@@ -98,6 +98,10 @@ impl PullRequestsPage {
         }));
     }
 
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.visible = visible;
         self.sync_git_visibility(cx);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::pull_requests::{PullRequestsEvent, PullRequestsPage};
+use crate::pull_requests::{PageMode, PageTab, PullRequestsEvent, PullRequestsPage};
 
 impl Shell {
     fn pull_requests_page(&mut self, cx: &mut Context<Self>) -> Entity<PullRequestsPage> {
@@ -8,7 +8,7 @@ impl Shell {
         }
         let page = cx.new(|cx| PullRequestsPage::new(self.state.clone(), cx));
         self.pull_requests_sub = Some(cx.subscribe(&page, |shell, _, event, cx| match event {
-            PullRequestsEvent::Close => shell.close_pull_requests(cx),
+            PullRequestsEvent::OpenInPage(tab) => shell.open_pull_requests_on(*tab, cx),
             PullRequestsEvent::OpenChat(handoff) => shell.open_pull_request_chat(handoff.clone(), cx),
             PullRequestsEvent::ToggleChat => shell.toggle_pr_chat(cx),
             PullRequestsEvent::OpenSettings(section) => {
@@ -30,10 +30,77 @@ impl Shell {
             page.update(cx, |page, cx| page.refresh(cx));
         }
         self.route = Route::PullRequests;
+        self.pull_requests_tab_open = true;
         page.update(cx, |page, cx| page.set_visible(true, cx));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    fn open_pull_requests_on(&mut self, tab: PageTab, cx: &mut Context<Self>) {
+        self.open_pull_requests(cx);
+        if let Some(page) = self.pull_requests_page.clone() {
+            page.update(cx, |page, cx| page.show_page_tab(tab, cx));
+        }
+    }
+
+    pub(super) fn add_pull_requests_surface(&mut self, tab: PageTab, cx: &mut Context<Self>) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        let key = self.panel_key(cx);
+        self.pr_surface_seq += 1;
+        let id = self.pr_surface_seq;
+        let page = cx
+            .new(|cx| PullRequestsPage::with_mode(self.state.clone(), PageMode::Surface(tab), cx));
+        let sub = cx.subscribe(&page, |shell, _, event, cx| match event {
+            PullRequestsEvent::OpenInPage(tab) => shell.open_pull_requests_on(*tab, cx),
+            PullRequestsEvent::OpenChat(handoff) => {
+                shell.open_pull_request_chat(handoff.clone(), cx)
+            }
+            PullRequestsEvent::OpenSettings(section) => shell.open_settings(*section, cx),
+            PullRequestsEvent::ToggleChat => {}
+        });
+        self.pr_surfaces.insert(id, (page, sub));
+        let surface = match tab {
+            PageTab::PullRequests => RightSurface::PullRequests(id),
+            PageTab::Git => RightSurface::Git(id),
+        };
+        self.right_tabs.entry(key).or_default().push(surface);
+        self.set_right_active(surface, cx);
+    }
+
+    pub(super) fn render_pull_requests_surface(
+        &mut self,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some((page, _)) = self.pr_surfaces.get(&id) else {
+            return self.render_surface_picker(cx);
+        };
+        let page = page.clone();
+        let width = self.right_visible_width(cx);
+        page.update(cx, |page, _| page.set_layout_width(width));
+        page.into_any_element()
+    }
+
+    pub(super) fn sync_pull_request_surfaces(&mut self, cx: &mut Context<Self>) {
+        let active = (!matches!(self.route, Route::Settings(_)) && self.right_pane_open(cx))
+            .then(|| self.resolved_right_active(cx));
+        let pages: Vec<_> = self
+            .pr_surfaces
+            .iter()
+            .map(|(id, (page, _))| (*id, page.clone()))
+            .collect();
+        for (id, page) in pages {
+            let shown = matches!(
+                active,
+                Some(RightSurface::PullRequests(open) | RightSurface::Git(open)) if open == id
+            );
+            if page.read(cx).visible() != shown {
+                page.update(cx, |page, cx| page.set_visible(shown, cx));
+            }
+        }
     }
 
     pub(super) fn open_pull_request_link(
@@ -179,30 +246,131 @@ impl Shell {
         }
     }
 
-    pub(super) fn render_pull_requests_page(
+    pub(super) fn close_pull_requests_tab(&mut self, cx: &mut Context<Self>) {
+        self.pull_requests_tab_open = false;
+        if matches!(self.route, Route::PullRequests) {
+            self.close_pull_requests(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn sync_pull_requests_visibility(&mut self, cx: &mut Context<Self>) {
+        let on_route = matches!(self.route, Route::PullRequests);
+        if let Some(page) = self.pull_requests_page.clone()
+            && page.read(cx).visible() != on_route
+        {
+            page.update(cx, |page, cx| page.set_visible(on_route, cx));
+        }
+    }
+
+    pub(super) fn render_pull_requests_column(
         &mut self,
-        window: &mut Window,
+        width: f32,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> AnyElement {
         let page = self.pull_requests_page(cx);
-        let overlays = self.render_overlays(window.viewport_size(), window, cx);
-        let drag = self.titlebar_drag_region(
-            "pull-requests-titlebar",
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(Theme::TITLEBAR_HEIGHT)),
-            cx,
-        );
+        page.update(cx, |page, _| page.set_layout_width(width));
         div()
-            .size_full()
+            .debug_selector(|| "pull-requests-column".into())
+            .h_full()
+            .w(px(width))
+            .flex_none()
             .relative()
-            .child(drag)
+            .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(page)
             .children(self.render_pr_chat(cx))
-            .children(overlays)
+            .into_any_element()
+    }
+
+    pub(super) fn render_pull_requests_strip_tab(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.pull_requests_tab_open {
+            return None;
+        }
+        let selected = matches!(self.route, Route::PullRequests);
+        let git = self
+            .pull_requests_page
+            .as_ref()
+            .is_some_and(|page| page.read(cx).git_tab_active());
+        let (glyph, title) = if git {
+            (icons::FORK, "Git")
+        } else {
+            (icons::PULL_REQUEST, "Pull Requests")
+        };
+        let (text_color, bg) = if selected {
+            (theme.text, crate::theme::glass_selected_bg())
+        } else {
+            (theme.text_muted.opacity(0.6), crate::theme::wash(0.0))
+        };
+        Some(
+            div()
+                .id("pull-requests-strip-tab")
+                .debug_selector(|| "pull-requests-strip-tab".into())
+                .role(gpui::Role::Tab)
+                .aria_label(title)
+                .group("pull-requests-strip-tab")
+                .h(px(28.0))
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .pl(px(8.0))
+                .pr(px(4.0))
+                .rounded(px(8.0))
+                .text_size(px(12.0))
+                .text_color(text_color)
+                .bg(bg)
+                .when(selected, |el| {
+                    el.shadow(crate::theme::glass_selected_shadows())
+                })
+                .when(!selected, |el| {
+                    el.hover(|style| style.bg(theme.glass_hover()))
+                })
+                .cursor_pointer()
+                .block_mouse_except_scroll()
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_pull_requests(cx);
+                }))
+                .child(
+                    icon(glyph)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(text_color),
+                )
+                .child(div().whitespace_nowrap().child(title))
+                .child(
+                    div()
+                        .id("pull-requests-strip-tab-close")
+                        .debug_selector(|| "pull-requests-strip-tab-close".into())
+                        .role(gpui::Role::Button)
+                        .aria_label("Close Pull Requests")
+                        .size(px(16.0))
+                        .rounded(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(if selected { 1.0 } else { 0.0 })
+                        .group_hover("pull-requests-strip-tab", |style| style.opacity(1.0))
+                        .hover(|style| style.bg(theme.ink(0.1)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_pull_requests_tab(cx);
+                        }))
+                        .child(
+                            icon(icons::CLOSE)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     pub(super) fn render_pull_requests_trigger(
@@ -247,7 +415,7 @@ impl Shell {
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_pull_requests(cx)))
             .child(
-                icon(icons::LUCIDE_GIT_PULL_REQUEST)
+                icon(icons::PULL_REQUEST)
                     .size(px(15.0))
                     .text_color(if open {
                         theme.text
@@ -389,6 +557,97 @@ mod tests {
             .iter()
             .filter(|method| *method == methods::GET_WORKING_TREE)
             .count()
+    }
+
+    fn select_lab_chat(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            let mut chat = crate::shell::tests::chat_with_path(Some("/repo"), None);
+            chat.id = "c1".into();
+            chat.device_id = "dev-local".into();
+            chat.space_id = Some("s1".into());
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat];
+                state.select_chat(Some("c1".into()), cx);
+            });
+        });
+        settle(cx, |cx| {
+            shell.read_with(cx, |shell, _| shell.active_chat == "c1")
+        });
+    }
+
+    #[gpui::test]
+    fn the_page_keeps_the_sidebar_and_a_git_surface_stops_polling_once_closed(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (shell, cx, _dir) = boot(cx, lab.clone());
+        select_lab_chat(&shell, cx);
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        settle(cx, |cx| {
+            cx.debug_bounds("pull-requests-strip-tab").is_some()
+        });
+        assert!(cx.debug_bounds("pull-requests-back").is_none());
+        assert!(
+            cx.debug_bounds("pull-requests-project").is_some()
+                || cx.debug_bounds("pull-requests-git-project").is_some()
+        );
+
+        shell.update(cx, |shell, cx| {
+            shell.toggle_sidebar(cx);
+            shell.toggle_right_pane(cx);
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, cx| {
+            assert!(matches!(shell.route, Route::PullRequests));
+            assert!(
+                shell.settings.sidebar_collapsed,
+                "the sidebar toggles on the page"
+            );
+            assert!(
+                shell.right_pane_open(cx),
+                "the right pane opens on the page"
+            );
+        });
+
+        shell.update(cx, |shell, cx| {
+            shell.add_pull_requests_surface(PageTab::Git, cx)
+        });
+        settle(cx, |cx| {
+            cx.debug_bounds("pull-requests-open-page").is_some()
+        });
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Git(1));
+        });
+        settle(cx, |_| tree_reads(&lab) >= 2);
+        settle(cx, |cx| {
+            shell.read_with(cx, |shell, _| {
+                !shell.tween_active(shell.sidebar_tween) && !shell.tween_active(shell.right_tween)
+            })
+        });
+
+        click(cx, "pull-requests-strip-tab-close");
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Chat)));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.close_right_surface(RightSurface::Git(1), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| assert!(shell.pr_surfaces.is_empty()));
+        let closed = tree_reads(&lab);
+        for _ in 0..10 {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            tree_reads(&lab),
+            closed,
+            "nothing polls once both are closed"
+        );
     }
 
     #[gpui::test]

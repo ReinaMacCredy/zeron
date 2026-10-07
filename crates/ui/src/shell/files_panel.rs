@@ -52,7 +52,7 @@ fn files_panel_layout(
 
 impl Shell {
     pub(super) fn files_panel_open(&self, cx: &App) -> bool {
-        matches!(self.route, Route::Chat)
+        matches!(self.route, Route::Chat | Route::PullRequests)
             && !self.active_chat.is_empty()
             && self.panels.get(&self.panel_key(cx)).files_open
     }
@@ -85,7 +85,7 @@ impl Shell {
     }
 
     pub(super) fn files_visible_width(&self, cx: &App) -> f32 {
-        if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
+        if !matches!(self.route, Route::Chat | Route::PullRequests) || self.active_chat.is_empty() {
             return 0.0;
         }
         self.files_layout(self.eval_tween(self.files_tween, self.files_target(cx)), cx)
@@ -119,7 +119,7 @@ impl Shell {
         source: &Entity<FilesSurface>,
         cx: &App,
     ) -> bool {
-        matches!(self.route, Route::Chat)
+        matches!(self.route, Route::Chat | Route::PullRequests)
             && self.panel_key(cx) == owner
             && source.read(cx).is_current_target(cx)
     }
@@ -325,13 +325,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.panel_key(cx);
-        let visible = matches!(self.route, Route::Chat) && self.files_panel_open(cx);
+        let visible =
+            matches!(self.route, Route::Chat | Route::PullRequests) && self.files_panel_open(cx);
         for (key, files) in &self.files {
             if !visible || *key != active {
                 files.update(cx, |files, _| files.release_git_status());
             }
         }
-        if !matches!(self.route, Route::Chat)
+        if !matches!(self.route, Route::Chat | Route::PullRequests)
             || self.active_chat.is_empty()
             || (!self.files_panel_open(cx) && !self.tween_active(self.files_tween))
         {

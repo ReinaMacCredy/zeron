@@ -1164,7 +1164,11 @@ impl Shell {
                 })
                 .collect()
         };
-        let selected = self.state.read(cx).focused_id();
+        let selected = self
+            .state
+            .read(cx)
+            .focused_id()
+            .filter(|_| !matches!(self.route, Route::PullRequests));
         let split = self.split_chat_id().map(str::to_string);
         // Keep the selected tab visible: on selection change, scroll it into
         // view (minimal movement — a new session's tab materializes at the far
@@ -1434,6 +1438,7 @@ impl Shell {
         // The canvas shows no tabs-adjacent chrome beyond the strip itself;
         // the bar keeps its height, drag region, and buttons.
         let on_canvas = self.state.read(cx).selected_chat.is_none();
+        let pr_route = matches!(self.route, Route::PullRequests);
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
@@ -1633,12 +1638,15 @@ impl Shell {
         // In panel takeover the header strip spans the whole band — the tabs
         // would sit UNDER it (both flex_none, the row overflows and paint
         // order stacks them), so they hide for the duration.
+        let page_tab = (!takeover)
+            .then(|| self.render_pull_requests_strip_tab(&theme, cx))
+            .flatten();
         let session_tabs = (!takeover).then(|| self.render_session_tabs(cx));
         // The session's own side-chat controls: "+" mints a fresh side chat
         // under this session, fork copies its history into one. Same pair
         // the side-chat header carries, so a family reads the same from
         // either end.
-        let session_controls = (!takeover && !on_canvas).then(|| {
+        let session_controls = (!takeover && !on_canvas && !pr_route).then(|| {
             let busy = self.side_chat_creating;
             div()
                 .flex_none()
@@ -1676,7 +1684,7 @@ impl Shell {
         } else {
             available_titlebar_width
         };
-        let actions = (!takeover && !on_canvas)
+        let actions = (!takeover && !on_canvas && !pr_route)
             .then(|| {
                 self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
             })
@@ -1690,6 +1698,7 @@ impl Shell {
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
+            .children(page_tab)
             .children(session_tabs)
             .child(div().flex_1())
             .children(session_controls)

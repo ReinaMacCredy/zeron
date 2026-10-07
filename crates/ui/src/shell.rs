@@ -920,6 +920,8 @@ pub enum RightSurface {
     Sidechat(u64),
     SideChat(u64),
     Device(u64),
+    PullRequests(u64),
+    Git(u64),
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
@@ -2190,6 +2192,11 @@ pub struct Shell {
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
+    pr_surfaces: std::collections::HashMap<
+        u64,
+        (Entity<crate::pull_requests::PullRequestsPage>, Subscription),
+    >,
+    pr_surface_seq: u64,
     device_panels: std::collections::HashMap<
         u64,
         (Entity<crate::device_panel::DevicePanel>, [Subscription; 2]),
@@ -2269,6 +2276,7 @@ pub struct Shell {
     account_usage_task: Option<Task<()>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     pull_requests_page: Option<Entity<crate::pull_requests::PullRequestsPage>>,
+    pull_requests_tab_open: bool,
     pull_requests_sub: Option<Subscription>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -2811,6 +2819,8 @@ impl Shell {
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
+            pr_surfaces: std::collections::HashMap::new(),
+            pr_surface_seq: 0,
             device_panels: std::collections::HashMap::new(),
             device_seq: 0,
             device_shell: Default::default(),
@@ -2862,6 +2872,7 @@ impl Shell {
             account_usage_task: None,
             harnesses_page: None,
             pull_requests_page: None,
+            pull_requests_tab_open: matches!(route, Route::PullRequests),
             pull_requests_sub: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -3608,7 +3619,7 @@ impl Shell {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         // The settings sidebar is pinned; flipping the flag here would only
         // change what the chat route shows after Back.
-        if matches!(self.route, Route::Settings(_) | Route::PullRequests) {
+        if matches!(self.route, Route::Settings(_)) {
             return;
         }
         let from = self.sidebar_now();
@@ -3774,6 +3785,14 @@ impl Shell {
                 RightSurface::Device(id) => self
                     .device_tab_title(*id, cx)
                     .map(|title| (*surface, title, false, self.device_tab_detail(*id, cx))),
+                RightSurface::PullRequests(id) => self
+                    .pr_surfaces
+                    .get(id)
+                    .map(|_| (*surface, SharedString::from("Pull Requests"), false, None)),
+                RightSurface::Git(id) => self
+                    .pr_surfaces
+                    .get(id)
+                    .map(|_| (*surface, SharedString::from("Git"), false, None)),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3826,7 +3845,9 @@ impl Shell {
             | RightSurface::Subagent(_)
             | RightSurface::Sidechat(_)
             | RightSurface::Browser(_)
-            | RightSurface::Device(_) => {
+            | RightSurface::Device(_)
+            | RightSurface::PullRequests(_)
+            | RightSurface::Git(_) => {
                 return None;
             }
         };
@@ -3950,7 +3971,9 @@ impl Shell {
             RightSurface::Subagent(_)
             | RightSurface::Sidechat(_)
             | RightSurface::Browser(_)
-            | RightSurface::Device(_) => {}
+            | RightSurface::Device(_)
+            | RightSurface::PullRequests(_)
+            | RightSurface::Git(_) => {}
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -5308,6 +5331,9 @@ impl Shell {
                 self.browser_subs.remove(&id);
             }
             RightSurface::Device(id) => self.drop_device_tab(id, cx),
+            RightSurface::PullRequests(id) | RightSurface::Git(id) => {
+                self.pr_surfaces.remove(&id);
+            }
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
                 self.diffs.remove(&id);
@@ -12944,6 +12970,9 @@ impl Shell {
                 }
                 RightSurface::SideChat(id) => self.render_side_chat(id, cx),
                 RightSurface::Device(id) => self.render_device_surface(id, cx),
+                RightSurface::PullRequests(id) | RightSurface::Git(id) => {
+                    self.render_pull_requests_surface(id, cx)
+                }
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
                     let transcript = self
                         .subagent_tabs
@@ -13153,10 +13182,33 @@ impl Shell {
                             })),
                         )
                     })
+                    .child(
+                        row(
+                            "surface-card-pull-requests",
+                            icons::PULL_REQUEST,
+                            "Pull Requests",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_pull_requests_surface(
+                                crate::pull_requests::PageTab::PullRequests,
+                                cx,
+                            );
+                        })),
+                    )
                     // Git surfaces only where there IS git — the pane itself
                     // no longer gates on it (terminals work anywhere).
                     .when(self.space_git_detected(cx), |el| {
-                        el.child(row("surface-card-diffs", icons::LIST, "Diffs").on_click(
+                        el.child(
+                            row("surface-card-git", icons::FORK, "Git").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.add_pull_requests_surface(
+                                        crate::pull_requests::PageTab::Git,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                        .child(row("surface-card-diffs", icons::LIST, "Diffs").on_click(
                             cx.listener(|this, _, window, cx| {
                                 this.add_diff_surface(window, cx);
                             }),
@@ -13365,6 +13417,8 @@ impl Shell {
                 RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
+                RightSurface::PullRequests(_) => icons::PULL_REQUEST,
+                RightSurface::Git(_) => icons::FORK,
                 RightSurface::Device(id) => self.device_tab_icon(id, cx),
                 RightSurface::Picker => icons::PLUS,
             };
@@ -14944,7 +14998,7 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                if !matches!(this.route, Route::Settings(_) | Route::PullRequests) {
+                if !matches!(this.route, Route::Settings(_)) {
                     this.toggle_sidebar(cx)
                 }
             }))
@@ -14964,7 +15018,7 @@ impl Render for Shell {
                 this.cycle_navigation(false, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
-                if matches!(this.route, Route::Chat) {
+                if matches!(this.route, Route::Chat | Route::PullRequests) {
                     this.toggle_right_pane(cx);
                     if !this.right_pane_open(cx) {
                         // The hidden editor can retain a focus handle after unmounting.
@@ -15135,6 +15189,18 @@ impl Render for Shell {
                         self.set_sidecar_popover(true, cx);
                     }
                 }
+                if let Some(tab) = match self.debug_dialog.as_deref() {
+                    Some("pr-surface") => Some(crate::pull_requests::PageTab::PullRequests),
+                    Some("git-surface") => Some(crate::pull_requests::PageTab::Git),
+                    _ => None,
+                } && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    self.add_pull_requests_surface(tab, cx);
+                    if !self.right_pane_open(cx) {
+                        self.toggle_right_pane(cx);
+                    }
+                }
                 if self.debug_dialog.as_deref() == Some("device")
                     && self.state.read(cx).selected_chat.is_some()
                 {
@@ -15241,10 +15307,9 @@ impl Render for Shell {
                 // Settings replaces the whole workspace, sidebar included. The
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
-                if matches!(self.route, Route::PullRequests) {
-                    let page = self.render_pull_requests_page(window, cx);
-                    break 'ready root.child(motion::fade_in("phase-app", page));
-                }
+                self.sync_pull_requests_visibility(cx);
+                self.sync_pull_request_surfaces(cx);
+                let pr_route = matches!(self.route, Route::PullRequests);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
@@ -15286,13 +15351,17 @@ impl Render for Shell {
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
-                let split_open = on_chat && self.split.is_some();
+                let split_open = on_chat && !pr_route && self.split.is_some();
                 let full_column = conversation_width(
                     viewport - self.files_reserved_width(cx),
                     self.sidebar_target(),
                     right_target_width,
                 );
-                let sidecar_width = self.sidecar_layout(full_column, split_open, cx);
+                let sidecar_width = if pr_route {
+                    0.0
+                } else {
+                    self.sidecar_layout(full_column, split_open, cx)
+                };
                 let column = (full_column - sidecar_width).max(0.0);
                 // The persisted share belongs to the LEFT pane, whichever
                 // session sits there.
@@ -15342,7 +15411,11 @@ impl Render for Shell {
                     },
                     cx,
                 );
-                let main = self.render_main(window, main_content_width, transcript_width, cx);
+                let main = if pr_route {
+                    self.render_pull_requests_column(column, cx)
+                } else {
+                    self.render_main(window, main_content_width, transcript_width, cx)
+                };
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
@@ -15384,7 +15457,11 @@ impl Render for Shell {
                 // (built inside `render_right_pane`).
                 // The split pane flexes into whatever the fixed-width main
                 // column leaves, so the seam's share holds.
-                let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
+                let split_side = self
+                    .split
+                    .as_ref()
+                    .map(|s| s.side)
+                    .filter(|_| on_chat && !pr_route);
                 let main_veil = split_side
                     .and_then(|side| self.render_split_size_veil(main_content_width, side, cx));
                 let main_header = split_side
@@ -15396,7 +15473,7 @@ impl Render for Shell {
                             .left_0()
                             .right_0()
                     });
-                let main = if main_transition.is_some() || split_open {
+                let main = if !pr_route && (main_transition.is_some() || split_open) {
                     div()
                         .h_full()
                         .w(px(main_content_width))
@@ -15412,7 +15489,9 @@ impl Render for Shell {
                 };
                 let split_pane = split_side
                     .and_then(|_| self.render_split_pane(column - main_content_width, cx));
-                let drop_zones = on_chat.then(|| self.render_split_drop_zones(cx)).flatten();
+                let drop_zones = (on_chat && !pr_route)
+                    .then(|| self.render_split_drop_zones(cx))
+                    .flatten();
                 // Floats over the panes' shared border like the sidebar seam
                 // below; the pane's own 1px border stays the visual divider.
                 let mut split_seam = split_pane.is_some().then(|| {

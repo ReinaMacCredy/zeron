@@ -4648,7 +4648,11 @@ impl Shell {
                 })
                 .collect()
         };
-        let focused = self.state.read(cx).focused_id();
+        let focused = self
+            .state
+            .read(cx)
+            .focused_id()
+            .filter(|_| !matches!(self.route, Route::PullRequests));
         rows.into_iter()
             .map(|(id, target, prompt)| {
                 let selected = focused.as_deref() == Some(id.as_str());
@@ -5164,7 +5168,12 @@ impl Shell {
             }
         }
 
-        let selected = self.state.read(cx).selected_chat.clone();
+        let selected = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .filter(|_| !matches!(self.route, Route::PullRequests));
         let split_pair = self.split_pair.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
@@ -5808,7 +5817,12 @@ impl Shell {
             }));
         let section = div().flex().flex_col().child(header);
         let body = {
-            let selected = self.state.read(cx).selected_chat.clone();
+            let selected = self
+                .state
+                .read(cx)
+                .selected_chat
+                .clone()
+                .filter(|_| !matches!(self.route, Route::PullRequests));
             let mut list = div()
                 .flex()
                 .flex_col()

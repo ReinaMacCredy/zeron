@@ -148,11 +148,12 @@ impl PullRequestsPage {
 
     pub(super) fn render_chat_button(
         &self,
+        compact: bool,
         theme: &crate::theme::Theme,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         use gpui::prelude::*;
-        use gpui::{div, px};
+        use gpui::px;
         super::top_chip("pull-requests-chat", "Chat", theme)
             .debug_selector(|| "pull-requests-chat".into())
             .aria_toggled(if self.chat_open {
@@ -160,25 +161,27 @@ impl PullRequestsPage {
             } else {
                 gpui::Toggled::False
             })
-            .mr(px(12.0))
             .when(self.chat_open, |chip| {
                 chip.bg(theme.accent_wash)
                     .border_color(theme.accent.opacity(0.35))
             })
+            .when(compact, |chip| chip.w(px(28.0)).px_0().justify_center())
             .on_click(cx.listener(|_, _, _, cx| cx.emit(super::PullRequestsEvent::ToggleChat)))
             .child(
-                div()
+                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                    .size(px(14.0))
+                    .flex_none()
                     .when(self.chat_open, |spark| {
                         spark.debug_selector(|| "pull-requests-chat-active".into())
                     })
-                    .text_color(theme.accent)
-                    .child("✦"),
+                    .text_color(theme.accent),
             )
-            .child("Chat")
-            .child(
-                crate::popover::kbd_hint(theme, &chat_shortcut(cx))
-                    .debug_selector(|| "pull-requests-chat-shortcut".into()),
-            )
+            .when(!compact, |chip| {
+                chip.child("Chat").child(
+                    crate::popover::kbd_hint(theme, &chat_shortcut(cx))
+                        .debug_selector(|| "pull-requests-chat-shortcut".into()),
+                )
+            })
             .into_any_element()
     }
 }

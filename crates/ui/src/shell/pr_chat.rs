@@ -1680,7 +1680,11 @@ impl Shell {
             .cursor_pointer()
             .hover(|s| s.bg(theme.accent_wash))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_pr_chat(cx)))
-            .child(div().text_color(theme.accent).child("✦"))
+            .child(
+                icon(icons::CHAT_ROUND_LINE)
+                    .size(px(14.0))
+                    .text_color(theme.accent),
+            )
             .child("Chat")
             .child(crate::popover::kbd_hint(
                 theme,
@@ -2252,9 +2256,12 @@ mod tests {
         let bar = cx.debug_bounds("pr-chat-bottom-bar").expect("bottom bar");
         assert_eq!(bar.size.width, px(PR_CHAT_BAR_WIDTH));
         assert!(bar.size.height <= px(PR_CHAT_BAR_HEIGHT), "{bar:?}");
+        let column = cx
+            .debug_bounds("pull-requests-column")
+            .expect("page column");
         assert!(
-            (bar.center().x - window.width / 2.0).abs() < px(0.5),
-            "{bar:?}"
+            (bar.center().x - column.center().x).abs() < px(0.5),
+            "{bar:?} {column:?}"
         );
         let settled = |bottom: Pixels, inset: f32| {
             let offset = window.height - px(inset) - bottom;
