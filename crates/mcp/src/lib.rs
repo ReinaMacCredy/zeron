@@ -294,7 +294,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, live, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Zeron fits the frame to the page's height. A height below the page's own height caps the frame there, and the rest scrolls inside it. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, live, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Zeron fits the frame to the page's height. A height below the page's own height caps the frame there, and the rest scrolls inside it. Call it from the main conversation: a page published from inside a subagent does not appear in the thread. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {

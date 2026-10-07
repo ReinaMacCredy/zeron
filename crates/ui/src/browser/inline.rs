@@ -17,7 +17,9 @@ use objc2_web_kit::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use wry::{WebView, WebViewExtMacOS};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
 
 pub(crate) enum InlineEvent {
     Height(f32),
@@ -31,6 +33,21 @@ struct PolicyState {
     key: SharedString,
     tx: InlineSender,
     loaded: Cell<bool>,
+    clicked: Arc<AtomicU64>,
+}
+
+/// A page opens links only right after the reader clicks inside its card,
+/// never from script alone.
+const CLICK_WINDOW_MS: u64 = 1500;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
+fn clicked_recently(clicked: &AtomicU64) -> bool {
+    now_ms().saturating_sub(clicked.load(Ordering::Relaxed)) <= CLICK_WINDOW_MS
 }
 
 define_class!(
@@ -54,7 +71,8 @@ define_class!(
                 .unwrap_or_default();
             let main =
                 unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() });
-            let link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
+            let link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated
+                && clicked_recently(&self.ivars().clicked);
             let allow = page_navigation(&url, main, link, &self.ivars().loaded, |url| {
                 let _ = self
                     .ivars()
@@ -189,7 +207,17 @@ impl InlineWebView {
         let height_key = key.clone();
         let link_tx = tx.clone();
         let link_key = key.clone();
+        let clicked = Arc::new(AtomicU64::new(0));
+        let link_clicked = clicked.clone();
+        let configuration = unsafe {
+            let configuration = objc2_web_kit::WKWebViewConfiguration::new(mtm);
+            configuration
+                .preferences()
+                .setJavaScriptCanOpenWindowsAutomatically(false);
+            configuration
+        };
         let web = wry::WebViewBuilder::new()
+            .with_webview_configuration(configuration)
             .with_visible(false)
             .with_focused(false)
             .with_incognito(true)
@@ -200,8 +228,10 @@ impl InlineWebView {
                     let _ = height_tx.send((height_key.clone(), InlineEvent::Height(height)));
                 }
             })
+            .with_permission_handler(|_| wry::PermissionResponse::Deny)
+            .with_drag_drop_handler(|_| true)
             .with_new_window_req_handler(move |url, _| {
-                if allowed_navigation(&url) {
+                if allowed_navigation(&url) && clicked_recently(&link_clicked) {
                     let _ = link_tx.send((link_key.clone(), InlineEvent::OpenLink(url)));
                 }
                 wry::NewWindowResponse::Deny
@@ -216,11 +246,11 @@ impl InlineWebView {
                 key: key.clone(),
                 tx,
                 loaded: Cell::new(false),
+                clicked: clicked.clone(),
             });
             unsafe { msg_send![super(object), init] }
         };
         unsafe { view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*policy))) };
-        web.load_html(html).map_err(|e| e.to_string())?;
 
         let scrolls = Rc::new(Cell::new(false));
         let monitor_clip = clip.clone();
@@ -230,10 +260,7 @@ impl InlineWebView {
         // to the transcript, or the thread stops scrolling under the pointer.
         let callback = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
             let e = unsafe { event.as_ref() };
-            if monitor_scrolls.get()
-                || monitor_clip.isHidden()
-                || e.window(mtm) != monitor_parent.window()
-            {
+            if monitor_clip.isHidden() || e.window(mtm) != monitor_parent.window() {
                 return event.as_ptr();
             }
             let point = monitor_parent.convertPoint_fromView(e.locationInWindow(), None);
@@ -245,6 +272,13 @@ impl InlineWebView {
             if !inside {
                 return event.as_ptr();
             }
+            if e.r#type() == objc2_app_kit::NSEventType::LeftMouseUp {
+                clicked.store(now_ms(), Ordering::Relaxed);
+                return event.as_ptr();
+            }
+            if monitor_scrolls.get() {
+                return event.as_ptr();
+            }
             unsafe {
                 let _: () = msg_send![&*monitor_parent, scrollWheel: e];
             }
@@ -252,7 +286,7 @@ impl InlineWebView {
         });
         let monitor = unsafe {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-                NSEventMask::ScrollWheel,
+                NSEventMask::ScrollWheel | NSEventMask::LeftMouseUp,
                 &callback,
             )
         };
@@ -270,6 +304,10 @@ impl InlineWebView {
             scrolls,
             monitor,
         }));
+        host.borrow()
+            .web
+            .load_html(html)
+            .map_err(|e| e.to_string())?;
         HOSTS.with(|hosts| hosts.borrow_mut().push(Rc::downgrade(&host)));
         Ok(Self(host))
     }

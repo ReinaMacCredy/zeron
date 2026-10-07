@@ -142,9 +142,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         title: "HTML pages",
         summary: "Show live HTML pages (charts, tables, mockups) inline in the thread.",
         tools: &[
-            tool(
+            needs(
                 "html_preview",
                 "Screenshot a page in Zeron's web engine to check it before showing it.",
+                "html_render",
             ),
             tool(
                 "html_render",

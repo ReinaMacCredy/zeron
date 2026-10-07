@@ -2,7 +2,7 @@
 //! a header over a placeholder the live page is laid on (macOS), sized to
 //! the height the page reports.
 use super::*;
-use crate::html_render::{clamp_height, frame_height, scrolls_inside};
+use crate::html_render::{clamp_height, frame_height, overflows, scrolls_inside};
 
 /// Live pages a transcript keeps at once; one scrolled away longest closes
 /// first and reloads when it scrolls back.
@@ -10,6 +10,12 @@ const MAX_LIVE_PAGES: usize = 6;
 /// Pages (text and measured height) kept for rows that left the transcript,
 /// so returning to a chat shows them at once instead of reloading.
 const KEPT_PAGES: usize = 24;
+const KEPT_BYTES: usize = 64 * 1024 * 1024;
+/// A page whose web process keeps dying stops reloading after this many.
+const MAX_CRASHES: u8 = 2;
+/// The Source view shows at most this much text; inlined image data is
+/// summarized first, since a page can carry megabytes of it.
+const MAX_SOURCE_CHARS: usize = 200_000;
 
 #[derive(Clone, Copy, PartialEq)]
 enum SheetView {
@@ -38,7 +44,13 @@ pub(super) struct HtmlPages {
     pages: HashMap<SharedString, crate::browser::inline::InlineWebView>,
     sources: HashMap<SharedString, PageSource>,
     used: HashMap<SharedString, u64>,
-    use_clock: u64,
+    /// Counts this transcript's renders: pages shown in the current one are
+    /// never evicted to make room for another.
+    pub(super) frame: u64,
+    /// Rows whose page once overflowed its frame: they keep the agent's
+    /// height, or a page sized to its viewport resizes without end.
+    capped: HashSet<SharedString>,
+    crashes: HashMap<SharedString, u8>,
     heights: HashMap<SharedString, f32>,
     sheet: Option<Sheet>,
     sheet_focus: gpui::FocusHandle,
@@ -72,7 +84,9 @@ impl HtmlPages {
             pages: HashMap::new(),
             sources: HashMap::new(),
             used: HashMap::new(),
-            use_clock: 0,
+            frame: 0,
+            capped: HashSet::new(),
+            crashes: HashMap::new(),
             heights: HashMap::new(),
             sheet: None,
             sheet_focus: cx.focus_handle(),
@@ -141,6 +155,11 @@ impl Transcript {
                     sheet.page = None;
                 }
                 self.html_pages.pages.remove(&key);
+                let crashes = self.html_pages.crashes.entry(key.clone()).or_default();
+                *crashes += 1;
+                if *crashes >= MAX_CRASHES {
+                    self.html_pages.sources.insert(key, PageSource::Failed);
+                }
                 cx.notify();
             }
         }
@@ -164,18 +183,33 @@ impl Transcript {
             .map(|(key, at)| (key, *at))
             .collect();
         gone.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
-        let keep: HashSet<SharedString> = alive
-            .iter()
-            .map(|key| (*key).clone())
-            .chain(
-                gone.into_iter()
-                    .take(KEPT_PAGES)
-                    .map(|(key, _)| key.clone()),
-            )
-            .collect();
+        let mut kept_bytes = 0usize;
+        let kept = gone
+            .into_iter()
+            .take(KEPT_PAGES)
+            .take_while(|(key, _)| {
+                if let Some(PageSource::Ready(html)) = self.html_pages.sources.get(*key) {
+                    kept_bytes += html.len();
+                }
+                kept_bytes <= KEPT_BYTES
+            })
+            .map(|(key, _)| key.clone());
+        let keep: HashSet<SharedString> =
+            alive.iter().map(|key| (*key).clone()).chain(kept).collect();
         let pages = &mut self.html_pages;
+        if pages
+            .sheet
+            .as_ref()
+            .is_some_and(|sheet| !alive.contains(&sheet.row))
+        {
+            pages.sheet = None;
+        }
         pages.heights.retain(|key, _| keep.contains(key));
-        pages.sources.retain(|key, _| keep.contains(key));
+        pages.capped.retain(|key| keep.contains(key));
+        pages.crashes.retain(|key, _| keep.contains(key));
+        pages.sources.retain(|key, source| {
+            keep.contains(key) && (alive.contains(key) || !matches!(source, PageSource::Failed))
+        });
         pages.used.retain(|key, _| keep.contains(key));
         #[cfg(target_os = "macos")]
         pages.pages.retain(|key, _| keep.contains(key));
@@ -238,12 +272,19 @@ impl Transcript {
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let source = self.html_page_source(row_id, owner, path, cx);
-        self.html_pages.use_clock += 1;
         self.html_pages
             .used
-            .insert(row_id.clone(), self.html_pages.use_clock);
+            .insert(row_id.clone(), self.html_pages.frame);
         let content = self.html_pages.heights.get(row_id).copied();
-        let height = frame_height(clamp_height(agent_height), content);
+        let agent_height = clamp_height(agent_height);
+        if content.is_some_and(|content| overflows(agent_height, content)) {
+            self.html_pages.capped.insert(row_id.clone());
+        }
+        let height = if self.html_pages.capped.contains(row_id) {
+            agent_height
+        } else {
+            frame_height(agent_height, content)
+        };
         let header = div()
             .flex()
             .items_center()
@@ -343,8 +384,12 @@ impl Transcript {
                     .html_pages
                     .pages
                     .keys()
-                    .min_by_key(|key| self.html_pages.used.get(*key).copied().unwrap_or(0))
-                    .cloned()
+                    .filter_map(|key| {
+                        let shown = self.html_pages.used.get(key).copied().unwrap_or(0);
+                        (shown < self.html_pages.frame).then_some((shown, key))
+                    })
+                    .min()
+                    .map(|(_, key)| key.clone())
             {
                 self.html_pages.pages.remove(&oldest);
             }
@@ -405,6 +450,33 @@ pub(super) fn native_mask(
 }
 
 const SHEET_SUFFIX: &str = "#sheet";
+
+/// The page as the Source view shows it: inlined image data summarized,
+/// long pages cut with a pointer to Save .html for the whole file.
+fn source_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len().min(MAX_SOURCE_CHARS));
+    let mut rest = html;
+    while let Some(at) = rest.find(";base64,") {
+        let start = at + ";base64,".len();
+        let run = rest[start..]
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+            .count();
+        out.push_str(&rest[..start]);
+        if run > 256 {
+            out.push_str(&format!("…{} KB…", run * 3 / 4 / 1024));
+        } else {
+            out.push_str(&rest[start..start + run]);
+        }
+        rest = &rest[start + run..];
+    }
+    out.push_str(rest);
+    if out.chars().count() > MAX_SOURCE_CHARS {
+        let cut: String = out.chars().take(MAX_SOURCE_CHARS).collect();
+        return format!("{cut}\n\n… Save .html for the whole page.");
+    }
+    out
+}
 
 /// A readable download name: the title without characters file systems reject.
 fn page_file_name(title: &str) -> String {
@@ -577,7 +649,7 @@ impl Transcript {
                     .font_family(theme.font_mono.clone())
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text)
-                    .child(source.to_string()),
+                    .child(source_text(&source)),
             ),
             SheetView::Live => {
                 #[cfg(target_os = "macos")]
@@ -882,6 +954,20 @@ mod tests {
         let tiny = native_mask(list, 38.0, 2000.0, 2000.0);
         assert_eq!(tiny.size.height, px(0.0));
         assert_eq!(tiny.size.width, px(0.0));
+    }
+
+    #[test]
+    fn the_source_view_summarizes_inlined_images_and_cuts_long_pages() {
+        let image = "A".repeat(4096);
+        let html = format!(
+            r#"<img src="data:image/png;base64,{image}"><img src="data:image/gif;base64,R0lG">"#
+        );
+        let shown = source_text(&html);
+        assert!(shown.contains("data:image/png;base64,…3 KB…"));
+        assert!(shown.contains("base64,R0lG"));
+        assert!(!shown.contains(&image));
+        let long = "x".repeat(MAX_SOURCE_CHARS + 10);
+        assert!(source_text(&long).ends_with("Save .html for the whole page."));
     }
 
     #[test]

@@ -22,11 +22,15 @@ pub fn clamp_height(height: f32) -> f32 {
 /// page's own height (the agent asked for a scrolling frame).
 pub fn frame_height(agent_height: f32, content_height: Option<f32>) -> f32 {
     clamp_height(match content_height {
-        // A page previewed at another width wraps a little taller here; that
-        // drift is not a request to scroll.
-        Some(content) if content <= agent_height + FIT_DRIFT => content,
+        Some(content) if !overflows(agent_height, content) => content,
         Some(_) | None => agent_height,
     })
+}
+
+/// A page previewed at another width wraps a little taller here; that drift
+/// is not a request to scroll.
+pub fn overflows(agent_height: f32, content_height: f32) -> bool {
+    content_height > agent_height + FIT_DRIFT
 }
 
 const FIT_DRIFT: f32 = 64.0;
@@ -226,6 +230,17 @@ fn tag_at(scan: &[u8], at: usize, name: &[u8]) -> bool {
             .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
 }
 
+/// `</name` at `at`, followed by whitespace, `>`, `/` or the end.
+fn close_tag_at(scan: &[u8], at: usize, name: &[u8]) -> bool {
+    scan.get(at..at + 2) == Some(b"</".as_slice())
+        && scan
+            .get(at + 2..at + 2 + name.len())
+            .is_some_and(|found| found.eq_ignore_ascii_case(name))
+        && scan
+            .get(at + 2 + name.len())
+            .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
+}
+
 fn tag_end(scan: &[u8], at: usize) -> usize {
     scan[at..]
         .iter()
@@ -279,12 +294,7 @@ fn blank_non_markup(html: &str) -> Vec<u8> {
             let mut search = at + 1 + name.len();
             let end = loop {
                 match find_ci(&scan, &close, search) {
-                    Some(p)
-                        if tag_at(&scan, p + 1, name)
-                            || scan
-                                .get(p + close.len())
-                                .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>') =>
-                    {
+                    Some(p) if close_tag_at(&scan, p, name) => {
                         break tag_end(&scan, p);
                     }
                     Some(p) => search = p + 1,
@@ -299,30 +309,24 @@ fn blank_non_markup(html: &str) -> Vec<u8> {
             let mut depth = 0usize;
             let mut cursor = at;
             let end = loop {
-                let open = (cursor..len).find(|&p| tag_at(&scan, p, b"template"));
-                let close = (cursor..len).find(|&p| {
-                    scan[p..].len() > 10
-                        && scan[p] == b'<'
-                        && scan[p + 1] == b'/'
-                        && tag_at(&scan, p + 1, b"template")
-                });
-                match (open, close) {
-                    (Some(o), Some(c)) if o < c => {
-                        depth += 1;
-                        cursor = tag_end(&scan, o);
+                let Some(next) = scan[cursor..]
+                    .iter()
+                    .position(|&c| c == b'<')
+                    .map(|offset| cursor + offset)
+                else {
+                    break len;
+                };
+                if tag_at(&scan, next, b"template") {
+                    depth += 1;
+                    cursor = tag_end(&scan, next);
+                } else if close_tag_at(&scan, next, b"template") {
+                    depth -= 1;
+                    cursor = tag_end(&scan, next);
+                    if depth == 0 {
+                        break cursor;
                     }
-                    (_, Some(c)) => {
-                        depth = depth.saturating_sub(1);
-                        cursor = tag_end(&scan, c);
-                        if depth == 0 {
-                            break cursor;
-                        }
-                    }
-                    (Some(o), None) => {
-                        depth += 1;
-                        cursor = tag_end(&scan, o);
-                    }
-                    (None, None) => break len,
+                } else {
+                    cursor = next + 1;
                 }
             };
             blank(&mut scan, at, end);
@@ -390,6 +394,28 @@ mod tests {
         assert!(out.starts_with("<html lang=en><head><meta charset"));
         let out = inject_bootstrap("  <!DOCTYPE html><body>x</body>", &theme(), false);
         assert!(out.starts_with("  <!DOCTYPE html><head>"));
+    }
+
+    #[test]
+    fn templates_close_and_never_swallow_the_rest_of_the_page() {
+        let page = "<body><template><p>a</p><template>b</template></template><head>c";
+        let scan = String::from_utf8(blank_non_markup(page)).unwrap();
+        assert!(scan.starts_with("<body>  "));
+        assert!(scan.ends_with("<head>c"), "{scan}");
+        let many = "<template>x</template>".repeat(20_000) + "<p>end</p>";
+        let started = std::time::Instant::now();
+        let scan = String::from_utf8(blank_non_markup(&many)).unwrap();
+        assert!(scan.ends_with("<p>end</p>"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn raw_text_ends_at_its_own_closing_tag() {
+        let page = "<script>var a = '</scripts>';</script><p>x</p><style>p{}</STYLE ><p>y</p>";
+        let scan = String::from_utf8(blank_non_markup(page)).unwrap();
+        assert!(scan.contains("<p>x</p>"));
+        assert!(scan.ends_with("<p>y</p>"));
+        assert!(!scan.contains("var a"));
     }
 
     #[test]

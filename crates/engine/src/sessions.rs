@@ -542,8 +542,12 @@ impl Inner {
         lock(&binds).retain(|(key, page)| {
             let slot = parts.iter_mut().find_map(|part| match part {
                 MessagePart::Tool {
-                    call, html_render, ..
+                    call,
+                    html_render,
+                    is_error,
+                    ..
                 } if html_render.is_none()
+                    && !*is_error
                     && call
                         .html_render_html()
                         .is_some_and(|html| crate::html_render::html_key(html) == *key) =>
@@ -1612,10 +1616,14 @@ impl SessionsEngine {
         let handle = self.doc_handle(new_chat_id)?;
         if handle.doc().read_entries()?.is_empty() {
             for entry in &entries[..end] {
-                handle.doc().push_message(&SessionMessageEntry {
+                let mut entry = SessionMessageEntry {
                     fork_import: true,
                     ..entry.clone()
-                })?;
+                };
+                if let Some((uploads, _)) = self.inner.generated_images.get() {
+                    crate::html_render::adopt_pages(uploads, new_chat_id, &mut entry);
+                }
+                handle.doc().push_message(&entry)?;
             }
         }
         if let Some(text) = entries[..end].iter().rev().find_map(|e| {

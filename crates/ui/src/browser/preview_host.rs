@@ -10,7 +10,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_web_kit::{
-    WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKUserScript,
+    WKFrameInfo, WKMediaCaptureType, WKNavigation, WKNavigationAction, WKNavigationActionPolicy,
+    WKNavigationDelegate, WKPermissionDecision, WKSecurityOrigin, WKUIDelegate, WKUserScript,
     WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
 };
 use serde_json::json;
@@ -40,14 +41,22 @@ const SETTLE_SCRIPT: &str =
 
 type Job = (
     HtmlPreviewRequest,
+    std::time::Instant,
     tokio::sync::oneshot::Sender<Result<HtmlPreview, String>>,
 );
+/// The engine stops waiting at 30 seconds; a request queued longer is
+/// answered without rendering it.
+const STALE_AFTER: Duration = Duration::from_secs(25);
 
 /// Serves previews for as long as the engine is attached.
 pub(crate) fn spawn(engine: EngineHandle, cx: &gpui::App) -> gpui::Task<()> {
     let (jobs, mut queue) = tokio::sync::mpsc::unbounded_channel::<Job>();
     cx.spawn(async move |cx| {
-        while let Some((request, reply)) = queue.recv().await {
+        while let Some((request, queued, reply)) = queue.recv().await {
+            if queued.elapsed() > STALE_AFTER {
+                let _ = reply.send(Err("The preview waited too long behind others.".into()));
+                continue;
+            }
             let theme = cx.update(|cx| theme_for(Theme::of(cx), request.appearance));
             let html = crate::html_render::inject_bootstrap(&request.html, &theme, false);
             let timeout = cx.background_executor().timer(LOAD_TIMEOUT);
@@ -55,10 +64,8 @@ pub(crate) fn spawn(engine: EngineHandle, cx: &gpui::App) -> gpui::Task<()> {
         }
     })
     .detach();
-    let registration = gpui_tokio::Tokio::spawn(cx, serve(engine, jobs));
-    cx.background_executor().spawn(async move {
-        let _ = registration.await;
-    })
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |_| serve(engine, jobs, executor).await)
 }
 
 fn theme_for(current: &Theme, appearance: PreviewAppearance) -> Theme {
@@ -72,7 +79,11 @@ fn theme_for(current: &Theme, appearance: PreviewAppearance) -> Theme {
     }
 }
 
-async fn serve(engine: EngineHandle, jobs: tokio::sync::mpsc::UnboundedSender<Job>) {
+async fn serve(
+    engine: EngineHandle,
+    jobs: tokio::sync::mpsc::UnboundedSender<Job>,
+    executor: gpui::BackgroundExecutor,
+) {
     let mut backoff = RETRY_MIN;
     loop {
         match engine
@@ -88,32 +99,37 @@ async fn serve(engine: EngineHandle, jobs: tokio::sync::mpsc::UnboundedSender<Jo
                     };
                     let (reply, answer) = tokio::sync::oneshot::channel();
                     let id = request.id.clone();
-                    if jobs.send((request, reply)).is_err() {
+                    if jobs
+                        .send((request, std::time::Instant::now(), reply))
+                        .is_err()
+                    {
                         return;
                     }
                     let engine = engine.clone();
-                    tokio::spawn(async move {
-                        let result = answer
-                            .await
-                            .unwrap_or_else(|_| Err("The preview was dropped.".into()));
-                        let params = match result {
-                            Ok(preview) => json!({ "id": id, "preview": preview }),
-                            Err(error) => json!({ "id": id, "error": error }),
-                        };
-                        if let Err(error) = engine
-                            .client()
-                            .call(methods::RESPOND_HTML_PREVIEW, params)
-                            .await
-                        {
-                            tracing::debug!(%error, "html preview reply dropped");
-                        }
-                    });
+                    executor
+                        .spawn(async move {
+                            let result = answer
+                                .await
+                                .unwrap_or_else(|_| Err("The preview was dropped.".into()));
+                            let params = match result {
+                                Ok(preview) => json!({ "id": id, "preview": preview }),
+                                Err(error) => json!({ "id": id, "error": error }),
+                            };
+                            if let Err(error) = engine
+                                .client()
+                                .call(methods::RESPOND_HTML_PREVIEW, params)
+                                .await
+                            {
+                                tracing::debug!(%error, "html preview reply dropped");
+                            }
+                        })
+                        .detach();
                 }
             }
             Err(RpcError::UnknownMethod(_) | RpcError::Closed) => return,
-            Err(error) => tracing::warn!(%error, "html preview host registration failed"),
+            Err(error) => tracing::debug!(%error, "html preview host registration failed"),
         }
-        tokio::time::sleep(backoff).await;
+        executor.timer(backoff).await;
         backoff = (backoff * 2).min(RETRY_MAX);
     }
 }
@@ -130,6 +146,19 @@ define_class!(
     #[ivars = PolicyState]
     struct Policy;
     unsafe impl NSObjectProtocol for Policy {}
+    unsafe impl WKUIDelegate for Policy {
+        #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
+        fn media(
+            &self,
+            _view: &WKWebView,
+            _origin: &WKSecurityOrigin,
+            _frame: &WKFrameInfo,
+            _kind: WKMediaCaptureType,
+            decision: &block2::Block<dyn Fn(WKPermissionDecision)>,
+        ) {
+            decision.call((WKPermissionDecision::Deny,));
+        }
+    }
     unsafe impl WKNavigationDelegate for Policy {
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn policy(
@@ -215,6 +244,9 @@ async fn render(
     };
     let view = unsafe {
         let configuration = WKWebViewConfiguration::new(mtm);
+        configuration
+            .preferences()
+            .setJavaScriptCanOpenWindowsAutomatically(false);
         configuration.setWebsiteDataStore(
             &objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
         );
@@ -228,6 +260,7 @@ async fn render(
         let view =
             WKWebView::initWithFrame_configuration(mtm.alloc(), frame(width, 600), &configuration);
         view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*policy)));
+        view.setUIDelegate(Some(ProtocolObject::from_ref(&*policy)));
         let origin = objc2_foundation::NSURL::URLWithString(&NSString::from_str(PREVIEW_ORIGIN));
         view.loadHTMLString_baseURL(&NSString::from_str(html), origin.as_deref());
         view
@@ -262,6 +295,7 @@ async fn render(
     };
     unsafe {
         view.setNavigationDelegate(None);
+        view.setUIDelegate(None);
         view.stopLoading();
     }
     result

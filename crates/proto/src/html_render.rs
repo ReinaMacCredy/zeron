@@ -11,7 +11,9 @@ pub const MAX_HEIGHT: u32 = 2000;
 pub const MAX_TITLE_CHARS: usize = 200;
 pub const MAX_HTML_BYTES: usize = 512_000;
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_PAGE_BYTES: usize = 25 * 1024 * 1024;
+/// Below the desktop's 24 MiB attachment read limit, so every stored page
+/// can be shown.
+pub const MAX_PAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MIN_PREVIEW_WIDTH: u32 = 240;
 pub const MAX_PREVIEW_WIDTH: u32 = 1600;
 /// The reply column at the default chat width (`TRANSCRIPT_WIDTH_DEFAULT`).

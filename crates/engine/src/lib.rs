@@ -620,6 +620,10 @@ fn relay_refused(method: &str) -> bool {
         method,
         methods::WATCH_COMPUTER_HOST_REQUESTS
             | methods::RESPOND_COMPUTER_HOST_REQUEST
+            | methods::PUBLISH_HTML_RENDER
+            | methods::HTML_PREVIEW
+            | methods::WATCH_HTML_PREVIEW_HOST
+            | methods::RESPOND_HTML_PREVIEW
             | methods::CANCEL_COMPUTER_ACTION
             | methods::SET_COMPUTER_SETTINGS
             | methods::GET_COMPUTER_CATALOG

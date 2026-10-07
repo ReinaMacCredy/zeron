@@ -12505,6 +12505,7 @@ impl Render for Transcript {
         // outlet — an overlay here would be tinted by the fade.
         self.update_runway_minimum(cx);
         self.html_pages.viewport = self.list.viewport_bounds();
+        self.html_pages.frame += 1;
         let list_el = list(self.list.clone(), cx.processor(Self::render_row))
             .size_full()
             .with_sizing_behavior(gpui::ListSizingBehavior::Auto);

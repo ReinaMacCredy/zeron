@@ -92,7 +92,10 @@ fn has_svg_root(bytes: &[u8]) -> bool {
                 return false;
             };
             rest = after[end + 3..].trim_start();
-        } else if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!doctype") {
+        } else if rest
+            .get(..9)
+            .is_some_and(|head| head.eq_ignore_ascii_case("<!doctype"))
+        {
             let Some(end) = rest.find('>') else {
                 return false;
             };
@@ -170,8 +173,14 @@ fn page_too_large(bytes: usize) -> PrepareError {
     ))
 }
 
+/// One open file: its size and kind are checked on the handle that is read,
+/// so a file swapped between the checks cannot slip through.
 fn read_image(path: &str) -> Result<Option<String>, PrepareError> {
-    let Ok(meta) = std::fs::metadata(path) else {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+    let Ok(meta) = file.metadata() else {
         return Ok(None);
     };
     if !meta.is_file() {
@@ -184,10 +193,17 @@ fn read_image(path: &str) -> Result<Option<String>, PrepareError> {
             MAX_IMAGE_BYTES as f64 / MIB
         )));
     }
-    let Ok(bytes) = std::fs::read(path) else {
+    let mut head = Vec::with_capacity(4096);
+    if (&mut file).take(4096).read_to_end(&mut head).is_err() || !is_image_bytes(&head) {
         return Ok(None);
-    };
-    if !is_image_bytes(&bytes) {
+    }
+    let mut bytes = head;
+    if file
+        .take((MAX_IMAGE_BYTES + 1 - bytes.len()) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_IMAGE_BYTES
+    {
         return Ok(None);
     }
     let mime = image_mime(path).unwrap_or("application/octet-stream");
@@ -226,17 +242,15 @@ pub fn html_key(html: &str) -> String {
 }
 
 fn chat_dir(uploads: &Uploads, chat_id: &str) -> PathBuf {
-    let safe: String = chat_id
+    let plain = chat_id
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    uploads.dir().join("html").join(safe)
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let name = if plain {
+        chat_id.to_owned()
+    } else {
+        chat_id.bytes().map(|b| format!("{b:02x}")).collect()
+    };
+    uploads.dir().join("html").join(name)
 }
 
 /// Stores a prepared page for `chat_id` and returns its reference.
@@ -265,8 +279,42 @@ pub fn publish(
     })
 }
 
+/// A chat that copies another's history (fork, side chat) gets its own copy
+/// of each page, so deleting either chat never takes the other's pages.
+pub fn adopt_pages(uploads: &Uploads, chat_id: &str, entry: &mut zeron_doc::SessionMessageEntry) {
+    let root = uploads.dir().join("html");
+    for part in &mut entry.parts {
+        let zeron_doc::MessagePart::Tool {
+            html_render: Some(page),
+            ..
+        } = part
+        else {
+            continue;
+        };
+        let source = PathBuf::from(&page.path);
+        let (Some(name), true) = (source.file_name(), source.starts_with(&root)) else {
+            continue;
+        };
+        let dir = chat_dir(uploads, chat_id);
+        let target = dir.join(name);
+        if target == source {
+            continue;
+        }
+        let copied = std::fs::create_dir_all(&dir).is_ok()
+            && (target.exists()
+                || std::fs::hard_link(&source, &target).is_ok()
+                || std::fs::copy(&source, &target).is_ok());
+        if copied {
+            page.path = target.to_string_lossy().into_owned();
+        }
+    }
+}
+
 /// A deleted chat takes its pages with it.
 pub fn remove_chat_pages(uploads: &Uploads, chat_id: &str) {
+    if chat_id.is_empty() {
+        return;
+    }
     let dir = chat_dir(uploads, chat_id);
     if dir.exists()
         && let Err(error) = std::fs::remove_dir_all(&dir)
@@ -314,28 +362,36 @@ impl PreviewHost {
         }
     }
 
-    /// The desktop app's request stream; the registration ends with it.
+    /// The desktop app's request stream; the registration ends with it. A
+    /// second app is refused while one is attached, so nothing else can take
+    /// over the pages (and inlined local images) being previewed.
     pub fn register(
         self: &std::sync::Arc<Self>,
-    ) -> futures::stream::BoxStream<'static, HtmlPreviewRequest> {
+    ) -> Result<futures::stream::BoxStream<'static, HtmlPreviewRequest>, String> {
         use futures::StreamExt;
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         let (items, received) = tokio::sync::mpsc::unbounded_channel();
-        if let Some(previous) = self.live().replace(LivePreviewHost {
-            id,
-            items,
-            pending: Default::default(),
-        }) {
-            Self::fail_all(previous);
+        {
+            let mut live = self.live();
+            if live.is_some() {
+                return Err(
+                    "Another Zeron desktop app already previews pages for this engine.".into(),
+                );
+            }
+            *live = Some(LivePreviewHost {
+                id,
+                items,
+                pending: Default::default(),
+            });
         }
         let registration = PreviewRegistration {
             host: self.clone(),
             id,
         };
-        futures::stream::unfold(
+        Ok(futures::stream::unfold(
             (received, registration),
             |(mut received, registration)| async move {
                 received
@@ -344,7 +400,7 @@ impl PreviewHost {
                     .map(|item| (item, (received, registration)))
             },
         )
-        .boxed()
+        .boxed())
     }
 
     pub fn respond(&self, id: &str, reply: PreviewReply) {
@@ -483,23 +539,81 @@ mod tests {
         assert_eq!(page.title, "Chart");
         assert_eq!(page.height, 2000);
         let path = PathBuf::from(&page.path);
-        assert!(path.starts_with(root.path().join("html").join("c_1")));
+        assert!(path.starts_with(root.path().join("html").join("632f31")));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "<p>hi</p>");
+        remove_chat_pages(&uploads, "");
+        assert!(
+            path.exists(),
+            "an empty chat id never removes every chat's pages"
+        );
+        let mut entry = zeron_doc::SessionMessageEntry {
+            id: "e1".into(),
+            role: zeron_doc::MessageRole::Assistant,
+            parts: vec![zeron_doc::MessagePart::Tool {
+                id: "p1".into(),
+                call: zeron_proto::ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "html_render".into(),
+                    input: None,
+                },
+                is_error: false,
+                resolved: true,
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+                html_render: Some(page.clone()),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        adopt_pages(&uploads, "fork-1", &mut entry);
+        let zeron_doc::MessagePart::Tool {
+            html_render: Some(adopted),
+            ..
+        } = &entry.parts[0]
+        else {
+            panic!("tool part");
+        };
+        assert!(adopted.path.contains("fork-1"));
         remove_chat_pages(&uploads, "c/1");
         assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&adopted.path).unwrap(),
+            "<p>hi</p>",
+            "the fork keeps its page after the source chat is deleted"
+        );
+    }
+
+    #[test]
+    fn svg_sniffing_never_panics_on_multibyte_text() {
+        assert!(!is_image_bytes("<!dé".as_bytes()));
+        assert!(!is_image_bytes("é<svg".as_bytes()));
     }
 
     #[tokio::test]
-    async fn previews_reach_the_newest_desktop_app_and_fail_cleanly_without_one() {
+    async fn previews_reach_the_attached_desktop_app_and_fail_cleanly_without_one() {
         use futures::StreamExt;
         let host = std::sync::Arc::new(PreviewHost::default());
         assert_eq!(
             preview(&host, "<p>x</p>".into(), None, None).await,
             Err(NO_PREVIEW_HOST.into())
         );
-        let mut first = host.register();
-        let mut second = host.register();
-        assert!(first.next().await.is_none(), "a newer app takes over");
+        let first = host.register().unwrap();
+        assert!(host.register().is_err(), "a second app never takes over");
+        drop(first);
+        let mut second = host.register().unwrap();
         let answer = {
             let host = host.clone();
             tokio::spawn(async move {

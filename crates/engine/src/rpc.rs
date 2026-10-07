@@ -2647,6 +2647,7 @@ impl RpcService for EngineRpc {
                             *resolved = true;
                         }
                     }
+                    crate::html_render::adopt_pages(&self.uploads, &chat.id, &mut entry);
                     target
                         .doc()
                         .push_message(&entry)
@@ -4836,6 +4837,7 @@ impl RpcService for EngineRpc {
             methods::WATCH_HTML_PREVIEW_HOST => Ok(RpcReply::Stream(
                 self.html_preview
                     .register()
+                    .map_err(RpcError::Failed)?
                     .filter_map(|item| async move { serde_json::to_value(item).ok() })
                     .boxed(),
             )),
