@@ -10,7 +10,10 @@ use zeron_proto::{PermissionMode, UserInputAnswer, UserInputKind, UserInputQuest
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
 use super::backend::ComputerError;
-use super::manager::{ComputerConsentCard, ComputerManagerSeams};
+use super::manager::{
+    COMPUTER_BROWSER_PROFILE_CONSENT_PARAMS, COMPUTER_BROWSER_PROFILE_CONSENT_TOOL,
+    ComputerConsentCard, ComputerManagerSeams,
+};
 use crate::sessions::SessionsEngine;
 
 pub const COMPUTER_CONSENT_ALLOW: &str = "Allow";
@@ -90,6 +93,15 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
         .filter(|_| card.scope == ComputerConsentScope::Task)
         .and_then(consent_always_label);
     let question = match (&card.app, card.scope) {
+        (Some(app), _)
+            if card.tool_name == COMPUTER_BROWSER_PROFILE_CONSENT_TOOL
+                && card.params_display == COMPUTER_BROWSER_PROFILE_CONSENT_PARAMS =>
+        {
+            format!(
+                "Allow Zeron to use your {}? It can read and act in your signed-in tabs.",
+                app.name
+            )
+        }
         (Some(app), ComputerConsentScope::Task) if app.verified() => format!(
             "{} The agent will use {} until this response ends.",
             consent_app_title(app),

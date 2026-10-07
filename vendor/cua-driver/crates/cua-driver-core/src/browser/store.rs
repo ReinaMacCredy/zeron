@@ -15,7 +15,7 @@
 //! `browser_ref_stale`, and frame identity is re-proven against the
 //! live frame tree before any mutation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -238,6 +238,7 @@ pub struct TargetRecord {
 #[derive(Default)]
 struct SessionTargets {
     targets: HashMap<String, TargetRecord>,
+    opened_tabs: HashSet<String>,
 }
 
 /// Parse an external page ref of the form `p<snapshot>:<index>`.
@@ -501,6 +502,30 @@ impl BrowserStore {
                 tab.snapshots.clear();
             }
         });
+    }
+
+    pub fn record_opened_tab(&self, session: &str, cdp_target_id: &str) {
+        self.inner
+            .lock()
+            .unwrap()
+            .entry(session.to_owned())
+            .or_default()
+            .opened_tabs
+            .insert(cdp_target_id.to_owned());
+    }
+
+    pub fn opened_tab(&self, session: &str, cdp_target_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(session)
+            .is_some_and(|targets| targets.opened_tabs.contains(cdp_target_id))
+    }
+
+    pub fn forget_opened_tab(&self, session: &str, cdp_target_id: &str) {
+        if let Some(targets) = self.inner.lock().unwrap().get_mut(session) {
+            targets.opened_tabs.remove(cdp_target_id);
+        }
     }
 
     /// Drop the whole namespace for an ended session. Wired to

@@ -266,6 +266,8 @@ pub trait ComputerToolFamily: Send + Sync {
         args: ToolArgs,
         context: &ComputerToolContext,
     ) -> McpToolResult;
+
+    async fn turn_ended(&self, _tools: &ComputerTools, _thread_id: &str, _turn_id: &str) {}
 }
 
 pub fn computer_tool_families(manager: &ComputerManager) -> Vec<Arc<dyn ComputerToolFamily>> {
@@ -359,6 +361,12 @@ impl ComputerTools {
 
     pub fn entry(&self, name: &str) -> Option<ComputerToolEntry> {
         self.entries().into_iter().find(|entry| entry.name() == name)
+    }
+
+    pub async fn turn_ended(&self, thread_id: &str, turn_id: &str) {
+        for family in &self.families {
+            family.turn_ended(self, thread_id, turn_id).await;
+        }
     }
 
     pub fn catalog(&self) -> Vec<McpToolDefinition> {

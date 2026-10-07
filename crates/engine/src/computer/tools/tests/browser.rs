@@ -42,11 +42,23 @@ fn build(
     mode: Option<PermissionMode>,
     families: Option<Vec<Arc<dyn ComputerToolFamily>>>,
 ) -> Browser {
+    build_with(
+        crate::computer::fake_backend::FakeComputerBackendOptions {
+            browser,
+            ..Default::default()
+        },
+        mode,
+        families,
+    )
+}
+
+fn build_with(
+    options: crate::computer::fake_backend::FakeComputerBackendOptions,
+    mode: Option<PermissionMode>,
+    families: Option<Vec<Arc<dyn ComputerToolFamily>>>,
+) -> Browser {
     let dir = tempfile::tempdir().unwrap();
-    let backend = fake_with(crate::computer::fake_backend::FakeComputerBackendOptions {
-        browser,
-        ..Default::default()
-    });
+    let backend = fake_with(options);
     let gate = ComputerApprovalGate::default();
     let approvals = Arc::new(Approvals {
         mode: Mutex::new(mode),
@@ -702,7 +714,7 @@ async fn reports_field_readback_without_claiming_submission_succeeded() {
 }
 
 #[tokio::test]
-async fn offers_one_honest_next_step_after_unsupported_profile_attachment_without_launching_it() {
+async fn points_a_refused_profile_bind_at_the_existing_profile_route_without_launching_anything() {
     let Browser { h, .. } = replying(|_| {
         structured(json!({
             "status": "refused",
@@ -718,12 +730,14 @@ async fn offers_one_honest_next_step_after_unsupported_profile_attachment_withou
         &json!({ "status": "refused", "refusal": { "code": "browser_consent_required" } })
     ));
     let text = text_of(&result);
-    assert!(text.contains("cannot attach to your existing browser profile"));
+    assert!(
+        text.contains("strategy:{kind:\"existing_profile\"}"),
+        "{text}"
+    );
     assert!(
         text.contains("computer_browser_prepare({allow_launch:true,profile:{mode:\"isolated_new\"")
     );
-    assert!(text.contains("without your cookies"));
-    assert!(text.contains("Do not substitute it when the task requires your existing profile"));
+    assert!(text.contains("without the user's cookies"));
     assert_eq!(h.backend.calls_for("browser.browser_prepare").len(), 1);
     h.dispose().await;
 }
@@ -1341,4 +1355,382 @@ async fn native_browser_uses_live_task_identity_and_preserves_host_errors() {
         "ended turn must not reach native host"
     );
     browser.h.dispose().await;
+}
+
+const CHROME_PID: u32 = 4242;
+const EDGE_PID: u32 = 5151;
+
+fn running_browser(pid: u32, name: &str, bundle_id: &str) -> zeron_proto::computer::ComputerApp {
+    zeron_proto::computer::ComputerApp {
+        pid,
+        name: name.into(),
+        bundle_id: Some(bundle_id.into()),
+        team_id: None,
+        running: true,
+        active: false,
+        launch_path: None,
+        window_count: Some(1),
+        last_used: None,
+    }
+}
+
+fn profile_driver(call: &ComputerBrowserCall) -> ComputerBrowserCallResult {
+    let pid = call.args.get("pid").cloned();
+    match call.name.as_str() {
+        "browser_prepare" => structured(json!({
+            "status": "ok",
+            "action": "attached_existing_profile",
+            "prepared_pid": pid,
+        })),
+        "get_browser_state" if call.args.contains_key("pid") => structured(json!({
+            "status": "ok",
+            "mode": "bind",
+            "target_id": "bt-1",
+            "endpoint_access_class": "existing_profile_approved",
+            "tabs": [{ "tab_id": "tab-user", "active": true, "title": "Mail", "url": "https://mail.example/" }],
+        })),
+        "get_browser_state" => structured(json!({
+            "status": "ok",
+            "mode": "snapshot",
+            "target_id": call.args["target_id"],
+            "tab_id": call.args["tab_id"],
+        })),
+        "browser_navigate" if call.args.get("close_tab") == Some(&json!(true)) => {
+            structured(json!({
+                "status": "ok",
+                "target_id": call.args["target_id"],
+                "tab_id": call.args["tab_id"],
+                "closed": true,
+            }))
+        }
+        "browser_navigate" if call.args.get("new_tab") == Some(&json!(true)) => {
+            let url = call.args["url"].as_str().unwrap_or_default();
+            let tab = format!("tab-{}", url.rsplit('/').next().unwrap_or("new"));
+            structured(json!({
+                "status": "ok",
+                "target_id": call.args["target_id"],
+                "tab_id": tab,
+                "opened_tab": true,
+            }))
+        }
+        _ => ok(),
+    }
+}
+
+fn profile_browsers(mode: PermissionMode) -> (Browser, Arc<Mutex<Vec<ComputerBrowserCall>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let browser = build_with(
+        crate::computer::fake_backend::FakeComputerBackendOptions {
+            browser: handler(move |call| {
+                sink.lock().unwrap().push(call.clone());
+                profile_driver(call)
+            }),
+            apps: Some(vec![
+                running_browser(CHROME_PID, "Google Chrome", "com.google.Chrome"),
+                running_browser(EDGE_PID, "Microsoft Edge", "com.microsoft.edgemac"),
+            ]),
+            ..Default::default()
+        },
+        Some(mode),
+        None,
+    );
+    (browser, seen)
+}
+
+fn attach(pid: u32) -> Value {
+    json!({ "pid": pid, "window_id": 7, "strategy": { "kind": "existing_profile" } })
+}
+
+fn profile_cards(h: &Harness) -> Vec<ComputerConsentCard> {
+    h.approvals.cards.lock().unwrap().clone()
+}
+
+fn closed_tabs(seen: &Arc<Mutex<Vec<ComputerBrowserCall>>>) -> Vec<String> {
+    recorded(seen)
+        .into_iter()
+        .filter(|call| call.name == "browser_navigate" && call.args.contains_key("close_tab"))
+        .map(|call| call.args["tab_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn asks_one_profile_card_per_browser_and_reuses_it_for_the_turn() {
+    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Ask);
+    h.decide(ApprovalDecision::Accept);
+    let prepared = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+    assert!(!prepared.is_error, "{prepared:?}");
+    let cards = profile_cards(&h);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].tool_name, "computer_browser_prepare");
+    assert_eq!(
+        cards[0].params_display,
+        crate::computer::manager::COMPUTER_BROWSER_PROFILE_CONSENT_PARAMS
+    );
+    assert_eq!(cards[0].scope, ComputerConsentScope::Task);
+    let app = cards[0].app.clone().unwrap();
+    assert_eq!(app.name, "Google Chrome profile");
+    assert_eq!(app.bundle_id.as_deref(), Some("com.google.Chrome"));
+    let question = crate::computer::engine_seams::consent_question(&cards[0]);
+    assert_eq!(
+        question.question,
+        "Allow Zeron to use your Google Chrome profile? It can read and act in your signed-in tabs."
+    );
+    assert!(
+        question
+            .options
+            .iter()
+            .any(|option| option == "Always allow Google Chrome profile")
+    );
+
+    let bound = h
+        .call(
+            "computer_browser_state",
+            json!({ "pid": CHROME_PID, "window_id": 7 }),
+        )
+        .await;
+    assert!(!bound.is_error, "{bound:?}");
+    let navigated = h
+        .call(
+            "computer_browser_navigate",
+            json!({ "target_id": "bt-1", "tab_id": "tab-user", "url": "https://example.com/" }),
+        )
+        .await;
+    assert!(!navigated.is_error, "{navigated:?}");
+    assert_eq!(
+        profile_cards(&h).len(),
+        1,
+        "the turn grant covers reads and actions"
+    );
+
+    let edge = h.call("computer_browser_prepare", attach(EDGE_PID)).await;
+    assert!(!edge.is_error, "{edge:?}");
+    let cards = profile_cards(&h);
+    assert_eq!(cards.len(), 2, "each browser asks once");
+    assert_eq!(
+        cards[1].app.as_ref().unwrap().name,
+        "Microsoft Edge profile"
+    );
+
+    let dispatched: Vec<String> = recorded(&seen).into_iter().map(|call| call.name).collect();
+    assert_eq!(
+        dispatched,
+        [
+            "browser_prepare",
+            "get_browser_state",
+            "browser_navigate",
+            "browser_prepare"
+        ]
+    );
+    assert_eq!(
+        recorded(&seen)[0].args["strategy"],
+        json!({ "kind": "existing_profile" })
+    );
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn a_denied_profile_card_attaches_nothing() {
+    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Ask);
+    h.decide(ApprovalDecision::Decline);
+    let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+    assert!(result.is_error);
+    assert_eq!(result_json(&result)["error"]["code"], "app_consent_denied");
+    assert_eq!(profile_cards(&h).len(), 1);
+    assert!(recorded(&seen).is_empty());
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn always_allow_records_the_profile_apart_from_the_browser_app() {
+    let (Browser { h, .. }, _) = profile_browsers(PermissionMode::Ask);
+    h.decide(ApprovalDecision::AcceptForSession);
+    let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+    assert!(!result.is_error, "{result:?}");
+    let gate = &h.approvals.gate;
+    assert!(gate.app_granted(
+        "other-thread",
+        None,
+        "x",
+        Some("browser-profile:com.google.Chrome")
+    ));
+    assert!(!gate.app_granted("other-thread", None, "x", Some("com.google.Chrome")));
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn mirrors_app_consent_and_shows_no_profile_card_outside_ask_mode() {
+    for mode in [PermissionMode::Auto, PermissionMode::Full] {
+        let (Browser { h, .. }, seen) = profile_browsers(mode);
+        let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+        assert!(!result.is_error, "{mode:?}: {result:?}");
+        assert!(profile_cards(&h).is_empty(), "{mode:?}");
+        assert_eq!(recorded(&seen).len(), 1, "{mode:?}");
+        h.dispose().await;
+    }
+}
+
+#[tokio::test]
+async fn never_launches_relaunches_or_guesses_the_users_browser() {
+    for (extra, code) in [
+        (json!({ "allow_launch": true }), "browser_relaunch_refused"),
+        (json!({ "windowed": true }), "browser_relaunch_refused"),
+        (
+            json!({ "profile": { "mode": "isolated_new" } }),
+            "browser_relaunch_refused",
+        ),
+        (json!({ "window_id": null }), "browser_target_required"),
+        (
+            json!({ "strategy": { "kind": "relaunch" } }),
+            "browser_strategy_unsupported",
+        ),
+    ] {
+        let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+        let mut arguments = attach(CHROME_PID);
+        for (key, value) in extra.as_object().unwrap() {
+            if value.is_null() {
+                arguments.as_object_mut().unwrap().remove(key);
+            } else {
+                arguments[key] = value.clone();
+            }
+        }
+        let result = h.call("computer_browser_prepare", arguments).await;
+        assert!(
+            subset(
+                result.structured_content.as_ref().unwrap(),
+                &json!({ "status": "refused", "refusal": { "code": code } })
+            ),
+            "{extra}: {result:?}"
+        );
+        assert!(recorded(&seen).is_empty(), "{extra}");
+        assert!(h.backend.calls_for("kill_app").is_empty());
+        h.dispose().await;
+    }
+}
+
+#[tokio::test]
+async fn closes_only_unkept_agent_tabs_at_turn_end_and_never_a_user_tab() {
+    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+    h.call(
+        "computer_browser_state",
+        json!({ "pid": CHROME_PID, "window_id": 7 }),
+    )
+    .await;
+    let open = |path: &str, keep: Option<&str>| {
+        let mut arguments = json!({
+            "target_id": "bt-1",
+            "tab_id": "tab-user",
+            "url": format!("https://example.com/{path}"),
+            "new_tab": true,
+        });
+        if let Some(keep) = keep {
+            arguments["keep"] = json!(keep);
+        }
+        arguments
+    };
+    let scratch = h
+        .call("computer_browser_navigate", open("scratch", None))
+        .await;
+    assert!(!scratch.is_error, "{scratch:?}");
+    assert!(text_of(&scratch).contains("closes when your turn ends"));
+    assert_eq!(
+        scratch.structured_content.as_ref().unwrap()["tab_id"],
+        "tab-scratch"
+    );
+    let kept = h
+        .call(
+            "computer_browser_navigate",
+            open("report", Some("deliverable")),
+        )
+        .await;
+    assert!(!text_of(&kept).contains("closes when your turn ends"));
+    h.call("computer_browser_navigate", open("draft", None))
+        .await;
+    let marked = h
+        .call(
+            "computer_browser_state",
+            json!({ "target_id": "bt-1", "tab_id": "tab-draft", "keep": "handoff" }),
+        )
+        .await;
+    assert!(!marked.is_error, "{marked:?}");
+    let user = h
+        .call(
+            "computer_browser_state",
+            json!({ "target_id": "bt-1", "tab_id": "tab-user", "keep": "deliverable" }),
+        )
+        .await;
+    assert!(text_of(&user).contains("this tab is the user's and is never closed"));
+    assert!(
+        recorded(&seen)
+            .iter()
+            .all(|call| !call.args.contains_key("keep")),
+        "keep is engine bookkeeping, never a driver argument"
+    );
+
+    h.tools.turn_ended(THREAD, TURN).await;
+    assert_eq!(closed_tabs(&seen), ["tab-scratch"]);
+    let close = recorded(&seen)
+        .into_iter()
+        .find(|call| call.args.contains_key("close_tab"))
+        .unwrap();
+    assert_eq!(close.task.turn_id, None);
+    assert!(close.mutation);
+
+    h.tools.turn_ended(THREAD, "turn-2").await;
+    assert_eq!(closed_tabs(&seen), ["tab-scratch", "tab-draft"]);
+    h.tools.turn_ended(THREAD, "turn-3").await;
+    assert_eq!(closed_tabs(&seen), ["tab-scratch", "tab-draft"]);
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn an_opened_tab_makes_an_omitted_tab_id_ambiguous_instead_of_defaulting_to_the_users_tab() {
+    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+    h.call(
+        "computer_browser_state",
+        json!({ "pid": CHROME_PID, "window_id": 7 }),
+    )
+    .await;
+    h.call(
+        "computer_browser_navigate",
+        json!({ "target_id": "bt-1", "url": "https://example.com/mine", "new_tab": true }),
+    )
+    .await;
+    let before = recorded(&seen).len();
+    let result = h
+        .call(
+            "computer_browser_click",
+            json!({ "target_id": "bt-1", "ref": "p1:0" }),
+        )
+        .await;
+    assert!(subset(
+        result.structured_content.as_ref().unwrap(),
+        &json!({ "status": "refused", "refusal": { "code": "browser_tab_required" } })
+    ));
+    assert!(text_of(&result).contains("tab-mine"));
+    assert_eq!(recorded(&seen).len(), before);
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn rejects_keep_outside_a_new_tab_or_a_tab_snapshot() {
+    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    let result = h
+        .call(
+            "computer_browser_navigate",
+            json!({ "target_id": "bt-1", "tab_id": "tab-user", "url": "https://example.com/", "keep": "deliverable" }),
+        )
+        .await;
+    assert!(result.is_error, "{result:?}");
+    let bad = h
+        .call(
+            "computer_browser_navigate",
+            json!({ "target_id": "bt-1", "tab_id": "tab-user", "url": "https://example.com/", "new_tab": true, "keep": "forever" }),
+        )
+        .await;
+    assert!(bad.is_error, "{bad:?}");
+    assert!(recorded(&seen).is_empty());
+    h.dispose().await;
 }

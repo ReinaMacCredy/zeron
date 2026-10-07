@@ -442,6 +442,7 @@ pub(crate) struct SemanticSnapshotOutcome {
 }
 
 pub(crate) struct BrowserTabScreenshot {
+    pub scope: &'static str,
     pub data_base64: String,
     pub width: u32,
     pub height: u32,
@@ -504,6 +505,40 @@ fn browser_screenshot_viewport(
         page_y,
         width,
         height,
+    })
+}
+
+const MAX_FULL_PAGE_CSS_HEIGHT: f64 = 16_384.0;
+
+fn browser_screenshot_full_page(
+    metrics: &Value,
+) -> Result<BrowserScreenshotViewport, BrowserRefusal> {
+    let content = metrics
+        .get("cssContentSize")
+        .or_else(|| metrics.get("contentSize"))
+        .ok_or_else(|| {
+            route_err(
+                "Page.getLayoutMetrics returned malformed data",
+                "missing content size metrics",
+            )
+        })?;
+    let number = |field: &str| {
+        content
+            .get(field)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or_else(|| {
+                route_err(
+                    "Page.getLayoutMetrics returned malformed data",
+                    format!("missing or non-positive content size field {field}"),
+                )
+            })
+    };
+    Ok(BrowserScreenshotViewport {
+        page_x: 0.0,
+        page_y: 0.0,
+        width: number("width")?,
+        height: number("height")?.min(MAX_FULL_PAGE_CSS_HEIGHT),
     })
 }
 
@@ -2120,6 +2155,148 @@ impl BrowserEngine {
             .await)
     }
 
+    pub(crate) async fn open_tab(
+        &self,
+        session: &str,
+        target_id: &str,
+        anchor_tab_id: &str,
+        url: &str,
+    ) -> Result<TabRecord, BrowserRefusal> {
+        let validated = self
+            .revalidate_for_mutation(session, target_id, Some(anchor_tab_id))
+            .await?;
+        if !validated.windowless && validated.record.cdp_window_id.is_none() {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserActionUnavailable,
+                "this embedded single-page browser has no tab strip to open a tab in",
+            ));
+        }
+        let created = validated
+            .conn
+            .call(
+                None,
+                "Target.createTarget",
+                json!({ "url": url, "background": true }),
+            )
+            .await
+            .map_err(|error| route_err("Target.createTarget failed", error))?;
+        let cdp_target_id = created
+            .get("targetId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                route_err(
+                    "Target.createTarget returned malformed data",
+                    "missing targetId",
+                )
+            })?;
+        self.store.record_opened_tab(session, &cdp_target_id);
+        if let Some(bound_window) = validated.record.cdp_window_id {
+            let window = validated
+                .conn
+                .call(
+                    None,
+                    "Browser.getWindowForTarget",
+                    json!({ "targetId": cdp_target_id }),
+                )
+                .await
+                .ok()
+                .and_then(|window| window.get("windowId").and_then(Value::as_i64));
+            if window != Some(bound_window) {
+                let _ = self
+                    .close_opened_target(&validated.conn, session, &cdp_target_id)
+                    .await;
+                return Err(refuse(
+                    BrowserRefusalCode::BrowserWrongTargetRefused,
+                    "the browser opened the new tab in a different window than the bound one, so the driver closed it again; bind the window that receives new tabs, or bring the bound window to the front and retry",
+                ));
+            }
+        }
+        let tab = TabRecord {
+            tab_id: self.store.mint_tab_id(),
+            cdp_target_id,
+            title: String::new(),
+            url: url.to_owned(),
+            active: None,
+            generation: validated.record.generation,
+            snapshots: HashMap::new(),
+        };
+        self.store.update_target(session, target_id, |record| {
+            record.tabs.insert(tab.tab_id.clone(), tab.clone());
+        });
+        if let Ok(record) = self.store.get_target(session, target_id) {
+            let owner = self
+                .store
+                .rebind_hint(target_id)
+                .map_or_else(|| session.to_owned(), |hint| hint.owner_session);
+            self.record_rebind_hint(
+                target_id,
+                record.pid,
+                record.window_id,
+                record.windowless,
+                &owner,
+                &record,
+            );
+        }
+        Ok(tab)
+    }
+
+    pub(crate) async fn close_tab(
+        &self,
+        session: &str,
+        target_id: &str,
+        tab_id: &str,
+    ) -> Result<(), BrowserRefusal> {
+        let record = self.target_for(session, target_id).await?;
+        let tab = record.tabs.get(tab_id).cloned().ok_or_else(|| {
+            refuse(
+                BrowserRefusalCode::BrowserTabNotFound,
+                format!("tab {tab_id} is not known for target {target_id}"),
+            )
+        })?;
+        if !self.store.opened_tab(session, &tab.cdp_target_id) {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                format!(
+                    "tab {tab_id} was not opened by this session; the driver closes only tabs it opened and never one of the user's tabs"
+                ),
+            ));
+        }
+        let validated = self
+            .revalidate_for_mutation(session, target_id, Some(tab_id))
+            .await?;
+        self.close_opened_target(&validated.conn, session, &tab.cdp_target_id)
+            .await?;
+        self.store.update_target(session, target_id, |record| {
+            record.tabs.remove(tab_id);
+        });
+        Ok(())
+    }
+
+    async fn close_opened_target(
+        &self,
+        conn: &CdpConnection,
+        session: &str,
+        cdp_target_id: &str,
+    ) -> Result<(), BrowserRefusal> {
+        if !self.store.opened_tab(session, cdp_target_id) {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "the driver closes only tabs it opened",
+            ));
+        }
+        conn.call(
+            None,
+            "Target.closeTarget",
+            json!({ "targetId": cdp_target_id }),
+        )
+        .await
+        .map_err(|error| route_err("Target.closeTarget failed", error))?;
+        self.store.forget_opened_tab(session, cdp_target_id);
+        Ok(())
+    }
+
     // ── Frame identity / OOPIF plumbing ─────────────────────────────────
 
     /// Fetch and parse one session's local frame tree.
@@ -2306,6 +2483,7 @@ impl BrowserEngine {
         session: &str,
         target_id: &str,
         tab_id: &str,
+        full_page: bool,
     ) -> Result<BrowserTabScreenshot, BrowserRefusal> {
         let record = self.target_for(session, target_id).await?;
         let tab = record.tabs.get(tab_id).cloned().ok_or_else(|| {
@@ -2320,7 +2498,11 @@ impl BrowserEngine {
             .call(Some(&cdp_session), "Page.getLayoutMetrics", json!({}))
             .await
             .map_err(|error| route_err("Page.getLayoutMetrics failed", error))?;
-        let viewport = browser_screenshot_viewport(&metrics)?;
+        let viewport = if full_page {
+            browser_screenshot_full_page(&metrics)?
+        } else {
+            browser_screenshot_viewport(&metrics)?
+        };
         let response = conn
             .call(
                 Some(&cdp_session),
@@ -2328,7 +2510,7 @@ impl BrowserEngine {
                 json!({
                     "format": "png",
                     "fromSurface": true,
-                    "captureBeyondViewport": false,
+                    "captureBeyondViewport": full_page,
                     "clip": {
                         "x": viewport.page_x,
                         "y": viewport.page_y,
@@ -2384,6 +2566,7 @@ impl BrowserEngine {
             ));
         }
         Ok(BrowserTabScreenshot {
+            scope: if full_page { "full_page" } else { "viewport" },
             data_base64,
             width,
             height,

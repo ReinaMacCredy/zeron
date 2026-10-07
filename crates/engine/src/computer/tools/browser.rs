@@ -26,7 +26,7 @@ use crate::computer::audit_log::{
 };
 use crate::computer::backend::{ComputerBrowserCallResult, ComputerError, CuaActionError};
 use crate::computer::desktop_operation_queue::OperationSignal;
-use crate::computer::manager::ComputerConsentTarget;
+use crate::computer::manager::{ComputerConsent, ComputerConsentTarget};
 use crate::computer::model_desktop_observation::with_model_desktop_observation;
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 
@@ -71,7 +71,15 @@ const TARGET_ID_DESCRIPTION: &str = "Opaque browser target id minted by computer
 const TAB_ID_DESCRIPTION: &str = "Opaque tab id from the bind result's tabs[].tab_id (tab-…). May be omitted when the target has exactly one tab, or one active tab — the gateway resolves it. Never pass target_id here.";
 const REF_DESCRIPTION: &str = "Page element ref from a computer_browser_state snapshot. Refs die on navigation or a newer snapshot of the same tab.";
 
-const EXISTING_PROFILE_UNAVAILABLE: &str = "This Computer route cannot attach to your existing browser profile. If a separate browser without your cookies satisfies the task, call computer_browser_prepare({allow_launch:true,profile:{mode:\"isolated_new\"}}). Use isolated_named with a task-specific name if the profile must survive browser restarts. Do not substitute it when the task requires your existing profile.";
+const EXISTING_PROFILE_ROUTE: &str = "This is the user's own browser profile. To act in their signed-in tabs, call computer_browser_prepare({pid, window_id, strategy:{kind:\"existing_profile\"}}); the user approves each browser once. If a separate browser without the user's cookies satisfies the task, prefer computer_browser_prepare({allow_launch:true,profile:{mode:\"isolated_new\"}}).";
+
+const EXISTING_PROFILE_NEEDS_WINDOW: &str = "strategy existing_profile attaches to the user's running browser and needs its exact pid and window_id from computer_list_windows. Nothing was sent.";
+
+const EXISTING_PROFILE_NO_LAUNCH: &str = "strategy existing_profile attaches to the user's running browser; it never launches, relaunches, or quits it, so it cannot be combined with allow_launch, profile, or windowed. No browser was launched or changed.";
+
+const OPENED_TAB_NOTE: &str = "This tab is yours and closes when your turn ends. To leave it open, call computer_browser_state({target_id, tab_id, keep}) with keep \"deliverable\" (the user should see it) or \"handoff\" (you continue next turn).";
+
+const KEEP_ONLY_OPENED: &str = "keep applies only to tabs you opened with new_tab; this tab is the user's and is never closed.";
 
 const PID_ONLY_BIND_REFUSED: &str = "A pid-only bind is for a live driver-owned headless browser. An existing desktop browser needs a native-window bind with computer_browser_state({pid,window_id}) and a verified CDP endpoint. Only a successful bind returns target_id for computer_browser_navigate and other browser actions. If that bind is unavailable, use the exact desktop window through computer_get_state and native Computer actions; do not send pid/window_id to browser actions or silently replace the user's profile.";
 
@@ -85,6 +93,7 @@ const MAX_LISTED_TABS: usize = 10;
 const MAX_REMEMBERED_TABS: usize = 100;
 const KNOWN_TARGETS_PER_THREAD: usize = 4;
 const KNOWN_THREADS_MAX: usize = 32;
+const MAX_OPENED_TABS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct BrowserTab {
@@ -101,6 +110,45 @@ struct BrowserRefusal {
     code: &'static str,
     message: String,
     detail: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabKeep {
+    Deliverable,
+    Handoff,
+}
+
+struct OpenedTab {
+    thread_id: String,
+    turn_id: Option<String>,
+    target_id: String,
+    tab_id: String,
+    keep: Option<TabKeep>,
+}
+
+fn wants_existing_profile(args: &ToolArgs) -> bool {
+    args.get("strategy")
+        .and_then(|strategy| strategy.get("kind"))
+        .and_then(Value::as_str)
+        == Some("existing_profile")
+}
+
+fn positive_u32(args: &ToolArgs, key: &str) -> Option<u32> {
+    args.get(key)
+        .and_then(is_safe_integer)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+fn tab_keep(args: &ToolArgs) -> Result<Option<TabKeep>, ToolInputError> {
+    match args.get("keep") {
+        None => Ok(None),
+        Some(Value::String(keep)) if keep == "deliverable" => Ok(Some(TabKeep::Deliverable)),
+        Some(Value::String(keep)) if keep == "handoff" => Ok(Some(TabKeep::Handoff)),
+        Some(_) => Err(ToolInputError::new(
+            "\"keep\" must be \"deliverable\" or \"handoff\".",
+        )),
+    }
 }
 
 fn resolvable_tab(tabs: &[BrowserTab]) -> Option<&BrowserTab> {
@@ -271,8 +319,17 @@ fn augment_browser_result(
             .get("code")
             .and_then(Value::as_str)
             .unwrap_or("browser_refused");
-        if name == "computer_browser_prepare" && code == "browser_consent_required" {
-            return refused_with_message(result, code, EXISTING_PROFILE_UNAVAILABLE);
+        let offers_existing_profile = refusal
+            .get("detail")
+            .and_then(|detail| detail.get("supported_strategies"))
+            .and_then(Value::as_array)
+            .is_some_and(|strategies| strategies.contains(&json!("existing_profile")));
+        if code == "browser_consent_required"
+            && !wants_existing_profile(args)
+            && (name == "computer_browser_prepare"
+                || (name == "computer_browser_state" && offers_existing_profile))
+        {
+            return refused_with_message(result, code, EXISTING_PROFILE_ROUTE);
         }
         if name == "computer_browser_state"
             && code == "browser_wrong_target_refused"
@@ -353,6 +410,8 @@ pub struct ComputerBrowserTools {
     entries: Vec<ComputerToolEntry>,
     known_targets: Mutex<KnownTargets>,
     target_pids: Mutex<Vec<(String, String, u32)>>,
+    profile_pids: Mutex<Vec<(String, u32)>>,
+    opened_tabs: Mutex<Vec<OpenedTab>>,
 }
 
 impl Default for ComputerBrowserTools {
@@ -361,6 +420,8 @@ impl Default for ComputerBrowserTools {
             entries: browser_entries(),
             known_targets: Mutex::default(),
             target_pids: Mutex::default(),
+            profile_pids: Mutex::default(),
+            opened_tabs: Mutex::default(),
         }
     }
 }
@@ -450,6 +511,112 @@ impl ComputerBrowserTools {
         pid.map(|pid| (None, ComputerConsentTarget::Pid(pid)))
             .into_iter()
             .collect()
+    }
+
+    fn remember_profile_pid(&self, thread_id: &str, pid: u32) {
+        let mut known = lock(&self.profile_pids);
+        if known
+            .iter()
+            .any(|(thread, known)| thread == thread_id && *known == pid)
+        {
+            return;
+        }
+        known.push((thread_id.to_owned(), pid));
+        while known.len() > KNOWN_THREADS_MAX * KNOWN_TARGETS_PER_THREAD {
+            known.remove(0);
+        }
+    }
+
+    fn profile_pid(&self, thread_id: &str, name: &str, args: &ToolArgs) -> Option<u32> {
+        if name == "computer_browser_prepare" && wants_existing_profile(args) {
+            return positive_u32(args, "pid");
+        }
+        let pid = self
+            .consent_targets(thread_id, args)
+            .into_iter()
+            .find_map(|(_, target)| match target {
+                ComputerConsentTarget::Pid(pid) => Some(pid),
+                _ => None,
+            })?;
+        lock(&self.profile_pids)
+            .iter()
+            .any(|(thread, known)| thread == thread_id && *known == pid)
+            .then_some(pid)
+    }
+
+    fn remember_opened_tab(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        target_id: &str,
+        tab_id: &str,
+        keep: Option<TabKeep>,
+    ) {
+        {
+            let mut known = lock(&self.known_targets);
+            if let Some((_, tabs)) = known
+                .iter_mut()
+                .find(|(thread, _)| thread == thread_id)
+                .and_then(|(_, targets)| targets.iter_mut().find(|(target, _)| target == target_id))
+            {
+                for tab in tabs.iter_mut() {
+                    tab.active = None;
+                }
+                tabs.push(BrowserTab {
+                    tab_id: tab_id.to_owned(),
+                    active: None,
+                    title: None,
+                    url: None,
+                });
+                while tabs.len() > MAX_REMEMBERED_TABS {
+                    tabs.remove(0);
+                }
+            }
+        }
+        let mut opened = lock(&self.opened_tabs);
+        opened.push(OpenedTab {
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.map(str::to_owned),
+            target_id: target_id.to_owned(),
+            tab_id: tab_id.to_owned(),
+            keep,
+        });
+        while opened.len() > MAX_OPENED_TABS {
+            opened.remove(0);
+        }
+    }
+
+    fn keep_tab(&self, thread_id: &str, target_id: &str, tab_id: &str, keep: TabKeep) -> bool {
+        lock(&self.opened_tabs)
+            .iter_mut()
+            .find(|tab| {
+                tab.thread_id == thread_id && tab.target_id == target_id && tab.tab_id == tab_id
+            })
+            .map(|tab| tab.keep = Some(keep))
+            .is_some()
+    }
+
+    fn tabs_to_close(&self, thread_id: &str, turn_id: &str) -> Vec<(String, String)> {
+        let mut close = Vec::new();
+        lock(&self.opened_tabs).retain_mut(|tab| {
+            if tab.thread_id != thread_id
+                || tab.turn_id.as_deref().is_some_and(|turn| turn != turn_id)
+            {
+                return true;
+            }
+            match tab.keep.take() {
+                Some(TabKeep::Deliverable) => false,
+                Some(TabKeep::Handoff) => {
+                    tab.turn_id = None;
+                    true
+                }
+                None => {
+                    close.push((tab.target_id.clone(), tab.tab_id.clone()));
+                    false
+                }
+            }
+        });
+        close
     }
 
     fn known_tabs(&self, thread_id: &str, target_id: &str) -> Vec<BrowserTab> {
@@ -606,12 +773,88 @@ impl ComputerBrowserTools {
             effective.insert("mode".into(), json!("keystrokes"));
             effective.insert("text".into(), json!("\n"));
         }
+        let keep = tab_keep(args)?;
+        let opens_tab =
+            name == "computer_browser_navigate" && args.get("new_tab") == Some(&Value::Bool(true));
+        if keep.is_some()
+            && !opens_tab
+            && !(name == "computer_browser_state" && args.contains_key("target_id"))
+        {
+            return Err(ToolInputError::new(
+                "\"keep\" is valid only with computer_browser_navigate new_tab:true, or computer_browser_state with target_id and tab_id.",
+            )
+            .into());
+        }
+        effective.remove("keep");
+        effective.remove("close_tab");
+        if name == "computer_browser_prepare" && args.contains_key("strategy") {
+            let refusal = if !wants_existing_profile(args) {
+                Some((
+                    "browser_strategy_unsupported",
+                    "The only strategy is {kind:\"existing_profile\"}. Nothing was sent.",
+                ))
+            } else if args.get("allow_launch") == Some(&Value::Bool(true))
+                || args.get("windowed") == Some(&Value::Bool(true))
+                || args.contains_key("profile")
+            {
+                Some(("browser_relaunch_refused", EXISTING_PROFILE_NO_LAUNCH))
+            } else if positive_u32(args, "pid").is_none()
+                || positive_u32(args, "window_id").is_none()
+            {
+                Some(("browser_target_required", EXISTING_PROFILE_NEEDS_WINDOW))
+            } else {
+                None
+            };
+            if let Some((code, message)) = refusal {
+                return Ok(refuse(
+                    effective,
+                    BrowserRefusal {
+                        code,
+                        message: message.to_owned(),
+                        detail: None,
+                    },
+                ));
+            }
+        }
         let visible_launch = name == "computer_browser_prepare"
             && effective.get("windowed") == Some(&Value::Bool(true));
         if visible_launch {
             self.assert_visible_browser_allowed(context).await?;
         }
-        if computer_browser_tool_requires_approval(name, effective) {
+        if let Some(pid) = self.profile_pid(&context.chat_id, name, effective) {
+            let consent = tools
+                .manager()
+                .authorize_browser_profile(&tools.caller(context), context.signal.clone(), pid)
+                .await?;
+            match consent {
+                ComputerConsent::Granted => {}
+                ComputerConsent::Denied(Some(app)) => {
+                    self.audit(
+                        tools,
+                        name,
+                        effective,
+                        context,
+                        AuditOutcome::new(
+                            ComputerAuditEffect::Refused,
+                            Some(COMPUTER_APP_CONSENT_DENIED_CODE),
+                        ),
+                    );
+                    return Ok(app_consent_refusal_result(&app, None));
+                }
+                ComputerConsent::Denied(None) | ComputerConsent::Unscoped => {
+                    self.audit(
+                        tools,
+                        name,
+                        effective,
+                        context,
+                        AuditOutcome::new(ComputerAuditEffect::Refused, Some("approval_denied")),
+                    );
+                    return Ok(McpToolResult::error(
+                        "Computer browser action was denied or cancelled; no input was sent.",
+                    ));
+                }
+            }
+        } else if computer_browser_tool_requires_approval(name, effective) {
             let targets = self.consent_targets(&context.chat_id, effective);
             match tools
                 .authorize_consent_targets(name, effective, context, targets)
@@ -673,6 +916,35 @@ impl ComputerBrowserTools {
             effective,
             result.structured_content.as_ref(),
         );
+        let structured = result.structured_content.as_ref();
+        let text = |key: &str| {
+            structured
+                .and_then(|map| map.get(key))
+                .and_then(Value::as_str)
+        };
+        let attached = text("action") == Some("attached_existing_profile")
+            || text("endpoint_access_class") == Some("existing_profile_approved");
+        if attached && let Some(pid) = positive_u32(effective, "pid") {
+            self.remember_profile_pid(&context.chat_id, pid);
+        }
+        let mut note = None;
+        if let (Some(target_id), Some(tab_id)) = (text("target_id"), text("tab_id")) {
+            if opens_tab && structured.and_then(|map| map.get("opened_tab")) == Some(&json!(true)) {
+                self.remember_opened_tab(
+                    &context.chat_id,
+                    context.turn_id.as_deref(),
+                    target_id,
+                    tab_id,
+                    keep,
+                );
+                note = keep.is_none().then_some(OPENED_TAB_NOTE);
+            } else if name == "computer_browser_state"
+                && let Some(keep) = keep
+                && !self.keep_tab(&context.chat_id, target_id, tab_id, keep)
+            {
+                note = Some(KEEP_ONLY_OPENED);
+            }
+        }
         if audited {
             self.audit(
                 tools,
@@ -682,9 +954,11 @@ impl ComputerBrowserTools {
                 computer_browser_effect(name, &bounded, &result),
             );
         }
-        Ok(browser_result_to_mcp(augment_browser_result(
-            name, effective, result,
-        )))
+        let result = augment_browser_result(name, effective, result);
+        Ok(browser_result_to_mcp(match note {
+            Some(note) => with_appended_text(result, note),
+            None => result,
+        }))
     }
 }
 
@@ -807,6 +1081,49 @@ impl ComputerToolFamily for ComputerBrowserTools {
             }
         }
     }
+
+    async fn turn_ended(&self, tools: &ComputerTools, thread_id: &str, turn_id: &str) {
+        for (target_id, tab_id) in self.tabs_to_close(thread_id, turn_id) {
+            let args = Map::from_iter([
+                ("target_id".to_owned(), json!(target_id)),
+                ("tab_id".to_owned(), json!(tab_id)),
+                ("close_tab".to_owned(), json!(true)),
+            ]);
+            let closed = tools
+                .manager()
+                .browser_call(
+                    thread_id,
+                    None,
+                    "browser_navigate",
+                    args.clone(),
+                    None,
+                    None::<fn() -> std::future::Ready<Result<(), ComputerError>>>,
+                )
+                .await;
+            let effect = match &closed {
+                Ok(result)
+                    if result
+                        .structured_content
+                        .as_ref()
+                        .and_then(|s| s.get("closed"))
+                        == Some(&json!(true)) =>
+                {
+                    ComputerAuditEffect::Verified
+                }
+                Ok(_) => ComputerAuditEffect::Refused,
+                Err(error) => {
+                    tracing::warn!(thread = %thread_id, %error, "agent browser tab cleanup failed");
+                    ComputerAuditEffect::Error
+                }
+            };
+            tools.manager().record_computer_audit(&ComputerAuditEntry {
+                thread_id: Some(thread_id.to_owned()),
+                turn_id: Some(turn_id.to_owned()),
+                args: Some(summarize_computer_audit_args(&args)),
+                ..ComputerAuditEntry::new("computer_browser_navigate", effect)
+            });
+        }
+    }
 }
 
 fn target_id_property() -> Value {
@@ -819,6 +1136,14 @@ fn tab_id_property() -> Value {
 
 fn ref_property() -> Value {
     json!({ "type": "string", "description": REF_DESCRIPTION })
+}
+
+fn keep_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["deliverable", "handoff"],
+        "description": "Keep a tab you opened past the end of this turn: \"deliverable\" leaves it open for the user; \"handoff\" keeps it through the next turn, then it closes unless kept again.",
+    })
 }
 
 fn browser_entry(
@@ -848,7 +1173,7 @@ fn browser_entries() -> Vec<ComputerToolEntry> {
         browser_entry(
             "computer_browser_state",
             "Read browser state",
-            "Observe or bind a browser through the desktop driver's CDP route. Two modes: pass pid to bind a prepared browser — window_id only for a native browser window; a driver-owned browser launched by computer_browser_prepare is headless and binds from pid alone with binding_route \"driver_owned_headless\" — or pass the target_id + tab_id it minted to snapshot one tab: a semantic outline, element refs, and optionally a viewport screenshot (include_screenshot). The bind result is explicit: target_id names the bound browser; each entry of tabs carries its own tab_id. tab_id may be omitted when the target has one (or one active) tab — the gateway resolves it; an ambiguous target refuses with its tab listing. Element refs stay valid until that tab navigates or a newer snapshot supersedes them.",
+            "Observe or bind a browser through the desktop driver's CDP route. Two modes: pass pid to bind a prepared browser — window_id only for a native browser window; a driver-owned browser launched by computer_browser_prepare is headless and binds from pid alone with binding_route \"driver_owned_headless\" — or pass the target_id + tab_id it minted to snapshot one tab: a semantic outline, element refs, and optionally a viewport screenshot (include_screenshot). The bind result is explicit: target_id names the bound browser; each entry of tabs carries its own tab_id. tab_id may be omitted when the target has one (or one active) tab — the gateway resolves it; an ambiguous target refuses with its tab listing. Element refs stay valid until that tab navigates or a newer snapshot supersedes them. For the user's own profile (computer_browser_prepare strategy existing_profile) the bind lists the user's open tabs in that window with title and url; claim one by passing its tab_id.",
             json!({
                 "type": "object",
                 "properties": {
@@ -883,6 +1208,11 @@ fn browser_entries() -> Vec<ComputerToolEntry> {
                         "type": "boolean",
                         "description": "Capture the tab viewport as PNG through CDP.",
                     },
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "With include_screenshot, capture the whole scrollable page (height capped at 16384 CSS px).",
+                    },
+                    "keep": keep_property(),
                 },
                 "additionalProperties": false,
             }),
@@ -891,12 +1221,21 @@ fn browser_entries() -> Vec<ComputerToolEntry> {
         browser_entry(
             "computer_browser_prepare",
             "Prepare browser",
-            "Prepare driver-owned isolated Chromium (profile.mode \"isolated_new\" or \"isolated_named\", allow_launch:true), headless by default. Or detect an existing endpoint with pid (+ window_id), allow_launch:false and no strategy. Linux control requires the verified driver and packaged host's confirmed direct-X11 Escape listener; only owned isolated headless targets support mutation. Wayland/XWayland and standalone hosts permit reads/passive prepare only. Linux refuses visible launch and personal-profile control. On macOS, windowed:true needs the user's request to watch; otherwise foreground_not_requested. Prefer \"isolated_named\" to preserve a profile across restarts; \"isolated_new\" starts empty. Use prepared_pid with computer_browser_state. Existing-profile attachment needs a consent grant this embedding cannot host (browser_consent_required).",
+            "Prepare driver-owned isolated Chromium (profile.mode \"isolated_new\" or \"isolated_named\", allow_launch:true), headless by default. Or detect an existing endpoint with pid (+ window_id), allow_launch:false and no strategy. Or attach the user's running, signed-in Chrome/Edge profile: pid + window_id + strategy {kind:\"existing_profile\"}; the user approves each browser once, Chrome's own remote-debugging toggle is enabled, and the browser is never relaunched or quit. Then bind with computer_browser_state {pid, window_id}. Linux control requires the verified driver and packaged host's confirmed direct-X11 Escape listener; only owned isolated headless targets support mutation. Wayland/XWayland and standalone hosts permit reads/passive prepare only. Linux refuses visible launch and personal-profile control. On macOS, windowed:true needs the user's request to watch; otherwise foreground_not_requested. Prefer \"isolated_named\" to preserve a profile across restarts; \"isolated_new\" starts empty. Use prepared_pid with computer_browser_state. Binding the user's browser without the existing_profile approval refuses with browser_consent_required.",
             json!({
                 "type": "object",
                 "properties": {
                     "pid": { "type": "integer", "description": "Browser process id to prepare or detect." },
-                    "window_id": { "type": "integer", "description": "Native window id owned by pid." },
+                    "window_id": { "type": "integer", "description": "Native window id owned by pid; required with strategy existing_profile." },
+                    "strategy": {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "enum": ["existing_profile"] },
+                        },
+                        "required": ["kind"],
+                        "additionalProperties": false,
+                        "description": "existing_profile: use the user's own running browser profile (cookies, signed-in tabs). Never combined with allow_launch, profile, or windowed.",
+                    },
                     "allow_launch": {
                         "type": "boolean",
                         "description": "Permit launching a separate driver-owned isolated Chromium.",
@@ -929,13 +1268,18 @@ fn browser_entries() -> Vec<ComputerToolEntry> {
         browser_entry(
             "computer_browser_navigate",
             "Navigate browser tab",
-            "Navigate one tab of a bound browser target to a new URL (http, https, or about only). Pass the bind result's target_id and the tab's own tab_id; tab_id may be omitted when the target has one (or one active) tab. Invalidates every element ref for the tab — take a fresh computer_browser_state snapshot before interacting again.",
+            "Navigate one tab of a bound browser target to a new URL (http, https, or about only). Pass the bind result's target_id and the tab's own tab_id; tab_id may be omitted when the target has one (or one active) tab. Invalidates every element ref for the tab — take a fresh computer_browser_state snapshot before interacting again. new_tab:true opens url in a new background tab instead and returns its tab_id; tabs you open close when your turn ends unless kept (keep). The user's own tabs are never closed.",
             json!({
                 "type": "object",
                 "properties": {
                     "target_id": target_id_property(),
                     "tab_id": tab_id_property(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "new_tab": {
+                        "type": "boolean",
+                        "description": "Open url in a new background tab of the bound window; tab_id names any tab of the target. Prefer this over taking over one of the user's tabs.",
+                    },
+                    "keep": keep_property(),
                 },
                 "required": ["target_id", "url"],
                 "additionalProperties": false,

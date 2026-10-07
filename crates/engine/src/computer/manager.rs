@@ -1,5 +1,6 @@
 mod actions;
 mod authority;
+mod browser_profile;
 mod consent_app;
 mod foreground;
 mod lease;
@@ -120,6 +121,9 @@ impl ComputerManagerEnv {
 
 #[cfg(test)]
 pub(crate) use authority::consent_params;
+pub use browser_profile::{
+    COMPUTER_BROWSER_PROFILE_CONSENT_PARAMS, COMPUTER_BROWSER_PROFILE_CONSENT_TOOL,
+};
 pub use consent_app::{
     COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
     COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
