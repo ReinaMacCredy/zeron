@@ -59,10 +59,14 @@ impl<T> Source<T> {
 
 pub struct HomeView {
     state: Entity<AppState>,
+    pickers: Entity<crate::pickers::Pickers>,
     git: Source<GitActivity>,
     git_filter: Option<String>,
     git_menu: popover::Popup<()>,
+    pr_pick: Option<PrScope>,
+    pr_menu: popover::Popup<()>,
     git_hover: Option<usize>,
+    meter_hover: Option<&'static str>,
     customize: popover::Popup<()>,
     collapse_since: Option<Instant>,
     grid_height: std::rc::Rc<std::cell::Cell<f32>>,
@@ -81,7 +85,11 @@ pub struct HomeView {
 impl EventEmitter<HomeEvent> for HomeView {}
 
 impl HomeView {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        pickers: Entity<crate::pickers::Pickers>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let ticker = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -92,10 +100,14 @@ impl HomeView {
         });
         Self {
             state,
+            pickers,
             git: Source::default(),
             git_filter: None,
             git_menu: popover::Popup::default(),
+            pr_pick: None,
+            pr_menu: popover::Popup::default(),
             git_hover: None,
+            meter_hover: None,
             customize: popover::Popup::default(),
             collapse_since: None,
             grid_height: Default::default(),
@@ -426,6 +438,62 @@ impl HomeView {
             .into_any_element()
     }
 
+    fn pr_scope(&self, listing: &ChangeRequestListing, cx: &App) -> PrScope {
+        self.pr_pick
+            .clone()
+            .unwrap_or_else(|| composer_pr_scope(listing, self.state.read(cx)))
+    }
+
+    fn close_pr_menu(&mut self, cx: &mut Context<Self>) {
+        if self.pr_menu.begin_close() {
+            popover::reap_popup(cx, |this: &mut Self| &mut this.pr_menu);
+            cx.notify();
+        }
+    }
+
+    fn render_pr_menu(
+        &mut self,
+        theme: &Theme,
+        scope: &PrScope,
+        repos: Vec<PrRepo>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = &theme.for_popup();
+        let mut rows = vec![(PrScope::All, "All projects".to_owned())];
+        rows.extend(repos.into_iter().map(|repo| {
+            (
+                PrScope::Repo {
+                    host: repo.host,
+                    repository: repo.repository,
+                },
+                repo.name,
+            )
+        }));
+        popover::popover_card(theme)
+            .w(px(220.0))
+            .p(px(4.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_pr_menu(cx)))
+            .children(rows.into_iter().enumerate().map(|(index, (pick, name))| {
+                let selected = &pick == scope;
+                let id: SharedString = format!("home-pr-project-{index}").into();
+                popover::menu_row(theme, selected, id.clone())
+                    .id(id)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pr_pick = Some(pick.clone());
+                        this.close_pr_menu(cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(name),
+                    )
+            }))
+            .into_any_element()
+    }
+
     fn close_git_menu(&mut self, cx: &mut Context<Self>) {
         if self.git_menu.begin_close() {
             popover::reap_popup(cx, |this: &mut Self| &mut this.git_menu);
@@ -470,6 +538,81 @@ pub(crate) fn chat_title(chat: &Chat) -> String {
         .filter(|title| !title.is_empty())
         .unwrap_or("New session")
         .to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrScope {
+    All,
+    Repo { host: String, repository: String },
+    Unlinked(String),
+}
+
+impl PrScope {
+    fn includes(&self, item: &ChangeRequestListItem) -> bool {
+        match self {
+            PrScope::All => true,
+            PrScope::Repo { host, repository } => {
+                &item.host == host && &item.repository == repository
+            }
+            PrScope::Unlinked(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrRepo {
+    pub host: String,
+    pub repository: String,
+    pub name: String,
+}
+
+pub(crate) fn pr_repos(listing: &ChangeRequestListing, state: &AppState) -> Vec<PrRepo> {
+    let mut repos: Vec<PrRepo> = Vec::new();
+    for project in &listing.projects {
+        if repos
+            .iter()
+            .any(|r| r.host == project.host && r.repository == project.repository)
+        {
+            continue;
+        }
+        let name = state
+            .space_row(&project.space_id)
+            .map(|space| state.representative_space(space).display_name().to_owned())
+            .unwrap_or_else(|| {
+                project
+                    .repository
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&project.repository)
+                    .to_owned()
+            });
+        repos.push(PrRepo {
+            host: project.host.clone(),
+            repository: project.repository.clone(),
+            name,
+        });
+    }
+    repos
+}
+
+pub(crate) fn composer_pr_scope(listing: &ChangeRequestListing, state: &AppState) -> PrScope {
+    let Some(space) = state.selected_space_row() else {
+        return PrScope::All;
+    };
+    let same_repository = |id: &str| {
+        space.repository_id.is_some()
+            && state.space_row(id).and_then(|s| s.repository_id.as_ref())
+                == space.repository_id.as_ref()
+    };
+    listing
+        .projects
+        .iter()
+        .find(|p| p.space_id == space.id || p.path == space.path || same_repository(&p.space_id))
+        .map(|p| PrScope::Repo {
+            host: p.host.clone(),
+            repository: p.repository.clone(),
+        })
+        .unwrap_or_else(|| PrScope::Unlinked(space.display_name().to_owned()))
 }
 
 fn failing_prs(listing: &ChangeRequestListing) -> Vec<&ChangeRequestListItem> {
@@ -571,6 +714,19 @@ fn gigabytes(bytes: u64) -> String {
     } else {
         format!("{gb:.0} GB")
     }
+}
+
+fn gibibytes(bytes: u64) -> f64 {
+    bytes as f64 / (1u64 << 30) as f64
+}
+
+fn used_of(used: f64, total: f64) -> String {
+    let used = if used < 10.0 {
+        format!("{used:.1}")
+    } else {
+        format!("{used:.0}")
+    };
+    format!("{used} / {total:.0} GB")
 }
 
 fn line_count(count: u64) -> String {
@@ -681,7 +837,9 @@ impl HomeView {
             Option<String>,
             Option<(&'static str, Option<Hsla>)>,
             DateTime<Utc>,
+            Option<String>,
         )> = {
+            let pickers = self.pickers.read(cx);
             let state = self.state.read(cx);
             running_agents(state, now)
                 .into_iter()
@@ -696,7 +854,27 @@ impl HomeView {
                         .config
                         .as_ref()
                         .map(|config| crate::pickers::harness_brand_icon(config.harness));
-                    (chat.id.clone(), chat_title(chat), detail, mark, started)
+                    let model = chat.config.as_ref().and_then(|config| {
+                        let name = config.model.as_deref().map(|id| {
+                            pickers
+                                .model_label(config.harness, id)
+                                .unwrap_or_else(|| id.to_owned())
+                        })?;
+                        Some(match config.reasoning {
+                            Some(level) => {
+                                format!("{name} {}", crate::pickers::reasoning_label(level))
+                            }
+                            None => name,
+                        })
+                    });
+                    (
+                        chat.id.clone(),
+                        chat_title(chat),
+                        detail,
+                        mark,
+                        started,
+                        model,
+                    )
                 })
                 .collect()
         };
@@ -707,7 +885,7 @@ impl HomeView {
         } else {
             rows.into_iter()
                 .take(4)
-                .map(|(chat_id, title, detail, mark, started)| {
+                .map(|(chat_id, title, detail, mark, started, model)| {
                     let elapsed =
                         crate::composer::background::elapsed_label((now - started).num_seconds());
                     let id: SharedString = format!("home-working-{chat_id}").into();
@@ -754,7 +932,17 @@ impl HomeView {
                                             .text_color(tint.unwrap_or(theme.text_muted)),
                                     )
                                 })
-                                .child(mono(theme, theme.text_muted, elapsed)),
+                                .when_some(model, |row, model| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(crate::typography::ui_rems(12.0))
+                                            .text_color(theme.text_muted)
+                                            .whitespace_nowrap()
+                                            .child(model),
+                                    )
+                                })
+                                .child(mono(theme, theme.text_faint, elapsed)),
                         )
                         .when_some(detail, |el, detail| {
                             el.child(
@@ -784,11 +972,34 @@ impl HomeView {
     }
 
     fn render_prs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let body: Vec<AnyElement> = match &self.prs.value {
-            None => vec![empty_line(theme, "Loading…")],
-            Some(Err(error)) => vec![empty_line(theme, error)],
-            Some(Ok(listing)) => {
+        let listing = self.prs.ready().cloned();
+        let scope = listing
+            .as_ref()
+            .map(|listing| self.pr_scope(listing, cx))
+            .unwrap_or(PrScope::All);
+        let repos = listing
+            .as_ref()
+            .map(|listing| pr_repos(listing, self.state.read(cx)))
+            .unwrap_or_default();
+        let label = match &scope {
+            PrScope::All => "All projects".to_owned(),
+            PrScope::Repo { host, repository } => repos
+                .iter()
+                .find(|r| &r.host == host && &r.repository == repository)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| repository.clone()),
+            PrScope::Unlinked(name) => name.clone(),
+        };
+        let mut review_count = 0;
+        let body: Vec<AnyElement> = match (&self.prs.value, &listing) {
+            (None, _) => vec![empty_line(theme, "Loading…")],
+            (Some(Err(error)), _) => vec![empty_line(theme, error)],
+            (_, None) => vec![empty_line(theme, "Loading…")],
+            (_, Some(listing)) => {
                 let (mine, review) = split_prs(listing);
+                let mine: Vec<_> = mine.into_iter().filter(|i| scope.includes(i)).collect();
+                let review: Vec<_> = review.into_iter().filter(|i| scope.includes(i)).collect();
+                review_count = review.len();
                 let mut body = Vec::new();
                 if !review.is_empty() {
                     body.push(sub_heading(
@@ -816,30 +1027,50 @@ impl HomeView {
                     }
                 }
                 if body.is_empty() {
-                    body.push(empty_line(
-                        theme,
-                        listing
+                    let message = match &scope {
+                        PrScope::Unlinked(name) => format!("{name} has no GitHub repository"),
+                        _ => listing
                             .errors
                             .first()
                             .map(|error| crate::pull_requests::failure_message(error.failure))
-                            .unwrap_or("Nothing waiting on you"),
-                    ));
+                            .unwrap_or("Nothing waiting on you")
+                            .to_owned(),
+                    };
+                    body.push(empty_line(theme, &message));
                 }
                 body
             }
         };
-        let count = self
-            .prs
-            .ready()
-            .map(|listing| split_prs(listing).1.len())
-            .filter(|count| *count > 0)
-            .map(|count| count.to_string());
+        let trigger = filter_trigger(theme, "home-pr-menu", label, self.pr_menu.is_open())
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.pr_menu.note_trigger_press()),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.pr_menu.take_press_was_open() {
+                    this.close_pr_menu(cx);
+                } else {
+                    this.pr_menu.open(());
+                    cx.notify();
+                }
+            }));
+        let trigger = if self.pr_menu.get().is_some() {
+            let closing = self.pr_menu.closing_since();
+            let menu = self.render_pr_menu(theme, &scope, repos, cx);
+            trigger.relative().child(popover::anchored_menu_below_end(
+                "home-pr-menu-card",
+                menu,
+                closing,
+            ))
+        } else {
+            trigger
+        };
         card(
             theme,
             icons::LUCIDE_GIT_PULL_REQUEST,
             "Pull requests",
-            count,
-            None,
+            (review_count > 0).then(|| review_count.to_string()),
+            Some(trigger.into_any_element()),
             body,
         )
     }
@@ -855,22 +1086,7 @@ impl HomeView {
                 .unwrap_or_else(|| "Project".into()),
             (Some(_), None) => "Project".into(),
         };
-        let open = self.git_menu.is_open();
-        let trigger = div()
-            .id("home-git-menu")
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .px(px(6.0))
-            .h(px(20.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .when(open, |el| el.bg(theme.wash(0.06)))
-            .hover(|style| style.bg(theme.wash(0.06)))
+        let trigger = filter_trigger(theme, "home-git-menu", label, self.git_menu.is_open())
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _| this.git_menu.note_trigger_press()),
@@ -882,13 +1098,7 @@ impl HomeView {
                     this.git_menu.open(());
                     cx.notify();
                 }
-            }))
-            .child(label)
-            .child(
-                icon(icons::ALT_ARROW_DOWN)
-                    .size(px(10.0))
-                    .text_color(theme.text_faint),
-            );
+            }));
         let trigger = if self.git_menu.get().is_some() {
             let closing = self.git_menu.closing_since();
             let menu = self.render_git_menu(theme, cx);
@@ -962,7 +1172,7 @@ impl HomeView {
             .into_any_element()
     }
 
-    fn render_this_mac(&mut self, theme: &Theme, cx: &App) -> AnyElement {
+    fn render_this_mac(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let name = {
             let state = self.state.read(cx);
             state
@@ -1000,7 +1210,7 @@ impl HomeView {
                                 .child(format!(
                                     "{} CPU · {} · {} disk",
                                     stats.cores,
-                                    gigabytes(stats.memory_total),
+                                    format!("{:.0} GB", gibibytes(stats.memory_total)),
                                     gigabytes(stats.disk_total)
                                 )),
                         )
@@ -1009,22 +1219,113 @@ impl HomeView {
                         .flex()
                         .gap(px(10.0))
                         .pt(px(6.0))
-                        .child(meter(theme, "CPU", stats.cpu_percent / 100.0))
-                        .child(meter(
+                        .child(self.meter(
+                            theme,
+                            "CPU",
+                            stats.cpu_percent / 100.0,
+                            format!("{:.0}% of {} cores", stats.cpu_percent, stats.cores),
+                            cx,
+                        ))
+                        .child(self.meter(
                             theme,
                             "Mem",
                             share(stats.memory_used, stats.memory_total),
+                            used_of(gibibytes(stats.memory_used), gibibytes(stats.memory_total)),
+                            cx,
                         ))
-                        .child(meter(
+                        .child(self.meter(
                             theme,
                             "Disk",
                             share(stats.disk_used, stats.disk_total),
+                            used_of(stats.disk_used as f64 / 1e9, stats.disk_total as f64 / 1e9),
+                            cx,
                         ))
                         .into_any_element(),
                 ]
             }
         };
         card(theme, icons::LAPTOP, "This Mac", None, None, body)
+    }
+
+    fn meter(
+        &self,
+        theme: &Theme,
+        label: &'static str,
+        share: f32,
+        detail: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let share = share.clamp(0.0, 1.0);
+        let hovered = self.meter_hover == Some(label);
+        div()
+            .id(SharedString::from(format!("home-meter-{label}")))
+            .relative()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                let next = if *hovering {
+                    Some(label)
+                } else if this.meter_hover == Some(label) {
+                    None
+                } else {
+                    this.meter_hover
+                };
+                if next != this.meter_hover {
+                    this.meter_hover = next;
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(if hovered {
+                        theme.text_muted
+                    } else {
+                        theme.text_faint
+                    })
+                    .child(label)
+                    .child(format!("{:.0}%", share * 100.0)),
+            )
+            .child(
+                div().h(px(3.0)).rounded_full().bg(theme.wash(0.1)).child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(share))
+                        .rounded_full()
+                        .bg(if hovered {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }),
+                ),
+            )
+            .when(hovered, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(-28.0))
+                        .child(crate::frost::frosted(
+                            6.0,
+                            16.0,
+                            div()
+                                .px(px(8.0))
+                                .py(px(3.0))
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(popover::surface_bg(theme))
+                                .whitespace_nowrap()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text)
+                                .child(detail),
+                        )),
+                )
+            })
     }
 
     fn render_services(&mut self, theme: &Theme) -> AnyElement {
@@ -1510,6 +1811,45 @@ fn day_label(
         .into_any_element()
 }
 
+fn filter_trigger(
+    theme: &Theme,
+    id: &'static str,
+    label: String,
+    open: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .px(px(6.0))
+        .h(px(20.0))
+        .max_w(px(180.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .when(open, |el| el.bg(theme.wash(0.06)))
+        .hover(|style| style.bg(theme.wash(0.06)))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .child(
+            icon(icons::ALT_ARROW_DOWN)
+                .size(px(10.0))
+                .flex_none()
+                .text_color(theme.text_faint),
+        )
+}
+
 fn card(
     theme: &Theme,
     glyph: &'static str,
@@ -1580,33 +1920,6 @@ fn mono(theme: &Theme, color: Hsla, text: String) -> gpui::Div {
 
 fn dot(color: Hsla) -> gpui::Div {
     div().size(px(6.0)).flex_none().rounded_full().bg(color)
-}
-
-fn meter(theme: &Theme, label: &'static str, share: f32) -> gpui::Div {
-    let share = share.clamp(0.0, 1.0);
-    div()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .gap(px(3.0))
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_faint)
-                .child(label)
-                .child(format!("{:.0}%", share * 100.0)),
-        )
-        .child(
-            div().h(px(3.0)).rounded_full().bg(theme.wash(0.1)).child(
-                div()
-                    .h_full()
-                    .w(gpui::relative(share))
-                    .rounded_full()
-                    .bg(theme.text_muted),
-            ),
-        )
 }
 
 impl Render for HomeView {
@@ -1828,6 +2141,52 @@ mod tests {
                 ],
                 vec![Widget::PullRequests, Widget::ThisMac],
             ]
+        );
+    }
+
+    #[test]
+    fn pr_scope_follows_the_composer_project_and_its_clones() {
+        let space = |id: &str, path: &str| -> zeron_proto::Space {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "local", "path": path, "gitDetected": true,
+                "repositoryId": "commit:abc", "createdAt": Utc::now(),
+            }))
+            .unwrap()
+        };
+        let mut state = AppState::new();
+        state.spaces = vec![
+            space("main", "/code/zeron"),
+            space("clone", "/code/zeron-2"),
+        ];
+        let listing = ChangeRequestListing {
+            projects: vec![zeron_proto::ChangeRequestProject {
+                repository: "reina/zeron".into(),
+                host: "github.com".into(),
+                space_id: "main".into(),
+                path: "/code/zeron".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(composer_pr_scope(&listing, &state), PrScope::All);
+        state.selected_space = Some("clone".into());
+        let scope = composer_pr_scope(&listing, &state);
+        assert_eq!(
+            scope,
+            PrScope::Repo {
+                host: "github.com".into(),
+                repository: "reina/zeron".into()
+            }
+        );
+        state.spaces.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "notes", "deviceId": "local", "path": "/code/notes", "createdAt": Utc::now(),
+            }))
+            .unwrap(),
+        );
+        state.selected_space = Some("notes".into());
+        assert_eq!(
+            composer_pr_scope(&listing, &state),
+            PrScope::Unlinked("notes".into())
         );
     }
 
