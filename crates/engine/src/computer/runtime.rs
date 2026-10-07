@@ -334,6 +334,7 @@ impl ComputerRuntime {
             {
                 tracing::warn!(chat = %chat_id, %error, "computer turn-end release failed");
             }
+            service.tools.turn_ended(&chat_id, &turn_id).await;
             let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
             if let Some(sessions) = &sessions {
                 for left in &left {
