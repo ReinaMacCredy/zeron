@@ -41,6 +41,8 @@ use cursor_overlay::{
 };
 use indexmap::IndexMap;
 
+use super::display::DisplayFrame;
+
 // ── Arrival-signal channels (one waiter slot per cursor key) ──────────────
 //
 // Each session's `animate_cursor_to` registers an arrival oneshot keyed by its
@@ -95,6 +97,9 @@ struct RenderMap {
     /// rendered cursor is crisp at native resolution instead of being
     /// bilinear-upsampled by Core Animation from a logical-pixel buffer.
     backing_scale: f64,
+    origin: (f64, f64),
+    display: Option<DisplayFrame>,
+    focus: Option<CursorKey>,
     /// Frozen launch-time config used as the template for lazily-created cursors.
     template: CursorConfig,
     /// Render-side tombstone of ended session cursor keys. A `Cmd`
@@ -182,6 +187,9 @@ pub fn init(cfg: CursorConfig) {
             win_w: 0.0,
             win_h: 0.0,
             backing_scale: 1.0, // overwritten in run_appkit() once the NSScreen is known
+            origin: (0.0, 0.0),
+            display: None,
+            focus: None,
             template: cfg,
             ended: std::collections::HashSet::new(),
         });
@@ -352,6 +360,7 @@ fn seed_start_in_map(map: &mut RenderMap, key: &CursorKey, target_x: f64, target
     // curve in; 140pt is enough to read as motion at 900pt/s peak speed.
     const SEED_OFFSET: f64 = 140.0;
     let (win_w, win_h) = (map.win_w, map.win_h);
+    let (ox, oy) = map.origin;
     // Respect the resurrection guard: never seed (and thus re-create) a cursor
     // whose session already ended.
     if map.ended.contains(key) {
@@ -367,7 +376,7 @@ fn seed_start_in_map(map: &mut RenderMap, key: &CursorKey, target_x: f64, target
         .cursors
         .entry(key.clone())
         .or_insert_with(|| render_state_for_key(&template, &k));
-    if !(rs.core.cfg.enabled && rs.core.pos.0 < -50.0) {
+    if !(rs.core.cfg.enabled && !rs.core.is_placed()) {
         return false;
     }
     let mut sx = target_x - SEED_OFFSET;
@@ -376,13 +385,13 @@ fn seed_start_in_map(map: &mut RenderMap, key: &CursorKey, target_x: f64, target
     // AppKit window is up; in that headless case the unclamped seed is still
     // on-screen-by-construction for any realistic target).
     if win_w > 0.0 && win_h > 0.0 {
-        sx = sx.clamp(2.0, win_w - 2.0);
-        sy = sy.clamp(2.0, win_h - 2.0);
+        sx = sx.clamp(ox + 2.0, ox + win_w - 2.0);
+        sy = sy.clamp(oy + 2.0, oy + win_h - 2.0);
         // If clamping collapsed the seed onto the target (target in a corner),
         // nudge it the other way so there is still a visible glide distance.
         if (sx - target_x).abs() < 8.0 && (sy - target_y).abs() < 8.0 {
-            sx = (target_x + SEED_OFFSET).min(win_w - 2.0);
-            sy = (target_y + SEED_OFFSET).min(win_h - 2.0);
+            sx = (target_x + SEED_OFFSET).min(ox + win_w - 2.0);
+            sy = (target_y + SEED_OFFSET).min(oy + win_h - 2.0);
         }
     }
     rs.core.pos = (sx, sy);
@@ -432,7 +441,7 @@ pub async fn animate_cursor_to(key: CursorKey, x: f64, y: f64) {
         let guard = RENDER.lock().unwrap();
         matches!(
             guard.as_ref().and_then(|m| m.cursors.get(&key)),
-            Some(rs) if rs.core.cfg.enabled && rs.core.pos.0 > -50.0
+            Some(rs) if rs.core.cfg.enabled && rs.core.is_placed()
         )
     };
     if !should_animate {
@@ -603,7 +612,7 @@ impl RenderState {
     fn compact_hide_wait(&self) -> Option<Duration> {
         (self.core.cfg.compact
             && self.core.visible
-            && self.core.pos.0 >= -100.0
+            && self.core.is_placed()
             && self.core.idle_alpha >= 0.004
             && self.core.motion.idle_hide_ms > 0.0)
             .then(|| {
@@ -629,7 +638,7 @@ impl RenderState {
             || self.core.session_badge_needs_frame_tick()
             || (self.core.motion.idle_hide_ms > 0.0
                 && self.core.visible
-                && self.core.pos.0 >= -100.0
+                && self.core.is_placed()
                 && self.core.idle_alpha >= 0.004)
     }
 }
@@ -694,7 +703,16 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
         eprintln!("synara_cua_overlay_init code=overlay_display_unavailable");
         return;
     }
-    let screen_frame: NSRect = msg_send![main_screen, frame];
+    let displays = super::display::active_displays();
+    let initial = displays
+        .iter()
+        .find(|d| d.primary)
+        .or(displays.first())
+        .copied();
+    let screen_frame: NSRect = match initial {
+        Some(display) => ns_rect(super::display::cocoa_frame(&displays, display.bounds)),
+        None => msg_send![main_screen, frame],
+    };
     let win_w = screen_frame.size.width;
     let win_h = screen_frame.size.height;
     // NSScreen.backingScaleFactor is the most direct source of truth — it's
@@ -702,7 +720,10 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
     // Fall back to the CG estimator (current-mode pixels ÷ points) when
     // the AppKit call returns a non-positive value, since downstream paint
     // math divides by this and a 0.0 would zero out the cursor.
-    let mut backing_scale: f64 = msg_send![main_screen, backingScaleFactor];
+    let mut backing_scale: f64 = match initial {
+        Some(display) => display.scale,
+        None => msg_send![main_screen, backingScaleFactor],
+    };
     if backing_scale.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         use core_graphics::display::CGMainDisplayID;
         let display_id = CGMainDisplayID();
@@ -778,6 +799,8 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
             m.win_w = win_w;
             m.win_h = win_h;
             m.backing_scale = backing_scale;
+            m.origin = initial.map(|d| d.origin()).unwrap_or((0.0, 0.0));
+            m.display = initial;
         }
     }
 
@@ -790,8 +813,10 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
     // ---- Render thread (60 fps) ----
     let layer_ptr = layer as usize;
     let win_ptr = win as usize;
-    let _: *mut AnyObject = msg_send![main_screen, retain];
-    let wallpaper = super::wallpaper::WallpaperTint::spawn(main_screen as usize, (win_w, win_h));
+    let mut wallpaper = super::wallpaper::WallpaperTint::spawn();
+    if let Some(display) = &initial {
+        wallpaper.warm(display);
+    }
     std::thread::spawn(move || {
         render_loop(layer_ptr, win_ptr, rx, win_w, win_h, wallpaper);
     });
@@ -820,6 +845,8 @@ fn render_loop(
     // the periodic defensive-repin (every ~60 active frames ≈ 1 s).
     let mut last_pinned: Option<u64> = None;
     let mut repin_frames: u32 = 0;
+    let mut displays = super::display::active_displays();
+    let mut displays_read = Instant::now();
 
     loop {
         // When no cursor animation/fade is active, block until the MCP side
@@ -880,6 +907,7 @@ fn render_loop(
             next_frame_tick_needed,
             next_hover_poll_needed,
             next_compact_hide_wait,
+            reframe,
         ) = {
             let mut guard = RENDER.lock().unwrap();
             match guard.as_mut() {
@@ -905,23 +933,51 @@ fn render_loop(
                     // latter lets a just-created path/click/focus rect start on
                     // this frame without waiting for the next 16ms tick.
                     let mut arrived: Vec<CursorKey> = Vec::new();
+                    let mut reframe = None;
+                    if let Some(key) = &last_key {
+                        map.focus = Some(key.clone());
+                    }
                     if frame_tick_needed || had_msg || compact_hide_tick {
+                        let focus_point = map
+                            .focus
+                            .as_ref()
+                            .and_then(|k| map.cursors.get(k))
+                            .filter(|rs| rs.core.is_placed())
+                            .map(|rs| rs.core.compact_display_pos());
+                        if let Some(point) = focus_point {
+                            if displays_read.elapsed() >= DISPLAY_RECHECK
+                                || !displays.iter().any(|d| d.contains(point))
+                            {
+                                displays = super::display::active_displays();
+                                displays_read = Instant::now();
+                            }
+                            if let Some(next) = retarget_display(map, &displays, point) {
+                                reframe = Some((
+                                    super::display::cocoa_frame(&displays, next.bounds),
+                                    next.scale,
+                                ));
+                            }
+                        }
                         // Keep every cursor's arc bounds honest once the
                         // AppKit window has reported the screen frame. Cheap
                         // enough per frame; the builder only consumes it when
                         // a compact travel is recorded.
                         let screen =
                             (map.win_w > 0.0 && map.win_h > 0.0).then_some((map.win_w, map.win_h));
+                        let origin = map.origin;
+                        let display = map.display;
                         for (k, rs) in map.cursors.iter_mut() {
                             if let Some(size) = screen {
                                 rs.core.screen_size = Some(size);
+                                rs.core.screen_origin = origin;
                             }
                             if rs.tick(dt) {
                                 arrived.push(k.clone());
                             }
                             if rs.core.codex_look() {
                                 let (x, y) = rs.core.compact_display_pos();
-                                rs.core.fog_tint = wallpaper.tint_at(x, y);
+                                rs.core.fog_tint =
+                                    display.and_then(|d| wallpaper.tint_at(&d, x, y));
                             }
                         }
                     }
@@ -970,6 +1026,7 @@ fn render_loop(
                             .values()
                             .filter_map(RenderState::compact_hide_wait)
                             .min(),
+                        reframe,
                     )
                 }
                 None => break,
@@ -984,6 +1041,11 @@ fn render_loop(
         // Repin: immediately on target change, then defensive every ~1 s while
         // the render loop is active. When quiescent, z-order is left unchanged
         // until the next command wakes the loop.
+        if let Some((frame, scale)) = reframe {
+            dispatch_reframe(win_ptr, layer_ptr, frame, scale);
+            last_pinned = None;
+        }
+
         if frame_tick_needed || had_msg {
             repin_frames += 1;
             let pin_changed = pinned_wid != last_pinned;
@@ -1027,6 +1089,7 @@ fn render_loop(
                     let mut pm = tiny_skia::Pixmap::new(w.max(1), h.max(1))
                         .unwrap_or_else(|| tiny_skia::Pixmap::new(1, 1).unwrap());
                     let backing_scale_f32 = scale as f32;
+                    let (origin_x, origin_y) = map.origin;
                     for (_k, rs) in &map.cursors {
                         let focus = rs.focus_rect.map(|rect| FocusRect {
                             rect,
@@ -1035,8 +1098,8 @@ fn render_loop(
                         cursor_overlay::paint_cursor(
                             &mut pm,
                             &rs.core,
-                            0.0,
-                            0.0, // macOS uses screen-local coords (no origin offset)
+                            origin_x,
+                            origin_y,
                             focus,
                             backing_scale_f32,
                         );
@@ -1079,8 +1142,7 @@ fn hardware_cursor_position() -> Option<(f64, f64)> {
 fn cursor_is_externally_visible(state: &RenderState) -> bool {
     state.core.cfg.enabled
         && state.core.visible
-        && state.core.pos.0 > -50.0
-        && state.core.pos.1 > -50.0
+        && state.core.is_placed()
         && state.core.idle_alpha >= 0.004
 }
 
@@ -1169,6 +1231,64 @@ fn dispatch_set_layer_contents(
             main_queue,
             Box::into_raw(payload) as *mut c_void,
             set_contents_cb,
+        );
+    }
+}
+
+const DISPLAY_RECHECK: Duration = Duration::from_secs(5);
+
+fn ns_rect([x, y, w, h]: [f64; 4]) -> objc2_foundation::NSRect {
+    objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(x, y),
+        objc2_foundation::NSSize::new(w, h),
+    )
+}
+
+fn retarget_display(
+    map: &mut RenderMap,
+    displays: &[DisplayFrame],
+    point: (f64, f64),
+) -> Option<DisplayFrame> {
+    let next = *super::display::display_for_point(displays, point)?;
+    if map.display == Some(next) {
+        return None;
+    }
+    map.display = Some(next);
+    map.origin = next.origin();
+    (map.win_w, map.win_h) = next.size();
+    map.backing_scale = next.scale;
+    Some(next)
+}
+
+fn dispatch_reframe(win_ptr: usize, layer_ptr: usize, frame: [f64; 4], scale: f64) {
+    use std::ffi::c_void;
+
+    #[link(name = "System", kind = "framework")]
+    extern "C" {
+        static _dispatch_main_q: u8;
+        fn dispatch_async_f(
+            queue: *const c_void,
+            context: *mut c_void,
+            work: unsafe extern "C" fn(*mut c_void),
+        );
+    }
+
+    unsafe extern "C" fn reframe_cb(ctx: *mut c_void) {
+        let (win_ptr, layer_ptr, frame, scale): (usize, usize, [f64; 4], f64) =
+            *Box::from_raw(ctx as *mut (usize, usize, [f64; 4], f64));
+        let win = win_ptr as *mut objc2::runtime::AnyObject;
+        let layer = layer_ptr as *mut objc2::runtime::AnyObject;
+        let _: () = objc2::msg_send![win, setFrame: ns_rect(frame) display: false];
+        let _: () = objc2::msg_send![layer, setContentsScale: scale];
+    }
+
+    let payload = Box::new((win_ptr, layer_ptr, frame, scale));
+    unsafe {
+        let main_queue = &raw const _dispatch_main_q as *const c_void;
+        dispatch_async_f(
+            main_queue,
+            Box::into_raw(payload) as *mut c_void,
+            reframe_cb,
         );
     }
 }
@@ -1489,6 +1609,9 @@ mod tests {
             win_w: 100.0,
             win_h: 100.0,
             backing_scale: 1.0,
+            origin: (0.0, 0.0),
+            display: None,
+            focus: None,
             template: CursorConfig::default(),
             ended: std::collections::HashSet::new(),
         }
@@ -1681,6 +1804,86 @@ mod tests {
         assert!(
             (pos.0 - 60.0).abs() > 4.0 || (pos.1 - 60.0).abs() > 4.0,
             "seed must differ from target to produce a visible glide, got {pos:?}"
+        );
+    }
+
+    fn reina_displays() -> Vec<DisplayFrame> {
+        vec![
+            DisplayFrame {
+                id: 1,
+                bounds: [0.0, 0.0, 1512.0, 982.0],
+                scale: 2.0,
+                primary: true,
+            },
+            DisplayFrame {
+                id: 2,
+                bounds: [-44.0, -1080.0, 1920.0, 1080.0],
+                scale: 1.0,
+                primary: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn overlay_follows_the_display_of_the_cursor_and_paints_there() {
+        let displays = reina_displays();
+        let mut map = empty_map();
+        map.template.compact = true;
+        map.template.theme_id = cursor_overlay::CODEX_THEME_ID.into();
+
+        assert_eq!(
+            retarget_display(&mut map, &displays, (700.0, 500.0)).map(|d| d.id),
+            Some(1)
+        );
+        assert_eq!(
+            (map.origin, map.win_w, map.win_h),
+            ((0.0, 0.0), 1512.0, 982.0)
+        );
+        assert!(retarget_display(&mut map, &displays, (900.0, 300.0)).is_none());
+
+        let external = retarget_display(&mut map, &displays, (500.0, -500.0)).unwrap();
+        assert_eq!(external.id, 2);
+        assert_eq!(map.origin, (-44.0, -1080.0));
+        assert_eq!(
+            (map.win_w, map.win_h, map.backing_scale),
+            (1920.0, 1080.0, 1.0)
+        );
+        assert_eq!(
+            crate::cursor::display::cocoa_frame(&displays, external.bounds),
+            [-44.0, 982.0, 1920.0, 1080.0]
+        );
+
+        apply_msg(&mut map, move_msg("sessA", 500.0, -500.0));
+        let rs = map.cursors.get_mut("sessA").unwrap();
+        rs.core.screen_origin = map.origin;
+        rs.core.screen_size = Some((map.win_w, map.win_h));
+        rs.core.motion.idle_hide_ms = 0.0;
+        for _ in 0..120 {
+            rs.core.tick_compact(1.0 / 60.0);
+        }
+        assert!(rs.core.is_placed(), "negative global points are on screen");
+        let mut pm = tiny_skia::Pixmap::new(1920, 1080).unwrap();
+        cursor_overlay::paint_cursor(&mut pm, &rs.core, map.origin.0, map.origin.1, None, 1.0);
+        let tip = pm.pixel(544 + 3, 580 + 5).unwrap();
+        assert_eq!(tip.alpha(), 255, "the arrow lands at global (500,-500)");
+        assert_eq!(pm.pixel(500, 500).unwrap().alpha(), 0);
+    }
+
+    #[test]
+    fn seed_clamps_inside_a_display_above_the_primary() {
+        let displays = reina_displays();
+        let mut map = empty_map();
+        retarget_display(&mut map, &displays, (100.0, -1000.0));
+        assert!(seed_start_in_map(
+            &mut map,
+            &"sessA".to_owned(),
+            0.0,
+            -1070.0
+        ));
+        let (x, y) = map.cursors["sessA"].core.pos;
+        assert!(
+            (-44.0..1876.0).contains(&x) && (-1080.0..0.0).contains(&y),
+            "{x},{y}"
         );
     }
 

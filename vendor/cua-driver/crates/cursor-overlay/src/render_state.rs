@@ -44,6 +44,8 @@ use crate::{
 use std::sync::Arc;
 
 pub const SESSION_BADGE_HOLD_SECS: f64 = 2.0;
+// Far below any global coordinate, so displays left of or above the primary still count as placed.
+pub const UNPLACED_POS: (f64, f64) = (-1.0e9, -1.0e9);
 pub const SESSION_BADGE_FADE_SECS: f64 = 0.4;
 
 /// Platform-agnostic render state shared by macOS / Windows / Linux overlays.
@@ -114,6 +116,7 @@ pub struct RenderStateCore {
     /// keeps every candidate path inside this frame; `None` means the frame
     /// is unknown (headless / tests) and the preferred arc is used.
     pub screen_size: Option<(f64, f64)>,
+    pub screen_origin: (f64, f64),
     /// Non-compact paths: set once the early-ack threshold has fired an
     /// arrival signal before the path physically ended.
     early_ack_fired: bool,
@@ -170,7 +173,7 @@ impl RenderStateCore {
             visual,
             theme,
             theme_fallback,
-            pos: (-200.0, -200.0),
+            pos: UNPLACED_POS,
             heading: std::f64::consts::FRAC_PI_4,
             path: None,
             dist: 0.0,
@@ -191,10 +194,15 @@ impl RenderStateCore {
             compact_motion: None,
             compact_pulse: None,
             screen_size: None,
+            screen_origin: (0.0, 0.0),
             early_ack_fired: false,
             fog_tint: None,
             codex: CodexState::default(),
         }
+    }
+
+    pub fn is_placed(&self) -> bool {
+        self.pos.0 > UNPLACED_POS.0 / 2.0
     }
 
     pub fn codex_look(&self) -> bool {
@@ -328,7 +336,7 @@ impl RenderStateCore {
                     motion.distance() > feel.scoot_distance_threshold
                         && motion.progress_value() < 1.0
                 }),
-                shown: self.visible && self.pos.0 >= -100.0,
+                shown: self.visible && self.is_placed(),
                 pressed: self.pressed,
                 loading: self.codex_loading(),
                 reduced_motion: self.cfg.reduced_motion == ReducedMotion::On,
@@ -366,7 +374,7 @@ impl RenderStateCore {
         // Chain from the currently displayed spot so a command landing
         // mid-flight continues smoothly instead of snapping to `pos` first.
         let from = self.compact_display_pos();
-        if from.0 < -100.0 {
+        if from.0 <= UNPLACED_POS.0 / 2.0 {
             self.compact_motion = None;
             return;
         }
@@ -375,12 +383,16 @@ impl RenderStateCore {
             self.compact_motion = None;
             return;
         }
-        self.compact_motion = Some(CompactMotion::new(
-            from,
-            (x, y),
-            &CursorFeel::default(),
-            self.screen_size,
-        ));
+        let (ox, oy) = self.screen_origin;
+        self.compact_motion = Some(
+            CompactMotion::new(
+                (from.0 - ox, from.1 - oy),
+                (x - ox, y - oy),
+                &CursorFeel::default(),
+                self.screen_size,
+            )
+            .with_origin(self.screen_origin),
+        );
     }
 
     /// Record the click ring for a compact ClickPulse — skipped entirely
@@ -397,7 +409,7 @@ impl RenderStateCore {
     }
 
     fn cursor_is_revealed(&self) -> bool {
-        self.visible && self.pos.0 >= -100.0 && self.idle_alpha >= 0.004
+        self.visible && self.is_placed() && self.idle_alpha >= 0.004
     }
 
     fn reveal_session_badge(&mut self) {
@@ -881,7 +893,7 @@ impl RenderStateCore {
 
                 // macOS-only: if the cursor is still at the initial off-screen
                 // sentinel, snap it to the offset target so the path starts on-screen.
-                if move_to_snap_sentinel && self.pos.0 < -50.0 {
+                if move_to_snap_sentinel && !self.is_placed() {
                     self.pos = (tx, ty);
                 }
                 let (x0, y0) = self.pos;
@@ -944,7 +956,7 @@ impl RenderStateCore {
                 if click_pulse_sentinel_only {
                     // macOS: only snap position on first placement (sentinel state).
                     // After that the cursor stays where the animation landed.
-                    if self.pos.0 < -50.0 {
+                    if !self.is_placed() {
                         // Apply same click offset so tip lands at click point.
                         const CLICK_OFFSET: f64 = 16.0;
                         let angle = std::f64::consts::FRAC_PI_4;
@@ -1131,7 +1143,7 @@ pub fn paint_cursor(
     backing_scale: f32,
 ) {
     let fading_out = core.codex_look() && core.codex.reveal() > 0.0;
-    if (!core.visible && !fading_out) || core.pos.0 < -100.0 || core.idle_alpha < 0.004 {
+    if (!core.visible && !fading_out) || !core.is_placed() || core.idle_alpha < 0.004 {
         return;
     }
 
@@ -1219,8 +1231,8 @@ pub fn paint_cursor(
         let (cr, cg, cb) = (0x5Eu8, 0xC0u8, 0xE8u8);
 
         if let Some(rect) = tiny_skia::Rect::from_xywh(
-            (fx * s) as f32,
-            (fy * s) as f32,
+            ((fx - origin_x) * s) as f32,
+            ((fy - origin_y) * s) as f32,
             (fw * s) as f32,
             (fh * s) as f32,
         ) {

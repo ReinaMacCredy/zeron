@@ -192,6 +192,7 @@ pub struct CompactMotion {
     elapsed: f64,
     previous: (f64, f64),
     travel_spec: SpringSpec,
+    origin: (f64, f64),
 }
 
 impl CompactMotion {
@@ -218,7 +219,15 @@ impl CompactMotion {
             squash: SpringChannel::new(1.0),
             elapsed: 0.0,
             previous: from,
+            origin: (0.0, 0.0),
         }
+    }
+
+    pub fn with_origin(mut self, origin: (f64, f64)) -> Self {
+        self.origin = origin;
+        self.from = (self.from.0 + origin.0, self.from.1 + origin.1);
+        self.target = (self.target.0 + origin.0, self.target.1 + origin.1);
+        self
     }
 
     /// Advance every channel by `dt`. Returns true once the whole motion is
@@ -299,7 +308,8 @@ impl CompactMotion {
         if self.progress.value >= 1.0 {
             return self.target;
         }
-        self.path.sample(self.progress.value.clamp(0.0, 1.0))
+        let (x, y) = self.path.sample(self.progress.value.clamp(0.0, 1.0));
+        (x + self.origin.0, y + self.origin.1)
     }
 
     /// Painted channels for the current frame. `activity` adds the loading
