@@ -790,8 +790,10 @@ unsafe fn run_appkit(_cfg: CursorConfig, rx: std::sync::mpsc::Receiver<OverlayMs
     // ---- Render thread (60 fps) ----
     let layer_ptr = layer as usize;
     let win_ptr = win as usize;
+    let _: *mut AnyObject = msg_send![main_screen, retain];
+    let wallpaper = super::wallpaper::WallpaperTint::spawn(main_screen as usize, (win_w, win_h));
     std::thread::spawn(move || {
-        render_loop(layer_ptr, win_ptr, rx, win_w, win_h);
+        render_loop(layer_ptr, win_ptr, rx, win_w, win_h, wallpaper);
     });
 
     // ---- NSApplication run loop (blocks until process exits) ----
@@ -805,6 +807,7 @@ fn render_loop(
     rx: std::sync::mpsc::Receiver<OverlayMsg>,
     _win_w: f64,
     _win_h: f64,
+    mut wallpaper: super::wallpaper::WallpaperTint,
 ) {
     let pending_frame = Arc::new(Mutex::new(FrameMailbox::new()));
     let target_frame_ms = Duration::from_millis(16); // ~60 fps while pixels can change
@@ -915,6 +918,10 @@ fn render_loop(
                             }
                             if rs.tick(dt) {
                                 arrived.push(k.clone());
+                            }
+                            if rs.core.codex_look() {
+                                let (x, y) = rs.core.compact_display_pos();
+                                rs.core.fog_tint = wallpaper.tint_at(x, y);
                             }
                         }
                     }

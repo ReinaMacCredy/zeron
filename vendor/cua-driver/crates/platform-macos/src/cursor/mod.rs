@@ -9,6 +9,7 @@ pub mod overlay;
 /// System cursor shape reporting (what the OS draws, not what Cua draws).
 pub mod shape;
 pub mod state;
+pub mod wallpaper;
 
 // Re-export the legacy per-instance cursor state (used by tools for multi-cursor tracking).
 pub use state::{CursorRegistry, CursorState};
