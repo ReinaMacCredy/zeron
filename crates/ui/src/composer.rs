@@ -325,6 +325,18 @@ pub fn comment_strip_height(count: usize) -> f32 {
     STRIP_PAD_TOP + crate::badges::BADGE_HEIGHT
 }
 
+pub const PR_CHIP_HEIGHT: f32 = 22.0;
+pub const PR_CHIP_PAD_TOP: f32 = 10.0;
+
+pub fn pr_chip_strip_height(count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    PR_CHIP_PAD_TOP + PR_CHIP_HEIGHT
+}
+
+type PrChipRemove = Rc<dyn Fn(crate::pull_requests::ContextChip, &mut App)>;
+
 /// Compact↔expanded flip morph (round 9): the flip used to snap between the
 /// two pill layouts. The original has no height transition (its shell carries
 /// only `transition-colors`), so this is a native nicety: ONE committed flip
@@ -6876,6 +6888,8 @@ pub struct Composer {
     side_chat: bool,
     pr_chat: bool,
     pr_context: Option<String>,
+    pr_chips: Vec<(crate::pull_requests::ContextChip, SharedString)>,
+    pr_chip_remove: Option<PrChipRemove>,
     idle_placeholder: SharedString,
     _picker_focus: Subscription,
     _input_events: Subscription,
@@ -7355,6 +7369,8 @@ impl Composer {
             side_chat: false,
             pr_chat: false,
             pr_context: None,
+            pr_chips: Vec::new(),
+            pr_chip_remove: None,
             idle_placeholder: "Do anything…".into(),
             _picker_focus: picker_focus,
             _input_events: input_events,
@@ -7694,6 +7710,19 @@ impl Composer {
 
     pub(crate) fn set_pr_context(&mut self, block: Option<String>) {
         self.pr_context = block;
+    }
+
+    pub(crate) fn set_pr_chips(
+        &mut self,
+        chips: Vec<(crate::pull_requests::ContextChip, SharedString)>,
+        on_remove: PrChipRemove,
+        cx: &mut Context<Self>,
+    ) {
+        self.pr_chip_remove = Some(on_remove);
+        if self.pr_chips != chips {
+            self.pr_chips = chips;
+            cx.notify();
+        }
     }
 
     /// Whether the draft holds anything a close would lose: text, staged
@@ -8141,6 +8170,65 @@ impl Composer {
 
     fn staged_chip_count(&self, cx: &App) -> usize {
         self.staged_comments(cx).len() + self.staged_quotes(cx).len()
+    }
+
+    fn render_pr_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if self.pr_chips.is_empty() {
+            return None;
+        }
+        let chips = self.pr_chips.iter().map(|(chip, label)| {
+            let chip = *chip;
+            let group: SharedString = format!("pr-chat-chip-group-{chip:?}").into();
+            div()
+                .group(group.clone())
+                .debug_selector(move || format!("pr-chat-chip-label-{chip:?}"))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .h(px(PR_CHIP_HEIGHT))
+                .pl(px(7.0))
+                .pr(px(4.0))
+                .rounded(px(6.0))
+                .bg(theme.ink(0.06))
+                .text_size(px(11.0))
+                .text_color(match chip {
+                    crate::pull_requests::ContextChip::PullRequest => theme.success,
+                    _ => theme.text.opacity(0.8),
+                })
+                .child(label.clone())
+                .child(
+                    div()
+                        .id(("pr-chat-chip-remove", chip as usize))
+                        .debug_selector(move || format!("pr-chat-chip-{chip:?}"))
+                        .role(gpui::Role::Button)
+                        .aria_label("Remove context")
+                        .cursor_pointer()
+                        .text_color(theme.text_muted)
+                        .opacity(0.0)
+                        .group_hover(group, |s| s.opacity(1.0))
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(remove) = this.pr_chip_remove.clone() {
+                                cx.defer(move |cx| remove(chip, cx));
+                            }
+                        }))
+                        .child("\u{00d7}"),
+                )
+        });
+        Some(
+            div()
+                .flex_none()
+                .h(px(pr_chip_strip_height(self.pr_chips.len())))
+                .overflow_hidden()
+                .flex()
+                .flex_row()
+                .gap(px(5.0))
+                .px(px(12.0))
+                .pt(px(PR_CHIP_PAD_TOP))
+                .children(chips),
+        )
     }
 
     fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
@@ -13451,7 +13539,8 @@ impl Render for Composer {
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
-        let comment_strip_h = comment_strip_height(self.staged_chip_count(cx));
+        let comment_strip_h = comment_strip_height(self.staged_chip_count(cx))
+            + pr_chip_strip_height(self.pr_chips.len());
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
         } else if expanded {
@@ -13709,6 +13798,7 @@ impl Render for Composer {
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_staged_chips(&theme, cx);
+        let pr_chips = self.render_pr_chips(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
         // Compensate for the transcript canvas beneath the frosted surface.
@@ -13815,6 +13905,7 @@ impl Render for Composer {
                 .relative()
                 .flex()
                 .flex_col()
+                .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
                 .children(strip)
@@ -13891,6 +13982,7 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .justify_end()
+                .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
                 .children(strip)

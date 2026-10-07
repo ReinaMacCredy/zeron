@@ -3790,6 +3790,7 @@ pub struct Transcript {
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
     pinned: bool,
+    send_runway: bool,
     /// A locally-sent prompt currently held near the viewport top while its
     /// reply grows into the empty space below it.
     own_turn: Option<OwnTurnAnchor>,
@@ -4283,6 +4284,7 @@ impl Transcript {
             show_jump_button: false,
             last_scroll_distance: 0.0,
             pinned,
+            send_runway: true,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
             promoted_queued_turn: None,
@@ -4371,6 +4373,15 @@ impl Transcript {
 
     pub(crate) fn rail_enabled(&self) -> bool {
         self.rail_enabled
+    }
+
+    /// A content-sized viewport (the PR dock) has no empty space to hold a new prompt in.
+    pub(crate) fn set_send_runway(&mut self, runway: bool) {
+        self.send_runway = runway;
+    }
+
+    pub(crate) fn content_height(&self) -> f32 {
+        f32::from(self.list.offset_for_item(self.list.item_count()))
     }
 
     /// Shell-driven: the measured height of the bottom chrome stack the
@@ -4904,6 +4915,10 @@ impl Transcript {
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
         self.discard_pending_viewport();
+        if !self.send_runway {
+            self.engage_pin(cx);
+            return;
+        }
         self.pinned = false;
         self.show_jump_button = false;
         self.spring.reset();
