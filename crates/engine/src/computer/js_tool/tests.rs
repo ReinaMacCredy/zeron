@@ -328,3 +328,11 @@ async fn a_successful_result_carries_its_text_and_actions_without_structured_con
         json!({ "actions": [{ "tool": "click", "app": "Calculator" }] })
     );
 }
+
+#[tokio::test]
+async fn ending_a_script_with_getaxstate_prints_the_state_once() {
+    let host = Arc::new(FakeHost::default());
+    exec("js-m", &host, "var c = await cua.getApp(\"Calculator\");").await;
+    let outcome = exec("js-m", &host, "await c.getAXState();").await;
+    assert_eq!(texts(&outcome).matches("7 text Value: 42").count(), 1);
+}

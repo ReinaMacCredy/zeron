@@ -165,14 +165,50 @@ pub(super) fn render_diff(previous: &TreeSnapshot, current: &TreeSnapshot) -> St
         .iter()
         .map(|line| (line.identity.as_str(), line.text.as_str()))
         .collect();
+    let mut unmatched: HashMap<(usize, &str), usize> = HashMap::new();
+    for line in previous
+        .lines
+        .iter()
+        .filter(|line| line.element_ref.is_none())
+    {
+        *unmatched
+            .entry((line.depth, line.text.as_str()))
+            .or_insert(0) += 1;
+    }
     let mut rows = Vec::new();
     if previous.header != current.header {
         rows.push(format!("~ {}", current.header));
     }
+    let current_texts: HashSet<(usize, &str)> = current
+        .lines
+        .iter()
+        .filter(|line| line.element_ref.is_none())
+        .map(|line| (line.depth, line.text.as_str()))
+        .collect();
+    let mut changed_unnumbered = 0;
     for line in &current.lines {
+        if line.element_ref.is_none()
+            && let Some(count) = unmatched.get_mut(&(line.depth, line.text.as_str()))
+            && *count > 0
+        {
+            *count -= 1;
+            continue;
+        }
         match before.get(line.identity.as_str()) {
             None => rows.push(format!("+ {}", line.numbered())),
-            Some(text) if *text != line.text => rows.push(format!("~ {}", line.numbered())),
+            Some(text)
+                if *text != line.text
+                    && line.element_ref.is_none()
+                    && current_texts.contains(&(line.depth, *text)) =>
+            {
+                rows.push(format!("+ {}", line.numbered()));
+            }
+            Some(text) if *text != line.text => {
+                if line.element_ref.is_none() {
+                    changed_unnumbered += 1;
+                }
+                rows.push(format!("~ {}", line.numbered()));
+            }
             Some(_) => {}
         }
     }
@@ -182,16 +218,17 @@ pub(super) fn render_diff(previous: &TreeSnapshot, current: &TreeSnapshot) -> St
         .map(|line| line.identity.as_str())
         .collect();
     let mut removed_refs = Vec::new();
-    let mut removed_unnumbered = 0;
     for line in &previous.lines {
-        if present.contains(line.identity.as_str()) {
-            continue;
-        }
-        match line.element_ref {
-            Some(element_ref) => removed_refs.push(element_ref),
-            None => removed_unnumbered += 1,
+        if let Some(element_ref) = line.element_ref
+            && !present.contains(line.identity.as_str())
+        {
+            removed_refs.push(element_ref);
         }
     }
+    let removed_unnumbered = unmatched
+        .values()
+        .sum::<usize>()
+        .saturating_sub(changed_unnumbered);
     let focus_changed =
         previous.focused != current.focused || previous.selected_text != current.selected_text;
     if rows.is_empty() && removed_refs.is_empty() && removed_unnumbered == 0 && !focus_changed {
@@ -493,6 +530,41 @@ mod tests {
             describe_line(&editor),
             "text entry area (settable) ID: First Text View, Value: alpha\\nbeta, Secondary Actions: Show menu, Copy"
         );
+    }
+
+    #[test]
+    fn an_inserted_row_does_not_mark_the_unchanged_rows_below_it_as_changed() {
+        let row = |text: &str| TreeLine {
+            depth: 2,
+            element_ref: None,
+            identity: String::new(),
+            text: text.to_owned(),
+        };
+        let snapshot = |lines: Vec<TreeLine>| TreeSnapshot {
+            window: "Window: \"Calculator\"".into(),
+            header: "Window: \"Calculator\".".into(),
+            lines,
+            focused: None,
+            selected_text: None,
+            truncated: false,
+        };
+        let mut before = vec![row("text Value: 5.535"), row("text Value: 42")];
+        for (index, line) in before.iter_mut().enumerate() {
+            line.identity = format!("row~{index}");
+        }
+        let mut after = vec![
+            row("text Value: 1.641"),
+            row("text Value: 5.535"),
+            row("text Value: 42"),
+        ];
+        for (index, line) in after.iter_mut().enumerate() {
+            line.identity = format!("row~{index}");
+        }
+        let diff = render_diff(&snapshot(before), &snapshot(after));
+        assert!(diff.contains("\n+ text Value: 1.641"), "{diff}");
+        assert!(!diff.contains("5.535"), "{diff}");
+        assert!(!diff.contains("Value: 42"), "{diff}");
+        assert!(!diff.contains("\nRemoved"), "{diff}");
     }
 
     #[test]

@@ -355,7 +355,12 @@ fn write_completion<'js>(ctx: &Ctx<'js>, shared: &Shared, value: JsValue<'js>) {
         && let Ok(text) = describe.call::<_, String>((completion,))
         && !text.is_empty()
     {
-        shared.lock_sink().content.push(McpContent::Text { text });
+        let mut sink = shared.lock_sink();
+        let repeated =
+            matches!(sink.content.last(), Some(McpContent::Text { text: last }) if *last == text);
+        if !repeated {
+            sink.content.push(McpContent::Text { text });
+        }
     }
 }
 
