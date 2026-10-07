@@ -49,6 +49,8 @@ impl SpawnPlan<'_> {
             "--embedded".into(),
             "--socket".into(),
             self.socket.to_string_lossy().into_owned(),
+            "--grant".into(),
+            "existing-profile".into(),
         ];
         if self.patched {
             args.extend([
@@ -315,6 +317,8 @@ mod tests {
                 "--embedded",
                 "--socket",
                 "/t/zeron-cua-abc123/driver-1.sock",
+                "--grant",
+                "existing-profile",
                 "--compact-cursor",
                 "--idle-hide-ms",
                 "60000"
@@ -324,7 +328,7 @@ mod tests {
             patched: false,
             ..plan
         };
-        assert_eq!(unpatched.args().len(), 4);
+        assert_eq!(unpatched.args().len(), 6);
         let env = plan.env();
         let get = |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str());
         assert_eq!(get("CUA_DRIVER_EMBEDDED"), Some("1"));
