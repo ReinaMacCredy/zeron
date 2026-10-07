@@ -5138,6 +5138,9 @@ mod tests {
             None,
         )
         .unwrap();
+        core.workspace
+            .create_chat("ordinary", None, Some(&core.device_id), None, None)
+            .unwrap();
         let rpc = core.rpc_service();
         let orchestrator = format!("{}1", zeron_proto::voice::ORCHESTRATOR_CHAT_PREFIX);
         for (chat, parent, expected) in [

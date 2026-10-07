@@ -1843,14 +1843,14 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
         .with_graces(Duration::from_millis(10), Duration::from_millis(100));
     let mut req = request("must never be submitted");
     req.cwd = dir.path().display().to_string();
-    req.mcp = Some(zeron_proto::McpServer {
-        name: "zeron".into(),
-        command: "zeron".into(),
-        args: vec!["mcp".into()],
-        env: Default::default(),
-    });
     let (mut controls, steer, token) = controls("Yes");
     let (voice, bridge, _events) = zeron_harness::codex::realtime::channel();
+    controls.tool_server = Some(zeron_harness::ToolServer {
+        command: "zeron".into(),
+        args: vec!["mcp".into()],
+        env: Vec::new(),
+        guidance: None,
+    });
     controls.realtime = Some(bridge);
     let mut stream = driver.start_idle(req, controls).await.unwrap();
     assert!(matches!(
@@ -1920,14 +1920,14 @@ async fn external_voice_keeps_canonical_events_without_any_local_helper() {
     let driver = CodexHarness::new().with_executable(binary);
     let mut req = request("");
     req.cwd = dir.path().display().to_string();
-    req.mcp = Some(zeron_proto::McpServer {
-        name: "zeron".into(),
-        command: "zeron".into(),
-        args: vec!["mcp".into()],
-        env: Default::default(),
-    });
     let (mut controls, _steer, token) = controls("Yes");
     let (voice, bridge, mut events) = channel();
+    controls.tool_server = Some(zeron_harness::ToolServer {
+        command: "zeron".into(),
+        args: vec!["mcp".into()],
+        env: Vec::new(),
+        guidance: None,
+    });
     controls.realtime = Some(bridge);
     let mut stream = driver.start_idle(req, controls).await.unwrap();
     assert!(matches!(
