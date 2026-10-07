@@ -1258,6 +1258,7 @@ pub struct UiSettings {
     pub sidebar_organization: SidebarOrganization,
     /// Timestamp used to order active sessions (newest first).
     pub sidebar_sort: SidebarSort,
+    pub sidebar_active_first: bool,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
     pub sidebar_show_project_label: bool,
@@ -1463,6 +1464,7 @@ impl Default for UiSettings {
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
+            sidebar_active_first: false,
             sidebar_show_project_label: true,
             // Upstream boots compact; this fork keeps its detailed rows.
             sidebar_compact: false,
@@ -2144,6 +2146,7 @@ impl UiSettings {
             sidebar_grouped,
             sidebar_organization,
             sidebar_sort,
+            sidebar_active_first,
             sidebar_show_project_label,
             sidebar_compact,
             sidebar_show_project_icon,
@@ -3486,6 +3489,7 @@ mod tests {
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
+            sidebar_active_first: true,
             sidebar_compact: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
