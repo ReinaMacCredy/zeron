@@ -12537,7 +12537,9 @@ impl Shell {
         let home = match &self.home_view {
             Some(home) => home.clone(),
             None => {
-                let home = cx.new(|cx| crate::home::HomeView::new(self.state.clone(), cx));
+                let pickers = self.composer.read(cx).pickers().clone();
+                let home =
+                    cx.new(|cx| crate::home::HomeView::new(self.state.clone(), pickers, cx));
                 self._home_events = Some(cx.subscribe_in(
                     &home,
                     window,
