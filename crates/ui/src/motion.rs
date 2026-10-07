@@ -464,6 +464,7 @@ pub const SIDECAR_POPOVER_SLIDE: MotionSpec =
     MotionSpec::new(220, CubicBezier::new(0.32, 0.72, 0.0, 1.0));
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
+pub const SEGMENT_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_QUINT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
 /// Stepped-slider snap — CSS `cubic-bezier(0.22, 1.1, 0.36, 1)`: quick, with

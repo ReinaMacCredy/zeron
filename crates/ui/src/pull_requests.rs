@@ -50,6 +50,8 @@ const NARROW_TOPBAR_WIDTH: f32 = 1000.0;
 const COMPACT_WIDTH: f32 = 760.0;
 const TOPBAR_HEIGHT: f32 = 44.0;
 const ROW_HEIGHT_HINT: f32 = 74.0;
+const TAB_GAP: f32 = 2.0;
+const TAB_BODY_SHIFT: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -450,6 +452,31 @@ pub struct PullRequestsPage {
     chat_open: bool,
     mode: PageMode,
     layout_width: Option<f32>,
+    shown_tab: PageTab,
+    tab_widths: std::rc::Rc<std::cell::Cell<[f32; 2]>>,
+    tab_slide: Option<TabSlide>,
+}
+
+struct TabSlide {
+    from: (f32, f32),
+    started: std::time::Instant,
+}
+
+impl TabSlide {
+    fn progress(&self, now: std::time::Instant) -> f32 {
+        let spec = crate::motion::SEGMENT_SLIDE;
+        let total = spec.total().mul_f32(crate::motion::speed_scale());
+        spec.progress(
+            now.saturating_duration_since(self.started).as_secs_f32() / total.as_secs_f32(),
+        )
+    }
+}
+
+fn pill_target(tab: PageTab, widths: [f32; 2]) -> (f32, f32) {
+    match tab {
+        PageTab::PullRequests => (0.0, widths[0]),
+        PageTab::Git => (widths[0] + TAB_GAP, widths[1]),
+    }
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -481,6 +508,7 @@ impl PullRequestsPage {
             prefs.tab = tab;
         }
         let listed_repository = prefs.repository.clone();
+        let shown_tab = prefs.tab;
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(240.0));
         list_state.splice_focusable(
             0..0,
@@ -531,6 +559,9 @@ impl PullRequestsPage {
             chat_open: false,
             mode,
             layout_width: None,
+            shown_tab,
+            tab_widths: Default::default(),
+            tab_slide: None,
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
             page.listing = Loadable::Ready(listing);
@@ -898,6 +929,38 @@ impl PullRequestsPage {
         self.update_prefs(false, cx, |prefs| prefs.tab = tab);
     }
 
+    fn pill(&self, now: std::time::Instant) -> Option<(f32, f32)> {
+        let widths = self.tab_widths.get();
+        if widths.iter().any(|width| *width <= 0.0) {
+            return None;
+        }
+        let (left, width) = pill_target(self.shown_tab, widths);
+        Some(match &self.tab_slide {
+            Some(slide) => {
+                let t = slide.progress(now);
+                (
+                    crate::motion::lerp(slide.from.0, left, t),
+                    crate::motion::lerp(slide.from.1, width, t),
+                )
+            }
+            None => (left, width),
+        })
+    }
+
+    fn sync_tab_slide(&mut self, now: std::time::Instant, cx: &App) -> Option<f32> {
+        if self.shown_tab != self.prefs.tab {
+            let from = self.pill(now).filter(|_| !cx.reduce_motion());
+            self.tab_slide = from.map(|from| TabSlide { from, started: now });
+            self.shown_tab = self.prefs.tab;
+        }
+        let progress = self.tab_slide.as_ref()?.progress(now);
+        if progress >= 1.0 {
+            self.tab_slide = None;
+            return None;
+        }
+        Some(progress)
+    }
+
     fn tab_count(&self, tab: PageTab, cx: &App) -> Option<usize> {
         match tab {
             PageTab::PullRequests => self.listing.ready().map(|listing| {
@@ -922,70 +985,109 @@ impl PullRequestsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let widths = self.tab_widths.get();
+        let pill = self.pill(std::time::Instant::now());
+        let view = cx.entity_id();
+        let tabs = [
+            (
+                PageTab::PullRequests,
+                "Pull Requests",
+                if tight { "PRs" } else { "Pull Requests" },
+                icons::PULL_REQUEST,
+            ),
+            (PageTab::Git, "Git", "Git", icons::FORK),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (tab, label, text, glyph))| {
+            let active = self.prefs.tab == tab;
+            let lit = match pill {
+                Some((left, width)) => {
+                    let (tab_left, tab_width) = pill_target(tab, widths);
+                    let overlap = (left + width).min(tab_left + tab_width) - left.max(tab_left);
+                    (overlap / tab_width).clamp(0.0, 1.0)
+                }
+                None => f32::from(u8::from(active)),
+            };
+            let tone = crate::motion::mix(theme.text_muted, theme.text, lit);
+            let measured = self.tab_widths.clone();
+            let selector = format!("pull-requests-tab-{tab:?}");
+            let count = (!compact)
+                .then(|| self.tab_count(tab, cx))
+                .flatten()
+                .map(|count| {
+                    let selector = format!("pull-requests-tab-count-{tab:?}");
+                    div()
+                        .debug_selector(move || selector.clone())
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(count.to_string())
+                });
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Tab)
+                .aria_label(label)
+                .relative()
+                .h(px(24.0))
+                .px(px(if tight { 8.0 } else { 10.0 }))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(7.0))
+                .text_size(px(13.0))
+                .whitespace_nowrap()
+                .text_color(tone)
+                .when(active && pill.is_none(), |el| el.bg(theme.ink(0.08)))
+                .when(!active, |el| {
+                    el.cursor_pointer()
+                        .hover(|style| style.text_color(theme.text))
+                        .on_click(cx.listener(move |page, _, _, cx| page.set_tab(tab, cx)))
+                })
+                .child(icon(glyph).size(px(14.0)).flex_none().text_color(tone))
+                .child(text)
+                .children(count)
+                .child(
+                    gpui::canvas(
+                        move |bounds, window, _| {
+                            let mut widths = measured.get();
+                            let width = f32::from(bounds.size.width);
+                            if (widths[ix] - width).abs() > 0.5 {
+                                widths[ix] = width;
+                                measured.set(widths);
+                                window.on_next_frame(move |_, cx| cx.notify(view));
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+        });
         div()
             .id("pull-requests-page-tabs")
             .role(gpui::Role::TabList)
             .flex_none()
-            .flex()
-            .gap(px(2.0))
             .p(px(2.0))
             .rounded(px(9.0))
             .border_1()
             .border_color(theme.hairline(0.09))
-            .children(
-                [
-                    (
-                        PageTab::PullRequests,
-                        "Pull Requests",
-                        if tight { "PRs" } else { "Pull Requests" },
-                        icons::PULL_REQUEST,
-                    ),
-                    (PageTab::Git, "Git", "Git", icons::FORK),
-                ]
-                .map(|(tab, label, text, glyph)| {
-                    let active = self.prefs.tab == tab;
-                    let selector = format!("pull-requests-tab-{tab:?}");
-                    let count =
-                        (!compact)
-                            .then(|| self.tab_count(tab, cx))
-                            .flatten()
-                            .map(|count| {
-                                let selector = format!("pull-requests-tab-count-{tab:?}");
-                                div()
-                                    .debug_selector(move || selector.clone())
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(count.to_string())
-                            });
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .role(gpui::Role::Tab)
-                        .aria_label(label)
-                        .h(px(24.0))
-                        .px(px(if tight { 8.0 } else { 10.0 }))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(7.0))
-                        .text_size(px(13.0))
-                        .whitespace_nowrap()
-                        .when(active, |el| el.bg(theme.ink(0.08)).text_color(theme.text))
-                        .when(!active, |el| {
-                            el.text_color(theme.text_muted)
-                                .cursor_pointer()
-                                .hover(|style| style.text_color(theme.text))
-                                .on_click(cx.listener(move |page, _, _, cx| page.set_tab(tab, cx)))
-                        })
-                        .child(
-                            icon(glyph)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(if active { theme.text } else { theme.text_muted }),
-                        )
-                        .child(text)
-                        .children(count)
-                }),
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .gap(px(TAB_GAP))
+                    .children(pill.map(|(left, width)| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(left))
+                            .w(px(width))
+                            .h(px(24.0))
+                            .rounded(px(7.0))
+                            .bg(theme.ink(0.08))
+                    }))
+                    .children(tabs),
             )
             .into_any_element()
     }
@@ -2094,6 +2196,10 @@ impl Render for PullRequestsPage {
             self.refresh(cx);
         }
         self.note_focus(window, cx);
+        let slide = self.sync_tab_slide(std::time::Instant::now(), cx);
+        if slide.is_some() {
+            window.request_animation_frame();
+        }
         let theme = Theme::of(cx).clone();
         let viewport = self.layout_width(window);
         let compact = viewport < COMPACT_WIDTH;
@@ -2139,6 +2245,16 @@ impl Render for PullRequestsPage {
             .min_h_0()
             .into_any_element()
         };
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .when_some(slide, |el, t| {
+                let side = if on_list { -1.0 } else { 1.0 };
+                el.left(px(side * (1.0 - t) * TAB_BODY_SHIFT)).opacity(t)
+            })
+            .child(body);
         let list = div()
             .flex_1()
             .min_w_0()
@@ -2227,6 +2343,7 @@ impl Render for PullRequestsPage {
                     .flex()
                     .flex_row()
                     .flex_none()
+                    .when_some(slide, |el, t| el.opacity(t))
                     .child(resizer)
                     .child(panel)
             }))
@@ -2773,6 +2890,44 @@ mod tests {
         });
         assert!(ROWS_RENDERED.with(|rows| rows.get()) > 0);
         assert_eq!(top(&page, cx), before);
+    }
+
+    #[gpui::test]
+    fn switching_tabs_slides_the_selection_pill(cx: &mut gpui::TestAppContext) {
+        let (page, cx, _dir) = scroll_fixture(cx, 3);
+        cx.run_until_parked();
+        let widths = page.update(cx, |page, _| page.tab_widths.get());
+        assert!(widths.iter().all(|width| *width > 0.0), "{widths:?}");
+        let rest = page
+            .update(cx, |page, _| page.pill(std::time::Instant::now()))
+            .expect("pill at rest");
+        assert_eq!(rest, pill_target(PageTab::PullRequests, widths));
+
+        let git = cx.debug_bounds("pull-requests-tab-Git").expect("Git tab");
+        cx.simulate_click(git.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, _| {
+            let slide = page.tab_slide.as_ref().expect("the switch starts a slide");
+            assert_eq!(slide.from, rest);
+            let target = pill_target(PageTab::Git, widths);
+            let span = crate::motion::SEGMENT_SLIDE
+                .total()
+                .mul_f32(crate::motion::speed_scale());
+            let mid = page.pill(slide.started + span / 4).unwrap();
+            assert!(mid.0 > rest.0 && mid.0 < target.0, "{mid:?} {target:?}");
+            assert_eq!(page.pill(slide.started + span).unwrap(), target);
+        });
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let list = cx
+            .debug_bounds("pull-requests-tab-PullRequests")
+            .expect("Pull Requests tab");
+        cx.simulate_click(list.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, _| {
+            assert!(page.tab_slide.is_none());
+            assert_eq!(page.pill(std::time::Instant::now()), Some(rest));
+        });
     }
 
     #[gpui::test]
