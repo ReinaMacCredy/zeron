@@ -50,8 +50,8 @@ use crate::computer::cards::{
     elevated_risk, is_control_denied, left_open_app, missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
-    ComputerCall, computer_call, computer_call_app, computer_call_rows, computer_output_hidden,
-    describe_computer_call,
+    ComputerCall, computer_action_label, computer_call, computer_call_app, computer_call_rows,
+    computer_js_action_label, computer_js_actions, computer_output_hidden,
 };
 use crate::device_panel::presentation::{
     device_call, device_call_detail, device_call_label, device_group_label,
@@ -423,6 +423,22 @@ enum ToolGenus {
     Computer,
     Device,
     Other,
+}
+
+fn group_computer_rows_by_app(tools: &mut [ToolItem]) {
+    if !tools
+        .iter()
+        .all(|tool| tool_genus(tool) == ToolGenus::Computer)
+    {
+        return;
+    }
+    let mut apps: Vec<Option<SharedString>> = Vec::new();
+    for tool in tools.iter() {
+        if !apps.contains(&tool.app) {
+            apps.push(tool.app.clone());
+        }
+    }
+    tools.sort_by_key(|tool| apps.iter().position(|app| *app == tool.app));
 }
 
 fn tool_genus(item: &ToolItem) -> ToolGenus {
@@ -1610,7 +1626,8 @@ pub fn rows_for_entry(
             if group.is_empty() {
                 return;
             }
-            let tools = std::mem::take(group);
+            let mut tools = std::mem::take(group);
+            group_computer_rows_by_app(&mut tools);
             let auto_open = streaming && last_ix == last_part_ix;
             rows.push(Row {
                 id: format!("{}#g{}", entry.id, group_ix).into(),
@@ -1652,8 +1669,22 @@ pub fn rows_for_entry(
                 let output_hidden = computer
                     .as_ref()
                     .is_some_and(|c| computer_output_hidden(c.tool, c.args));
+                let js_actions = computer
+                    .as_ref()
+                    .filter(|computer| computer.tool == "computer")
+                    .and_then(|_| output.as_deref())
+                    .map(computer_js_actions)
+                    .unwrap_or_default();
                 let detail = if output_hidden {
                     None
+                } else if !js_actions.is_empty() {
+                    Some(ToolDetail::Output {
+                        lines: js_actions
+                            .iter()
+                            .map(|action| computer_js_action_label(action, true).into())
+                            .collect(),
+                        truncated_by: 0,
+                    })
                 } else {
                     tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                 };
@@ -11322,6 +11353,20 @@ fn device_chip_content(tool: &ToolItem) -> Option<(SharedString, String)> {
     ))
 }
 
+fn computer_row_icon(app: Option<&str>, theme: &Theme) -> AnyElement {
+    match app.and_then(|app| crate::appshots::running_app_icon(None, None, Some(app))) {
+        Some(icon) => gpui::img(icon)
+            .flex_none()
+            .size(px(14.0))
+            .into_any_element(),
+        None => crate::icons::icon(crate::icons::CURSOR)
+            .flex_none()
+            .size(px(12.0))
+            .text_color(theme.text_muted)
+            .into_any_element(),
+    }
+}
+
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
@@ -11335,7 +11380,13 @@ fn chip_header_row(
         ToolItemKind::Note => ("Wrote".into(), note_chip_detail(tool)),
         ToolItemKind::Call => match computer_call(&tool.call) {
             Some(computer) => (
-                describe_computer_call(computer.tool, computer.args).into(),
+                computer_action_label(
+                    computer.tool,
+                    computer.args,
+                    tool.app.as_deref(),
+                    tool.resolved,
+                )
+                .into(),
                 String::new(),
             ),
             None => device_chip_content(tool).unwrap_or_else(|| {
@@ -11345,6 +11396,8 @@ fn chip_header_row(
         },
     };
     let activity = !is_agent_tool(tool);
+    let computer_icon = (tool.kind == ToolItemKind::Call && computer_call(&tool.call).is_some())
+        .then(|| computer_row_icon(tool.app.as_deref(), theme));
     let file_path = tool_file_path(&tool.call);
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
@@ -11398,6 +11451,7 @@ fn chip_header_row(
                     ),
             )
         })
+        .children(computer_icon)
         .child(
             div()
                 .flex_none()
