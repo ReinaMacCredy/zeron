@@ -29,7 +29,7 @@ use super::visible_use::{
     ComputerForegroundAuthorization, ComputerForegroundContext,
     computer_foreground_authorization_for_messages,
 };
-use crate::sessions::{ComputerRun, SessionsEngine};
+use crate::sessions::{ComputerRun, ComputerStoppedApp, SessionsEngine};
 
 #[cfg(test)]
 mod tests;
@@ -403,6 +403,9 @@ pub async fn computer_action(
     if run.turn_desktop_revoked {
         return Ok(denied("user_revoked", COMPUTER_USER_REVOKED));
     }
+    if stopped_target(&service.manager, &run.turn_stopped_apps, &args).await {
+        return Ok(denied(COMPUTER_APP_STOPPED_CODE, COMPUTER_APP_STOPPED));
+    }
     let key: CallKey = (params.chat_id.clone(), params.request_id.clone());
     let token = CancellationToken::new();
     let calls = runtime.calls().clone();
@@ -483,6 +486,35 @@ pub async fn computer_action(
     result
         .map(finished)
         .map_err(|_| "The computer action ended without a result.".to_owned())
+}
+
+pub const COMPUTER_APP_STOPPED_CODE: &str = "user_stopped_app";
+pub const COMPUTER_APP_STOPPED: &str = "This application session has been explicitly stopped by the user for this turn. Stop your work and send a final message noting they stopped the session and you're ready to continue if they want you to. Computer use can be used again in the next assistant turn.";
+
+async fn stopped_target(
+    manager: &ComputerManager,
+    stopped: &[ComputerStoppedApp],
+    args: &ToolArgs,
+) -> bool {
+    if stopped.is_empty() {
+        return false;
+    }
+    let steps = args
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object);
+    for target in std::iter::once(args).chain(steps).map(consent_target) {
+        if let Some((key, name)) = manager.app_identity(&target).await
+            && stopped
+                .iter()
+                .any(|app| app.matches(Some(&key), Some(&name)))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub const COMPUTER_FOREGROUND_DECLINED_CODE: &str = "foreground_declined";

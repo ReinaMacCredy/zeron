@@ -851,9 +851,15 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_t
         (ComputerConsentScope::Task, Some("computer_click".into())),
         "the strip and menu bar get the card's request"
     );
+    assert!(!rig.core.computer.settings().approved_once);
     answer(&rig, "allow", &card, "Allow");
     assert!(click.await.unwrap());
     no_pending(&manager, "an answer clears the pending request").await;
+    wait_for(
+        || rig.core.computer.settings().approved_once,
+        "the first approval to be remembered for the one-time disclosure",
+    )
+    .await;
     let answered = || {
         rig.entries(CHAT)
             .iter()

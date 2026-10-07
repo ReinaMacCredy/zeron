@@ -1,6 +1,4 @@
-use std::collections::VecDeque;
-
-use gpui::{App, Entity};
+use gpui::{AnyElement, App, Entity, div, prelude::*, px};
 use zeron_proto::computer::{ComputerPendingKind, ComputerPendingRequest, ThreadComputerState};
 
 use super::preview::{self, ComputerPreviewStore};
@@ -18,10 +16,22 @@ pub struct ChatPresence {
     pub chat_id: String,
     pub app: Option<String>,
     pub window_id: Option<String>,
-    pub activity: Option<String>,
     pub tone: PresenceTone,
     pub user_takeover: bool,
     pub pending: Option<ComputerPendingRequest>,
+    pub apps: Vec<DrivenApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrivenApp {
+    pub name: String,
+    pub pid: Option<u32>,
+}
+
+impl DrivenApp {
+    pub fn same_app(&self, other: &str) -> bool {
+        self.name.trim().eq_ignore_ascii_case(other.trim())
+    }
 }
 
 impl ChatPresence {
@@ -104,11 +114,21 @@ pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<Chat
         chat_id: chat_id.to_owned(),
         app,
         window_id,
-        activity: state.and_then(|state| state.activity.clone()),
         tone,
         user_takeover: paused
             && (chat.user_paused || own_pause.is_some_and(|pause| pause.user_takeover)),
         pending,
+        apps: chat
+            .apps
+            .iter()
+            .filter(|app| {
+                !chat
+                    .stopped_apps
+                    .iter()
+                    .any(|stopped| app.same_app(stopped))
+            })
+            .cloned()
+            .collect(),
     })
 }
 
@@ -121,25 +141,7 @@ pub fn presences(store: &ComputerPreviewStore) -> Vec<ChatPresence> {
     presences
 }
 
-pub const RING_LIMIT: usize = 4;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RingTone {
-    Accent,
-    Warning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RingSpec {
-    pub chat_id: String,
-    pub pid: i32,
-    pub window: u32,
-    pub tone: RingTone,
-    pub dashed: bool,
-    pub label: String,
-}
-
-fn cua_window(window_id: &str) -> Option<(i32, u32)> {
+pub(crate) fn cua_window(window_id: &str) -> Option<(i32, u32)> {
     let (pid, window) = window_id.strip_prefix("cua:")?.split_once(':')?;
     let valid = |part: &str| {
         !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && !part.starts_with('0')
@@ -148,37 +150,6 @@ fn cua_window(window_id: &str) -> Option<(i32, u32)> {
         return None;
     }
     Some((pid.parse().ok()?, window.parse().ok()?))
-}
-
-pub fn ring_specs(presences: &[ChatPresence]) -> Vec<RingSpec> {
-    presences
-        .iter()
-        .filter_map(|presence| {
-            let (pid, window) = cua_window(presence.window_id.as_deref()?)?;
-            let (tone, dashed, label) = match presence.tone {
-                PresenceTone::Driving => (
-                    RingTone::Accent,
-                    false,
-                    presence.activity.as_deref().unwrap_or("Working").to_owned(),
-                ),
-                PresenceTone::Paused if presence.user_takeover => {
-                    (RingTone::Warning, false, "You're using it".to_owned())
-                }
-                PresenceTone::Paused => (RingTone::Warning, false, "Paused".to_owned()),
-                PresenceTone::NeedsYou => (RingTone::Accent, true, "Waiting for you".to_owned()),
-                PresenceTone::Revoked { .. } => return None,
-            };
-            Some(RingSpec {
-                chat_id: presence.chat_id.clone(),
-                pid,
-                window,
-                tone,
-                dashed,
-                label: format!("Zeron · {label}"),
-            })
-        })
-        .take(RING_LIMIT)
-        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,13 +175,10 @@ pub fn rail_entries(store: &ComputerPreviewStore) -> Vec<RailEntry> {
     entries
 }
 
-const ANSWERED_LIMIT: usize = 32;
-
 #[derive(Debug, Default)]
 pub struct ComputerPresenceMap {
     chats: Vec<ChatPresence>,
     rail: Vec<RailEntry>,
-    answered: VecDeque<(String, String)>,
 }
 
 impl ComputerPresenceMap {
@@ -243,32 +211,10 @@ impl ComputerPresenceMap {
     pub fn chats(&self) -> &[ChatPresence] {
         &self.chats
     }
-
-    pub fn set_answered(&mut self, chat_id: &str, input_id: &str, answered: bool) {
-        self.answered
-            .retain(|(chat, input)| chat != chat_id || input != input_id);
-        if answered {
-            if self.answered.len() == ANSWERED_LIMIT {
-                self.answered.pop_front();
-            }
-            self.answered
-                .push_back((chat_id.to_owned(), input_id.to_owned()));
-        }
-    }
-
-    pub fn answered(&self, chat_id: &str, input_id: &str) -> bool {
-        self.answered
-            .iter()
-            .any(|(chat, input)| chat == chat_id && input == input_id)
-    }
 }
 
 pub fn map(cx: &App) -> Option<Entity<ComputerPresenceMap>> {
     preview::presence_map(cx)
-}
-
-pub fn for_chat(chat_id: &str, cx: &App) -> Option<ChatPresence> {
-    map(cx)?.read(cx).get(chat_id).cloned()
 }
 
 pub fn tone(chat_id: &str, cx: &App) -> Option<PresenceTone> {
@@ -279,22 +225,73 @@ pub fn rail_entry(chat_id: &str, cx: &App) -> Option<RailEntry> {
     map(cx)?.read(cx).rail_entry(chat_id).cloned()
 }
 
-pub fn set_answered(chat_id: &str, input_id: &str, answered: bool, cx: &mut App) {
-    if let Some(map) = map(cx) {
-        map.update(cx, |map, _| map.set_answered(chat_id, input_id, answered));
-    }
-}
-
-pub fn answered(chat_id: &str, input_id: &str, cx: &App) -> bool {
-    map(cx).is_some_and(|map| map.read(cx).answered(chat_id, input_id))
+pub fn chat_glyph(
+    surface: &str,
+    chat_id: &str,
+    size: f32,
+    opacity: f32,
+    theme: &crate::theme::Theme,
+    cx: &App,
+) -> Option<AnyElement> {
+    let color = match tone(chat_id, cx)? {
+        PresenceTone::Driving | PresenceTone::NeedsYou => theme.accent,
+        PresenceTone::Paused => theme.warning,
+        PresenceTone::Revoked { .. } => return None,
+    };
+    let selector = format!("{surface}-computer-{chat_id}");
+    Some(
+        div()
+            .debug_selector(move || selector)
+            .flex_none()
+            .size(px(size))
+            .child(
+                crate::icons::icon(crate::icons::CURSOR)
+                    .size(px(size))
+                    .text_color(color.opacity(opacity)),
+            )
+            .into_any_element(),
+    )
 }
 
 #[cfg(test)]
-mod tests {
-    use zeron_proto::computer::{ComputerEvent, ComputerInputPause};
+pub(crate) mod tests {
+    use zeron_proto::computer::{
+        ComputerConsentApp, ComputerConsentScope, ComputerEvent, ComputerInputPause,
+    };
 
     use super::*;
     use crate::computer::preview::tests::{driving, image, thread_state};
+
+    pub(crate) fn foreground_pending(app: Option<&str>) -> ComputerPendingRequest {
+        ComputerPendingRequest {
+            input_id: "computer-foreground-1".into(),
+            question_id: "foreground".into(),
+            kind: ComputerPendingKind::Foreground {
+                app: app.map(Into::into),
+            },
+        }
+    }
+
+    pub(crate) fn consent_pending(
+        scope: ComputerConsentScope,
+        app: Option<&str>,
+        verified: bool,
+    ) -> ComputerPendingRequest {
+        ComputerPendingRequest {
+            input_id: "computer-consent-1".into(),
+            question_id: "consent".into(),
+            kind: ComputerPendingKind::Consent {
+                scope,
+                app: app.map(|name| ComputerConsentApp {
+                    name: name.into(),
+                    bundle_id: verified.then(|| "com.mitchellh.ghostty".into()),
+                    pid: Some(4242),
+                }),
+                tool: Some("computer_type_text".into()),
+                params: Some(r#"{"window_id":"cua:4242:17","text":"hunter2"}"#.into()),
+            },
+        }
+    }
 
     fn state(store: &mut ComputerPreviewStore, state: ThreadComputerState) -> bool {
         store.apply_event(&ComputerEvent::ThreadState {
@@ -334,10 +331,13 @@ mod tests {
                 chat_id: "a".into(),
                 app: Some("Calculator".into()),
                 window_id: Some("w1".into()),
-                activity: Some("Typing".into()),
                 tone: PresenceTone::Driving,
                 user_takeover: false,
                 pending: None,
+                apps: vec![DrivenApp {
+                    name: "Calculator".into(),
+                    pid: None,
+                }],
             })
         );
         assert!(
@@ -469,120 +469,6 @@ mod tests {
         assert!(map.rail_entry("a").is_none());
     }
 
-    fn active(store: &mut ComputerPreviewStore, thread: &str, activity: Option<&str>) {
-        let mut driving = thread_state(thread, true);
-        driving.activity = activity.map(Into::into);
-        state(store, driving);
-    }
-
-    #[test]
-    fn a_ring_follows_each_driving_chat_target() {
-        let mut store = ComputerPreviewStore::default();
-        driving(&mut store, "a");
-        assert!(ring_specs(&presences(&store)).is_empty(), "no target yet");
-        action(&mut store, "a", "cua:4242:9191", "computer_type_text");
-        active(&mut store, "a", Some("Typing"));
-        driving(&mut store, "b");
-        action(&mut store, "b", "cua:77:5", "computer_click");
-        driving(&mut store, "c");
-        action(&mut store, "c", "w1", "computer_click");
-        assert_eq!(
-            ring_specs(&presences(&store)),
-            vec![
-                RingSpec {
-                    chat_id: "a".into(),
-                    pid: 4242,
-                    window: 9191,
-                    tone: RingTone::Accent,
-                    dashed: false,
-                    label: "Zeron · Typing".into(),
-                },
-                RingSpec {
-                    chat_id: "b".into(),
-                    pid: 77,
-                    window: 5,
-                    tone: RingTone::Accent,
-                    dashed: false,
-                    label: "Zeron · Working".into(),
-                },
-            ],
-            "a window id that is not a desktop window gets no ring"
-        );
-        action(&mut store, "a", "cua:4242:9192", "computer_click");
-        assert_eq!(ring_specs(&presences(&store))[0].window, 9192);
-        for bad in [
-            "cua:0:1",
-            "cua:12:01",
-            "cua:12",
-            "cua::3",
-            "cua:-1:2",
-            "cua:1:2:3",
-        ] {
-            assert_eq!(cua_window(bad), None, "{bad}");
-        }
-        for chat in ["d", "e", "f", "g"] {
-            driving(&mut store, chat);
-            action(&mut store, chat, "cua:9:9", "computer_click");
-        }
-        assert_eq!(ring_specs(&presences(&store)).len(), RING_LIMIT);
-        let labels: Vec<_> = ring_specs(&presences(&store))
-            .into_iter()
-            .map(|spec| spec.label)
-            .collect();
-        assert!(
-            labels.iter().all(|label| !label.contains("hunter2")
-                && !label.contains("computer_")
-                && !label.contains("4242")),
-            "{labels:?}"
-        );
-    }
-
-    #[test]
-    fn no_ring_after_revoke_or_idle() {
-        let mut store = ComputerPreviewStore::default();
-        driving(&mut store, "a");
-        action(&mut store, "a", "cua:42:7", "computer_click");
-        assert_eq!(ring_specs(&presences(&store)).len(), 1);
-        let mut revoked = thread_state("a", true);
-        revoked.input_stopped = Some(true);
-        state(&mut store, revoked);
-        assert!(ring_specs(&presences(&store)).is_empty(), "revoked");
-        state(&mut store, thread_state("a", false));
-        store.clear_revoked("a");
-        driving(&mut store, "b");
-        action(&mut store, "b", "cua:42:8", "computer_click");
-        state(&mut store, thread_state("b", false));
-        assert!(ring_specs(&presences(&store)).is_empty(), "idle");
-    }
-
-    #[test]
-    fn paused_rings_are_warning() {
-        let mut store = ComputerPreviewStore::default();
-        driving(&mut store, "a");
-        action(&mut store, "a", "cua:42:7", "computer_click");
-        let mut paused = thread_state("a", true);
-        paused.input_pause = Some(ComputerInputPause {
-            window_id: Some("cua:42:7".into()),
-            pid: Some(42),
-            message: "Screen locked".into(),
-            user_takeover: false,
-        });
-        state(&mut store, paused);
-        let specs = ring_specs(&presences(&store));
-        assert_eq!(specs.len(), 1);
-        assert_eq!(
-            (specs[0].tone, specs[0].dashed, specs[0].label.as_str()),
-            (RingTone::Warning, false, "Zeron · Paused")
-        );
-        let mut waiting = presences(&store).remove(0);
-        waiting.tone = PresenceTone::NeedsYou;
-        let specs = ring_specs(&[waiting]);
-        assert_eq!(
-            (specs[0].tone, specs[0].dashed, specs[0].label.as_str()),
-            (RingTone::Accent, true, "Zeron · Waiting for you")
-        );
-    }
-
     #[test]
     fn a_takeover_event_turns_the_chat_paused_and_resumed_clears_it() {
         let mut store = ComputerPreviewStore::default();
@@ -604,10 +490,9 @@ mod tests {
             (PresenceTone::Paused, true, Some("Calculator"), Some("w1"))
         );
         assert!(store.set_user_paused("a", Some("cua:42:7".into())));
-        let ring = ring_specs(&presences(&store));
         assert_eq!(
-            (ring[0].tone, ring[0].label.as_str(), ring[0].window),
-            (RingTone::Warning, "Zeron · You're using it", 7)
+            chat_presence(&store, "a").unwrap().window_id.as_deref(),
+            Some("cua:42:7")
         );
         assert!(store.clear_user_paused("a"));
         assert!(!store.clear_user_paused("a"));
@@ -650,7 +535,7 @@ mod tests {
         let mut store = ComputerPreviewStore::default();
         driving(&mut store, "a");
         action(&mut store, "a", "cua:42:7", "computer_click");
-        let pending = crate::computer::strip::tests::foreground_pending(Some("Ghostty"));
+        let pending = crate::computer::presence::tests::foreground_pending(Some("Ghostty"));
         let mut asking = thread_state("a", false);
         asking.pending_request = Some(pending.clone());
         state(&mut store, asking.clone());
@@ -670,11 +555,10 @@ mod tests {
             )
         );
         assert!(presence.holds_desktop());
-        assert_eq!(ring_specs(&[presence])[0].label, "Zeron · Waiting for you");
 
         let mut consent = asking.clone();
-        consent.pending_request = Some(crate::computer::strip::tests::consent_pending(
-            zeron_proto::computer::ComputerConsentScope::Task,
+        consent.pending_request = Some(crate::computer::presence::tests::consent_pending(
+            ComputerConsentScope::Task,
             Some("Calculator"),
             true,
         ));
@@ -701,10 +585,10 @@ mod tests {
                 chat_id: "a".into(),
                 app: None,
                 window_id: Some("cua:42:7".into()),
-                activity: None,
                 tone: PresenceTone::Revoked { summing_up: true },
                 user_takeover: false,
                 pending: None,
+                apps: Vec::new(),
             }
         );
         state(&mut store, asking);
@@ -717,21 +601,6 @@ mod tests {
         store.clear_revoked("a");
         state(&mut store, thread_state("a", false));
         assert_eq!(chat_presence(&store, "a"), None, "answered, idle");
-    }
-
-    #[test]
-    fn answered_ids_are_per_chat_bounded_and_can_be_withdrawn() {
-        let mut map = ComputerPresenceMap::default();
-        map.set_answered("a", "computer-consent-1", true);
-        assert!(map.answered("a", "computer-consent-1"));
-        assert!(!map.answered("b", "computer-consent-1"));
-        map.set_answered("a", "computer-consent-1", false);
-        assert!(!map.answered("a", "computer-consent-1"), "a failed send");
-        for n in 0..=ANSWERED_LIMIT {
-            map.set_answered("a", &format!("input-{n}"), true);
-        }
-        assert!(!map.answered("a", "input-0"), "the oldest falls out");
-        assert!(map.answered("a", &format!("input-{ANSWERED_LIMIT}")));
     }
 
     #[test]
@@ -757,10 +626,6 @@ mod tests {
         state(&mut store, untitled);
         let presence = chat_presence(&store, "a").unwrap();
         assert_eq!(presence.app, None, "a window title never names the target");
-        assert_eq!(
-            crate::computer::strip::strip_copy(&presence).text(),
-            "The target window isn't reachable · bring it onto this desktop or exit full screen"
-        );
         paused.input_pause.as_mut().unwrap().window_id = Some("gone".into());
         state(&mut store, paused);
         assert_eq!(chat_presence(&store, "a").unwrap().app, None);

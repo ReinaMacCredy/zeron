@@ -25,7 +25,7 @@ use crate::popover;
 use crate::settings::permission_guide::{
     self, PermissionGuide, PermissionGuideHost, PermissionPane, choice_button, outline_button, row,
 };
-use crate::settings::{SavePolicy, widgets};
+use crate::settings::{ComputerClickSounds, SavePolicy, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -1513,6 +1513,46 @@ impl Render for ComputerPage {
             placement_control.into_any_element(),
             None,
         ));
+        let click_sounds = crate::settings::computer_click_sounds(cx);
+        let sound_chip = |id: &'static str, label: &'static str, value: ComputerClickSounds| {
+            choice_button(&theme, id, label, click_sounds == value)
+                .debug_selector(move || id.to_string())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::settings::update(SavePolicy::Immediate, cx, |s| {
+                        s.computer_click_sounds = value
+                    });
+                    cx.notify();
+                }))
+        };
+        card = card.child(row(
+            &theme,
+            false,
+            "Click sounds",
+            "Play a soft click when the agent clicks in an app.",
+            None,
+            None,
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .child(sound_chip(
+                    "computer-click-sounds-foreground",
+                    "Foreground clicks",
+                    ComputerClickSounds::Foreground,
+                ))
+                .child(sound_chip(
+                    "computer-click-sounds-all",
+                    "Foreground and background clicks",
+                    ComputerClickSounds::ForegroundAndBackground,
+                ))
+                .child(sound_chip(
+                    "computer-click-sounds-off",
+                    "Off",
+                    ComputerClickSounds::Off,
+                ))
+                .into_any_element(),
+            None,
+        ));
 
         let acknowledged = Self::acknowledged(cx);
         let guide_open = !acknowledged || self.guide_requested;
@@ -1543,7 +1583,7 @@ impl Render for ComputerPage {
                 ),
                 (
                     "Follow and stop",
-                    "Watch the preview while the agent works. Press Esc or Stop on the strip to take the desktop back; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it.",
+                    "Watch the preview while the agent works. Choose Stop Using an app under Computer Use Controls in the menu bar to take that app back for the rest of the turn; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it.",
                 ),
             ];
             let mut section = div()
@@ -1684,7 +1724,7 @@ impl Render for ComputerPage {
                     &theme,
                     false,
                     "Desktop abilities",
-                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Press Esc or Stop on the strip to take the desktop back for the rest of the turn; the agent then sums up. Esc needs Input Monitoring. The chat's Stop button ends the turn.",
+                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Choose Stop Using an app under Computer Use Controls in the menu bar to take that app back for the rest of the turn; the agent then sums up. The chat's Stop button ends the turn.",
                     Some(
                         format!(
                             "{backend} · {}",
@@ -2197,6 +2237,37 @@ mod tests {
         wait(cx, |_| placement() == ComputerPreviewPlacement::Rail);
         drop(page);
         runtime.block_on(core.shutdown());
+    }
+
+    #[gpui::test]
+    fn click_sound_chips_save_to_ui_settings(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        init(cx, dir.path());
+        let (engine, _) = scripted_engine(&runtime, |method, _| match method {
+            methods::GET_COMPUTER_SETTINGS => Ok(json!({})),
+            _ => Err("unsupported".into()),
+        });
+        let (_page, cx) = open_page(cx, engine, Rc::new(|| grants(true, true, true)));
+        let sounds = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| crate::settings::computer_click_sounds(cx))
+        };
+        assert_eq!(sounds(cx), ComputerClickSounds::Foreground);
+        for (chip, expected) in [
+            (
+                "computer-click-sounds-all",
+                ComputerClickSounds::ForegroundAndBackground,
+            ),
+            ("computer-click-sounds-off", ComputerClickSounds::Off),
+            (
+                "computer-click-sounds-foreground",
+                ComputerClickSounds::Foreground,
+            ),
+        ] {
+            click(cx, chip);
+            assert_eq!(sounds(cx), expected, "{chip}");
+        }
     }
 
     #[gpui::test]

@@ -185,6 +185,23 @@ impl ComputerManager {
         ((!placeholder).then_some(app), key)
     }
 
+    pub async fn app_identity(&self, target: &ComputerConsentTarget) -> Option<(String, String)> {
+        if *target == ComputerConsentTarget::Unscoped {
+            return None;
+        }
+        let ResolvedConsentApp { app, key } = self.resolve_consent_app(target).await;
+        Some((key, app.name))
+    }
+
+    pub async fn stopped_app_key(&self, app: &ComputerConsentApp) -> Option<String> {
+        let target = match (app.pid, app.bundle_id.as_deref()) {
+            (Some(pid), _) => ComputerConsentTarget::Pid(pid),
+            (None, Some(bundle_id)) => return Some(format!("bundle:{bundle_id}")),
+            (None, None) => ComputerConsentTarget::App(app.name.clone()),
+        };
+        self.app_identity(&target).await.map(|(key, _)| key)
+    }
+
     async fn ask_turn(&self, thread_id: Option<&str>) -> Option<(String, String)> {
         let owner = super::agent_thread_id(thread_id)?;
         let turn = current_computer_task().and_then(|task| task.turn_id)?;

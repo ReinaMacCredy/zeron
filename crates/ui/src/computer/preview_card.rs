@@ -6,6 +6,7 @@ use gpui::{
 };
 use zeron_proto::computer::{ComputerPreviewPlacement, ComputerPreviewSize, ComputerSettings};
 use zeron_proto::view::Indicator;
+use zeron_rpc::methods;
 
 use super::preview::{
     self, BadgeTone, ComputerPreviewStore, PreviewPhase, PreviewView, STILL_POLL_INTERVAL,
@@ -134,6 +135,8 @@ pub struct ComputerPreviewCard {
     still_poll: Option<(String, Task<()>)>,
     settings_fetch: Option<Task<()>>,
     seen_settings: Option<ComputerSettings>,
+    menu_open: bool,
+    completion_repaint: Option<Task<()>>,
     _observers: [Subscription; 2],
 }
 
@@ -160,6 +163,8 @@ impl ComputerPreviewCard {
             still_poll: None,
             settings_fetch: None,
             seen_settings: None,
+            menu_open: false,
+            completion_repaint: None,
             _observers: observers,
         }
     }
@@ -174,6 +179,7 @@ impl ComputerPreviewCard {
             if self.chat_id != chat_id {
                 self.hovered = false;
                 self.drag = None;
+                self.menu_open = false;
             }
             self.chat_id = chat_id;
             self.slot = slot;
@@ -190,6 +196,48 @@ impl ComputerPreviewCard {
             return;
         };
         preview::update_store(&self.store, cx, |store| store.hide_for_task(&chat));
+    }
+
+    pub fn hide_all_active(&mut self, cx: &mut Context<Self>) {
+        preview::update_store(&self.store, cx, |store| store.hide_all_active());
+    }
+
+    pub fn move_to_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.dock(cx);
+        if self.store.read(cx).placement() == ComputerPreviewPlacement::Rail {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let (store, state) = (self.store.clone(), self.state.clone());
+        cx.spawn(async move |_, cx| {
+            let Ok(mut settings) = engine
+                .client()
+                .call_as::<ComputerSettings>(methods::GET_COMPUTER_SETTINGS, serde_json::json!({}))
+                .await
+            else {
+                return;
+            };
+            settings.computer_preview_placement = ComputerPreviewPlacement::Rail;
+            let params = serde_json::to_value(&settings).unwrap_or_default();
+            if let Err(error) = engine
+                .client()
+                .call(methods::SET_COMPUTER_SETTINGS, params)
+                .await
+            {
+                tracing::warn!(target: "desktop_cua", "move the preview to the sidebar: {error}");
+                return;
+            }
+            cx.update(|cx| {
+                state.update(cx, |state, cx| {
+                    state.computer_settings = Some(settings.clone());
+                    cx.notify();
+                });
+                preview::update_store(&store, cx, |store| store.set_settings(settings));
+            });
+        })
+        .detach();
     }
 
     fn set_floating(&mut self, origin: Option<Point<f32>>, cx: &mut Context<Self>) {
@@ -342,6 +390,123 @@ impl ComputerPreviewCard {
     }
 }
 
+pub(super) fn completion_check(theme: &Theme) -> gpui::Div {
+    div()
+        .debug_selector(|| "computer-preview-complete".into())
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .size(px(44.0))
+                .rounded_full()
+                .bg(theme.success.opacity(0.92))
+                .shadow_lg()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(crate::icons::CHECK)
+                        .size(px(22.0))
+                        .text_color(gpui::white()),
+                ),
+        )
+}
+
+fn menu_item(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.bg(gpui::white().opacity(0.14)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(on_click)
+        .child(label)
+}
+
+impl ComputerPreviewCard {
+    fn render_menu(
+        &self,
+        floating: bool,
+        view: &PreviewView,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.menu_open = false;
+            cx.notify();
+        };
+        div()
+            .absolute()
+            .top(px(46.0))
+            .right(px(8.0))
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(gpui::white().opacity(0.15))
+            .bg(theme.surface_overlay.opacity(0.97))
+            .shadow_lg()
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(menu_item(
+                "computer-preview-hide-task",
+                "Hide for this task",
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    close(this, cx);
+                    this.hide(cx);
+                }),
+            ))
+            .child(menu_item(
+                "computer-preview-hide-all",
+                "Hide for all active tasks",
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    close(this, cx);
+                    this.hide_all_active(cx);
+                }),
+            ))
+            .when(!floating, |menu| {
+                menu.child(menu_item(
+                    "computer-preview-float",
+                    "Move to floating window",
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        close(this, cx);
+                        this.pop_out(cx);
+                    }),
+                ))
+            })
+            .when(
+                floating || view.placement == ComputerPreviewPlacement::Card,
+                |menu| {
+                    menu.child(menu_item(
+                        "computer-preview-sidebar",
+                        "Move to sidebar",
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            close(this, cx);
+                            this.move_to_sidebar(cx);
+                        }),
+                    ))
+                },
+            )
+            .into_any_element()
+    }
+}
+
 fn pill(color: Hsla, dot: Hsla, label: String) -> gpui::Div {
     div()
         .flex()
@@ -429,6 +594,18 @@ impl Render for ComputerPreviewCard {
             .into_any_element();
         }
         let theme = Theme::of(cx).clone();
+        if view.completed && self.completion_repaint.is_none() {
+            self.completion_repaint = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(preview::COMPLETION_FLASH)
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.completion_repaint = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         let aspect = view_aspect(&view);
         let caps = card_caps(size);
         let floating = view.floating.map(|stored| {
@@ -631,7 +808,10 @@ impl Render for ComputerPreviewCard {
                                 .child(pill(gpui::white(), theme.text_muted, label)),
                         )
                     })
-                    .when(hovered || dragging, |viewport| {
+                    .when(view.completed, |viewport| {
+                        viewport.child(completion_check(&theme))
+                    })
+                    .when(hovered || dragging || self.menu_open, |viewport| {
                         viewport.child(
                             div()
                                 .absolute()
@@ -644,6 +824,15 @@ impl Render for ComputerPreviewCard {
                                 .border_1()
                                 .border_color(gpui::white().opacity(0.2))
                                 .bg(gpui::white().opacity(0.12))
+                                .child(control(
+                                    "computer-preview-menu",
+                                    crate::icons::MORE_HORIZONTAL,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.menu_open = !this.menu_open;
+                                        cx.notify();
+                                    }),
+                                ))
                                 .child(detach)
                                 .child(control(
                                     "computer-preview-hide",
@@ -654,6 +843,9 @@ impl Render for ComputerPreviewCard {
                                     }),
                                 )),
                         )
+                    })
+                    .when(self.menu_open, |viewport| {
+                        viewport.child(self.render_menu(floating.is_some(), &view, &theme, cx))
                     }),
             )
             .child(tracker);
@@ -1100,6 +1292,96 @@ mod tests {
         cx.debug_bounds(selector).expect("control on hover")
     }
 
+    #[gpui::test]
+    fn the_preview_menu_hides_floats_and_moves_to_the_sidebar(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _card, mut wire, cx) = mount(cx, dir.path());
+        live_card(&store, cx);
+        wire.methods(cx);
+        let pick = |cx: &mut VisualTestContext, item: &'static str| {
+            let menu = reveal(cx, "computer-preview-menu");
+            cx.simulate_click(menu.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            let bounds = cx
+                .debug_bounds(item)
+                .unwrap_or_else(|| panic!("{item} in the menu"));
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+
+        let menu = reveal(cx, "computer-preview-menu");
+        cx.simulate_click(menu.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        for item in [
+            "computer-preview-hide-task",
+            "computer-preview-hide-all",
+            "computer-preview-float",
+            "computer-preview-sidebar",
+        ] {
+            assert!(cx.debug_bounds(item).is_some(), "{item}");
+        }
+        cx.simulate_click(menu.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("computer-preview-float").is_none(),
+            "closed"
+        );
+
+        pick(cx, "computer-preview-float");
+        assert!(cx.update(|_, cx| store.read(cx).view("a").floating.is_some()));
+        let menu = reveal(cx, "computer-preview-menu");
+        cx.simulate_click(menu.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("computer-preview-float").is_none(),
+            "already floating"
+        );
+        let sidebar = cx
+            .debug_bounds("computer-preview-sidebar")
+            .expect("Move to sidebar");
+        cx.simulate_click(sidebar.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| store.read(cx).view("a").floating.is_none()));
+        assert!(
+            wire.methods(cx)
+                .iter()
+                .any(|(method, _)| method == methods::GET_COMPUTER_SETTINGS),
+            "the card placement switches to the rail through a fresh settings read"
+        );
+
+        change(&store, cx, |store| {
+            driving(store, "b");
+            store.mark_live("b")
+        });
+        pick(cx, "computer-preview-hide-all");
+        assert_eq!(phase(&store, cx), Some(PreviewPhase::HiddenForTask));
+        assert_eq!(
+            cx.update(|_, cx| store.read(cx).view("b").phase),
+            Some(PreviewPhase::HiddenForTask)
+        );
+        assert!(cx.debug_bounds("computer-preview-card").is_none());
+    }
+
+    #[gpui::test]
+    fn a_finished_turn_flashes_a_checkmark_on_the_card(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _card, _wire, cx) = mount(cx, dir.path());
+        live_card(&store, cx);
+        assert!(cx.debug_bounds("computer-preview-complete").is_none());
+        change(&store, cx, |store| {
+            store.apply_event(&ComputerEvent::ThreadState {
+                state: Box::new(crate::computer::preview::tests::thread_state("a", false)),
+            })
+        });
+        assert!(
+            cx.debug_bounds("computer-preview-complete").is_some(),
+            "the checkmark plays when the driving turn finishes"
+        );
+    }
     #[gpui::test]
     fn the_card_pops_out_into_a_floating_card_and_docks_back(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();

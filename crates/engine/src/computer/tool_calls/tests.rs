@@ -429,6 +429,95 @@ async fn a_revoked_turn_is_refused_with_user_revoked_not_capability_denied() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_using_an_app_refuses_only_that_app_for_the_rest_of_the_turn() {
+    let backend = Scripted::default_fake();
+    let rig = Rig::new(Some(backend.clone())).await;
+    rig.settings(true);
+    let secret = rig.run("c1", "type").await;
+    let type_in =
+        |window: &str| json!({ "text": "a", "window_id": window, "include_screenshot": false });
+    let typed = rig
+        .action(&secret, "computer_type_text", type_in("fake-terminal"), 1)
+        .await
+        .unwrap();
+    assert!(!typed.is_error, "{typed:?}");
+    let reply = rig
+        .client
+        .call(
+            methods::COMPUTER_REVOKE_DESKTOP,
+            json!({ "chatId": CHAT, "app": { "name": "org.kde.konsole", "pid": 1001 } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply, json!({ "revoked": true }));
+    let refused = rig
+        .action(&secret, "computer_type_text", type_in("fake-terminal"), 2)
+        .await
+        .unwrap();
+    assert!(refused.is_error);
+    assert_eq!(
+        payload(&refused)["error"]["code"],
+        json!(COMPUTER_APP_STOPPED_CODE)
+    );
+    assert_eq!(
+        payload(&refused)["error"]["message"],
+        json!(
+            "This application session has been explicitly stopped by the user for this turn. Stop your work and send a final message noting they stopped the session and you're ready to continue if they want you to. Computer use can be used again in the next assistant turn."
+        )
+    );
+    let batched = rig
+        .action(
+            &secret,
+            "computer_run",
+            json!({ "steps": [{ "type": "type_text", "text": "b", "window_id": "fake-terminal" }] }),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        payload(&batched)["error"]["code"],
+        json!(COMPUTER_APP_STOPPED_CODE),
+        "a batch step reaching the stopped app is refused too"
+    );
+    let other = rig
+        .action(&secret, "computer_type_text", type_in("fake-calculator"), 4)
+        .await
+        .unwrap();
+    assert!(!other.is_error, "another app keeps working: {other:?}");
+    let listed = rig
+        .action(&secret, "computer_list_windows", json!({}), 5)
+        .await
+        .unwrap();
+    assert!(!listed.is_error, "an unscoped call is not an app session");
+    assert_eq!(backend.calls_for("typeText").len(), 2);
+    let run = rig.core.sessions.computer_run(CHAT, &secret).unwrap();
+    assert!(
+        !run.turn_desktop_revoked,
+        "only the app stopped, not the desktop"
+    );
+    assert!(rig.core.sessions.turn_in_flight(CHAT));
+    rig.probe
+        .finishes
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .notify_one();
+    wait_for(
+        || !rig.core.sessions.turn_in_flight(CHAT),
+        "the turn to end",
+    )
+    .await;
+    let next = rig.run("c2", "type again").await;
+    let again = rig
+        .action(&next, "computer_type_text", type_in("fake-terminal"), 6)
+        .await
+        .unwrap();
+    assert!(!again.is_error, "the next turn may use it again: {again:?}");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unsupported_service_lists_nothing_and_refuses_every_call() {
     let rig = Rig::new(None).await;
     rig.settings(true);

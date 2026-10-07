@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -11,10 +11,11 @@ use zeron_proto::computer::{
 };
 use zeron_rpc::{RpcError, methods};
 
-use super::presence::ComputerPresenceMap;
+use super::presence::{ComputerPresenceMap, DrivenApp, cua_window};
 use crate::state::EngineHandle;
 
 pub const STILL_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
+pub const COMPLETION_FLASH: Duration = Duration::from_millis(1_600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewPhase {
@@ -120,6 +121,9 @@ pub(super) struct ChatPreview {
     floating: Option<Point<f32>>,
     thumb_closed: bool,
     user_opened: bool,
+    pub(super) apps: Vec<DrivenApp>,
+    pub(super) stopped_apps: Vec<String>,
+    finished_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +140,7 @@ pub struct PreviewView {
     pub badge: Option<StatusBadge>,
     pub wants_stills: bool,
     pub floating: Option<Point<f32>>,
+    pub completed: bool,
 }
 
 impl PreviewView {
@@ -332,6 +337,8 @@ impl ComputerPreviewStore {
             chat.user_paused_window = None;
             chat.thumb_closed = false;
             chat.user_opened = false;
+            chat.apps.clear();
+            chat.stopped_apps.clear();
             self.evicted
                 .extend(chat.tap.take().map(|frame| frame.image));
             self.evicted
@@ -359,6 +366,13 @@ impl ComputerPreviewStore {
                 if was && !active {
                     chat.user_paused = false;
                     chat.user_paused_window = None;
+                    chat.finished_at = (!stopped(state) && chat.phase == Some(PreviewPhase::Live))
+                        .then(Instant::now);
+                }
+                if active && !was {
+                    chat.apps.clear();
+                    chat.stopped_apps.clear();
+                    chat.finished_at = None;
                 }
                 if active != was {
                     let next = phase_on_agent_edge(chat.phase, active);
@@ -380,13 +394,28 @@ impl ComputerPreviewStore {
                 let mut changed = self.chat(thread_id).phase.is_none()
                     && self.set_phase(thread_id, Some(PreviewPhase::Armed));
                 let chat = self.chat(thread_id);
-                let app = chat.state.as_ref().and_then(|state| {
+                let window = chat.state.as_ref().and_then(|state| {
                     state
                         .windows
                         .iter()
                         .find(|window| Some(&window.id) == window_id.as_ref())
-                        .and_then(|window| window.app_name.clone())
                 });
+                let app = window.and_then(|window| window.app_name.clone());
+                if let Some(name) = app.as_deref().filter(|name| !name.trim().is_empty())
+                    && !chat.apps.iter().any(|known| known.same_app(name))
+                {
+                    let pid = window.and_then(|window| window.pid).or_else(|| {
+                        window_id
+                            .as_deref()
+                            .and_then(cua_window)
+                            .and_then(|(pid, _)| u32::try_from(pid).ok())
+                    });
+                    chat.apps.push(DrivenApp {
+                        name: name.to_owned(),
+                        pid,
+                    });
+                    changed = true;
+                }
                 if let Some(window_id) = window_id {
                     let same_window = chat.last_window_id.as_ref() == Some(window_id);
                     let next_app = app
@@ -515,12 +544,41 @@ impl ComputerPreviewStore {
     }
 
     pub fn hide_for_task(&mut self, chat_id: &str) -> bool {
-        let opened = self
-            .chats
-            .get_mut(chat_id)
-            .is_some_and(|chat| std::mem::take(&mut chat.user_opened));
+        let opened = self.chats.get_mut(chat_id).is_some_and(|chat| {
+            let flashing = chat.finished_at.take().is_some();
+            std::mem::take(&mut chat.user_opened) | flashing
+        });
         let next = phase_on_hide(self.chats.get(chat_id).and_then(|chat| chat.phase));
         self.set_phase(chat_id, next) | opened
+    }
+
+    pub fn hide_all_active(&mut self) -> bool {
+        let active: Vec<String> = self
+            .chats
+            .iter()
+            .filter(|(_, chat)| {
+                matches!(chat.phase, Some(PreviewPhase::Armed | PreviewPhase::Live))
+            })
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect();
+        active.iter().fold(false, |changed, chat_id| {
+            self.hide_for_task(chat_id) | changed
+        })
+    }
+
+    pub fn stop_app(&mut self, chat_id: &str, app: &str) -> bool {
+        let Some(chat) = self.chats.get_mut(chat_id) else {
+            return false;
+        };
+        if chat
+            .stopped_apps
+            .iter()
+            .any(|stopped| stopped.eq_ignore_ascii_case(app))
+        {
+            return false;
+        }
+        chat.stopped_apps.push(app.to_owned());
+        true
     }
 
     pub fn reopen(&mut self, chat_id: &str) -> bool {
@@ -622,9 +680,12 @@ impl ComputerPreviewStore {
         let phase = chat.and_then(|chat| chat.phase);
         let user_opened = chat.is_some_and(|chat| chat.user_opened);
         let shown = self.settings.auto_open_computer_pane || user_opened;
+        let completed = chat
+            .and_then(|chat| chat.finished_at)
+            .is_some_and(|at| at.elapsed() < COMPLETION_FLASH);
         let open = match phase {
             Some(PreviewPhase::Live) => shown,
-            Some(PreviewPhase::Ended) => user_opened,
+            Some(PreviewPhase::Ended) => user_opened || (shown && completed),
             _ => false,
         };
         let active = chat.is_some_and(|chat| {
@@ -666,6 +727,7 @@ impl ComputerPreviewStore {
             badge: status_badge(state, active, true),
             wants_stills: wanted && source == FrameSource::Stills,
             floating: chat.and_then(|chat| chat.floating),
+            completed,
             frame,
         }
     }
@@ -911,6 +973,27 @@ pub fn takeover_sink(cx: &App) -> Option<Box<dyn Fn(super::host::TakeoverEvent) 
     }))
 }
 
+pub fn click_landed(event: &ComputerEvent) -> Option<bool> {
+    let ComputerEvent::Action {
+        action,
+        ok: true,
+        delivery,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    matches!(
+        super::presentation::computer_tool_name(action),
+        Some("computer_click" | "computer_browser_click")
+    )
+    .then(|| {
+        delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.path.contains("foreground"))
+    })
+}
+
 pub fn watch_events(engine: EngineHandle, cx: &mut App) -> Option<Task<()>> {
     let store = store(cx)?.downgrade();
     Some(cx.spawn(async move |cx| {
@@ -943,7 +1026,14 @@ pub fn watch_events(engine: EngineHandle, cx: &mut App) -> Option<Task<()>> {
                 let Some(live) = store.upgrade() else {
                     return;
                 };
-                cx.update(|cx| update_store(&live, cx, |store| store.apply_event(&event)));
+                cx.update(|cx| {
+                    update_store(&live, cx, |store| store.apply_event(&event));
+                    if let Some(foreground) = click_landed(&event)
+                        && crate::settings::computer_click_sounds(cx).plays(foreground)
+                    {
+                        crate::sound::play_computer_click();
+                    }
+                });
             }
             let Some(live) = store.upgrade() else {
                 return;
@@ -1057,6 +1147,145 @@ pub(crate) mod tests {
         });
     }
 
+    fn click(thread: &str, path: Option<&str>, ok: bool, action: &str) -> ComputerEvent {
+        ComputerEvent::Action {
+            window_id: Some("w1".into()),
+            delivery: path.map(|path| {
+                serde_json::from_value(serde_json::json!({ "path": path, "verified": "confirmed" }))
+                    .unwrap()
+            }),
+            action: action.into(),
+            ok,
+            message: None,
+            thread_id: Some(thread.into()),
+            restored_window_id: None,
+            restore_status: None,
+            masked: false,
+        }
+    }
+
+    #[test]
+    fn a_landed_click_reports_whether_it_was_in_the_foreground() {
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("foreground-cgevent"),
+                true,
+                "computer_click"
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("ax-press"),
+                true,
+                "mcp__zeron__computer_click"
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            click_landed(&click("a", None, true, "computer_browser_click")),
+            Some(false)
+        );
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("foreground-cgevent"),
+                false,
+                "computer_click"
+            )),
+            None,
+            "a failed click makes no sound"
+        );
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("foreground-cgevent"),
+                true,
+                "computer_type_text"
+            )),
+            None
+        );
+        let setting = crate::settings::ComputerClickSounds::Foreground;
+        assert!(setting.plays(true) && !setting.plays(false));
+    }
+
+    #[test]
+    fn hide_for_all_active_tasks_hides_only_live_previews() {
+        let mut store = ComputerPreviewStore::default();
+        for chat in ["a", "b", "c"] {
+            driving(&mut store, chat);
+            store.mark_live(chat);
+        }
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("c", false)),
+        });
+        assert!(store.hide_all_active());
+        assert_eq!(store.view("a").phase, Some(PreviewPhase::HiddenForTask));
+        assert_eq!(store.view("b").phase, Some(PreviewPhase::HiddenForTask));
+        assert_eq!(store.view("c").phase, Some(PreviewPhase::Ended));
+        assert!(!store.hide_all_active(), "nothing left to hide");
+    }
+
+    #[test]
+    fn a_finished_drive_flashes_complete_but_a_revoked_one_does_not() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        store.mark_live("a");
+        assert!(!store.view("a").completed);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        assert!(store.view("a").completed, "the turn finished");
+        assert!(store.view("a").open, "the card stays up for the checkmark");
+        driving(&mut store, "a");
+        assert!(!store.view("a").completed, "a new drive clears it");
+
+        driving(&mut store, "c");
+        store.mark_live("c");
+        store.hide_for_task("c");
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("c", false)),
+        });
+        assert!(
+            !store.view("c").completed && !store.view("c").open,
+            "a hidden preview never pops back for the checkmark"
+        );
+
+        driving(&mut store, "b");
+        store.mark_live("b");
+        let mut revoked = thread_state("b", false);
+        revoked.input_stopped = Some(true);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(revoked),
+        });
+        assert!(!store.view("b").completed);
+    }
+
+    #[test]
+    fn driven_apps_collect_per_drive_and_a_stop_hides_one() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        store.apply_event(&click("a", None, true, "computer_click"));
+        store.apply_event(&click("a", None, true, "computer_click"));
+        let apps = |store: &ComputerPreviewStore| {
+            crate::computer::presence::chat_presence(store, "a")
+                .map(|presence| presence.apps)
+                .unwrap_or_default()
+        };
+        assert_eq!(apps(&store).len(), 1, "one entry per app");
+        assert!(store.stop_app("a", "calculator"));
+        assert!(!store.stop_app("a", "Calculator"));
+        assert!(apps(&store).is_empty());
+        assert!(!store.stop_app("nobody", "Calculator"));
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        driving(&mut store, "a");
+        store.apply_event(&click("a", None, true, "computer_click"));
+        assert_eq!(apps(&store).len(), 1, "the next drive starts fresh");
+    }
     #[test]
     fn the_newest_tap_frame_wins_and_older_ones_are_evicted() {
         let mut store = ComputerPreviewStore::default();
@@ -1249,7 +1478,10 @@ pub(crate) mod tests {
             state: Box::new(thread_state("a", false)),
         });
         assert_eq!(store.view("a").phase, Some(PreviewPhase::Ended));
-        assert!(!store.view("a").open, "the drive's end closes it");
+        assert!(
+            store.view("a").completed && store.view("a").open,
+            "the drive's end keeps it up only for the checkmark"
+        );
         assert!(store.reopen("a"), "an ended drive reopens too");
         assert!(store.view("a").open);
         assert!(store.hide_for_task("a"));

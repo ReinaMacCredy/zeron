@@ -673,6 +673,35 @@ pub(super) fn icon_for_bundle(bundle: &str) -> Option<Vec<u8>> {
     })
 }
 
+pub(super) fn icon_for_pid(pid: i32) -> Option<Vec<u8>> {
+    autoreleasepool(|| unsafe {
+        let app: *mut Object =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        if app.is_null() {
+            return None;
+        }
+        let icon: *mut Object = msg_send![app, icon];
+        nsimage_png(icon)
+    })
+}
+
+pub(super) fn icon_for_app_named(name: &str) -> Option<Vec<u8>> {
+    autoreleasepool(|| unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let apps: *mut Object = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![apps, count];
+        for index in 0..count {
+            let app: *mut Object = msg_send![apps, objectAtIndex: index];
+            let localized: *mut Object = msg_send![app, localizedName];
+            if nsstring(localized).is_some_and(|localized| localized.eq_ignore_ascii_case(name)) {
+                let icon: *mut Object = msg_send![app, icon];
+                return nsimage_png(icon);
+            }
+        }
+        None
+    })
+}
+
 pub(super) fn activate_app_named(name: &str) -> bool {
     autoreleasepool(|| unsafe {
         let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];

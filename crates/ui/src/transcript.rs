@@ -43,15 +43,15 @@ use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, Su
 use zeron_proto::ToolCall;
 
 use crate::computer::cards::{
-    CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome,
-    computer_card, computer_event_row, computer_notice, consent_allow_description, consent_answers,
-    consent_app, consent_card_title, consent_choices, consent_detail, consent_event_label,
-    consent_outcome, consent_question, consent_scope, is_control_denied, left_open_app,
-    missing_computer_permissions, revoked_label,
+    ApprovalCard, CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice,
+    ConsentOutcome, approval_card, computer_card, computer_event_row, computer_notice,
+    consent_answers, consent_app, consent_card_title, consent_choice_key, consent_choices,
+    consent_detail, consent_event_label, consent_outcome, consent_question, consent_scope,
+    elevated_risk, is_control_denied, left_open_app, missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
-    ComputerCall, computer_call, computer_call_app, computer_call_rows, computer_output_hidden,
-    describe_computer_call,
+    ComputerCall, computer_action_label, computer_call, computer_call_app, computer_call_rows,
+    computer_js_action_label, computer_js_actions, computer_output_hidden,
 };
 use crate::device_panel::presentation::{
     device_call, device_call_detail, device_call_label, device_group_label,
@@ -423,6 +423,22 @@ enum ToolGenus {
     Computer,
     Device,
     Other,
+}
+
+fn group_computer_rows_by_app(tools: &mut [ToolItem]) {
+    if !tools
+        .iter()
+        .all(|tool| tool_genus(tool) == ToolGenus::Computer)
+    {
+        return;
+    }
+    let mut apps: Vec<Option<SharedString>> = Vec::new();
+    for tool in tools.iter() {
+        if !apps.contains(&tool.app) {
+            apps.push(tool.app.clone());
+        }
+    }
+    tools.sort_by_key(|tool| apps.iter().position(|app| *app == tool.app));
 }
 
 fn tool_genus(item: &ToolItem) -> ToolGenus {
@@ -1610,7 +1626,8 @@ pub fn rows_for_entry(
             if group.is_empty() {
                 return;
             }
-            let tools = std::mem::take(group);
+            let mut tools = std::mem::take(group);
+            group_computer_rows_by_app(&mut tools);
             let auto_open = streaming && last_ix == last_part_ix;
             rows.push(Row {
                 id: format!("{}#g{}", entry.id, group_ix).into(),
@@ -1652,8 +1669,22 @@ pub fn rows_for_entry(
                 let output_hidden = computer
                     .as_ref()
                     .is_some_and(|c| computer_output_hidden(c.tool, c.args));
+                let js_actions = computer
+                    .as_ref()
+                    .filter(|computer| computer.tool == "computer")
+                    .and_then(|_| output.as_deref())
+                    .map(computer_js_actions)
+                    .unwrap_or_default();
                 let detail = if output_hidden {
                     None
+                } else if !js_actions.is_empty() {
+                    Some(ToolDetail::Output {
+                        lines: js_actions
+                            .iter()
+                            .map(|action| computer_js_action_label(action, true).into())
+                            .collect(),
+                        truncated_by: 0,
+                    })
                 } else {
                     tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                 };
@@ -3784,7 +3815,6 @@ pub struct Transcript {
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
     foreground_sent: HashSet<SharedString>,
-    strip_pending: Option<String>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
@@ -4242,7 +4272,6 @@ impl Transcript {
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
             foreground_sent: HashSet::new(),
-            strip_pending: None,
             html_files: HashMap::new(),
             html_apps: None,
             html_apps_task: None,
@@ -4266,21 +4295,6 @@ impl Transcript {
         let view = cx.entity_id();
         cx.on_release(move |_, _| crate::computer::protected_surfaces::publish(view, false))
             .detach();
-        if let Some(presence) = crate::computer::presence::map(cx) {
-            cx.observe(&presence, |this: &mut Self, map, cx| {
-                let pending = this
-                    .chat_id
-                    .as_deref()
-                    .and_then(|chat_id| map.read(cx).get(chat_id))
-                    .and_then(|presence| presence.pending.as_ref())
-                    .map(|pending| pending.input_id.clone());
-                if this.strip_pending != pending {
-                    this.strip_pending = pending;
-                    cx.notify();
-                }
-            })
-            .detach();
-        }
         this.sync(cx);
         this
     }
@@ -8323,19 +8337,8 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         self.rendered_rows.insert(row.id.clone());
-        let answerable = match &row.kind {
-            RowKind::ComputerConsent {
-                request_id,
-                outcome: None,
-                ..
-            } if !self.consent_sent.contains_key(request_id) => Some(request_id),
-            RowKind::ComputerForeground { request_id, .. } => Some(request_id),
-            _ => None,
-        };
-        if let Some(request_id) = answerable
-            && (self.foreground_sent.contains(request_id)
-                || self.answered_off_card(request_id, cx)
-                || self.pending_on_strip(request_id, cx))
+        if let RowKind::ComputerForeground { request_id, .. } = &row.kind
+            && self.foreground_sent.contains(request_id)
         {
             return gpui::Empty.into_any_element();
         }
@@ -10557,6 +10560,13 @@ impl Transcript {
             .insert(request_id.clone(), choice.outcome());
         self.consent_failures.remove(&request_id);
         cx.notify();
+        if choice != ConsentChoice::Decline {
+            self.state.update(cx, |state, _| {
+                if let Some(settings) = state.computer_settings.as_mut() {
+                    settings.approved_once = true;
+                }
+            });
+        }
         let answers = consent_answers(&question_id, &choice);
         cx.spawn(async move |this, cx| {
             let sent =
@@ -10596,17 +10606,18 @@ impl Transcript {
                 theme,
             );
         }
-        let mut lines: Vec<SharedString> = Vec::new();
-        if !detail.is_empty() {
-            lines.push(detail.to_owned().into());
-        }
-        lines.push(consent_allow_description(scope, app).into());
         let actions = consent_choices(scope, app)
             .into_iter()
+            .rev()
             .map(|(choice, label)| {
                 let (request_id, question_id) = (request_id.clone(), question_id.clone());
                 CardAction {
-                    id: format!("computer-consent-{}-{}", request_id, label).into(),
+                    id: format!(
+                        "computer-consent-{}-{}",
+                        request_id,
+                        consent_choice_key(&choice)
+                    )
+                    .into(),
                     label: label.into(),
                     primary: choice == ConsentChoice::Allow,
                     on_click: Box::new(cx.listener(move |this, _, _, cx| {
@@ -10620,13 +10631,28 @@ impl Transcript {
                 }
             })
             .collect();
-        computer_card(
-            CardTone::Warning,
-            crate::icons::CURSOR,
-            consent_card_title(scope, app).into(),
-            lines,
-            actions,
-            self.consent_failures.get(&request_id).cloned(),
+        let disclosure = self
+            .state
+            .read(cx)
+            .computer_settings
+            .as_ref()
+            .is_none_or(|settings| !settings.approved_once);
+        approval_card(
+            ApprovalCard {
+                icon: app.and_then(|app| {
+                    crate::appshots::running_app_icon(
+                        app.bundle_id.as_deref(),
+                        app.pid,
+                        Some(&app.name),
+                    )
+                }),
+                title: consent_card_title(scope, app).into(),
+                detail: (!detail.is_empty()).then(|| detail.to_owned().into()),
+                risk: app.and_then(elevated_risk),
+                disclosure,
+                actions,
+                status: self.consent_failures.get(&request_id).cloned(),
+            },
             theme,
         )
     }
@@ -10686,12 +10712,12 @@ impl Transcript {
     ) -> AnyElement {
         let actions = [
             (
-                zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_ALLOW,
-                true,
-            ),
-            (
                 zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_DECLINE,
                 false,
+            ),
+            (
+                zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_ALLOW,
+                true,
             ),
         ]
         .into_iter()
@@ -10707,34 +10733,21 @@ impl Transcript {
             }
         })
         .collect();
-        computer_card(
-            CardTone::Warning,
-            crate::icons::CURSOR,
-            format!(
-                "{} needs to come to the front to type",
-                app.unwrap_or("The app")
-            )
-            .into(),
-            vec!["It will cover your screen; don't type while the agent works".into()],
-            actions,
-            self.consent_failures.get(&request_id).cloned(),
+        approval_card(
+            ApprovalCard {
+                icon: app.and_then(|app| crate::appshots::running_app_icon(None, None, Some(app))),
+                title: format!("Bring {} to the front?", app.unwrap_or("the app")).into(),
+                detail: Some(
+                    "Zeron needs it in front to type. It will cover your screen until the turn ends."
+                        .into(),
+                ),
+                risk: None,
+                disclosure: false,
+                actions,
+                status: self.consent_failures.get(&request_id).cloned(),
+            },
             theme,
         )
-    }
-
-    fn answered_off_card(&self, request_id: &str, cx: &gpui::App) -> bool {
-        self.chat_id
-            .as_deref()
-            .is_some_and(|chat_id| crate::computer::presence::answered(chat_id, request_id, cx))
-    }
-
-    fn pending_on_strip(&self, request_id: &str, cx: &gpui::App) -> bool {
-        let Some(chat_id) = self.chat_id.as_deref() else {
-            return false;
-        };
-        crate::computer::presence::for_chat(chat_id, cx)
-            .and_then(|presence| presence.pending)
-            .is_some_and(|pending| pending.input_id == request_id)
     }
 
     fn chat_hosted_here(&self, cx: &gpui::App) -> bool {
@@ -11353,7 +11366,13 @@ fn chip_header_row(
         ToolItemKind::Note => ("Wrote".into(), note_chip_detail(tool)),
         ToolItemKind::Call => match computer_call(&tool.call) {
             Some(computer) => (
-                describe_computer_call(computer.tool, computer.args).into(),
+                computer_action_label(
+                    computer.tool,
+                    computer.args,
+                    tool.app.as_deref(),
+                    tool.resolved,
+                )
+                .into(),
                 String::new(),
             ),
             None => device_chip_content(tool).unwrap_or_else(|| {
@@ -11808,8 +11827,15 @@ fn activity_rail(
             .absolute()
             .inset_0(),
         )
-        .child(
-            crate::icons::icon(match tool.kind {
+        .child(match computer_app_icon(tool) {
+            Some(icon) => gpui::img(icon)
+                .absolute()
+                .left(px(ACTIVITY_ICON_LEFT))
+                .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
+                .size(px(ACTIVITY_ICON_SIZE))
+                .opacity(branch_reveal)
+                .into_any_element(),
+            None => crate::icons::icon(match tool.kind {
                 ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
                 ToolItemKind::Note => crate::icons::PEN,
                 ToolItemKind::Call => tool_icon_path(&tool.call),
@@ -11819,8 +11845,16 @@ fn activity_rail(
             .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
             .size(px(ACTIVITY_ICON_SIZE))
             .opacity(branch_reveal)
-            .text_color(tint),
-        )
+            .text_color(tint)
+            .into_any_element(),
+        })
+}
+
+fn computer_app_icon(tool: &ToolItem) -> Option<Arc<gpui::Image>> {
+    if tool.kind != ToolItemKind::Call || computer_call(&tool.call).is_none() {
+        return None;
+    }
+    crate::appshots::running_app_icon(None, None, tool.app.as_deref())
 }
 
 /// A clockwise ribbon contour. Nonzero fill unions intersecting contours,
@@ -20304,10 +20338,10 @@ mod computer_tests {
         let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
         cx.run_until_parked();
         let allow = cx
-            .debug_bounds("computer-consent-computer-consent-1-Allow Computer for this task")
+            .debug_bounds("computer-consent-computer-consent-1-allow")
             .expect("Allow painted");
         assert!(
-            cx.debug_bounds("computer-consent-computer-consent-1-Deny")
+            cx.debug_bounds("computer-consent-computer-consent-1-deny")
                 .is_some()
         );
         cx.simulate_click(allow.center(), gpui::Modifiers::default());
@@ -20331,14 +20365,14 @@ mod computer_tests {
         fixture.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("computer-consent-computer-consent-1-Deny")
+            cx.debug_bounds("computer-consent-computer-consent-1-deny")
                 .is_none(),
             "an answered card settles instead of offering the choice again"
         );
     }
 
     #[gpui::test]
-    fn a_pending_consent_on_this_mac_renders_only_after_it_settles(cx: &mut gpui::TestAppContext) {
+    fn a_pending_consent_on_this_mac_is_answered_in_the_thread(cx: &mut gpui::TestAppContext) {
         use crate::computer::preview::{self, tests::thread_state};
         use zeron_proto::computer::ComputerEvent;
 
@@ -20377,16 +20411,13 @@ mod computer_tests {
             fixture.update(cx, |_, cx| cx.notify());
             cx.run_until_parked();
         };
-        let deny = "computer-consent-computer-consent-1-Deny";
+        let deny = "computer-consent-computer-consent-1-deny";
         repaint(cx);
-        assert!(
-            cx.debug_bounds(deny).is_some(),
-            "no strip holds it (a remote viewer): the card answers"
-        );
+        assert!(cx.debug_bounds(deny).is_some());
 
         let store = cx.update(|_, cx| preview::store(cx).unwrap());
         let mut asking = thread_state("chat", false);
-        asking.pending_request = Some(crate::computer::strip::tests::consent_pending(
+        asking.pending_request = Some(crate::computer::presence::tests::consent_pending(
             ComputerConsentScope::Task,
             None,
             false,
@@ -20398,51 +20429,12 @@ mod computer_tests {
                 })
             })
         });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds(deny).is_none(),
-            "the strip has the question"
-        );
-        assert_eq!(
-            cx.debug_bounds("consent-row").unwrap().size.height,
-            px(0.0),
-            "no card, no gap"
-        );
-
-        let idle = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|_, cx| {
-                preview::update_store(&store, cx, |store| {
-                    store.apply_event(&ComputerEvent::ThreadState {
-                        state: Box::new(thread_state("chat", false)),
-                    })
-                })
-            });
-            cx.run_until_parked();
-        };
-        idle(cx);
+        repaint(cx);
         assert!(
             cx.debug_bounds(deny).is_some(),
-            "left the strip unanswered here (displaced, or the turn moved on): the card answers"
+            "the engine holding the question pending no longer hides the card: it is the only place to answer"
         );
-
-        cx.update(|_, cx| {
-            preview::update_store(&store, cx, |store| {
-                store.apply_event(&ComputerEvent::ThreadState {
-                    state: Box::new(asking.clone()),
-                })
-            })
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds(deny).is_none());
-        cx.update(|_, cx| {
-            crate::computer::presence::set_answered("chat", "computer-consent-1", true, cx)
-        });
-        idle(cx);
-        assert_eq!(
-            cx.debug_bounds("consent-row").unwrap().size.height,
-            px(0.0),
-            "answered on the strip: the card never flashes back before the doc settles"
-        );
+        assert!(cx.debug_bounds("computer-approval-card").is_some());
 
         transcript.update(cx, |transcript, _| {
             transcript.rows = rows(vec![consent_part(
@@ -20523,7 +20515,7 @@ mod computer_tests {
             let mut asking = thread_state("chat", false);
             asking.pending_request = input_id.map(|input_id| {
                 let mut pending =
-                    crate::computer::strip::tests::foreground_pending(Some("Ghostty"));
+                    crate::computer::presence::tests::foreground_pending(Some("Ghostty"));
                 pending.input_id = input_id.into();
                 pending
             });
@@ -20537,21 +20529,12 @@ mod computer_tests {
             cx.run_until_parked();
         };
         publish(cx, Some("f1"));
-        assert!(
-            cx.debug_bounds(allow).is_none(),
-            "the strip has the question"
-        );
-        assert_eq!(
-            cx.debug_bounds("foreground-row").unwrap().size.height,
-            px(0.0)
-        );
-        publish(cx, Some("computer-foreground-2"));
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
         assert!(
             cx.debug_bounds(allow).is_some(),
-            "another request heads the strip: this one stays answerable here"
+            "pending on the engine, the in-thread card still answers it"
         );
-
-        publish(cx, None);
         let bounds = cx.debug_bounds(allow).expect("Allow painted");
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         cx.run_until_parked();
@@ -20598,7 +20581,10 @@ mod computer_tests {
                 zeron_rpc::RpcClient::new(out, inbound),
             ))
         });
-        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        state.update(cx, |state, _| {
+            state.computer_settings = Some(Default::default());
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
         struct Fixture(Entity<Transcript>);
         impl Render for Fixture {
@@ -20624,14 +20610,22 @@ mod computer_tests {
                 div().w(px(520.0)).child(card)
             }
         }
-        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("computer-consent-computer-consent-1-Allow for this task")
+            cx.debug_bounds("computer-consent-computer-consent-1-allow")
                 .is_some()
         );
+        assert!(
+            cx.debug_bounds("computer-approval-risk").is_some(),
+            "a browser is an elevated-risk app"
+        );
+        assert!(
+            cx.debug_bounds("computer-approval-disclosure").is_some(),
+            "nothing approved yet: the one-time disclosure shows"
+        );
         let always = cx
-            .debug_bounds("computer-consent-computer-consent-1-Always allow Safari")
+            .debug_bounds("computer-consent-computer-consent-1-always")
             .expect("Always allow painted");
         cx.simulate_click(always.center(), gpui::Modifiers::default());
         cx.run_until_parked();
@@ -20648,6 +20642,17 @@ mod computer_tests {
                 }],
             }
         );
+        assert!(
+            state.read_with(cx, |state, _| state
+                .computer_settings
+                .as_ref()
+                .is_some_and(|settings| settings.approved_once)),
+            "the first approval retires the disclosure here before the engine echoes it"
+        );
+        transcript.update(cx, |transcript, _| transcript.consent_sent.clear());
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("computer-approval-disclosure").is_none());
     }
 
     #[gpui::test]

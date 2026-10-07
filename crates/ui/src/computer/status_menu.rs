@@ -4,34 +4,19 @@ use std::rc::Rc;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{App, Entity};
-use zeron_engine::computer::engine_seams::{
-    COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_DECLINE,
-};
-use zeron_proto::UserInputAnswer;
 use zeron_rpc::methods;
 
-use super::presence::{ChatPresence, PresenceTone};
-use super::strip;
+use super::presence::{ChatPresence, DrivenApp};
 use crate::state::AppState;
 
+pub const MENU_TITLE: &str = "Computer Use Controls";
+pub const NO_ACTIVE_SESSIONS: &str = "No Active Sessions";
 const TITLE_LIMIT: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     OpenChat(String),
-    Stop(String),
-    Foreground {
-        chat_id: String,
-        input_id: String,
-        question_id: String,
-        allow: bool,
-    },
-    Consent {
-        chat_id: String,
-        input_id: String,
-        question_id: String,
-        label: String,
-    },
+    StopApp { app: DrivenApp, chats: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +26,7 @@ pub enum MenuRow {
     Separator,
     Action {
         label: String,
-        hint: Option<String>,
+        symbol: Option<&'static str>,
         action: MenuAction,
     },
 }
@@ -49,7 +34,15 @@ pub enum MenuRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusMenu {
     pub rows: Vec<MenuRow>,
-    pub tone: PresenceTone,
+    pub apps: Vec<DrivenApp>,
+}
+
+impl StatusMenu {
+    pub fn active(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|row| matches!(row, MenuRow::Action { .. }))
+    }
 }
 
 fn short_title(title: Option<String>) -> String {
@@ -64,155 +57,97 @@ fn short_title(title: Option<String>) -> String {
     format!("{}…", cut.trim_end())
 }
 
-fn activity(presence: &ChatPresence) -> String {
-    if let Some(ask) = strip::consent_request(presence) {
-        return ask.sentence;
-    }
-    if strip::foreground_request(presence).is_some() {
-        return format!(
-            "{} needs to come to the front",
-            presence.app.as_deref().unwrap_or("The app")
-        );
-    }
-    let copy = strip::strip_copy(presence);
-    match presence.tone {
-        PresenceTone::Paused => copy.lead.unwrap_or(copy.detail),
-        _ => copy.detail,
-    }
-}
-
 pub fn status_menu(
     presences: &[ChatPresence],
     title: impl Fn(&str) -> Option<String>,
+    enabled: bool,
 ) -> Option<StatusMenu> {
     let holding: Vec<_> = presences
         .iter()
         .filter(|presence| presence.holds_desktop())
         .collect();
-    let tone = [
-        PresenceTone::NeedsYou,
-        PresenceTone::Driving,
-        PresenceTone::Paused,
-    ]
-    .into_iter()
-    .find(|tone| holding.iter().any(|presence| presence.tone == *tone))?;
-    let mut rows = vec![MenuRow::Header("Zeron is controlling this Mac".into())];
-    for presence in holding {
-        rows.push(MenuRow::Separator);
-        rows.push(MenuRow::Info(format!(
-            "{} · {}",
-            short_title(title(&presence.chat_id)),
-            presence.app.as_deref().unwrap_or("Desktop")
-        )));
-        rows.push(MenuRow::Info(activity(presence)));
-        if let Some(ask) = strip::consent_request(presence) {
-            for (_, label, answers) in strip::consent_buttons(&ask) {
-                for answer in answers {
-                    rows.push(MenuRow::Action {
-                        label: label.clone(),
-                        hint: None,
-                        action: MenuAction::Consent {
-                            chat_id: presence.chat_id.clone(),
-                            input_id: ask.input_id.clone(),
-                            question_id: answer.question_id,
-                            label: answer.labels.concat(),
-                        },
-                    });
-                }
-            }
-        }
-        if let Some(pending) = strip::foreground_request(presence) {
-            for (label, allow) in [
-                (COMPUTER_FOREGROUND_ALLOW, true),
-                (COMPUTER_FOREGROUND_DECLINE, false),
-            ] {
-                rows.push(MenuRow::Action {
-                    label: label.into(),
-                    hint: None,
-                    action: MenuAction::Foreground {
-                        chat_id: presence.chat_id.clone(),
-                        input_id: pending.input_id.clone(),
-                        question_id: pending.question_id.clone(),
-                        allow,
-                    },
-                });
-            }
-        }
-        rows.push(MenuRow::Action {
-            label: "Open chat".into(),
-            hint: None,
-            action: MenuAction::OpenChat(presence.chat_id.clone()),
+    if holding.is_empty() {
+        return enabled.then(|| StatusMenu {
+            rows: vec![
+                MenuRow::Header(MENU_TITLE.into()),
+                MenuRow::Separator,
+                MenuRow::Info(NO_ACTIVE_SESSIONS.into()),
+            ],
+            apps: Vec::new(),
         });
-        if strip::shows_stop(presence) {
-            rows.push(MenuRow::Action {
-                label: "Stop".into(),
-                hint: Some("Esc".into()),
-                action: MenuAction::Stop(presence.chat_id.clone()),
-            });
+    }
+    let mut apps: Vec<(DrivenApp, Vec<String>)> = Vec::new();
+    for presence in &holding {
+        for app in &presence.apps {
+            match apps.iter_mut().find(|(known, _)| known.same_app(&app.name)) {
+                Some((_, chats)) => chats.push(presence.chat_id.clone()),
+                None => apps.push((app.clone(), vec![presence.chat_id.clone()])),
+            }
         }
     }
-    Some(StatusMenu { rows, tone })
+    let mut rows = vec![MenuRow::Header(MENU_TITLE.into())];
+    if !apps.is_empty() {
+        rows.push(MenuRow::Separator);
+    }
+    for (app, chats) in &apps {
+        rows.push(MenuRow::Action {
+            label: format!("Stop Using {}", app.name),
+            symbol: Some("stop.circle"),
+            action: MenuAction::StopApp {
+                app: app.clone(),
+                chats: chats.clone(),
+            },
+        });
+    }
+    rows.push(MenuRow::Separator);
+    let several = holding.len() > 1;
+    for presence in &holding {
+        rows.push(MenuRow::Action {
+            label: if several {
+                format!("Open chat · {}", short_title(title(&presence.chat_id)))
+            } else {
+                "Open chat".into()
+            },
+            symbol: None,
+            action: MenuAction::OpenChat(presence.chat_id.clone()),
+        });
+    }
+    Some(StatusMenu {
+        rows,
+        apps: apps.into_iter().map(|(app, _)| app).collect(),
+    })
 }
 
-fn revoke_desktop(state: &Entity<AppState>, chat_id: String, cx: &mut App) {
+fn stop_app(state: &Entity<AppState>, app: DrivenApp, chats: Vec<String>, cx: &mut App) {
+    if let Some(store) = super::preview::store(cx) {
+        super::preview::update_store(&store, cx, |store| {
+            chats.iter().fold(false, |changed, chat_id| {
+                store.stop_app(chat_id, &app.name) | changed
+            })
+        });
+    }
     let Some(engine) = state.read(cx).engine().cloned() else {
         return;
     };
-    cx.spawn(async move |_| {
-        if let Err(error) = engine
-            .client()
-            .call(
-                methods::COMPUTER_REVOKE_DESKTOP,
-                serde_json::json!({ "chatId": chat_id }),
-            )
-            .await
-        {
-            tracing::warn!(target: "desktop_cua", "revoke desktop from the menu bar: {error}");
-        }
-    })
-    .detach();
-}
-
-pub(crate) fn answer_pending(
-    state: &Entity<AppState>,
-    chat_id: String,
-    input_id: String,
-    answers: Vec<UserInputAnswer>,
-    cx: &mut App,
-) {
-    let Some(engine) = state.read(cx).engine().cloned() else {
-        return;
-    };
-    super::presence::set_answered(&chat_id, &input_id, true, cx);
-    cx.spawn(async move |cx| {
-        if let Err(error) =
-            crate::composer::respond_input(&engine, &chat_id, &input_id, answers).await
-        {
-            tracing::warn!(target: "desktop_cua", "answer the pending computer request: {error}");
-            cx.update(|cx| super::presence::set_answered(&chat_id, &input_id, false, cx));
-        }
-    })
-    .detach();
-}
-
-fn answer_foreground(
-    state: &Entity<AppState>,
-    chat_id: String,
-    input_id: String,
-    question_id: String,
-    allow: bool,
-    cx: &mut App,
-) {
-    let label = if allow {
-        COMPUTER_FOREGROUND_ALLOW
-    } else {
-        COMPUTER_FOREGROUND_DECLINE
-    };
-    let answers = vec![UserInputAnswer {
-        question_id,
-        labels: vec![label.into()],
-    }];
-    answer_pending(state, chat_id, input_id, answers, cx);
+    for chat_id in chats {
+        let (engine, params) = (
+            engine.clone(),
+            serde_json::json!({
+                "chatId": chat_id,
+                "app": { "name": app.name, "pid": app.pid },
+            }),
+        );
+        cx.spawn(async move |_| {
+            if let Err(error) = engine
+                .client()
+                .call(methods::COMPUTER_REVOKE_DESKTOP, params)
+                .await
+            {
+                tracing::warn!(target: "desktop_cua", "stop using an app from the menu bar: {error}");
+            }
+        })
+        .detach();
+    }
 }
 
 pub fn drive(
@@ -223,20 +158,28 @@ pub fn drive(
 ) -> Option<mpsc::UnboundedSender<MenuAction>> {
     let map = super::presence::map(cx)?;
     let (actions, mut received) = mpsc::unbounded::<MenuAction>();
-    let applied: Rc<RefCell<Option<StatusMenu>>> = Rc::default();
+    let applied: Rc<RefCell<Option<Option<StatusMenu>>>> = Rc::default();
     let refresh = Rc::new({
         let (map, state, actions) = (map.clone(), state.clone(), actions.clone());
         move |cx: &mut App| {
             let chats = state.read(cx);
-            let model = status_menu(map.read(cx).chats(), |chat_id| {
-                chats
-                    .chats
-                    .iter()
-                    .find(|chat| chat.id == chat_id)
-                    .and_then(|chat| chat.title.clone())
-            });
-            if *applied.borrow() != model {
-                applied.replace(model.clone());
+            let enabled = chats
+                .computer_settings
+                .as_ref()
+                .is_some_and(|settings| settings.computer_control_enabled);
+            let model = status_menu(
+                map.read(cx).chats(),
+                |chat_id| {
+                    chats
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == chat_id)
+                        .and_then(|chat| chat.title.clone())
+                },
+                enabled,
+            );
+            if applied.borrow().as_ref() != Some(&model) {
+                applied.replace(Some(model.clone()));
                 apply(model, &actions);
             }
         }
@@ -246,33 +189,17 @@ pub fn drive(
         move |_, cx| refresh(cx)
     })
     .detach();
-    cx.observe(&state, move |_, cx| refresh(cx)).detach();
+    cx.observe(&state, {
+        let refresh = refresh.clone();
+        move |_, cx| refresh(cx)
+    })
+    .detach();
+    refresh(cx);
     cx.spawn(async move |cx| {
         while let Some(action) = received.next().await {
             cx.update(|cx| match action {
                 MenuAction::OpenChat(chat_id) => open_chat(chat_id, cx),
-                MenuAction::Stop(chat_id) => revoke_desktop(&state, chat_id, cx),
-                MenuAction::Foreground {
-                    chat_id,
-                    input_id,
-                    question_id,
-                    allow,
-                } => answer_foreground(&state, chat_id, input_id, question_id, allow, cx),
-                MenuAction::Consent {
-                    chat_id,
-                    input_id,
-                    question_id,
-                    label,
-                } => answer_pending(
-                    &state,
-                    chat_id,
-                    input_id,
-                    vec![UserInputAnswer {
-                        question_id,
-                        labels: vec![label],
-                    }],
-                    cx,
-                ),
+                MenuAction::StopApp { app, chats } => stop_app(&state, app, chats, cx),
             });
         }
     })
@@ -285,19 +212,26 @@ mod tests {
     use zeron_proto::computer::{ComputerEvent, ComputerInputPause};
 
     use super::*;
-    use crate::computer::presence::presences;
+    use crate::computer::presence::{PresenceTone, presences};
     use crate::computer::preview::ComputerPreviewStore;
     use crate::computer::preview::tests::{driving, thread_state};
 
-    fn presence(chat: &str, tone: PresenceTone) -> ChatPresence {
+    fn app(name: &str, pid: u32) -> DrivenApp {
+        DrivenApp {
+            name: name.into(),
+            pid: Some(pid),
+        }
+    }
+
+    fn presence(chat: &str, tone: PresenceTone, apps: Vec<DrivenApp>) -> ChatPresence {
         ChatPresence {
             chat_id: chat.into(),
-            app: Some("Ghostty".into()),
+            app: apps.first().map(|app| app.name.clone()),
             window_id: Some("cua:42:7".into()),
-            activity: Some("Typing".into()),
             tone,
             user_takeover: false,
             pending: None,
+            apps,
         }
     }
 
@@ -309,175 +243,100 @@ mod tests {
         }
     }
 
-    fn info(text: &str) -> MenuRow {
-        MenuRow::Info(text.into())
+    fn stop(app: DrivenApp, chats: &[&str]) -> MenuRow {
+        MenuRow::Action {
+            label: format!("Stop Using {}", app.name),
+            symbol: Some("stop.circle"),
+            action: MenuAction::StopApp {
+                app,
+                chats: chats.iter().map(|chat| chat.to_string()).collect(),
+            },
+        }
     }
 
-    fn open(chat: &str) -> MenuRow {
+    fn open(label: &str, chat: &str) -> MenuRow {
         MenuRow::Action {
-            label: "Open chat".into(),
-            hint: None,
+            label: label.into(),
+            symbol: None,
             action: MenuAction::OpenChat(chat.into()),
         }
     }
 
-    fn stop(chat: &str) -> MenuRow {
-        MenuRow::Action {
-            label: "Stop".into(),
-            hint: Some("Esc".into()),
-            action: MenuAction::Stop(chat.into()),
-        }
-    }
-
     #[test]
-    fn no_menu_when_nothing_drives() {
-        assert_eq!(status_menu(&[], titles), None);
-        let revoked = [
-            presence("a", PresenceTone::Revoked { summing_up: true }),
-            presence("b", PresenceTone::Revoked { summing_up: false }),
+    fn idle_reads_no_active_sessions_only_while_computer_use_is_on() {
+        let idle = [
+            presence("a", PresenceTone::Revoked { summing_up: true }, Vec::new()),
+            presence("b", PresenceTone::Revoked { summing_up: false }, Vec::new()),
         ];
-        assert_eq!(status_menu(&revoked, titles), None);
-    }
-
-    #[test]
-    fn one_block_per_driving_chat_with_open_and_stop() {
-        let mut paused = presence("b", PresenceTone::Paused);
-        paused.app = Some("Calculator".into());
-        let menu = status_menu(
-            &[
-                presence("a", PresenceTone::Driving),
-                paused.clone(),
-                presence("c", PresenceTone::Revoked { summing_up: true }),
-            ],
-            titles,
-        )
-        .expect("menu");
-        assert_eq!(menu.tone, PresenceTone::Driving);
+        assert_eq!(status_menu(&idle, titles, false), None);
+        let menu = status_menu(&idle, titles, true).expect("the idle menu");
         assert_eq!(
             menu.rows,
             vec![
-                MenuRow::Header("Zeron is controlling this Mac".into()),
+                MenuRow::Header("Computer Use Controls".into()),
                 MenuRow::Separator,
-                info("Agent Orchestration for the rel… · Ghostty"),
-                info("Typing"),
-                open("a"),
-                stop("a"),
-                MenuRow::Separator,
-                info("Fix the build · Calculator"),
-                info("Calculator isn't reachable"),
-                open("b"),
+                MenuRow::Info("No Active Sessions".into()),
             ]
         );
-        let menu = status_menu(&[paused.clone()], titles).unwrap();
-        assert_eq!(
-            menu.tone,
-            PresenceTone::Paused,
-            "only paused chats: warning"
-        );
-        let taken = ChatPresence {
-            user_takeover: true,
-            ..paused
-        };
-        assert_eq!(
-            status_menu(&[taken], titles).unwrap().rows[2..],
-            [
-                info("Fix the build · Calculator"),
-                info("You're using Calculator"),
-                open("b"),
-            ],
-            "no Stop while the user holds the window"
-        );
-        let bare = ChatPresence {
-            app: None,
-            activity: None,
-            ..presence("z", PresenceTone::NeedsYou)
-        };
-        let menu = status_menu(&[presence("a", PresenceTone::Driving), bare], titles).unwrap();
-        assert_eq!(menu.tone, PresenceTone::NeedsYou);
-        assert_eq!(
-            &menu.rows[6..],
-            &[
-                MenuRow::Separator,
-                info("New session · Desktop"),
-                info("Working"),
-                open("z"),
-            ],
-            "no Stop while a chat waits for the user"
-        );
+        assert!(!menu.active());
+        assert!(menu.apps.is_empty());
     }
 
     #[test]
-    fn a_foreground_request_offers_allow_and_no_with_its_ids() {
-        let asking = ChatPresence {
-            pending: Some(crate::computer::strip::tests::foreground_pending(Some(
-                "Ghostty",
-            ))),
-            ..presence("b", PresenceTone::NeedsYou)
-        };
-        let menu = status_menu(&[presence("a", PresenceTone::Driving), asking], titles).unwrap();
-        assert_eq!(menu.tone, PresenceTone::NeedsYou);
-        let answer = |label: &str, allow| MenuRow::Action {
-            label: label.into(),
-            hint: None,
-            action: MenuAction::Foreground {
-                chat_id: "b".into(),
-                input_id: "computer-foreground-1".into(),
-                question_id: "foreground".into(),
-                allow,
-            },
-        };
-        assert_eq!(
-            &menu.rows[6..],
+    fn one_stop_per_driven_app_for_every_chat_driving_it() {
+        let calculator = app("Calculator", 11);
+        let ghostty = app("Ghostty", 22);
+        let menu = status_menu(
             &[
+                presence(
+                    "a",
+                    PresenceTone::Driving,
+                    vec![calculator.clone(), ghostty.clone()],
+                ),
+                presence("b", PresenceTone::Paused, vec![app("calculator", 11)]),
+                presence(
+                    "c",
+                    PresenceTone::Revoked { summing_up: true },
+                    vec![app("Notes", 33)],
+                ),
+            ],
+            titles,
+            false,
+        )
+        .expect("menu");
+        assert!(menu.active());
+        assert_eq!(
+            menu.rows,
+            vec![
+                MenuRow::Header("Computer Use Controls".into()),
                 MenuRow::Separator,
-                info("Fix the build · Ghostty"),
-                info("Ghostty needs to come to the front"),
-                answer("Allow for this turn", true),
-                answer("No", false),
-                open("b"),
+                stop(calculator.clone(), &["a", "b"]),
+                stop(ghostty.clone(), &["a"]),
+                MenuRow::Separator,
+                open("Open chat · Agent Orchestration for the rel…", "a"),
+                open("Open chat · Fix the build", "b"),
             ]
         );
-    }
-
-    #[test]
-    fn a_consent_request_offers_the_strip_choices_with_its_ids() {
-        use zeron_proto::computer::ComputerConsentScope;
-        let asking = ChatPresence {
-            pending: Some(crate::computer::strip::tests::consent_pending(
-                ComputerConsentScope::Task,
-                Some("Ghostty"),
-                true,
-            )),
-            ..presence("b", PresenceTone::NeedsYou)
-        };
-        let menu = status_menu(&[asking], titles).unwrap();
-        assert_eq!(menu.tone, PresenceTone::NeedsYou);
-        let answer = |label: &str, engine: &str| MenuRow::Action {
-            label: label.into(),
-            hint: None,
-            action: MenuAction::Consent {
-                chat_id: "b".into(),
-                input_id: "computer-consent-1".into(),
-                question_id: "consent".into(),
-                label: engine.into(),
-            },
-        };
+        assert_eq!(menu.apps, vec![calculator, ghostty], "the icon stack");
+        let single = status_menu(
+            &[presence("b", PresenceTone::NeedsYou, Vec::new())],
+            titles,
+            true,
+        )
+        .unwrap();
         assert_eq!(
-            &menu.rows[1..],
-            &[
+            single.rows,
+            vec![
+                MenuRow::Header("Computer Use Controls".into()),
                 MenuRow::Separator,
-                info("Fix the build · Ghostty"),
-                info("Type in Ghostty"),
-                answer("Allow for this task", "Allow"),
-                answer("Always allow Ghostty", "Always allow Ghostty"),
-                answer("No", "Deny"),
-                open("b"),
-            ]
+                open("Open chat", "b"),
+            ],
+            "a chat with no app yet still opens"
         );
     }
 
     #[gpui::test]
-    fn the_menu_follows_presence_and_titles_and_its_actions_reach_the_engine(
+    fn stop_using_an_app_revokes_only_that_app_in_every_chat_driving_it(
         cx: &mut gpui::TestAppContext,
     ) {
         use gpui::AppContext;
@@ -495,16 +354,19 @@ mod tests {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(
                 zeron_rpc::RpcClient::new(out, inbound),
             ));
-            state.chats = vec![
-                serde_json::from_value(serde_json::json!({
-                    "id": "a",
-                    "deviceId": "mac",
-                    "title": "Ship it",
-                    "archived": false,
-                    "createdAt": "2026-09-23T00:00:00Z"
-                }))
-                .unwrap(),
-            ];
+            state.chats = ["a", "b"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id,
+                        "deviceId": "mac",
+                        "title": format!("Ship {id}"),
+                        "archived": false,
+                        "createdAt": "2026-09-23T00:00:00Z"
+                    }))
+                    .unwrap()
+                })
+                .collect();
         });
         let applied: Rc<RefCell<Vec<Option<StatusMenu>>>> = Rc::default();
         let opened: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -529,150 +391,127 @@ mod tests {
             cx.update(|cx| preview::update_store(&store, cx, |store| store.apply_event(&event)));
             cx.run_until_parked();
         };
-        let info_rows = |menu: &Option<StatusMenu>| -> Vec<String> {
+        let click = |thread: &str, window: &str| ComputerEvent::Action {
+            window_id: Some(window.into()),
+            delivery: None,
+            action: "computer_click".into(),
+            ok: true,
+            message: None,
+            thread_id: Some(thread.into()),
+            restored_window_id: None,
+            restore_status: None,
+            masked: false,
+        };
+        let stops = |menu: &Option<StatusMenu>| -> Vec<String> {
             menu.iter()
                 .flat_map(|menu| menu.rows.iter())
                 .filter_map(|row| match row {
-                    MenuRow::Info(text) => Some(text.clone()),
+                    MenuRow::Action {
+                        label,
+                        action: MenuAction::StopApp { .. },
+                        ..
+                    } => Some(label.clone()),
                     _ => None,
                 })
                 .collect()
         };
-
-        let mut typing = thread_state("a", true);
-        typing.activity = Some("Typing".into());
-        apply(
-            cx,
-            ComputerEvent::ThreadState {
-                state: Box::new(typing),
-            },
-        );
-        apply(
-            cx,
-            ComputerEvent::Action {
-                window_id: Some("w1".into()),
-                delivery: None,
-                action: "computer_click".into(),
-                ok: true,
-                message: None,
-                thread_id: Some("a".into()),
-                restored_window_id: None,
-                restore_status: None,
-                masked: false,
-            },
-        );
         assert_eq!(
-            info_rows(applied.borrow().last().unwrap()),
-            vec!["Ship it · Calculator", "Typing"]
-        );
-        let count = applied.borrow().len();
-        cx.update(|cx| {
-            preview::update_store(&store, cx, |store| {
-                store.accept_tap_frame("a", crate::computer::preview::tests::image(1, 960, 600))
-            })
-        });
-        state.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        assert_eq!(
-            applied.borrow().len(),
-            count,
-            "frames and unrelated state changes reapply nothing"
+            applied.borrow().last(),
+            Some(&None),
+            "off and idle: no item"
         );
 
-        state.update(cx, |state, cx| {
-            state.chats[0].title = Some("Renamed".into());
-            cx.notify();
-        });
-        cx.run_until_parked();
+        for chat in ["a", "b"] {
+            let mut active = thread_state(chat, true);
+            active.windows[0].id = "cua:4242:9".into();
+            active.windows.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "cua:77:5", "title": "Term", "appName": "Ghostty", "pid": 77,
+                    "focused": false, "minimized": false, "visible": true
+                }))
+                .unwrap(),
+            );
+            apply(
+                cx,
+                ComputerEvent::ThreadState {
+                    state: Box::new(active),
+                },
+            );
+            apply(cx, click(chat, "cua:4242:9"));
+        }
+        apply(cx, click("a", "cua:77:5"));
         assert_eq!(
-            info_rows(applied.borrow().last().unwrap())[0],
-            "Renamed · Calculator"
+            stops(applied.borrow().last().unwrap()),
+            vec!["Stop Using Calculator", "Stop Using Ghostty"]
         );
 
-        actions
-            .unbounded_send(MenuAction::Stop("a".into()))
-            .unwrap();
-        actions
-            .unbounded_send(MenuAction::OpenChat("a".into()))
-            .unwrap();
-        actions
-            .unbounded_send(MenuAction::Foreground {
-                chat_id: "a".into(),
-                input_id: "computer-foreground-3".into(),
-                question_id: "foreground".into(),
-                allow: false,
+        let calculator = applied
+            .borrow()
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                MenuRow::Action {
+                    action: action @ MenuAction::StopApp { app, .. },
+                    ..
+                } if app.name == "Calculator" => Some(action.clone()),
+                _ => None,
             })
             .unwrap();
+        actions.unbounded_send(calculator).unwrap();
         actions
-            .unbounded_send(MenuAction::Consent {
-                chat_id: "a".into(),
-                input_id: "computer-consent-4".into(),
-                question_id: "consent".into(),
-                label: "Always allow Ghostty".into(),
-            })
+            .unbounded_send(MenuAction::OpenChat("b".into()))
             .unwrap();
         cx.run_until_parked();
         let mut revokes = Vec::new();
-        let mut answers = Vec::new();
         while let Ok(frame) = frames.try_recv() {
             let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
             if frame["method"] == methods::COMPUTER_REVOKE_DESKTOP {
                 revokes.push(frame["params"].clone());
             }
-            if frame["method"] == methods::QUEUE_COMMAND {
-                answers.push(frame["params"].clone());
-            }
         }
-        assert_eq!(revokes, vec![serde_json::json!({ "chatId": "a" })]);
-        assert_eq!(answers.len(), 2, "{answers:?}");
         assert_eq!(
-            answers[0]["command"],
-            serde_json::to_value(zeron_doc::SessionCommandPayload::RespondInput {
-                request_id: "computer-foreground-3".into(),
-                answers: vec![UserInputAnswer {
-                    question_id: "foreground".into(),
-                    labels: vec!["No".into()],
-                }],
-            })
-            .unwrap()
+            revokes,
+            vec![
+                serde_json::json!({ "chatId": "a", "app": { "name": "Calculator", "pid": 4242 } }),
+                serde_json::json!({ "chatId": "b", "app": { "name": "Calculator", "pid": 4242 } }),
+            ],
+            "one per chat driving it, each naming only that app"
         );
+        assert_eq!(*opened.borrow(), vec!["b".to_string()]);
         assert_eq!(
-            answers[1]["command"],
-            serde_json::to_value(zeron_doc::SessionCommandPayload::RespondInput {
-                request_id: "computer-consent-4".into(),
-                answers: vec![UserInputAnswer {
-                    question_id: "consent".into(),
-                    labels: vec!["Always allow Ghostty".into()],
-                }],
-            })
-            .unwrap()
+            stops(applied.borrow().last().unwrap()),
+            vec!["Stop Using Ghostty"],
+            "the stopped app leaves the menu; the other stays"
         );
-        assert_eq!(*opened.borrow(), vec!["a".to_string()]);
-        cx.update(|cx| {
-            for input in ["computer-foreground-3", "computer-consent-4"] {
-                assert!(
-                    crate::computer::presence::answered("a", input, cx),
-                    "{input}: a menu answer marks the id as answered here"
-                );
-            }
-            assert!(!crate::computer::presence::answered(
-                "b",
-                "computer-consent-4",
-                cx
-            ));
-        });
 
-        apply(
-            cx,
-            ComputerEvent::ThreadState {
-                state: Box::new(thread_state("a", false)),
-            },
-        );
-        assert_eq!(
-            applied.borrow().last(),
-            Some(&None),
-            "idle removes the item"
-        );
+        for chat in ["a", "b"] {
+            apply(
+                cx,
+                ComputerEvent::ThreadState {
+                    state: Box::new(thread_state(chat, false)),
+                },
+            );
+        }
+        assert_eq!(applied.borrow().last(), Some(&None), "idle and off");
+        state.update(cx, |state, cx| {
+            state.computer_settings = Some(zeron_proto::computer::ComputerSettings {
+                computer_control_enabled: true,
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let idle = applied
+            .borrow()
+            .last()
+            .cloned()
+            .flatten()
+            .expect("idle menu");
+        assert_eq!(idle.rows[2], MenuRow::Info("No Active Sessions".into()));
     }
 
     #[test]
@@ -680,7 +519,7 @@ mod tests {
         let mut store = ComputerPreviewStore::default();
         driving(&mut store, "a");
         store.apply_event(&ComputerEvent::Action {
-            window_id: Some("cua:4242:9191".into()),
+            window_id: Some("w1".into()),
             delivery: None,
             action: "computer_type_text".into(),
             ok: true,
@@ -693,7 +532,7 @@ mod tests {
         let mut typing = thread_state("a", true);
         typing.activity = Some("Typing".into());
         typing.input_pause = Some(ComputerInputPause {
-            window_id: Some("cua:4242:9191".into()),
+            window_id: Some("w1".into()),
             pid: Some(4242),
             message: "computer_type_text refused for hunter2-secret".into(),
             user_takeover: false,
@@ -701,56 +540,23 @@ mod tests {
         store.apply_event(&ComputerEvent::ThreadState {
             state: Box::new(typing),
         });
-        let mut all = presences(&store);
-        assert_eq!(all[0].tone, PresenceTone::Paused);
-        let mut texts = Vec::new();
-        for (tone, user_takeover) in [
-            (PresenceTone::Paused, false),
-            (PresenceTone::Paused, true),
-            (PresenceTone::Driving, false),
-            (PresenceTone::NeedsYou, false),
-        ] {
-            all[0].tone = tone;
-            all[0].user_takeover = user_takeover;
-            all[0].pending = (tone == PresenceTone::NeedsYou)
-                .then(|| crate::computer::strip::tests::foreground_pending(Some("Calculator")));
-            let menu = status_menu(&all, |_| Some("Ship it".into())).unwrap();
-            texts.extend(menu.rows.into_iter().filter_map(|row| match row {
+        let all = presences(&store);
+        let menu = status_menu(&all, |_| Some("Ship it".into()), true).unwrap();
+        let texts: Vec<String> = menu
+            .rows
+            .into_iter()
+            .filter_map(|row| match row {
                 MenuRow::Header(text) | MenuRow::Info(text) => Some(text),
-                MenuRow::Action { label, hint, .. } => {
-                    Some(format!("{label} {}", hint.unwrap_or_default()))
-                }
+                MenuRow::Action { label, .. } => Some(label),
                 MenuRow::Separator => None,
-            }));
-            all[0].pending = (tone == PresenceTone::NeedsYou).then(|| {
-                crate::computer::strip::tests::consent_pending(
-                    zeron_proto::computer::ComputerConsentScope::Task,
-                    Some("Calculator"),
-                    true,
-                )
-            });
-            let menu = status_menu(&all, |_| Some("Ship it".into())).unwrap();
-            texts.extend(menu.rows.into_iter().filter_map(|row| match row {
-                MenuRow::Header(text) | MenuRow::Info(text) => Some(text),
-                MenuRow::Action { label, hint, .. } => {
-                    Some(format!("{label} {}", hint.unwrap_or_default()))
-                }
-                MenuRow::Separator => None,
-            }));
-        }
+            })
+            .collect();
         assert!(
-            texts.contains(&"Ship it · Desktop".to_string()),
+            texts.contains(&"Stop Using Calculator".to_string()),
             "{texts:?}"
         );
         for text in texts {
-            for secret in [
-                "computer_",
-                "hunter2",
-                "4242",
-                "9191",
-                "cua:",
-                "com.mitchellh",
-            ] {
+            for secret in ["computer_", "hunter2", "4242", "cua:"] {
                 assert!(!text.contains(secret), "{text} carries {secret}");
             }
         }
