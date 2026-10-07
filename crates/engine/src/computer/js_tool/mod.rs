@@ -55,11 +55,16 @@ pub struct JsOutcome {
 }
 
 impl JsOutcome {
-    pub fn into_result(self, title: Option<&str>) -> McpToolResult {
+    pub fn into_result(self) -> McpToolResult {
         let mut content = self.content;
         if let Some(error) = &self.error {
             content.push(McpContent::Text {
                 text: error.clone(),
+            });
+        }
+        if !self.actions.is_empty() {
+            content.push(McpContent::Text {
+                text: json!({ "actions": self.actions }).to_string(),
             });
         }
         if content.is_empty() {
@@ -69,11 +74,7 @@ impl JsOutcome {
         }
         McpToolResult {
             content,
-            structured_content: Some(json!({
-                "tool": COMPUTER_JS_TOOL,
-                "title": title,
-                "actions": self.actions,
-            })),
+            structured_content: None,
             is_error: self.error.is_some(),
         }
     }
@@ -386,32 +387,24 @@ fn redeclared_name(error: &str) -> Option<String> {
 }
 
 fn relax_const(code: &str) -> String {
-    code.split_inclusive('\n')
-        .map(|line| {
-            let indent = line.len() - line.trim_start().len();
-            match line[indent..].strip_prefix("const ") {
-                Some(rest) => format!("{}let {rest}", &line[..indent]),
-                None => line.to_owned(),
-            }
-        })
-        .collect()
+    static CONST: OnceLock<regex::Regex> = OnceLock::new();
+    CONST
+        .get_or_init(|| regex::Regex::new(r"(^|[;{}(]|\n)(\s*)const\s").expect("valid regex"))
+        .replace_all(code, "${1}${2}let ")
+        .into_owned()
 }
 
 fn rewrite_redeclaration(code: &str, name: &str) -> String {
-    let mut out = String::with_capacity(code.len());
-    for line in code.split_inclusive('\n') {
-        let indent = line.len() - line.trim_start().len();
-        let body = &line[indent..];
-        let replaced = ["let ", "const ", "var "].iter().find_map(|keyword| {
-            let after = body.strip_prefix(keyword)?;
-            let rest = after.strip_prefix(name)?;
-            let next = rest.chars().next();
-            (matches!(next, Some(' ' | '=' | ';' | '\n' | '\r')) || next.is_none())
-                .then(|| format!("{}{name}{rest}", &line[..indent]))
-        });
-        out.push_str(replaced.as_deref().unwrap_or(line));
+    let pattern = format!(
+        r"(^|[;{{}}(]|\n)(\s*)(?:let|const|var)\s+{}\b",
+        regex::escape(name)
+    );
+    match regex::Regex::new(&pattern) {
+        Ok(declaration) => declaration
+            .replace_all(code, format!("${{1}}${{2}}{name}").as_str())
+            .into_owned(),
+        Err(_) => code.to_owned(),
     }
-    out
 }
 
 impl Shared {

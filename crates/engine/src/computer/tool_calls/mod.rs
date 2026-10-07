@@ -699,10 +699,6 @@ async fn computer_js(
     let Some(code) = args.get("code").and_then(Value::as_str) else {
         return McpToolResult::error("The computer tool needs a \"code\" string.");
     };
-    let title = args
-        .get("title")
-        .and_then(Value::as_str)
-        .map(|title| js_slice(title, 80).to_owned());
     let timeout = args
         .get("timeout_ms")
         .and_then(Value::as_u64)
@@ -748,5 +744,5 @@ async fn computer_js(
     .await;
     watcher.abort();
     calls.finish(&key);
-    outcome.into_result(title.as_deref())
+    outcome.into_result()
 }

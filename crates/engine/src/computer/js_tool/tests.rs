@@ -288,3 +288,43 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
             .any(|args| args["keep"] == json!("deliverable") && args["tab_id"] == json!("tab-new"))
     );
 }
+
+#[tokio::test]
+async fn a_mid_line_redeclaration_after_a_semicolon_is_reassigned_too() {
+    let host = Arc::new(FakeHost::default());
+    exec("js-k", &host, "const st = 1;").await;
+    let outcome = exec(
+        "js-k",
+        &host,
+        "for (let i = 0; i < 2; i++) {} const st = 2; st",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert!(texts(&outcome).ends_with("2"));
+}
+
+#[tokio::test]
+async fn a_successful_result_carries_its_text_and_actions_without_structured_content() {
+    let host = Arc::new(FakeHost::default());
+    let result = exec(
+        "js-l",
+        &host,
+        "var c = await cua.getApp(\"Calculator\"); await c.click(3);",
+    )
+    .await
+    .into_result();
+    assert!(result.structured_content.is_none());
+    let text: Vec<&str> = result
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            McpContent::Text { text } => Some(text.as_str()),
+            McpContent::Image { .. } => None,
+        })
+        .collect();
+    assert!(text.iter().any(|t| t.contains("7 text Value: 42")));
+    assert_eq!(
+        serde_json::from_str::<Value>(text.last().unwrap()).unwrap(),
+        json!({ "actions": [{ "tool": "click", "app": "Calculator" }] })
+    );
+}
