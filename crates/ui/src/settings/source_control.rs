@@ -355,7 +355,7 @@ impl Render for SourceControlPage {
                 &theme,
                 true,
                 "Chat history",
-                "Keep per PR: reopening a PR shows its earlier chats. Fresh every time: a new chat or another PR discards the old chat unless you turn it into a thread.",
+                "Keep per PR: reopening a PR shows its earlier chats. Fresh every time: a new chat discards the old one unless you turn it into a thread.",
                 None,
                 None,
                 history_control,

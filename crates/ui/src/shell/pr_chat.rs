@@ -203,7 +203,7 @@ impl Shell {
         reveal_previous: bool,
         cx: &mut Context<Self>,
     ) {
-        self.release_pr_chat(cx);
+        self.discard_pr_chat(cx);
         let newest = self.newest_pr_chat_session(&context.index_key(), cx);
         match newest {
             Some((row, created_at)) if !self.pr_chat_idle_expired(&row.id, created_at, cx) => {
@@ -2937,6 +2937,29 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Chat)));
+    }
+
+    #[gpui::test]
+    fn fresh_switching_prs_leaves_a_settled_chat_untouched(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_history = PrChatHistory::Fresh;
+            })
+        });
+        let (chat_id, _) = send_review(&runtime, &shell, cx, &mut wire);
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item_n(8), None, cx));
+        let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
+        assert!(deleted(&frames).is_empty(), "{frames:?}");
+        shell.read_with(cx, |shell, cx| {
+            assert_ne!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id);
+            assert!(settings::current(cx).pr_chat_indexed(&chat_id));
+        });
     }
 
     #[gpui::test]
