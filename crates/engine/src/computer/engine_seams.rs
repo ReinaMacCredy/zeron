@@ -28,6 +28,7 @@ pub struct EngineComputerSeams {
     gate: ComputerApprovalGate,
     cards: Mutex<HashMap<String, (String, String)>>,
     pending: Mutex<Option<PendingSink>>,
+    approved: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -41,7 +42,12 @@ impl EngineComputerSeams {
             gate,
             cards: Mutex::default(),
             pending: Mutex::default(),
+            approved: Mutex::default(),
         }
+    }
+
+    pub fn on_approved(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.approved) = Some(hook);
     }
 
     pub fn on_pending(&self, sink: PendingSink) {
@@ -241,13 +247,22 @@ impl ComputerManagerSeams for EngineComputerSeams {
         );
         let gate = self.gate.clone();
         let pending = lock(&self.pending).clone();
+        let approved = lock(&self.approved).clone();
         tokio::spawn(async move {
             let answers = answers.await;
             if let Some(pending) = pending {
                 pending(&card.chat_id, None, &input_id, None);
             }
             if let Ok(answers) = answers {
-                gate.respond(&card.chat_id, &card.request_id, consent_decision(&answers));
+                let decision = consent_decision(&answers);
+                if matches!(
+                    decision,
+                    ApprovalDecision::Accept | ApprovalDecision::AcceptForSession
+                ) && let Some(approved) = approved
+                {
+                    approved();
+                }
+                gate.respond(&card.chat_id, &card.request_id, decision);
             }
         });
         Ok(())
