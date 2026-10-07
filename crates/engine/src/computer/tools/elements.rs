@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use crate::computer::element_identity::computer_element_ref_identity;
 use crate::computer::ui_tree_targeting::{
     ComputerActionableElement, ComputerActionableElementChange, ComputerActionableElementRef,
     ComputerActionableElements, diff_actionable_elements,
@@ -45,28 +44,33 @@ impl ElementState {
         elements: ComputerActionableElements,
     ) -> ComputerActionableElements {
         let table = self.ref_tables.entry(thread_id.to_owned()).or_default();
-        if table.entries.len() + elements.items.len() > MAX_ELEMENT_REFS {
+        let keys: Vec<String> = elements
+            .ref_index
+            .iter()
+            .map(|id| json!([id.window_id, id.role, id.label, id.ordinal]).to_string())
+            .collect();
+        let unseen = keys
+            .iter()
+            .filter(|key| !table.by_key.contains_key(*key))
+            .count();
+        if table.entries.len() + unseen > MAX_ELEMENT_REFS {
             table.by_key.clear();
             table.entries.clear();
         }
         let mut stable = elements;
         for (index, item) in stable.items.iter_mut().enumerate() {
             let id = &stable.ref_index[index];
-            let identity = match computer_element_ref_identity(id) {
-                Some(native) => json!(["native", native]),
-                None => json!(["ordinal", id.ordinal]),
-            };
-            let key = json!([id.window_id, id.role, id.label, identity]).to_string();
-            let element_ref = match table.by_key.get(&key) {
+            let key = &keys[index];
+            let element_ref = match table.by_key.get(key) {
                 Some(existing) => *existing,
                 None => {
                     let minted = table.next;
                     table.next += 1;
-                    table.by_key.insert(key, minted);
-                    table.entries.insert(minted, id.clone());
+                    table.by_key.insert(key.clone(), minted);
                     minted
                 }
             };
+            table.entries.insert(element_ref, id.clone());
             item.element_ref = element_ref;
         }
         stable
@@ -193,7 +197,8 @@ pub(super) fn element_change_fields(
     limit: Option<usize>,
 ) -> Map<String, Value> {
     let empty = Vec::new();
-    let changes = diff_actionable_elements(before.map_or(&empty, |before| &before.items), &stable.items);
+    let changes =
+        diff_actionable_elements(before.map_or(&empty, |before| &before.items), &stable.items);
     let mut remaining = limit.unwrap_or(usize::MAX);
     let mut take = |count: usize| {
         let selected = count.min(remaining);
@@ -235,4 +240,101 @@ pub(super) fn element_change_fields(
         fields.insert("elementChangesIncomplete".into(), json!(true));
     }
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use zeron_proto::computer::{ComputerRect, ComputerUiNode};
+
+    use super::*;
+    use crate::computer::element_identity::{
+        computer_element_ref_identity, retain_computer_element,
+    };
+
+    fn listing(labels: &[&str], token_prefix: &str) -> ComputerActionableElements {
+        let node = |label: &str| ComputerUiNode {
+            role: "AXButton".into(),
+            label: Some(label.into()),
+            value: None,
+            description: None,
+            frame: ComputerRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            activation_point: None,
+            on_screen: true,
+            window_id: Some("w".into()),
+            accessibility_root: None,
+            node_path: None,
+            editable: None,
+            truncated: None,
+            children: Vec::new(),
+        };
+        ComputerActionableElements {
+            items: labels
+                .iter()
+                .map(|label| ComputerActionableElement {
+                    element_ref: 0,
+                    role: "AXButton".into(),
+                    label: (*label).into(),
+                    value: None,
+                    window_id: Some("w".into()),
+                    unclamped_value: None,
+                })
+                .collect(),
+            ref_index: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| ComputerActionableElementRef {
+                    label: (*label).into(),
+                    role: "AXButton".into(),
+                    window_id: Some("w".into()),
+                    ordinal: 0,
+                    observed: retain_computer_element(
+                        &node(label),
+                        Some(format!("{token_prefix}:{index}")),
+                    ),
+                })
+                .collect(),
+            complete: true,
+            source_incomplete: false,
+            omitted: 0,
+        }
+    }
+
+    // Catches keying refs on the driver's per-snapshot element token: every
+    // re-read would mint fresh numbers and strand the agent's earlier refs.
+    #[test]
+    fn keeps_refs_stable_when_the_driver_rotates_its_snapshot_tokens() {
+        let mut state = ElementState::default();
+        let first = state.remember_digest("t", "k", listing(&["Save", "Open"], "s1"));
+        let second = state.remember_digest("t", "k", listing(&["Save", "Open"], "s2"));
+        let refs = |l: &ComputerActionableElements| {
+            l.items
+                .iter()
+                .map(|item| item.element_ref)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(refs(&first), refs(&second));
+        let RefLookup::Found(entry) = state.lookup_ref("t", second.items[0].element_ref as u64)
+        else {
+            panic!("ref must resolve");
+        };
+        assert_eq!(computer_element_ref_identity(&entry), Some("s2:0"));
+    }
+
+    // Catches counting every re-read item as new: a window holding more than
+    // half the table's capacity would clear and renumber on each read.
+    #[test]
+    fn a_large_window_reread_never_clears_the_table() {
+        let labels: Vec<String> = (0..300).map(|index| format!("Item {index}")).collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let mut state = ElementState::default();
+        let first = state.remember_digest("t", "k", listing(&labels, "s1"));
+        let second = state.remember_digest("t", "k", listing(&labels, "s2"));
+        assert_eq!(first.items[299].element_ref, second.items[299].element_ref);
+        assert_eq!(second.items[0].element_ref, 0);
+    }
 }
