@@ -256,6 +256,7 @@ impl InlineWebView {
         let monitor_clip = clip.clone();
         let monitor_parent = parent.clone();
         let monitor_scrolls = scrolls.clone();
+        let monitor_view = view.clone();
         // A page that fits its frame has nothing to scroll; the wheel belongs
         // to the transcript, or the thread stops scrolling under the pointer.
         let callback = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
@@ -269,6 +270,16 @@ impl InlineWebView {
                 && point.x < region.origin.x + region.size.width
                 && point.y >= region.origin.y
                 && point.y < region.origin.y + region.size.height;
+            // GPUI's view never takes first responder on click, so the page
+            // would keep eating Space and arrows typed into the composer.
+            if e.r#type() == objc2_app_kit::NSEventType::LeftMouseDown {
+                if !inside && has_focus(&monitor_view) {
+                    if let Some(window) = monitor_parent.window() {
+                        window.makeFirstResponder(Some(&monitor_parent));
+                    }
+                }
+                return event.as_ptr();
+            }
             if !inside {
                 return event.as_ptr();
             }
@@ -286,7 +297,7 @@ impl InlineWebView {
         });
         let monitor = unsafe {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-                NSEventMask::ScrollWheel | NSEventMask::LeftMouseUp,
+                NSEventMask::ScrollWheel | NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp,
                 &callback,
             )
         };
