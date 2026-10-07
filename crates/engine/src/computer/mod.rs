@@ -19,6 +19,8 @@ pub mod fake_backend;
 pub mod frame_route;
 pub mod geometry;
 pub mod host_wire;
+#[cfg(target_os = "macos")]
+pub mod js_tool;
 pub mod manager;
 pub mod model_desktop_observation;
 pub mod runtime;

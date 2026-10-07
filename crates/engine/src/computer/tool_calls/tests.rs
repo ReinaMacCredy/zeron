@@ -358,9 +358,13 @@ async fn the_catalog_follows_the_turn_flag_and_lists_the_advertised_desktop_tool
 
     let slash = rig.run("c2", "/computer-use open Calculator").await;
     let listed = rig.catalog(&slash).await.unwrap();
-    assert_eq!(listed.len(), 18, "{listed:?}");
-    assert!(listed.contains(&"computer_run".to_owned()));
-    assert!(!listed.contains(&"computer_drag".to_owned()));
+    if cfg!(target_os = "macos") {
+        assert_eq!(listed, ["computer"], "{listed:?}");
+    } else {
+        assert_eq!(listed.len(), 18, "{listed:?}");
+        assert!(listed.contains(&"computer_run".to_owned()));
+        assert!(!listed.contains(&"computer_drag".to_owned()));
+    }
     rig.probe
         .finishes
         .lock()
@@ -679,7 +683,7 @@ async fn run_seams_bound_browser_files_to_the_run_cwd_and_read_space_designation
     let secret = rig.run("c1", "Use Space ID 2 for this task.").await;
     assert_eq!(
         rig.catalog(&secret).await.unwrap().len(),
-        if cfg!(target_os = "macos") { 29 } else { 28 }
+        if cfg!(target_os = "macos") { 1 } else { 28 }
     );
     let outside = tempfile::tempdir().unwrap();
     let stray = outside.path().join("stray.txt");

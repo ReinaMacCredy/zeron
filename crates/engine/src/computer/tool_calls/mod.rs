@@ -262,8 +262,11 @@ impl ComputerToolSeams for RunToolSeams {
                 list_computer_permissions(&signal.missing)
             )
         };
-        self.sessions
-            .write_computer_note(&self.chat_id, "Computer control needs setup", Some(&hint));
+        self.sessions.write_computer_note(
+            &self.chat_id,
+            "Computer control needs setup",
+            Some(&hint),
+        );
     }
 }
 
@@ -284,10 +287,26 @@ pub fn computer_catalog(
 ) -> Result<ComputerCatalog, String> {
     let run = live_run(sessions, &params.chat_id, &params.run_secret)?;
     let tools = match runtime.service() {
-        Some(service) if service.supported && run.run_computer_control => service.tools.catalog(),
+        Some(service) if service.supported && run.run_computer_control => {
+            advertised_catalog(&service.tools)
+        }
         _ => Vec::new(),
     };
     Ok(ComputerCatalog { tools })
+}
+
+#[cfg(target_os = "macos")]
+fn advertised_catalog(
+    _tools: &super::tools::ComputerTools,
+) -> Vec<zeron_proto::computer::McpToolDefinition> {
+    vec![super::js_tool::definition()]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn advertised_catalog(
+    tools: &super::tools::ComputerTools,
+) -> Vec<zeron_proto::computer::McpToolDefinition> {
+    tools.catalog()
 }
 
 pub fn cancel_computer_action(
@@ -361,6 +380,17 @@ pub async fn computer_action(
         return Ok(denied("computer_unavailable", &message));
     };
     let tools = service.tools.clone();
+    #[cfg(target_os = "macos")]
+    if params.tool == super::js_tool::COMPUTER_JS_TOOL {
+        if !run.turn_computer_control {
+            return Ok(denied(
+                "capability_denied",
+                "Computer control is off for this turn; no input was sent.",
+            ));
+        }
+        let target = (params.chat_id, params.run_secret, params.request_id);
+        return Ok(computer_js(runtime, sessions, target, args, run.turn_id.clone()).await);
+    }
     if tools.entry(&params.tool).is_none() {
         return Err(format!("Unknown computer tool \"{}\".", params.tool));
     }
@@ -623,4 +653,100 @@ fn unavailable_message(availability: &zeron_proto::computer::ComputerAvailabilit
         }
         _ => "Computer use is unavailable on this Mac.".to_owned(),
     }
+}
+
+#[cfg(target_os = "macos")]
+struct EngineJsHost {
+    runtime: Arc<ComputerRuntime>,
+    sessions: SessionsEngine,
+    chat_id: String,
+    run_secret: String,
+    parent: String,
+    next: std::sync::atomic::AtomicU64,
+    handle: tokio::runtime::Handle,
+}
+
+#[cfg(target_os = "macos")]
+impl super::js_tool::JsHost for EngineJsHost {
+    fn call(&self, tool: &str, arguments: Value) -> McpToolResult {
+        if tool == super::js_tool::COMPUTER_JS_TOOL {
+            return McpToolResult::error("The computer tool cannot call itself.");
+        }
+        let n = self.next.fetch_add(1, Ordering::SeqCst);
+        let params = ComputerActionParams {
+            chat_id: self.chat_id.clone(),
+            run_secret: self.run_secret.clone(),
+            tool: tool.to_owned(),
+            arguments,
+            request_id: McpRequestId::String(format!("{}#js{n}", self.parent)),
+        };
+        let action = computer_action(&self.runtime, &self.sessions, params);
+        match self.handle.block_on(action) {
+            Ok(result) => result,
+            Err(message) => McpToolResult::error(message),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn computer_js(
+    runtime: &Arc<ComputerRuntime>,
+    sessions: &SessionsEngine,
+    (chat_id, run_secret, request_id): (String, String, McpRequestId),
+    args: ToolArgs,
+    turn_id: Option<String>,
+) -> McpToolResult {
+    let Some(code) = args.get("code").and_then(Value::as_str) else {
+        return McpToolResult::error("The computer tool needs a \"code\" string.");
+    };
+    let title = args
+        .get("title")
+        .and_then(Value::as_str)
+        .map(|title| js_slice(title, 80).to_owned());
+    let timeout = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map_or(super::js_tool::DEFAULT_TIMEOUT, Duration::from_millis);
+    let reset = args.get("reset").and_then(Value::as_bool).unwrap_or(false);
+    let key: CallKey = (chat_id.clone(), request_id.clone());
+    let token = CancellationToken::new();
+    let calls = runtime.calls().clone();
+    if !calls.register(key.clone(), turn_id, token.clone()) {
+        return McpToolResult::error("This request id is already in flight.");
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let (token, cancelled) = (token.clone(), cancelled.clone());
+        tokio::spawn(async move {
+            token.cancelled().await;
+            cancelled.store(true, Ordering::SeqCst);
+        })
+    };
+    let parent = match &request_id {
+        McpRequestId::Number(n) => n.to_string(),
+        McpRequestId::String(s) => s.clone(),
+    };
+    let host = Arc::new(EngineJsHost {
+        runtime: runtime.clone(),
+        sessions: sessions.clone(),
+        chat_id: chat_id.clone(),
+        run_secret,
+        parent,
+        next: std::sync::atomic::AtomicU64::new(0),
+        handle: tokio::runtime::Handle::current(),
+    });
+    let outcome = super::js_tool::run(
+        &chat_id,
+        super::js_tool::JsRequest {
+            code: code.to_owned(),
+            timeout,
+            reset,
+            host,
+            cancelled,
+        },
+    )
+    .await;
+    watcher.abort();
+    calls.finish(&key);
+    outcome.into_result(title.as_deref())
 }
