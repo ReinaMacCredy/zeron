@@ -351,6 +351,42 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `ZERON_MOCK_HTML_RENDER=<page.html>` publishes
+        // that page through the run's real `zeron mcp` server (engine store,
+        // tool-part reference) and appends the matching tool call.
+        let html_render_events = match (
+            std::env::var("ZERON_MOCK_HTML_RENDER").ok(),
+            request.mcp.as_ref(),
+        ) {
+            (Some(page), Some(server)) if !page.is_empty() => {
+                let html =
+                    std::fs::read_to_string(&page).unwrap_or_else(|_| "<p>mock page</p>".into());
+                let height: u32 = std::env::var("ZERON_MOCK_HTML_HEIGHT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(600);
+                let input =
+                    serde_json::json!({ "html": html, "title": "Mock page", "height": height });
+                let result = mock_mcp_call(server, "html_render", input.clone()).await;
+                vec![
+                    AgentEvent::ToolCall {
+                        id: "mock-html-render".into(),
+                        call: zeron_proto::ToolCall::Mcp {
+                            server: "zeron".into(),
+                            tool: "html_render".into(),
+                            input: Some(input),
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "mock-html-render".into(),
+                        is_error: result.is_err(),
+                        output: Some(result.unwrap_or_else(|error| error)),
+                        diff: None,
+                    },
+                ]
+            }
+            _ => Vec::new(),
+        };
         // Dev/testing knob: `ZERON_MOCK_SUBAGENT=1` appends two spawn chips
         // whose nested traffic arrives as tagged `AgentEvent::Subagent`
         // events — the only data-side way to put spawn chips (running → done)
@@ -725,6 +761,7 @@ impl Harness for MockHarness {
             .chain(write_events)
             .chain(subagent_events)
             .chain(read_file_events)
+            .chain(html_render_events)
             .chain(reply_event)
             .chain(todo_events)
             .chain(code_event)
@@ -804,4 +841,47 @@ impl Harness for MockHarness {
             })
             .boxed())
     }
+}
+
+/// One `tools/call` over a fresh `zeron mcp` stdio server (dev knobs only).
+async fn mock_mcp_call(
+    server: &zeron_proto::McpServer,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut child = tokio::process::Command::new(&server.command)
+        .args(&server.args)
+        .envs(&server.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
+    for message in [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mock","version":"0"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":arguments}}),
+    ] {
+        stdin
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        if reply["id"] == 2 {
+            let text = reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            return if reply["result"]["isError"] == true {
+                Err(text)
+            } else {
+                Ok(text)
+            };
+        }
+    }
+    Err("zeron mcp exited without answering".into())
 }

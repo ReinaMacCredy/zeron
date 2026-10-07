@@ -271,6 +271,8 @@ pub mod methods {
     pub const DEVICE_TOOL_OPEN: &str = "DeviceToolOpen";
     pub const DEVICE_TOOL_SCREENSHOT: &str = "DeviceToolScreenshot";
     pub const DEVICE_TOOL_CLOSE: &str = "DeviceToolClose";
+    /// `html_render`: store an agent's page in its chat (run-secret gated).
+    pub const PUBLISH_HTML_RENDER: &str = "PublishHtmlRender";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";

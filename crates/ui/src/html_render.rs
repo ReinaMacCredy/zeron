@@ -1,0 +1,450 @@
+//! Agent-published HTML pages ("HTML renders", the `html_render` thread
+//! tool): the theme a page is handed as CSS variables, the bootstrap injected
+//! at the start of its `<head>`, and the frame height rules. Ported from t3code
+//! `packages/shared/src/htmlRender.ts` so pages written for either app agree.
+
+use crate::theme::Theme;
+use gpui::Hsla;
+
+pub const MIN_HEIGHT: f32 = zeron_proto::html_render::MIN_HEIGHT as f32;
+pub const MAX_HEIGHT: f32 = zeron_proto::html_render::MAX_HEIGHT as f32;
+
+pub fn clamp_height(height: f32) -> f32 {
+    if height.is_finite() {
+        height.round().clamp(MIN_HEIGHT, MAX_HEIGHT)
+    } else {
+        MIN_HEIGHT
+    }
+}
+
+/// The frame fits the page so it never scrolls inside the thread and takes
+/// the reader's scroll. The agent's height caps it only when it is below the
+/// page's own height (the agent asked for a scrolling frame).
+pub fn frame_height(agent_height: f32, content_height: Option<f32>) -> f32 {
+    clamp_height(match content_height {
+        // A page previewed at another width wraps a little taller here; that
+        // drift is not a request to scroll.
+        Some(content) if content <= agent_height + FIT_DRIFT => content,
+        Some(_) | None => agent_height,
+    })
+}
+
+const FIT_DRIFT: f32 = 64.0;
+
+/// Whether the page is taller than its frame and scrolls inside it.
+pub fn scrolls_inside(frame: f32, content_height: Option<f32>) -> bool {
+    content_height.is_some_and(|content| content > frame + 1.0)
+}
+
+fn css_color(color: Hsla) -> String {
+    let rgba = gpui::Rgba::from(color);
+    let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "rgba({},{},{},{})",
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        (rgba.a.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
+    )
+}
+
+fn font_stack(family: &str, generic: &str) -> String {
+    let family = family.replace(['"', ';', '{', '}', '<', '>'], "");
+    if family.trim().is_empty() {
+        generic.into()
+    } else {
+        format!("\"{family}\", {generic}")
+    }
+}
+
+/// Roles themes cannot change, plus a categorical chart series after the
+/// theme's own accent (t3 `FIXED_COLORS`).
+fn fixed(dark: bool) -> (&'static str, &'static str, [&'static str; 5]) {
+    if dark {
+        (
+            "#3b82f6",
+            "#60a5fa",
+            ["#2dd4bf", "#fbbf24", "#c084fc", "#fb7185", "#a3e635"],
+        )
+    } else {
+        (
+            "#3b82f6",
+            "#1d4ed8",
+            ["#0d9488", "#d97706", "#9333ea", "#e11d48", "#65a30d"],
+        )
+    }
+}
+
+/// The variables a page styles against, named like t3's so one page works in
+/// both apps. `--accent` is the brand color, not a hover surface.
+pub fn theme_variables(theme: &Theme) -> Vec<(&'static str, String)> {
+    let dark = theme.appearance.is_dark();
+    let (info, info_foreground, chart) = fixed(dark);
+    let c = css_color;
+    let mut vars = vec![
+        ("--background", c(theme.bg)),
+        ("--foreground", c(theme.text)),
+        ("--muted", c(theme.element_hover)),
+        ("--muted-foreground", c(theme.text_muted)),
+        ("--card", c(theme.surface_card)),
+        ("--card-foreground", c(theme.text)),
+        ("--popover", c(theme.surface_overlay)),
+        ("--popover-foreground", c(theme.text)),
+        ("--secondary", c(theme.surface_raised)),
+        ("--secondary-foreground", c(theme.text)),
+        ("--border", c(theme.border)),
+        ("--input", c(theme.input_bg)),
+        ("--ring", c(theme.accent)),
+        ("--primary", c(theme.solid)),
+        ("--primary-foreground", c(theme.on_solid)),
+        ("--accent", c(theme.accent)),
+        ("--accent-foreground", c(theme.on_accent)),
+        ("--accent-surface", c(theme.accent_wash)),
+        ("--accent-surface-foreground", c(theme.accent_strong)),
+        ("--destructive", c(theme.danger)),
+        ("--destructive-foreground", c(theme.danger_strong)),
+        ("--destructive-surface", c(theme.danger_muted)),
+        ("--warning", c(theme.warning)),
+        ("--warning-foreground", c(theme.warning)),
+        ("--warning-surface", c(theme.warning_muted)),
+        ("--success", c(theme.success)),
+        ("--success-foreground", c(theme.success)),
+        ("--success-surface", c(theme.success_muted)),
+        ("--info", info.into()),
+        ("--info-foreground", info_foreground.into()),
+        ("--code-background", c(theme.code_wash)),
+        ("--code-foreground", c(theme.code_text)),
+        ("--chart-1", c(theme.accent)),
+    ];
+    const CHART: [&str; 5] = [
+        "--chart-2",
+        "--chart-3",
+        "--chart-4",
+        "--chart-5",
+        "--chart-6",
+    ];
+    vars.extend(
+        CHART
+            .into_iter()
+            .zip(chart)
+            .map(|(name, color)| (name, color.into())),
+    );
+    vars.push(("--radius", "0.625rem".into()));
+    vars.push((
+        "--font-sans",
+        font_stack(
+            &theme.font_sans,
+            "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+        ),
+    ));
+    vars.push((
+        "--font-mono",
+        font_stack(&theme.font_mono, "\"SF Mono\", Menlo, monospace"),
+    ));
+    vars
+}
+
+/// The theme stylesheet the bootstrap's `<style id="zeron-theme">` holds.
+/// Inline cards sit on the thread itself, so their page background is clear;
+/// a preview screenshot paints the thread's background.
+pub fn theme_css(theme: &Theme, inline: bool) -> String {
+    let scheme = if theme.appearance.is_dark() {
+        "dark"
+    } else {
+        "light"
+    };
+    let mut css = format!(":root{{color-scheme:{scheme};");
+    for (name, value) in theme_variables(theme) {
+        css.push_str(name);
+        css.push(':');
+        css.push_str(&value);
+        css.push(';');
+    }
+    css.push('}');
+    css.push_str(if inline {
+        "html{background:transparent;"
+    } else {
+        "html{background:var(--background);"
+    });
+    css.push_str("color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}");
+    css
+}
+
+/// Reports the page's content height to the host as it changes (t3's
+/// measure: the document's scroll height when it overflows, else its box).
+const SIZE_SCRIPT: &str = r#"(function(){var h,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h||!window.ipc)return;h=v;window.ipc.postMessage(JSON.stringify({height:v}));};if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);})();"#;
+
+/// JavaScript that swaps a mounted page's theme without reloading it.
+pub fn retheme_script(theme: &Theme, inline: bool) -> String {
+    let css = serde_json::to_string(&theme_css(theme, inline)).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "(function(){{var s=document.getElementById('zeron-theme');if(s)s.textContent={css};}})()"
+    )
+}
+
+fn bootstrap_markup(scan: &str, theme: &Theme, inline: bool) -> String {
+    let mut markup = String::new();
+    let head = &scan[..scan.len().min(4096)];
+    if !(contains_ci(head, "<meta") && contains_ci(head, "charset")) {
+        markup.push_str("<meta charset=\"utf-8\">");
+    }
+    if !contains_ci(scan, "name=\"viewport\"") && !contains_ci(scan, "name=viewport") {
+        markup.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    }
+    markup.push_str("<style id=\"zeron-theme\">");
+    markup.push_str(&theme_css(theme, inline).replace("</", "<\\/"));
+    markup.push_str("</style>");
+    if inline {
+        markup.push_str("<script>");
+        markup.push_str(SIZE_SCRIPT);
+        markup.push_str("</script>");
+    }
+    markup
+}
+
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    find_ci(haystack.as_bytes(), needle.as_bytes(), 0).is_some()
+}
+
+fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (from..=haystack.len() - needle.len())
+        .find(|&at| haystack[at..at + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+/// The tag starting at `at` (`<name`) is a real open tag of `name`: the name
+/// is followed by whitespace, `>`, `/` or the end.
+fn tag_at(scan: &[u8], at: usize, name: &[u8]) -> bool {
+    let end = at + 1 + name.len();
+    scan.len() >= end
+        && scan[at] == b'<'
+        && scan[at + 1..end].eq_ignore_ascii_case(name)
+        && scan
+            .get(end)
+            .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
+}
+
+fn tag_end(scan: &[u8], at: usize) -> usize {
+    scan[at..]
+        .iter()
+        .position(|&c| c == b'>')
+        .map_or(scan.len(), |p| at + p + 1)
+}
+
+const RAW_TEXT: [&[u8]; 9] = [
+    b"script",
+    b"style",
+    b"textarea",
+    b"title",
+    b"xmp",
+    b"iframe",
+    b"noembed",
+    b"noframes",
+    b"noscript",
+];
+
+/// Comments, raw text, and template contents blanked to spaces of the same
+/// byte length, so offsets still line up and inert tags cannot receive the
+/// bootstrap.
+fn blank_non_markup(html: &str) -> Vec<u8> {
+    let mut scan = html.as_bytes().to_vec();
+    let len = scan.len();
+    let blank = |scan: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut scan[from..to.min(len)] {
+            *byte = b' ';
+        }
+    };
+    let mut at = 0;
+    while at < len {
+        if scan[at] != b'<' {
+            at += 1;
+            continue;
+        }
+        if scan[at..].starts_with(b"<!--") {
+            let end = find_ci(&scan, b"-->", at + 4).map_or(len, |p| p + 3);
+            blank(&mut scan, at, end);
+            at = end;
+            continue;
+        }
+        if tag_at(&scan, at, b"plaintext") {
+            blank(&mut scan, at, len);
+            break;
+        }
+        if let Some(name) = RAW_TEXT.iter().find(|name| tag_at(&scan, at, name)) {
+            let mut close = Vec::with_capacity(name.len() + 2);
+            close.extend_from_slice(b"</");
+            close.extend_from_slice(name);
+            let mut search = at + 1 + name.len();
+            let end = loop {
+                match find_ci(&scan, &close, search) {
+                    Some(p)
+                        if tag_at(&scan, p + 1, name)
+                            || scan
+                                .get(p + close.len())
+                                .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>') =>
+                    {
+                        break tag_end(&scan, p);
+                    }
+                    Some(p) => search = p + 1,
+                    None => break len,
+                }
+            };
+            blank(&mut scan, at, end);
+            at = end;
+            continue;
+        }
+        if tag_at(&scan, at, b"template") {
+            let mut depth = 0usize;
+            let mut cursor = at;
+            let end = loop {
+                let open = (cursor..len).find(|&p| tag_at(&scan, p, b"template"));
+                let close = (cursor..len).find(|&p| {
+                    scan[p..].len() > 10
+                        && scan[p] == b'<'
+                        && scan[p + 1] == b'/'
+                        && tag_at(&scan, p + 1, b"template")
+                });
+                match (open, close) {
+                    (Some(o), Some(c)) if o < c => {
+                        depth += 1;
+                        cursor = tag_end(&scan, o);
+                    }
+                    (_, Some(c)) => {
+                        depth = depth.saturating_sub(1);
+                        cursor = tag_end(&scan, c);
+                        if depth == 0 {
+                            break cursor;
+                        }
+                    }
+                    (Some(o), None) => {
+                        depth += 1;
+                        cursor = tag_end(&scan, o);
+                    }
+                    (None, None) => break len,
+                }
+            };
+            blank(&mut scan, at, end);
+            at = end;
+            continue;
+        }
+        at += 1;
+    }
+    scan
+}
+
+/// Inserts the theme bootstrap at the start of the document head, so a
+/// page's own styles and scripts come after it and win.
+pub fn inject_bootstrap(html: &str, theme: &Theme, inline: bool) -> String {
+    let scan = blank_non_markup(html);
+    let scan_text = String::from_utf8_lossy(&scan);
+    let markup = bootstrap_markup(&scan_text, theme, inline);
+    let find_open = |name: &[u8]| (0..scan.len()).find(|&p| tag_at(&scan, p, name));
+    if let Some(head) = find_open(b"head") {
+        let at = tag_end(&scan, head);
+        return format!("{}{markup}{}", &html[..at], &html[at..]);
+    }
+    if let Some(open) = find_open(b"html") {
+        let at = tag_end(&scan, open);
+        return format!("{}<head>{markup}</head>{}", &html[..at], &html[at..]);
+    }
+    let trimmed = html.trim_start();
+    if trimmed.len() >= 9 && trimmed[..9].eq_ignore_ascii_case("<!doctype") {
+        let start = html.len() - trimmed.len();
+        let at = tag_end(&scan, start);
+        return format!("{}<head>{markup}</head>{}", &html[..at], &html[at..]);
+    }
+    format!("<!doctype html><head>{markup}</head>{html}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> Theme {
+        Theme::dark()
+    }
+
+    #[test]
+    fn bootstrap_lands_at_the_start_of_the_real_head() {
+        let page = "<!doctype html><html><head><title>x</title><style>body{}</style></head><body>hi</body></html>";
+        let out = inject_bootstrap(page, &theme(), true);
+        let head = out.find("<head>").unwrap() + "<head>".len();
+        assert!(out[head..].starts_with("<meta charset=\"utf-8\">"));
+        assert!(out.find("zeron-theme").unwrap() < out.find("<title>").unwrap());
+        assert!(out.ends_with("<body>hi</body></html>"));
+    }
+
+    #[test]
+    fn inert_heads_never_receive_the_bootstrap() {
+        let page = "<!-- <head> --><script>var s='<head>'</script><template><head></head></template><p>x</p>";
+        let out = inject_bootstrap(page, &theme(), false);
+        assert!(out.starts_with("<!doctype html><head><meta"));
+        assert!(out.ends_with(page));
+    }
+
+    #[test]
+    fn a_page_without_head_gets_one_after_html_or_doctype() {
+        let out = inject_bootstrap("<html lang=en><body>x</body></html>", &theme(), false);
+        assert!(out.starts_with("<html lang=en><head><meta charset"));
+        let out = inject_bootstrap("  <!DOCTYPE html><body>x</body>", &theme(), false);
+        assert!(out.starts_with("  <!DOCTYPE html><head>"));
+    }
+
+    #[test]
+    fn existing_charset_and_viewport_are_kept() {
+        let page = "<head><meta charset=utf-8><meta name=\"viewport\" content=\"x\"></head>";
+        let out = inject_bootstrap(page, &theme(), false);
+        assert_eq!(out.matches("charset").count(), 1);
+        assert_eq!(out.matches("viewport").count(), 1);
+    }
+
+    #[test]
+    fn only_inline_cards_report_their_height_and_clear_their_background() {
+        let inline = inject_bootstrap("<p>x</p>", &theme(), true);
+        let preview = inject_bootstrap("<p>x</p>", &theme(), false);
+        assert!(inline.contains("window.ipc.postMessage"));
+        assert!(inline.contains("html{background:transparent"));
+        assert!(!preview.contains("window.ipc"));
+        assert!(preview.contains("html{background:var(--background)"));
+    }
+
+    #[test]
+    fn theme_variables_cover_the_documented_names() {
+        let css = theme_css(&theme(), true);
+        for name in [
+            "--background:",
+            "--foreground:",
+            "--muted-foreground:",
+            "--card:",
+            "--border:",
+            "--primary:",
+            "--accent:",
+            "--destructive:",
+            "--success:",
+            "--chart-6:",
+            "--font-sans:",
+            "--font-mono:",
+        ] {
+            assert!(css.contains(name), "{name} missing");
+            assert!(zeron_proto::html_render::THEME_GUIDE.contains(name.trim_end_matches(':')));
+        }
+        assert!(css.starts_with(":root{color-scheme:dark;"));
+        assert!(!css.contains("</"));
+    }
+
+    #[test]
+    fn frames_fit_the_page_unless_the_agent_asked_for_less() {
+        assert_eq!(frame_height(600.0, None), 600.0);
+        assert_eq!(frame_height(600.0, Some(420.0)), 420.0);
+        assert_eq!(frame_height(600.0, Some(900.0)), 600.0);
+        assert_eq!(frame_height(600.0, Some(640.0)), 640.0);
+        assert_eq!(frame_height(1200.0, Some(900.0)), 900.0);
+        assert_eq!(frame_height(2400.0, Some(5000.0)), MAX_HEIGHT);
+        assert_eq!(frame_height(600.0, Some(10.0)), MIN_HEIGHT);
+        assert_eq!(clamp_height(f32::NAN), MIN_HEIGHT);
+        assert!(scrolls_inside(600.0, Some(900.0)));
+        assert!(!scrolls_inside(420.0, Some(420.0)));
+    }
+}

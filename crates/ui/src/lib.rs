@@ -41,6 +41,7 @@ mod haptics;
 pub mod history;
 mod home;
 pub(crate) mod html_open;
+pub(crate) mod html_render;
 pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;

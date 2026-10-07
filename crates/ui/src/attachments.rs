@@ -684,6 +684,18 @@ async fn read_attachment_bytes(
     Some((name, mime, bytes))
 }
 
+/// Read back an agent-published HTML page (`html_render`) as text.
+pub async fn read_attachment_text(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    path: &str,
+) -> Option<String> {
+    let (_, _, bytes) =
+        read_attachment_bytes(engine, executor, target_device_id, path, None).await?;
+    String::from_utf8(bytes).ok()
+}
+
 /// Read back a staged file of any type (a queued message restored for editing).
 pub async fn read_attachment_file(
     engine: &EngineHandle,

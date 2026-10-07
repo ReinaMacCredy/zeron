@@ -733,6 +733,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            html_render: None,
         }
     }
 
@@ -989,6 +990,7 @@ mod composer_tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                html_render: None,
             }],
             created_at: 0,
             device_id: "d".into(),

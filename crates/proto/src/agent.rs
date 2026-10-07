@@ -470,6 +470,33 @@ impl ToolCall {
         }
     }
 
+    /// An agent-published HTML page (the `html_render` thread tool). Only
+    /// zeron's own server: another MCP server may ship a same-named tool.
+    pub fn is_html_render(&self) -> bool {
+        match self {
+            ToolCall::Mcp { server, tool, .. } => server == "zeron" && tool == "html_render",
+            ToolCall::Unknown { name, .. } => {
+                matches!(
+                    name.as_str(),
+                    "zeron_html_render" | "mcp__zeron__html_render" | "zeron/html_render"
+                )
+            }
+            _ => false,
+        }
+    }
+
+    /// The page an `html_render` call published, as the agent sent it.
+    pub fn html_render_html(&self) -> Option<&str> {
+        match self {
+            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }
+                if self.is_html_render() =>
+            {
+                input.as_ref()?.get("html")?.as_str()
+            }
+            _ => None,
+        }
+    }
+
     pub fn delegate_task_text(&self) -> Option<&str> {
         match self {
             ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }

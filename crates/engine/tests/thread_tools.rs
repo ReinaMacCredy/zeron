@@ -1500,3 +1500,178 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
         core.shutdown().await;
     });
 }
+
+/// Opens an `html_render` call, hands the test its run secret, and settles
+/// the call once the test has published through the engine.
+struct PublishingHarness {
+    secret: Arc<Mutex<Option<String>>>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Harness for PublishingHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Publishing"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        *self.secret.lock().unwrap() = controls.tool_server.as_ref().and_then(|server| {
+            server
+                .env
+                .iter()
+                .find(|(name, _)| name == zeron_rpc::COMPUTER_RUN_SECRET_ENV)
+                .map(|(_, value)| value.clone())
+        });
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        let release = self.release.clone();
+        tokio::spawn(async move {
+            let events = [
+                AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "rec-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-html".into(),
+                    assistant_message_id: "a-html".into(),
+                },
+                AgentEvent::ToolCall {
+                    id: "tc-html".into(),
+                    call: zeron_proto::ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: "html_render".into(),
+                        input: Some(serde_json::json!({
+                            "html": "<p>chart</p>", "title": "Chart", "height": 420,
+                        })),
+                    },
+                },
+            ];
+            for event in events {
+                let _ = tx.send(Ok(event)).await;
+            }
+            release.notified().await;
+            for event in [
+                AgentEvent::ToolResult {
+                    id: "tc-html".into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                },
+                AgentEvent::TextDelta {
+                    text: "Bars are tokens per turn.".into(),
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-html".into()),
+                },
+            ] {
+                let _ = tx.send(Ok(event)).await;
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_published_page_lands_on_its_tool_part_and_leaves_with_the_chat() {
+    use zeron_rpc::RpcService;
+    let secret = Arc::new(Mutex::new(None));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let rig = rig_on(Arc::new(PublishingHarness {
+        secret: secret.clone(),
+        release: release.clone(),
+    }));
+    let core = &rig.core;
+    core.sessions.set_tool_server_port(1);
+    queue_human_run(core, "lead", "cmd-1", "msg-1");
+    wait_for(|| secret.lock().unwrap().is_some(), "the run secret").await;
+    let secret = secret.lock().unwrap().clone().unwrap();
+    let rpc = core.rpc_service();
+    let publish = |html: &str, secret: &str| serde_json::json!({ "chatId": "lead", "runSecret": secret, "html": html, "title": "Chart", "height": 420 });
+    let forged = rpc
+        .handle(
+            zeron_rpc::methods::PUBLISH_HTML_RENDER,
+            publish("<p>chart</p>", "forged"),
+        )
+        .await;
+    assert!(forged.is_err(), "a forged secret publishes nothing");
+    let missing = rpc
+        .handle(
+            zeron_rpc::methods::PUBLISH_HTML_RENDER,
+            publish(r#"<img src="/nope/shot.png">"#, &secret),
+        )
+        .await;
+    assert!(
+        matches!(&missing, Err(zeron_rpc::RpcError::Failed(m)) if m.contains("/nope/shot.png")),
+        "an unreadable image names itself: {:?}",
+        missing.err()
+    );
+    let reply = match rpc
+        .handle(
+            zeron_rpc::methods::PUBLISH_HTML_RENDER,
+            publish("<p>chart</p>", &secret),
+        )
+        .await
+        .expect("publish")
+    {
+        zeron_rpc::RpcReply::Value(value) => value,
+        _ => panic!("publish answers once"),
+    };
+    let path = reply["htmlRender"]["path"].as_str().unwrap().to_owned();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "<p>chart</p>");
+    assert_eq!(reply["message"], zeron_proto::html_render::RENDERED_MESSAGE);
+    release.notify_one();
+    let stamped = || {
+        entries(core, "lead").iter().find_map(|entry| {
+            entry.parts.iter().find_map(|part| match part {
+                zeron_doc::MessagePart::Tool {
+                    id, html_render, ..
+                } if id == "tc-html" => html_render.clone(),
+                _ => None,
+            })
+        })
+    };
+    wait_for(
+        || stamped().is_some(),
+        "the page reference on the tool part",
+    )
+    .await;
+    let page = stamped().unwrap();
+    assert_eq!(page.path, path);
+    assert_eq!(page.title, "Chart");
+    assert_eq!(page.height, 420);
+    core.rpc_service()
+        .handle(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "deleteChat", "chatId": "lead" }),
+        )
+        .await
+        .expect("delete chat");
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "deleting the chat deletes its pages"
+    );
+    core.shutdown().await;
+}

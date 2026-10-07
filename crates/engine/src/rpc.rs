@@ -1433,6 +1433,7 @@ impl EngineRpc {
                 // write into an orphaned session doc).
                 let sessions = self.sessions.clone();
                 let doc_host = self.doc_host.clone();
+                let uploads = self.uploads.clone();
                 let chat_ids = deleted.chat_ids;
                 tokio::spawn(async move {
                     for chat_id in chat_ids {
@@ -1440,6 +1441,7 @@ impl EngineRpc {
                             tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
                         }
                         doc_host.purge_chat(&chat_id);
+                        crate::html_render::remove_chat_pages(&uploads, &chat_id);
                     }
                 });
                 Ok(())
@@ -1547,6 +1549,7 @@ impl EngineRpc {
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
+                crate::html_render::remove_chat_pages(&self.uploads, &chat_id);
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self
@@ -4764,6 +4767,27 @@ impl RpcService for EngineRpc {
                     feed.filter_map(|item| async move { serde_json::to_value(item).ok() })
                         .boxed(),
                 ))
+            }
+            methods::PUBLISH_HTML_RENDER => {
+                let p: zeron_proto::html_render::PublishHtmlRenderParams = parse_params(params)?;
+                if self.sessions.computer_run(&p.chat_id, &p.run_secret).is_none() {
+                    return Err(RpcError::Failed(
+                        "html_render needs this chat's live Zeron run".into(),
+                    ));
+                }
+                let uploads = self.uploads.clone();
+                let (chat_id, html, title, height) = (p.chat_id.clone(), p.html.clone(), p.title, p.height);
+                let page = tokio::task::spawn_blocking(move || {
+                    crate::html_render::publish(&uploads, &chat_id, &html, &title, height)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                self.sessions.bind_html_render(&p.chat_id, &p.html, page.clone());
+                RpcReply::value(&serde_json::json!({
+                    "htmlRender": page,
+                    "message": zeron_proto::html_render::RENDERED_MESSAGE,
+                }))
             }
             methods::DEVICE_TOOL_LIST
             | methods::DEVICE_TOOL_OPEN

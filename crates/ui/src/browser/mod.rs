@@ -13,6 +13,8 @@ pub(crate) mod automation;
 pub(crate) mod control_admission;
 #[cfg(target_os = "macos")]
 pub(crate) mod control_host;
+#[cfg(target_os = "macos")]
+pub(crate) mod inline;
 pub mod model;
 mod view;
 
@@ -64,6 +66,21 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
             Some("Browser"),
         )]);
     }
+}
+
+/// The window-root bracket inline pages are swept against; see `inline`.
+pub(crate) fn inline_frame_begin() -> Option<gpui::AnyElement> {
+    #[cfg(target_os = "macos")]
+    return Some(gpui::IntoElement::into_any_element(inline::frame_begin()));
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+pub(crate) fn inline_frame_end() -> Option<gpui::AnyElement> {
+    #[cfg(target_os = "macos")]
+    return Some(gpui::IntoElement::into_any_element(inline::frame_end()));
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 #[derive(Clone, Debug)]

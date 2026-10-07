@@ -1884,6 +1884,7 @@ mod tests {
             subagent_ref: Some(format!("c1--sub--{id}")),
             subagent_status: status,
             subagent_tail: None,
+            html_render: None,
         }
     }
 

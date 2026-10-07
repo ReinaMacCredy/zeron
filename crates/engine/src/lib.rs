@@ -28,6 +28,7 @@ pub mod diff_sync;
 pub mod doc_host;
 pub mod harness_updates;
 mod home_widgets;
+mod html_render;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;

@@ -251,9 +251,9 @@ impl Observer {
     }
 }
 
-struct ClipState {
-    dragging: Cell<bool>,
-    region: Cell<objc2_foundation::NSRect>,
+pub(super) struct ClipState {
+    pub(super) dragging: Cell<bool>,
+    pub(super) region: Cell<objc2_foundation::NSRect>,
     resize_inset: Cell<f64>,
 }
 
@@ -264,7 +264,7 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[name = "ZeronBrowserClipView"]
     #[ivars = ClipState]
-    struct BrowserClipView;
+    pub(super) struct BrowserClipView;
     impl BrowserClipView {
         #[unsafe(method(hitTest:))]
         fn hit_test(&self, point: objc2_foundation::NSPoint) -> *mut NSView {
@@ -277,6 +277,114 @@ define_class!(
         }
     }
 );
+
+/// Hosts a native webview in a clip view that stays stationary at the GPUI
+/// view's full bounds, beneath the shared GPUI overlay plane.
+pub(super) fn attach_clip(
+    window: &Window,
+    view: &WKWebView,
+    mtm: MainThreadMarker,
+) -> Result<
+    (
+        Retained<NSView>,
+        Retained<BrowserClipView>,
+        Retained<AnyObject>,
+    ),
+    String,
+> {
+    window
+        .enable_scene_overlay()
+        .map_err(|error| error.to_string())?;
+    let parent = unsafe { view.superview() }.ok_or("Browser parent is missing")?;
+    let clip: Retained<BrowserClipView> = unsafe {
+        let object = mtm.alloc().set_ivars(ClipState {
+            dragging: Cell::new(false),
+            region: Cell::new(objc2_foundation::NSRect::ZERO),
+            resize_inset: Cell::new(0.0),
+        });
+        msg_send![super(object), initWithFrame: objc2_foundation::NSRect::ZERO]
+    };
+    clip.setWantsLayer(true);
+    clip.setAutoresizesSubviews(false);
+    let clip_mask: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
+    unsafe {
+        let color = NSColor::blackColor().CGColor();
+        let _: () = msg_send![&*clip_mask, setBackgroundColor: &*color];
+        let layer: *mut AnyObject = msg_send![&*clip, layer];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        let _: () = msg_send![layer, setMask: &*clip_mask];
+    }
+    clip.setHidden(true);
+    parent.addSubview(&clip);
+    // Keep every native tab beneath the shared GPUI overlay plane.
+    for sibling in parent.subviews() {
+        if sibling.class().name() == c"GPUIOverlayView" {
+            parent.addSubview_positioned_relativeTo(
+                &clip,
+                NSWindowOrderingMode::Below,
+                Some(&sibling),
+            );
+            break;
+        }
+    }
+    clip.addSubview(view);
+    Ok((parent, clip, clip_mask))
+}
+
+/// Shows `bounds ∩ mask` of a webview laid out at the full `bounds`.
+pub(super) fn place(
+    parent: &NSView,
+    clip: &BrowserClipView,
+    clip_mask: &AnyObject,
+    view: &WKWebView,
+    bounds: Bounds<Pixels>,
+    visible: Bounds<Pixels>,
+) {
+    let x = f64::from(f32::from(visible.origin.x));
+    let y = f64::from(f32::from(visible.origin.y));
+    let width = f64::from(f32::from(visible.size.width)).max(0.);
+    let height = f64::from(f32::from(visible.size.height)).max(0.);
+    let y = if parent.isFlipped() {
+        y
+    } else {
+        parent.bounds().size.height - y - height
+    };
+    let actions_disabled: bool = unsafe {
+        let previous = msg_send![class!(CATransaction), disableActions];
+        let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+        previous
+    };
+    // Keep the host stationary. Moving it while WebKit updates its
+    // remote layer tree can combine the old origin with the new size.
+    clip.setFrame(parent.bounds());
+    let region = objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(x, y),
+        objc2_foundation::NSSize::new(width, height),
+    );
+    clip.ivars().region.set(region);
+    unsafe {
+        let _: () = msg_send![clip_mask, setFrame: region];
+    }
+    // Wry's set_bounds rounds logical origins and sizes to whole points. GPUI
+    // uses fractional points, so that leaves uncovered background
+    // strips between the WKWebView and its clip after a resize.
+    let web_height = f64::from(f32::from(bounds.size.height)).max(0.);
+    let web_y = f64::from(f32::from(bounds.origin.y));
+    let web_y = if parent.isFlipped() {
+        web_y
+    } else {
+        parent.bounds().size.height - web_y - web_height
+    };
+    view.setFrame(objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(f64::from(f32::from(bounds.origin.x)), web_y),
+        objc2_foundation::NSSize::new(f64::from(f32::from(bounds.size.width)).max(0.), web_height),
+    ));
+    unsafe {
+        // Leave the implicit transaction open for the matching Metal
+        // presentation. Committing here would expose native geometry early.
+        let _: () = msg_send![class!(CATransaction), setDisableActions: actions_disabled];
+    }
+}
 
 pub(super) struct NativePage(Rc<RefCell<Host>>);
 
@@ -319,42 +427,7 @@ impl NativePage {
             .build_as_child(window)
             .map_err(|e| e.to_string())?;
         let view = Retained::into_super(web.webview());
-        window
-            .enable_scene_overlay()
-            .map_err(|error| error.to_string())?;
-        let parent = unsafe { view.superview() }.ok_or("Browser parent is missing")?;
-        let clip: Retained<BrowserClipView> = unsafe {
-            let object = mtm.alloc().set_ivars(ClipState {
-                dragging: Cell::new(false),
-                region: Cell::new(objc2_foundation::NSRect::ZERO),
-                resize_inset: Cell::new(0.0),
-            });
-            msg_send![super(object), initWithFrame: objc2_foundation::NSRect::ZERO]
-        };
-        clip.setWantsLayer(true);
-        clip.setAutoresizesSubviews(false);
-        let clip_mask: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
-        unsafe {
-            let color = NSColor::blackColor().CGColor();
-            let _: () = msg_send![&*clip_mask, setBackgroundColor: &*color];
-            let layer: *mut AnyObject = msg_send![&*clip, layer];
-            let _: () = msg_send![layer, setMasksToBounds: true];
-            let _: () = msg_send![layer, setMask: &*clip_mask];
-        }
-        clip.setHidden(true);
-        parent.addSubview(&clip);
-        // Keep every native tab beneath the shared GPUI overlay plane.
-        for sibling in parent.subviews() {
-            if sibling.class().name() == c"GPUIOverlayView" {
-                parent.addSubview_positioned_relativeTo(
-                    &clip,
-                    NSWindowOrderingMode::Below,
-                    Some(&sibling),
-                );
-                break;
-            }
-        }
-        clip.addSubview(&view);
+        let (parent, clip, clip_mask) = attach_clip(window, &view, mtm)?;
 
         let observer = Observer::new(tx.clone(), mtm);
         unsafe {
@@ -600,53 +673,14 @@ impl Host {
         if self.bounds != Some(bounds) || self.visible_bounds != Some(visible) {
             self.bounds = Some(bounds);
             self.visible_bounds = Some(visible);
-            let x = f64::from(f32::from(visible.origin.x));
-            let y = f64::from(f32::from(visible.origin.y));
-            let width = f64::from(f32::from(visible.size.width)).max(0.);
-            let height = f64::from(f32::from(visible.size.height)).max(0.);
-            let y = if self.parent.isFlipped() {
-                y
-            } else {
-                self.parent.bounds().size.height - y - height
-            };
-            let actions_disabled: bool = unsafe {
-                let previous = msg_send![class!(CATransaction), disableActions];
-                let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-                previous
-            };
-            // Keep the host stationary. Moving it while WebKit updates its
-            // remote layer tree can combine the old origin with the new size.
-            self.clip.setFrame(self.parent.bounds());
-            let region = objc2_foundation::NSRect::new(
-                objc2_foundation::NSPoint::new(x, y),
-                objc2_foundation::NSSize::new(width, height),
+            place(
+                &self.parent,
+                &self.clip,
+                &self.clip_mask,
+                &self.view,
+                bounds,
+                visible,
             );
-            self.clip.ivars().region.set(region);
-            unsafe {
-                let _: () = msg_send![&*self.clip_mask, setFrame: region];
-            }
-            // Wry's set_bounds rounds logical origins and sizes to whole points. GPUI
-            // uses fractional points, so that leaves uncovered background
-            // strips between the WKWebView and its clip after a resize.
-            let web_height = f64::from(f32::from(bounds.size.height)).max(0.);
-            let web_y = f64::from(f32::from(bounds.origin.y));
-            let web_y = if self.parent.isFlipped() {
-                web_y
-            } else {
-                self.parent.bounds().size.height - web_y - web_height
-            };
-            self.view.setFrame(objc2_foundation::NSRect::new(
-                objc2_foundation::NSPoint::new(f64::from(f32::from(bounds.origin.x)), web_y),
-                objc2_foundation::NSSize::new(
-                    f64::from(f32::from(bounds.size.width)).max(0.),
-                    web_height,
-                ),
-            ));
-            unsafe {
-                // Leave the implicit transaction open for the matching Metal
-                // presentation. Committing here would expose native geometry early.
-                let _: () = msg_send![class!(CATransaction), setDisableActions: actions_disabled];
-            }
             #[cfg(feature = "browser-fixture")]
             unsafe {
                 let layer: *mut AnyObject = msg_send![&*self.clip, layer];

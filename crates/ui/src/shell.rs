@@ -14872,6 +14872,7 @@ impl Render for Shell {
             .id("shell-root")
             .track_focus(&self.shortcut_focus)
             .child(div().track_focus(&self.unfocused))
+            .children(crate::browser::inline_frame_begin())
             .relative()
             .flex()
             .flex_row()
@@ -15607,6 +15608,7 @@ impl Render for Shell {
             // Last so the invisible CSD resize strips sit above every other
             // element at the window edges.
             .children(Self::render_linux_resize_borders(window));
+        let root = root.children(crate::browser::inline_frame_end());
         self.render_time = None;
         root
     }

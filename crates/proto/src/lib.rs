@@ -10,6 +10,7 @@ pub mod device_hub;
 pub mod entities;
 pub mod file_mentions;
 pub mod home;
+pub mod html_render;
 pub mod invocation;
 pub mod motion;
 pub mod preview;

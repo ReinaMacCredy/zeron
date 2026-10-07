@@ -584,6 +584,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         subagent_ref: Some("sub-1".into()),
         subagent_status: Some(status),
         subagent_tail: None,
+        html_render: None,
     };
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);
@@ -664,6 +665,7 @@ fn computer_part(id: &str, tool: &str, input: Option<serde_json::Value>, is_erro
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
+        html_render: None,
     }
 }
 

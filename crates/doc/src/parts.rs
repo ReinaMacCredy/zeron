@@ -204,6 +204,10 @@ pub enum MessagePart {
         /// its tagged text deltas (capped; display-only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_tail: Option<String>,
+        /// The page an `html_render` call published (additive; stamped by
+        /// the engine — the HTML itself never enters the doc).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        html_render: Option<zeron_proto::html_render::HtmlRenderRef>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -375,6 +379,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    html_render: None,
                 });
             }
         }
@@ -1021,6 +1026,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                html_render: None,
             },
         ];
         let chunks = split_parts(&parts);

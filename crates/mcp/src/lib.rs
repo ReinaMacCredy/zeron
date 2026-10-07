@@ -23,6 +23,7 @@ use futures::stream::FuturesUnordered;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
+use zeron_proto::html_render;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{Chat, Session, Space, UserInputAnswer};
 use zeron_rpc::{RpcClient, methods};
@@ -276,6 +277,21 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "html_render",
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, live, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Zeron fits the frame to the page's height. A height below the page's own height caps the frame there, and the rest scrolls inside it. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document." },
+                    "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS, "description": "Short name for the page." },
+                    "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "The frame height in CSS pixels. Use the page's height, or less to make long content scroll inside the frame." }
+                },
+                "required": ["html", "title", "height"],
+                "additionalProperties": false
+            },
+            "annotations": { "title": "Render HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true }
+        },
+        {
             "name": "device_list",
             "description": "List iOS Simulators and Android Emulators on this environment's device hosts, which platforms each host can run, and which devices are already open in this thread's Device panel. Call this before device_open when you do not know a device id.",
             "inputSchema": {
@@ -505,6 +521,7 @@ impl ThreadTools {
             "ask_user" => self.ask_user(args).await,
             "terminal" => self.terminal(args).await,
             "project_actions" => self.project_actions(args).await,
+            "html_render" => self.html_render(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
@@ -1172,6 +1189,21 @@ impl ThreadTools {
             "requestId": request_id,
             "commandId": queued["commandId"],
         }))
+    }
+
+    async fn html_render(&self, args: &Value) -> Result<Value, String> {
+        let secret = self
+            .run_secret
+            .as_deref()
+            .ok_or("html_render needs a live Zeron run")?;
+        let html = args["html"].as_str().ok_or("html must be a string")?;
+        let title = args["title"].as_str().ok_or("title must be a string")?;
+        let height = args["height"].as_f64().ok_or("height must be a number")?;
+        self.call_engine(
+            methods::PUBLISH_HTML_RENDER,
+            json!({ "chatId": self.chat_id, "runSecret": secret, "html": html, "title": title, "height": height }),
+        )
+        .await
     }
 
     pub async fn ask_user(&self, args: &Value) -> Result<Value, String> {
@@ -1944,7 +1976,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 23] = [
+    const THREAD_TOOLS: [&str; 24] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -1957,6 +1989,7 @@ mod tests {
         "ask_user",
         "terminal",
         "project_actions",
+        "html_render",
         "device_list",
         "device_open",
         "device_screenshot",
@@ -2247,6 +2280,21 @@ mod tests {
                         methods::DEVICE_TOOL_CLOSE => Ok(RpcReply::Value(json!({}))),
                         _ => Ok(RpcReply::Value(json!({ "device": device }))),
                     }
+                }
+                methods::PUBLISH_HTML_RENDER => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    if params["runSecret"] != "live" {
+                        return Err(RpcError::Failed(
+                            "html_render needs this chat's live Zeron run".into(),
+                        ));
+                    }
+                    Ok(RpcReply::Value(json!({
+                        "htmlRender": { "path": "/u/html/c1/ab.html", "title": params["title"], "height": 420 },
+                        "message": html_render::RENDERED_MESSAGE,
+                    })))
                 }
                 methods::GET_COMPUTER_CATALOG
                 | methods::COMPUTER_ACTION
@@ -3193,6 +3241,56 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn html_render_publishes_into_the_callers_own_run() {
+        let unbound = rig(fixture());
+        assert_eq!(
+            unbound
+                .tools
+                .call(
+                    "html_render",
+                    &json!({ "html": "<p>x</p>", "title": "T", "height": 400 })
+                )
+                .await,
+            Err("html_render needs a live Zeron run".into())
+        );
+        let rig = computer_rig(Some("live"));
+        let page = rig
+            .tools
+            .call(
+                "html_render",
+                &json!({ "html": "<p>x</p>", "title": "Chart", "height": 400, "chatId": "other" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page["htmlRender"]["title"], "Chart");
+        assert_eq!(page["message"], html_render::RENDERED_MESSAGE);
+        let sent = logged(&rig.calls, methods::PUBLISH_HTML_RENDER);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["chatId"], "a");
+        assert_eq!(sent[0]["runSecret"], "live");
+        assert_eq!(sent[0]["html"], "<p>x</p>");
+        assert_eq!(sent[0]["height"], 400.0);
+        assert_eq!(
+            rig.tools
+                .call("html_render", &json!({ "title": "T", "height": 400 }))
+                .await,
+            Err("html must be a string".into())
+        );
+        let listed = tool_list();
+        let tool = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "html_render")
+            .unwrap();
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["html", "title", "height"])
+        );
+        assert!(tool["description"].as_str().unwrap().contains("--chart-1"));
     }
 
     #[tokio::test]

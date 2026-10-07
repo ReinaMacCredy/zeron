@@ -175,6 +175,8 @@ struct RunHandle {
     stop_tx: mpsc::UnboundedSender<String>,
     /// The MCP call never carries the harness tool id, so the part is matched by task text.
     delegate_binds: Arc<Mutex<Vec<(String, String)>>>,
+    /// Published pages awaiting their tool part, keyed by the agent's html.
+    html_binds: Arc<Mutex<Vec<(String, zeron_proto::html_render::HtmlRenderRef)>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +364,7 @@ impl RunSetup {
                 computer: RunComputer::new(),
                 stop_tx,
                 delegate_binds: Arc::new(Mutex::new(Vec::new())),
+                html_binds: Arc::new(Mutex::new(Vec::new())),
             },
             controls,
             engine_rx,
@@ -470,6 +473,8 @@ impl Inner {
             ),
             false => crate::doc_host::DELEGATION_GUIDANCE.to_string(),
         };
+        guidance.push_str("\n\n");
+        guidance.push_str(zeron_proto::html_render::GUIDANCE);
         if lock(&self.device_hub)
             .as_ref()
             .is_some_and(|hub| hub.agent_access_enabled())
@@ -515,6 +520,37 @@ impl Inner {
             match slot {
                 Some(slot) => {
                     *slot = Some(child.clone());
+                    false
+                }
+                None => true,
+            }
+        });
+    }
+
+    fn bind_html_renders(&self, chat_id: &str, run_id: &str, parts: &mut [MessagePart]) {
+        let Some(binds) = lock(&self.runs)
+            .get(chat_id)
+            .filter(|run| run.run_id == run_id)
+            .map(|run| run.html_binds.clone())
+        else {
+            return;
+        };
+        lock(&binds).retain(|(key, page)| {
+            let slot = parts.iter_mut().find_map(|part| match part {
+                MessagePart::Tool {
+                    call, html_render, ..
+                } if html_render.is_none()
+                    && call
+                        .html_render_html()
+                        .is_some_and(|html| crate::html_render::html_key(html) == *key) =>
+                {
+                    Some(html_render)
+                }
+                _ => None,
+            });
+            match slot {
+                Some(slot) => {
+                    *slot = Some(page.clone());
                     false
                 }
                 None => true,
@@ -658,6 +694,17 @@ impl SessionsEngine {
             .stop_tx
             .send(task_id.to_owned())
             .map_err(|_| EngineError::Other("the run has ended".into()))
+    }
+
+    pub fn bind_html_render(
+        &self,
+        chat_id: &str,
+        html: &str,
+        page: zeron_proto::html_render::HtmlRenderRef,
+    ) {
+        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
+            lock(&run.html_binds).push((crate::html_render::html_key(html), page));
+        }
     }
 
     pub fn bind_delegate(&self, chat_id: &str, task: &str, child_chat_id: &str) {
@@ -3483,6 +3530,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                html_render,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3501,6 +3549,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref: subagent_ref.clone(),
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
+                html_render: html_render.clone(),
             },
             other => other.clone(),
         })
@@ -4842,6 +4891,7 @@ async fn drive_run(
                 AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
             ) {
                 inner.bind_delegates(&chat_id, &run_id, &mut folded);
+                inner.bind_html_renders(&chat_id, &run_id, &mut folded);
             }
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
@@ -5372,6 +5422,7 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains(crate::doc_host::DELEGATION_GUIDANCE));
+            assert!(text.contains(zeron_proto::html_render::GUIDANCE));
         }
     }
 

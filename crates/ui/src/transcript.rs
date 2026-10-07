@@ -32,6 +32,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+mod html_card;
+
 use gpui::{
     AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
@@ -1073,6 +1075,14 @@ enum HtmlFileState {
 
 #[derive(Clone)]
 pub enum RowKind {
+    /// A page the agent published with `html_render`, shown live above its
+    /// reply.
+    HtmlRender {
+        owner: SharedString,
+        path: SharedString,
+        title: SharedString,
+        height: f32,
+    },
     HtmlFiles {
         targets: Arc<Vec<crate::html_open::HtmlTarget>>,
     },
@@ -1711,6 +1721,19 @@ pub fn rows_for_entry(
                 }
                 pending_group.push(item);
                 group_last_part_ix = part_ix;
+                if let Some(row) = html_card::html_render_row(entry, part) {
+                    // Like the denied notice: outside the work fold, so the
+                    // page stays above the reply when the fold is closed.
+                    if !compact {
+                        flush_group(
+                            &mut rows,
+                            &mut pending_group,
+                            &mut group_ix,
+                            group_last_part_ix,
+                        );
+                    }
+                    rows.push(row);
+                }
                 if let Some(computer) = &computer
                     && is_control_denied(*is_error, output.as_deref())
                     && !denied_tools.contains(&computer.tool)
@@ -2064,7 +2087,12 @@ pub fn rows_for_entry(
                 rows_for_entry(&work_entry, pending, false, parse)
             };
             // The denied notice already stays visible outside the fold, under the same row id.
-            inner.retain(|row| !matches!(row.kind, RowKind::ComputerNotice { .. }));
+            inner.retain(|row| {
+                !matches!(
+                    row.kind,
+                    RowKind::ComputerNotice { .. } | RowKind::HtmlRender { .. }
+                )
+            });
             for row in &mut inner {
                 row.turn_start = false;
                 row.timestamp = None;
@@ -3786,6 +3814,7 @@ pub struct Transcript {
     foreground_sent: HashSet<SharedString>,
     strip_pending: Option<String>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
+    html_pages: html_card::HtmlPages,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
     html_menu: Option<SharedString>,
@@ -4244,6 +4273,7 @@ impl Transcript {
             foreground_sent: HashSet::new(),
             strip_pending: None,
             html_files: HashMap::new(),
+            html_pages: html_card::HtmlPages::new(cx),
             html_apps: None,
             html_apps_task: None,
             html_menu: None,
@@ -6049,6 +6079,7 @@ impl Transcript {
             }
         }
         self.rows = new_rows;
+        self.retain_html_pages();
         if old_last != self.rows.len().checked_sub(1) {
             if let Some(ix) = old_last.filter(|&ix| ix < self.rows.len()) {
                 // Bottom chrome moves to the new tail too.
@@ -8749,6 +8780,12 @@ impl Transcript {
             RowKind::HtmlFiles { targets } => {
                 self.render_html_files(&row.id, targets, workspace_root.as_deref(), &theme, cx)
             }
+            RowKind::HtmlRender {
+                owner,
+                path,
+                title,
+                height,
+            } => self.render_html_render(&row.id, owner, path, title, *height, window, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ComputerConsent {
                 request_id,
@@ -12467,6 +12504,7 @@ impl Render for Transcript {
         // OVER the bottom fade gradient, which is a later sibling of this
         // outlet — an overlay here would be tinted by the fade.
         self.update_runway_minimum(cx);
+        self.html_pages.viewport = self.list.viewport_bounds();
         let list_el = list(self.list.clone(), cx.processor(Self::render_row))
             .size_full()
             .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
@@ -15842,6 +15880,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            html_render: None,
         }
     }
 
@@ -15872,6 +15911,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                html_render: None,
             }
         };
         let entry = assistant(
@@ -16056,6 +16096,7 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            html_render: None,
         }
     }
 
@@ -16112,6 +16153,7 @@ mod tests {
             subagent_ref: Some("child-1".into()),
             subagent_status: None,
             subagent_tail: None,
+            html_render: None,
         };
         let entry = assistant(
             "m-del",
@@ -19001,6 +19043,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            html_render: None,
         }
     }
 
@@ -19841,6 +19884,7 @@ mod computer_tests {
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                html_render: None,
             },
             other => other,
         };
