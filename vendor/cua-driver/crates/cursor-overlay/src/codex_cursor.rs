@@ -37,8 +37,9 @@ const RIM_ALPHA: f32 = 0.81;
 pub const PRESS_SCALE: f64 = 0.865;
 const PRESS_HOLD_SECS: f64 = 0.12;
 pub const TILT_MAX_DEGREES: f64 = 18.0;
-const SPIN_SECS_PER_TURN: f64 = 2.0;
-const SPIN_RETURN: SpringSpec = SpringSpec::new(0.4, 0.86);
+pub const SWING_MAX_DEGREES: f64 = 17.3;
+const SWING_PERIOD_SECS: f64 = 1.2;
+const SWING_SPRING: SpringSpec = SpringSpec::new(0.3, 0.86);
 pub const REVEAL_SECS: f64 = 0.22;
 const FADE_BLUR_POINTS: f64 = 8.0;
 
@@ -87,6 +88,7 @@ pub struct CodexState {
     stretch_target: (f64, f64),
     spin: SpringChannel,
     spin_target: f64,
+    swing_phase: f64,
     loading: bool,
     press_hold: f64,
     reveal: f64,
@@ -107,6 +109,7 @@ impl Default for CodexState {
             stretch_target: (1.0, 1.0),
             spin: SpringChannel::new(0.0),
             spin_target: 0.0,
+            swing_phase: 0.0,
             loading: false,
             press_hold: 0.0,
             reveal: 0.0,
@@ -166,6 +169,9 @@ impl CodexState {
         let sideways = TIP_AXIS.0 * velocity.1 - TIP_AXIS.1 * velocity.0;
         self.tilt_target = TILT_MAX_DEGREES.to_radians() * (sideways / peak).clamp(-1.0, 1.0);
         self.tilt.step(self.tilt_target, &feel.rotation_spec(), dt);
+        if self.tilt_target == 0.0 && self.tilt.settled(0.0, 1.0e-3, 1.0e-2) {
+            self.tilt.snap(0.0);
+        }
 
         let ratio = (speed / peak).clamp(0.0, 1.0);
         self.stretch_target = if input.scoot {
@@ -183,18 +189,16 @@ impl CodexState {
 
         self.scale.step(self.scale_target, &feel.press_spec(), dt);
 
-        if self.loading {
-            let rate = TAU / SPIN_SECS_PER_TURN;
-            self.spin.value += rate * dt;
-            self.spin.velocity = rate;
-            self.spin_target = self.spin.value;
+        self.spin_target = if self.loading {
+            self.swing_phase = (self.swing_phase + dt / SWING_PERIOD_SECS).fract();
+            -SWING_MAX_DEGREES.to_radians() * (1.0 - (TAU * self.swing_phase).cos()) / 2.0
         } else {
-            self.spin_target = (self.spin.value / TAU).round() * TAU;
-            self.spin.step(self.spin_target, &SPIN_RETURN, dt);
-            if self.spin.settled(self.spin_target, 1.0e-3, 1.0e-2) {
-                self.spin.snap(0.0);
-                self.spin_target = 0.0;
-            }
+            self.swing_phase = 0.0;
+            0.0
+        };
+        self.spin.step(self.spin_target, &SWING_SPRING, dt);
+        if !self.loading && self.spin.settled(0.0, 1.0e-3, 1.0e-2) {
+            self.spin.snap(0.0);
         }
 
         self.reveal = if input.shown {
@@ -505,19 +509,21 @@ mod tests {
     }
 
     #[test]
-    fn loading_spins_and_returns_to_rest() {
+    fn loading_swings_inside_the_measured_range_and_returns_to_rest() {
         let feel = CursorFeel::default();
         let mut s = CodexState::default();
         let mut busy = input((0.0, 0.0));
         busy.loading = true;
-        for _ in 0..60 {
+        let cap = SWING_MAX_DEGREES.to_radians();
+        let (mut low, mut high) = (0.0_f64, 0.0_f64);
+        for _ in 0..240 {
             s.tick(1.0 / 60.0, &busy, &feel);
+            let rotation = s.channels().rotation;
+            low = low.min(rotation);
+            high = high.max(rotation);
         }
-        let spun = s.channels().rotation;
-        assert!(
-            (spun - TAU / SPIN_SECS_PER_TURN).abs() < 0.05,
-            "spun {spun}"
-        );
+        assert!(low < -0.8 * cap && low >= -cap - 0.02, "swung to {low}");
+        assert!(high <= 0.03, "never swings the other way: {high}");
         assert!(s.animating());
         for _ in 0..600 {
             s.tick(1.0 / 60.0, &input((0.0, 0.0)), &feel);
