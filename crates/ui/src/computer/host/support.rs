@@ -9,6 +9,7 @@ use zeron_proto::computer::{
 pub use crate::computer::cursor_preference::{CuaCursorStyle, normalize_cua_cursor_style};
 
 pub const CUA_CURSOR_IDLE_HIDE_MS: u64 = 60_000;
+pub const CUA_CURSOR_THEME: &str = "zeron.codex";
 pub const ESCAPE_INPUT_COOLDOWN: Duration = Duration::from_millis(1_500);
 pub(super) const BOUNDED_ENTRIES: usize = 256;
 pub(super) const ANONYMOUS_TASK: &str = "anonymous";

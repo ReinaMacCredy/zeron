@@ -490,6 +490,9 @@ pub fn load_installed_theme(id: &str) -> Result<Option<Arc<CompiledTheme>>> {
 }
 
 pub fn resolve_theme_selection(id: &str) -> Result<Option<Arc<CompiledTheme>>> {
+    if id == crate::COMPACT_THEME_ID || id == crate::CODEX_THEME_ID {
+        return Ok(None);
+    }
     load_installed_theme(id)
 }
 

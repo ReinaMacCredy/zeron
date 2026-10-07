@@ -10,6 +10,7 @@ pub mod arc;
 pub mod badge_glyphs;
 pub mod bezier;
 pub mod capture_utils;
+pub mod codex_cursor;
 pub mod compact_cursor;
 pub mod feel;
 pub mod motion;
@@ -45,8 +46,9 @@ pub use spring::{travel_response, SpringChannel, SpringSpec};
 pub use theme::{
     parse_style_color, session_fill_hex, session_fill_rgba, CursorAction, CursorStyle,
     CursorVisualState, DeliveryModifier, PlaybackKind, ReducedMotion, TargetModifier,
-    DEFAULT_CURSOR_FILL, DEFAULT_THEME_ID, DEFAULT_THEME_VERSION, STOCK_CURSOR_FILL,
-    STOCK_CURSOR_FILL_PRESSED, STOCK_CURSOR_RIM, STOCK_CURSOR_SHADOW, THEME_PROFILE,
+    CODEX_THEME_ID, COMPACT_THEME_ID, DEFAULT_CURSOR_FILL, DEFAULT_THEME_ID, DEFAULT_THEME_VERSION,
+    STOCK_CURSOR_FILL, STOCK_CURSOR_FILL_PRESSED, STOCK_CURSOR_RIM, STOCK_CURSOR_SHADOW,
+    THEME_PROFILE,
 };
 pub use theme_artifact::{
     decode_theme, embedded_default_theme, inspect_artifact, list_installed_themes,
