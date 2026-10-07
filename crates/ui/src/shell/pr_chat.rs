@@ -94,7 +94,7 @@ impl Shell {
                 page.read(cx).chat_context(cx).index_key() == panel.context.index_key()
             }),
             None => false,
-        };
+        } && !self.open_pr_chat_idle_expired(cx);
         if restore {
             if let Some(panel) = self.pr_chat.as_mut() {
                 panel.view = PanelView::Open;
@@ -106,8 +106,11 @@ impl Shell {
             };
             let context = page.read(cx).chat_context(cx);
             self.discard_pr_chat(cx);
-            match self.newest_pr_chat_session(&context.index_key(), cx) {
-                Some(row) => self.resume_pr_chat(context, row, cx),
+            let newest = self
+                .newest_pr_chat_session(&context.index_key(), cx)
+                .filter(|(row, created_at)| !self.pr_chat_idle_expired(&row.id, *created_at, cx));
+            match newest {
+                Some((row, _)) => self.resume_pr_chat(context, row, cx),
                 None => self.start_pr_chat(context, cx),
             }
         }
@@ -115,7 +118,11 @@ impl Shell {
         cx.notify();
     }
 
-    fn newest_pr_chat_session(&self, scope: &str, cx: &App) -> Option<zeron_proto::Chat> {
+    fn newest_pr_chat_session(
+        &self,
+        scope: &str,
+        cx: &App,
+    ) -> Option<(zeron_proto::Chat, chrono::DateTime<Utc>)> {
         let mut sessions = settings::pr_chat_sessions(scope, cx);
         sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
         let state = self.state.read(cx);
@@ -124,7 +131,47 @@ impl Shell {
                 .chats
                 .iter()
                 .find(|chat| chat.id == session.chat_id && !chat.archived)
-                .cloned()
+                .map(|chat| (chat.clone(), session.created_at))
+        })
+    }
+
+    fn pr_chat_idle_expired(
+        &self,
+        chat_id: &str,
+        created_at: chrono::DateTime<Utc>,
+        cx: &App,
+    ) -> bool {
+        let Some(limit) = settings::pr_chat_idle_limit(cx) else {
+            return false;
+        };
+        let state = self.state.read(cx);
+        let busy = state.session_for(chat_id).is_some_and(|session| {
+            matches!(
+                session.status,
+                zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+            )
+        });
+        let last = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.last_message_at)
+            .unwrap_or(created_at);
+        !busy && Utc::now() - last > limit
+    }
+
+    fn open_pr_chat_idle_expired(&self, cx: &App) -> bool {
+        let Some(panel) = self.pr_chat.as_ref().filter(|panel| panel.indexed) else {
+            return false;
+        };
+        if self
+            .pr_chat_tab()
+            .is_some_and(|tab| tab.composer.read(cx).is_sending())
+        {
+            return false;
+        }
+        settings::pr_chat_session(&panel.chat_id, cx).is_some_and(|session| {
+            self.pr_chat_idle_expired(&panel.chat_id, session.created_at, cx)
         })
     }
 
@@ -288,7 +335,7 @@ impl Shell {
             cx.notify();
             return;
         }
-        self.discard_pr_chat(cx);
+        self.release_pr_chat(cx);
         self.start_pr_chat(context, cx);
         self.sync_pr_chat_button(cx);
         cx.notify();
@@ -585,6 +632,16 @@ impl Shell {
         panel.view = PanelView::Closed;
         panel.sessions_menu = false;
         if settings::current(cx).pr_chat_history == PrChatHistory::Fresh {
+            self.release_pr_chat(cx);
+        }
+        self.sync_pr_chat_button(cx);
+        cx.notify();
+    }
+
+    fn release_pr_chat(&mut self, cx: &mut Context<Self>) {
+        if settings::current(cx).pr_chat_history == PrChatHistory::Fresh
+            && let Some(panel) = self.pr_chat.as_mut()
+        {
             let chat_id = panel.chat_id.clone();
             if panel.fresh && settings::current(cx).pr_chat_indexed(&chat_id) {
                 if let Some(side) = panel.side.take() {
@@ -592,10 +649,8 @@ impl Shell {
                 }
                 self.delete_pr_chat(chat_id, cx);
             }
-            self.discard_pr_chat(cx);
         }
-        self.sync_pr_chat_button(cx);
-        cx.notify();
+        self.discard_pr_chat(cx);
     }
 
     fn park_pr_chat(
@@ -1077,6 +1132,26 @@ impl Shell {
                     .child(icon(icons::LUCIDE_CHEVRON_DOWN).size(px(12.0)))
             }))
             .child(div().flex_1())
+            .child(
+                div()
+                    .id("pr-chat-new")
+                    .debug_selector(|| "pr-chat-new".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("New chat")
+                    .size(px(26.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.ink(0.06)))
+                    .on_click(cx.listener(|this, _, _, cx| this.new_pr_chat_session(cx)))
+                    .child(
+                        icon(icons::PEN_NEW_SQUARE)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
             .child(
                 div()
                     .id("pr-chat-promote")
@@ -1781,6 +1856,7 @@ fn day_divider(label: SharedString, theme: &Theme) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::PrChatIdleExpiry;
     use gpui::{AppContext, TestAppContext, VisualTestContext};
     use zeron_rpc::{ClientFrame, ServerFrame};
 
@@ -1901,7 +1977,9 @@ mod tests {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
             crate::terminal::panel::init(cx);
-            settings::init(UiSettings::default(), dir.path(), cx);
+            let mut initial = UiSettings::default();
+            initial.pr_chat_idle_expiry = PrChatIdleExpiry::Never;
+            settings::init(initial, dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -1946,7 +2024,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mini_chat_mints_an_ask_chat_with_the_context_and_stays_out_of_the_sidebar(
+    fn the_mini_chat_mints_a_chat_with_the_context_and_stays_out_of_the_sidebar(
         cx: &mut TestAppContext,
     ) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
@@ -2051,14 +2129,14 @@ mod tests {
         assert_eq!(create["spaceId"], "s1");
         assert_eq!(create["cwd"], "/wt/x");
         assert_eq!(create["createdByChatId"], serde_json::Value::Null);
-        assert_eq!(create["config"]["permissionMode"], "ask");
+        assert_eq!(create["config"]["permissionMode"], "full");
         let frames = wire.serve(&runtime, cx, |method, _| {
             (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
         });
         let run = calls(&frames, methods::QUEUE_COMMAND);
         assert_eq!(run.len(), 1, "{frames:?}");
         let request = &run[0].params["command"]["request"];
-        assert_eq!(request["permissionMode"], "ask");
+        assert_eq!(request["permissionMode"], "full");
         assert_eq!(request["cwd"], "/wt/x");
         let prompt = request["prompt"].as_str().unwrap();
         assert!(
@@ -2211,34 +2289,68 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mini_chat_refuses_agents_that_do_not_ask_before_running_commands(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_mini_chat_sends_with_any_agent_and_the_picked_permission_mode(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         let (chat_id, composer, side_state) = open_pr_chat(&runtime, &shell, cx, &mut wire);
-        for harness in ["pi", "opencode", "cursor", "grok"] {
-            let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
-                "harness": harness, "sandbox": "workspace-write",
-            }))
-            .unwrap();
-            side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
-            composer.update(cx, |composer, cx| {
-                composer.send_prompt("Approve and merge it".into(), cx)
-            });
-            let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
+        let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "pi", "sandbox": "workspace-write", "permissionMode": "auto",
+        }))
+        .unwrap();
+        side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+        composer.update(cx, |composer, cx| {
+            composer.send_prompt("Approve and merge it".into(), cx)
+        });
+        let frames = wire.serve(&runtime, cx, |method, params| {
+            (method == methods::MUTATE && params["op"] == "createChat")
+                .then(|| serde_json::json!({}))
+        });
+        let create = calls(&frames, methods::MUTATE);
+        assert_eq!(create.len(), 1, "{frames:?}");
+        assert_eq!(create[0].params["config"]["harness"], "pi");
+        assert_eq!(create[0].params["config"]["permissionMode"], "auto");
+        assert!(composer.read_with(cx, |composer, _| composer.failure().is_none()));
+        let frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        let run = calls(&frames, methods::QUEUE_COMMAND);
+        assert_eq!(run.len(), 1, "{frames:?}");
+        assert_eq!(
+            run[0].params["command"]["request"]["permissionMode"],
+            "auto"
+        );
+    }
+
+    #[gpui::test]
+    fn the_mini_chat_composer_shows_the_footer_and_permission_chip(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (_, composer, _) = open_pr_chat(&runtime, &shell, cx, &mut wire);
+        let panel = cx.debug_bounds("pr-chat-floating").expect("panel drawn");
+        for selector in ["composer-footer", "picker-permission"] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} drawn"));
             assert!(
-                calls(&frames, methods::MUTATE).is_empty()
-                    && calls(&frames, methods::QUEUE_COMMAND).is_empty(),
-                "{harness}: {frames:?}"
-            );
-            assert!(
-                composer.read_with(cx, |composer, _| composer
-                    .failure()
-                    .is_some_and(|failure| failure.contains("can't ask"))),
-                "{harness}"
+                panel.contains(&bounds.origin) && panel.contains(&bounds.bottom_right()),
+                "{selector} {bounds:?} inside {panel:?}"
             );
         }
+        let permission = cx.debug_bounds("picker-permission").unwrap();
+        let footer = cx.debug_bounds("composer-footer").unwrap();
+        assert!(
+            (permission.center().y - footer.center().y).abs() < px(4.0),
+            "one footer row: {permission:?} {footer:?}"
+        );
+        assert_eq!(
+            cx.update(|_, cx| composer
+                .read(cx)
+                .pickers()
+                .read(cx)
+                .effective_permission_mode(cx)),
+            zeron_proto::PermissionMode::Full,
+            "a new PR chat starts in the same mode as any new chat"
+        );
     }
 
     #[gpui::test]
@@ -2556,7 +2668,7 @@ mod tests {
         assert_eq!(run.len(), 1, "{frames:?}");
         let request = &run[0].params["command"]["request"];
         assert_eq!(request["prompt"], "What changed since we last talked?");
-        assert_eq!(request["permissionMode"], "ask");
+        assert_eq!(request["permissionMode"], "full");
         shell.read_with(cx, |shell, _| {
             assert!(shell.pr_chat.as_ref().unwrap().earlier.is_none())
         });
@@ -3367,6 +3479,241 @@ mod tests {
             );
             let settings = settings::current(cx);
             assert!(settings.pr_chat_indexed("gone") && settings.pr_chat_indexed("gone8"));
+        });
+    }
+
+    fn send_mock(
+        runtime: &tokio::runtime::Runtime,
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+        wire: &mut Wire,
+    ) -> String {
+        let (chat_id, composer, side_state) = shell.read_with(cx, |shell, _| {
+            let tab = shell.pr_chat_tab().expect("chat minted");
+            (
+                shell.pr_chat.as_ref().unwrap().chat_id.clone(),
+                tab.composer.clone(),
+                tab.state.clone(),
+            )
+        });
+        let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "mock", "sandbox": "workspace-write",
+        }))
+        .unwrap();
+        side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+        composer.update(cx, |composer, cx| composer.send_prompt("Hi".into(), cx));
+        wire.serve(runtime, cx, |method, _| {
+            matches!(method, methods::MUTATE | methods::QUEUE_COMMAND)
+                .then(|| serde_json::json!({}))
+        });
+        wire.serve(runtime, cx, |_, _| Some(serde_json::json!({})));
+        shell.read_with(cx, |_, cx| {
+            assert!(settings::current(cx).pr_chat_indexed(&chat_id))
+        });
+        chat_id
+    }
+
+    fn serve_prepare(
+        runtime: &tokio::runtime::Runtime,
+        cx: &mut VisualTestContext,
+        wire: &mut Wire,
+    ) -> usize {
+        let frames = wire.serve(runtime, cx, |method, _| {
+            (method == methods::PREPARE_CHANGE_REQUEST_CHAT).then(|| {
+                serde_json::json!({
+                    "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                    "worktree": false, "onHead": false,
+                })
+            })
+        });
+        calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len()
+    }
+
+    fn deleted(frames: &[ClientFrame]) -> Vec<String> {
+        calls(frames, methods::MUTATE)
+            .into_iter()
+            .filter(|frame| frame.params["op"] == "deleteChat")
+            .map(|frame| frame.params["chatId"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn the_header_new_chat_button_starts_a_new_session_in_both_history_modes(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (unsent, _, _) = open_pr_chat(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-new");
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            0,
+            "an unsent chat is already new"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, unsent)
+        });
+
+        let kept = send_mock(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-new");
+        let frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::PREPARE_CHANGE_REQUEST_CHAT).then(|| {
+                serde_json::json!({
+                    "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                    "worktree": false, "onHead": false,
+                })
+            })
+        });
+        assert_eq!(
+            calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len(),
+            1
+        );
+        assert!(deleted(&frames).is_empty(), "{frames:?}");
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_ne!(panel.chat_id, kept);
+            assert!(!panel.indexed);
+            assert!(shell.pr_chat_open());
+            assert!(shell.pr_chat_tab().is_some());
+            assert!(settings::current(cx).pr_chat_indexed(&kept));
+        });
+
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_history = PrChatHistory::Fresh
+            })
+        });
+        shell.update(cx, |shell, cx| {
+            shell.close_pr_chat(cx);
+            shell.toggle_pr_chat(cx);
+        });
+        assert_eq!(serve_prepare(&runtime, cx, &mut wire), 1);
+        assert!(cx.debug_bounds("pr-chat-sessions").is_none());
+        let fresh = send_mock(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-new");
+        let mut frames = wire.serve(&runtime, cx, |method, _| match method {
+            methods::PREPARE_CHANGE_REQUEST_CHAT => Some(serde_json::json!({
+                "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                "worktree": false, "onHead": false,
+            })),
+            _ => Some(serde_json::json!({})),
+        });
+        frames.extend(wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({}))));
+        assert_eq!(
+            calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len(),
+            1
+        );
+        assert_eq!(
+            deleted(&frames),
+            [fresh.clone()],
+            "Fresh discards the replaced chat"
+        );
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert!(panel.chat_id != fresh && panel.chat_id != kept);
+            assert!(
+                settings::current(cx).pr_chat_indexed(&kept),
+                "made under Keep per PR"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_idle_session_past_the_expiry_opens_a_new_chat_and_a_recent_one_resumes(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let set_last = |cx: &mut VisualTestContext, ago: chrono::Duration| {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, _| {
+                    let chat = state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.id == "old")
+                        .unwrap();
+                    chat.last_message_at = Some(Utc::now() - ago);
+                })
+            })
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(row("old", false, serde_json::json!({})))
+            })
+        });
+        index(cx, "github.com/acme/zeron#7", &[("old", 3)]);
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_idle_expiry = PrChatIdleExpiry::ThirtyMinutes
+            })
+        });
+        set_last(cx, chrono::Duration::hours(2));
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            1,
+            "past 30 min: a new chat"
+        );
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_ne!(panel.chat_id, "old");
+            assert!(panel.earlier.is_none());
+            assert!(settings::current(cx).pr_chat_indexed("old"));
+            let rows = shell.pr_chat_session_rows(cx);
+            assert!(rows.iter().any(|row| row.chat_id == "old" && !row.current));
+        });
+
+        set_last(cx, chrono::Duration::minutes(10));
+        shell.update(cx, |shell, cx| {
+            shell.discard_pr_chat(cx);
+            shell.toggle_pr_chat(cx);
+        });
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            0,
+            "inside 30 min: resumed"
+        );
+        shell.read_with(cx, |shell, _| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_eq!(panel.chat_id, "old");
+            assert!(panel.indexed);
+        });
+
+        shell.update(cx, |shell, cx| shell.close_pr_chat(cx));
+        set_last(cx, chrono::Duration::hours(2));
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            1,
+            "the kept panel expires too"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_ne!(shell.pr_chat.as_ref().unwrap().chat_id, "old")
+        });
+
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_idle_expiry = PrChatIdleExpiry::Never
+            })
+        });
+        shell.update(cx, |shell, cx| {
+            shell.discard_pr_chat(cx);
+            shell.toggle_pr_chat(cx);
+        });
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            0,
+            "Never always resumes"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "old")
         });
     }
 

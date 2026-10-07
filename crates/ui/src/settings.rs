@@ -818,6 +818,12 @@ pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
         .unwrap_or_default()
 }
 
+pub fn pr_chat_idle_limit(cx: &App) -> Option<chrono::Duration> {
+    cx.try_global::<SettingsStore>()
+        .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
+        .and_then(|store| store.current.pr_chat_idle_expiry.limit())
+}
+
 pub fn home_widgets(cx: &App) -> HomeWidgets {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.home_widgets)
@@ -1197,6 +1203,51 @@ pub enum PrChatHistory {
     Fresh,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrChatIdleExpiry {
+    Never,
+    FiveMinutes,
+    TenMinutes,
+    #[default]
+    ThirtyMinutes,
+    OneHour,
+    OneDay,
+}
+
+impl PrChatIdleExpiry {
+    pub const ALL: [Self; 6] = [
+        Self::Never,
+        Self::FiveMinutes,
+        Self::TenMinutes,
+        Self::ThirtyMinutes,
+        Self::OneHour,
+        Self::OneDay,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Never => "Never",
+            Self::FiveMinutes => "5 min",
+            Self::TenMinutes => "10 min",
+            Self::ThirtyMinutes => "30 min",
+            Self::OneHour => "1 hour",
+            Self::OneDay => "1 day",
+        }
+    }
+
+    pub fn limit(self) -> Option<chrono::Duration> {
+        match self {
+            Self::Never => None,
+            Self::FiveMinutes => Some(chrono::Duration::minutes(5)),
+            Self::TenMinutes => Some(chrono::Duration::minutes(10)),
+            Self::ThirtyMinutes => Some(chrono::Duration::minutes(30)),
+            Self::OneHour => Some(chrono::Duration::hours(1)),
+            Self::OneDay => Some(chrono::Duration::days(1)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrChatSession {
@@ -1467,6 +1518,7 @@ pub struct UiSettings {
     pub commit_message_model: Option<CommitModelChoice>,
     pub pr_chat_style: PrChatStyle,
     pub pr_chat_history: PrChatHistory,
+    pub pr_chat_idle_expiry: PrChatIdleExpiry,
     pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
     pub git_agent_busy_policy: GitAgentBusyPolicy,
     pub device_auto_float: bool,
@@ -1592,6 +1644,7 @@ impl Default for UiSettings {
             commit_message_model: None,
             pr_chat_style: PrChatStyle::default(),
             pr_chat_history: PrChatHistory::default(),
+            pr_chat_idle_expiry: PrChatIdleExpiry::default(),
             pr_chat_sessions: Default::default(),
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
             device_auto_float: true,
@@ -2275,6 +2328,7 @@ impl UiSettings {
             commit_message_model,
             pr_chat_style,
             pr_chat_history,
+            pr_chat_idle_expiry,
             pr_chat_sessions,
             git_agent_busy_policy,
             device_auto_float,
@@ -2691,6 +2745,7 @@ mod tests {
         assert_eq!(legacy.commit_message_model, None);
         assert_eq!(legacy.pr_chat_style, PrChatStyle::Floating);
         assert_eq!(legacy.pr_chat_history, PrChatHistory::KeepPerPr);
+        assert_eq!(legacy.pr_chat_idle_expiry, PrChatIdleExpiry::ThirtyMinutes);
         assert_eq!(legacy.git_agent_busy_policy, GitAgentBusyPolicy::SafeOnly);
         assert_eq!(legacy, UiSettings::default());
         let saved = serde_json::to_string(&legacy).unwrap();
@@ -2823,6 +2878,20 @@ mod tests {
         assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
         assert_eq!(merged.commit_message_instruction, "Conventional please.");
         assert_eq!(merged.pr_chat_style, PrChatStyle::BottomBar);
+
+        let mut expiry = base.clone();
+        expiry.pr_chat_idle_expiry = PrChatIdleExpiry::OneDay;
+        let merged = UiSettings::merge_changes(&base, &expiry, merged);
+        assert_eq!(merged.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
+        assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
+        let mut other = base.clone();
+        other.sidebar_width = 280.0;
+        let merged = UiSettings::merge_changes(&base, &other, merged);
+        assert_eq!(merged.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
+        assert_eq!(
+            serde_json::to_value(PrChatIdleExpiry::FiveMinutes).unwrap(),
+            "five-minutes"
+        );
     }
 
     #[test]
@@ -3737,6 +3806,7 @@ mod tests {
             }),
             pr_chat_style: PrChatStyle::BottomBar,
             pr_chat_history: PrChatHistory::Fresh,
+            pr_chat_idle_expiry: PrChatIdleExpiry::OneHour,
             pr_chat_sessions: std::collections::BTreeMap::from([(
                 "github.com/acme/zeron#7".to_string(),
                 vec![PrChatSession {
