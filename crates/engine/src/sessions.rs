@@ -30,6 +30,7 @@ use zeron_doc::{
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
+use zeron_proto::tools::ToolGroup;
 use zeron_proto::{
     AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, PermissionMode, RunRequest,
     Session, SessionBranch, SessionStatus, ToolDiff, UserInputAnswer, UserInputQuestion,
@@ -462,21 +463,25 @@ impl Inner {
     ) -> Option<zeron_harness::ToolServer> {
         let port = (*lock(&self.tool_server_port))?;
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
-        let mut guidance = match computer_control {
-            true => format!(
-                "{}\n\n{}",
-                crate::computer::tools::guidance::computer_tool_instructions(),
-                crate::doc_host::DELEGATION_GUIDANCE
-            ),
-            false => crate::doc_host::DELEGATION_GUIDANCE.to_string(),
-        };
-        if lock(&self.device_hub)
+        let devices = lock(&self.device_hub)
             .as_ref()
-            .is_some_and(|hub| hub.agent_access_enabled())
-        {
-            guidance.push_str("\n\n");
-            guidance.push_str(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS);
-        }
+            .is_some_and(|hub| hub.agent_access_enabled());
+        let disabled = self.registry.tool_settings().disabled(&[]);
+        let live = |group| zeron_proto::tools::group_live(group, &disabled);
+        let computer_guidance =
+            computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
+        let blocks: Vec<&str> = [
+            computer_guidance
+                .as_deref()
+                .filter(|_| live(ToolGroup::Computer)),
+            live(ToolGroup::Delegation).then_some(crate::doc_host::DELEGATION_GUIDANCE),
+            (devices && live(ToolGroup::Devices))
+                .then_some(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let guidance = (!blocks.is_empty()).then(|| blocks.join("\n\n"));
         Some(zeron_harness::ToolServer {
             command,
             args: vec![
@@ -487,7 +492,7 @@ impl Inner {
                 port.to_string(),
             ],
             env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
-            guidance: Some(guidance),
+            guidance,
         })
     }
 
@@ -5373,6 +5378,40 @@ mod tests {
             );
             assert!(text.contains(crate::doc_host::DELEGATION_GUIDANCE));
         }
+    }
+
+    #[test]
+    fn a_tool_group_turned_off_drops_its_prompt_block() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let registry = Arc::new(HarnessRegistry::new());
+        let sessions = SessionsEngine::new("host".into(), journal, registry.clone());
+        sessions.set_tool_server_port(4242);
+        let guidance = |computer| {
+            sessions
+                .inner
+                .tool_server_for("chat", "secret", computer)
+                .and_then(|server| server.guidance)
+        };
+        let mut settings = zeron_proto::tools::ToolSettings::default();
+        settings.set_tool("delegate_task", false);
+        registry.set_tool_settings(settings.clone());
+        assert_eq!(
+            guidance(false).as_deref(),
+            Some(crate::doc_host::DELEGATION_GUIDANCE)
+        );
+        settings.set_group(ToolGroup::Delegation, false);
+        registry.set_tool_settings(settings.clone());
+        assert_eq!(guidance(false), None);
+        let computer = guidance(true).unwrap();
+        assert!(computer.starts_with("## Zeron computer use\n"));
+        assert!(!computer.contains(crate::doc_host::DELEGATION_GUIDANCE));
+        for name in zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES {
+            settings.set_tool(name, false);
+        }
+        registry.set_tool_settings(settings);
+        assert_eq!(guidance(true), None);
     }
 
     fn request_with_resume(session: &str) -> RunRequest {

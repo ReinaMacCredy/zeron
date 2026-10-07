@@ -32,6 +32,7 @@ pub mod permission_guide;
 pub mod shortcuts;
 pub mod source_control;
 pub mod thread_naming;
+pub mod tools;
 pub mod wallpaper;
 pub mod wallpaper_colors;
 pub mod widgets;

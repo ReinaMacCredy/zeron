@@ -51,6 +51,7 @@ use crate::settings::home::HomeSettingsPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::source_control::SourceControlPage;
+use crate::settings::tools::{ToolsPage, ToolsPageEvent};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SPLIT_PANE_MIN, SPLIT_RATIO_DEFAULT,
@@ -564,6 +565,7 @@ pub enum SettingsSection {
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
     Harnesses,
+    Tools,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
@@ -584,7 +586,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 14] = [
+    pub const ALL: [SettingsSection; 15] = [
         SettingsSection::General,
         SettingsSection::Home,
         SettingsSection::Appearance,
@@ -592,6 +594,7 @@ impl SettingsSection {
         SettingsSection::Voice,
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
+        SettingsSection::Tools,
         SettingsSection::Devices,
         SettingsSection::Files,
         SettingsSection::Appshots,
@@ -632,6 +635,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "devices",
             SettingsSection::Harnesses => "providers",
+            SettingsSection::Tools => "tools",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
@@ -654,6 +658,7 @@ impl SettingsSection {
             "devices" => SettingsSection::Devices,
             "providers" | "harnesses" => SettingsSection::Harnesses,
             "agents" => SettingsSection::Agents,
+            "tools" => SettingsSection::Tools,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
             "notifications" => SettingsSection::Notifications,
@@ -682,6 +687,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Providers",
+            SettingsSection::Tools => "Tools",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
@@ -707,6 +713,7 @@ impl SettingsSection {
                 "agent", "harness", "account", "usage", "claude", "codex", "cursor", "opencode",
             ],
             SettingsSection::Agents => &["account", "login", "usage", "provider"],
+            SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
@@ -2263,6 +2270,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     computer_page: Option<Entity<ComputerPage>>,
     device_hub_page: Option<Entity<DeviceHubPage>>,
+    tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     accounts_page: Option<Entity<AccountsPage>>,
     /// This device's agent logins + usage for the sidebar user row and its
@@ -2860,6 +2868,7 @@ impl Shell {
             shortcuts_page: None,
             computer_page: None,
             device_hub_page: None,
+            tools_page: None,
             pending_computer_guide: None,
             accounts_page: None,
             account_usage: None,
@@ -6016,6 +6025,9 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
+        if section == SettingsSection::Tools {
+            self.tools_page = None;
+        }
         if section == SettingsSection::Computer
             && let Some(page) = &self.computer_page
         {
@@ -6399,6 +6411,20 @@ impl Shell {
                     page.update(cx, |page, cx| page.open_setup_guide(&missing, cx));
                 }
                 page.into_any_element()
+            }
+            SettingsSection::Tools => {
+                if self.tools_page.is_none() {
+                    let state = self.state.clone();
+                    let page = cx.new(|cx| ToolsPage::new(state, cx));
+                    let sub = cx.subscribe(&page, |this: &mut Shell, _, event, cx| match event {
+                        ToolsPageEvent::OpenSection(section) => this.open_settings(*section, cx),
+                    });
+                    self.tools_page = Some((page, sub));
+                }
+                match &self.tools_page {
+                    Some((page, _)) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
             }
             SettingsSection::DeviceHub => {
                 let state = self.state.clone();
@@ -8470,6 +8496,7 @@ impl Shell {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
+            SettingsSection::Tools => icons::LUCIDE_HAMMER,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
@@ -19897,6 +19924,7 @@ mod settings_modal_regressions {
             ("settings/appshots", SettingsSection::Appshots),
             ("settings/computer", SettingsSection::Computer),
             ("settings/device-hub", SettingsSection::DeviceHub),
+            ("settings/tools", SettingsSection::Tools),
             ("settings/source-control", SettingsSection::SourceControl),
             ("settings/home", SettingsSection::Home),
             ("settings/archived", SettingsSection::Archived),
