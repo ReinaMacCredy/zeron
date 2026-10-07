@@ -457,6 +457,17 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "maximum": COMPUTER_SELECT_TEXT_RANGE_MAX,
             "description": "Number of UTF-16 code units to select; 0 collapses the selection to a caret at start. A range running past the element's end is refused rather than clamped. The result's value is the text the range covered; compare it with the text you meant to select before typing over it.",
         },
+        "text": {
+            "type": "string",
+            "description": "Instead of start/length, the exact text to find in the element's current value. It must occur exactly once after prefix/suffix narrowing, or the call refuses.",
+        },
+        "prefix": { "type": "string", "description": "Text that must immediately precede the match." },
+        "suffix": { "type": "string", "description": "Text that must immediately follow the match." },
+        "selection": {
+            "type": "string",
+            "enum": ["text", "cursor_before", "cursor_after"],
+            "description": "Select the matched text (default) or place a caret before or after it.",
+        },
     })));
     let rect_properties = |window: &str| {
         object(json!({
@@ -882,10 +893,10 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_select_text",
             "Select text",
             format!(
-                "Select an exact character range inside a text element, through the accessibility layer rather than by key chord or pointer drag. {}",
+                "Select an exact character range inside a text element, through the accessibility layer rather than by key chord or pointer drag. Pass start and length, or text with optional prefix, suffix and selection. {}",
                 select_text_note(dialect)
             ),
-            object_schema(select_properties, &["start", "length"]),
+            object_schema(select_properties, &[]),
             None,
         )),
         action_entry(

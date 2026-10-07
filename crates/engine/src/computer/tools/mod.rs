@@ -170,7 +170,7 @@ pub fn run_step_fields(step_type: &str) -> Option<Vec<&'static str>> {
         "perform_action" => with_target(&["action"]),
         "select_text" => {
             let mut fields = semantic(&[]);
-            fields.extend_from_slice(&["start", "length"]);
+            fields.extend_from_slice(&["start", "length", "text", "prefix", "suffix", "selection"]);
             fields
         }
         "wait" => {

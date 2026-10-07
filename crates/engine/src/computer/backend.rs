@@ -98,6 +98,84 @@ pub struct ComputerTextRange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputerTextSelection {
+    Range(ComputerTextRange),
+    Match(ComputerTextMatch),
+}
+
+impl From<ComputerTextRange> for ComputerTextSelection {
+    fn from(range: ComputerTextRange) -> Self {
+        Self::Range(range)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerTextMatch {
+    pub text: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub placement: ComputerTextPlacement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputerTextPlacement {
+    Text,
+    CursorBefore,
+    CursorAfter,
+}
+
+impl ComputerTextMatch {
+    pub fn range_in(&self, value: &str) -> Result<ComputerTextRange, String> {
+        let starts: Vec<usize> = value
+            .char_indices()
+            .map(|(start, _)| start)
+            .filter(|start| value[*start..].starts_with(self.text.as_str()))
+            .filter(|start| {
+                let end = start + self.text.len();
+                self.prefix
+                    .as_deref()
+                    .is_none_or(|prefix| value[..*start].ends_with(prefix))
+                    && self
+                        .suffix
+                        .as_deref()
+                        .is_none_or(|suffix| value[end..].starts_with(suffix))
+            })
+            .collect();
+        let start = match starts.as_slice() {
+            [start] => *start,
+            [] => {
+                return Err(
+                    "The text was not found in the element's current value. Observe it again with computer_get_state."
+                        .to_owned(),
+                );
+            }
+            many => {
+                return Err(format!(
+                    "The text occurs {} times in the element's value. Add prefix or suffix to name one occurrence.",
+                    many.len()
+                ));
+            }
+        };
+        let offset = super::utf8_truncation::utf16_len(&value[..start]) as u64;
+        let length = super::utf8_truncation::utf16_len(&self.text) as u64;
+        Ok(match self.placement {
+            ComputerTextPlacement::Text => ComputerTextRange {
+                start: offset,
+                length,
+            },
+            ComputerTextPlacement::CursorBefore => ComputerTextRange {
+                start: offset,
+                length: 0,
+            },
+            ComputerTextPlacement::CursorAfter => ComputerTextRange {
+                start: offset + length,
+                length: 0,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputerMenuTarget {
     Window(String),
     App(String),

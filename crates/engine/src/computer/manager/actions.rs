@@ -22,7 +22,7 @@ use crate::computer::backend::{
     ComputerAgentDialect, ComputerBackendActionResult, ComputerBackendError, ComputerBackendMethod,
     ComputerBrowserCall, ComputerBrowserCallResult, ComputerCaptureRequest, ComputerError,
     ComputerLaunchOptions, ComputerMenuBackendTarget, ComputerMenuTarget, ComputerStateOptions,
-    ComputerTextRange, clamp_computer_message,
+    ComputerTextSelection, clamp_computer_message,
 };
 use crate::computer::call_context::{mark_computer_call, timed_computer_leg};
 use crate::computer::denylist::ComputerDenylistError;
@@ -1380,14 +1380,27 @@ impl ComputerManager {
         &self,
         thread_id: Option<&str>,
         target: impl Into<ObservedComputerTarget>,
-        range: ComputerTextRange,
+        selection: impl Into<ComputerTextSelection>,
     ) -> Result<ComputerActionResult, ComputerError> {
         let target = target.into();
+        let selection = selection.into();
         let window_id = target.target.window_id.clone();
         self.with_semantic_control(thread_id, window_id.as_deref(), || async {
             let resolved = self
                 .prepare_semantic_dispatch(&target, thread_id, true)
                 .await?;
+            let range = match &selection {
+                ComputerTextSelection::Range(range) => *range,
+                ComputerTextSelection::Match(matcher) => matcher
+                    .range_in(resolved.node.value.as_deref().unwrap_or_default())
+                    .map_err(|message| {
+                        ComputerTargetError::new(
+                            ComputerTargetErrorCode::NotFound,
+                            message,
+                            Vec::new(),
+                        )
+                    })?,
+            };
             let result =
                 timed_computer_leg("dispatch", self.backend.select_text(&resolved, range)).await?;
             Ok(self.action_result(

@@ -36,6 +36,13 @@ fn calculator_root() -> ComputerUiNode {
         ui("text-field", Some("Display"), None, Some("0"), 40.0),
         ui("AXButton", Some("All Clear"), None, None, 80.0),
         ui("AXButton", Some("Delete"), None, None, 120.0),
+        ui(
+            "AXTextArea",
+            Some("Notes"),
+            None,
+            Some("😀 alpha beta gamma beta"),
+            160.0
+        ),
     ]);
     serde_json::from_value(json!({
         "role": "desktop",
@@ -354,4 +361,57 @@ async fn a_failed_run_scopes_its_state_to_the_failing_steps_window() {
         vec!["fake-calculator"]
     );
     h.dispose().await;
+}
+
+async fn select(h: &Harness, extra: Value) -> McpToolResult {
+    let mut arguments = json!({ "label": "Notes", "window_id": CALC, "include_screenshot": false });
+    for (key, value) in extra.as_object().unwrap() {
+        arguments[key] = value.clone();
+    }
+    h.call("computer_select_text", arguments).await
+}
+
+fn last_range(h: &Harness) -> Value {
+    h.backend
+        .calls_for("selectText")
+        .last()
+        .map(|call| call.args[1].clone())
+        .unwrap_or(Value::Null)
+}
+
+// Catches byte offsets instead of UTF-16 units (the emoji shifts them),
+// picking the first of several matches, and ignoring prefix narrowing.
+#[tokio::test]
+async fn selects_text_by_match_in_utf16_units_and_refuses_ambiguity() {
+    let h = calculator_harness();
+    let ambiguous = select(&h, json!({ "text": "beta" })).await;
+    assert!(ambiguous.is_error, "{ambiguous:?}");
+    assert!(
+        text_of(&ambiguous).contains("occurs 2 times"),
+        "{ambiguous:?}"
+    );
+    assert!(h.backend.calls_for("selectText").is_empty());
+
+    let picked = select(&h, json!({ "text": "beta", "prefix": "gamma " })).await;
+    assert!(!picked.is_error, "{picked:?}");
+    assert_eq!(last_range(&h), json!({ "start": 20, "length": 4 }));
+    assert_eq!(result_json(&picked)["value"], json!("beta"));
+
+    let caret = select(
+        &h,
+        json!({ "text": "alpha", "suffix": " beta", "selection": "cursor_after" }),
+    )
+    .await;
+    assert!(!caret.is_error, "{caret:?}");
+    assert_eq!(last_range(&h), json!({ "start": 8, "length": 0 }));
+
+    let missing = select(&h, json!({ "text": "delta" })).await;
+    assert!(text_of(&missing).contains("not found"), "{missing:?}");
+    let mixed = select(&h, json!({ "text": "alpha", "start": 0, "length": 1 })).await;
+    assert!(text_of(&mixed).contains("never both"), "{mixed:?}");
+    h.dispose().await;
+}
+
+fn text_of(result: &McpToolResult) -> String {
+    result.first_text().unwrap_or_default().to_owned()
 }

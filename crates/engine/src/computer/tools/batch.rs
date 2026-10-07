@@ -9,8 +9,8 @@ use super::args::{
     read_action_name, read_click_gesture, read_clipboard_text, read_delta, read_drag_duration_ms,
     read_key_or_chord, read_menu_path_arg, read_menu_target_arg, read_modifiers,
     read_nested_screenshot_target, read_required_text, read_screenshot_target,
-    read_select_text_range, read_select_text_target, read_set_value_value, read_wait_duration_ms,
-    read_window_id_arg,
+    read_select_text_selection, read_select_text_target, read_set_value_value,
+    read_wait_duration_ms, read_window_id_arg,
 };
 use super::desktop::{
     Handled, is_strip_window, json_of, limited_scroll, noted_json, pause, read_pid, readiness_json,
@@ -28,7 +28,7 @@ use super::{
 };
 use crate::computer::backend::{
     COMPUTER_ACTION_OBSERVATION_MAX_DIMENSION, ComputerCaptureRequest, ComputerError,
-    ComputerLaunchOptions, ComputerTextRange,
+    ComputerLaunchOptions,
 };
 use crate::computer::cursor_activity::cursor_tool_activity;
 use crate::computer::desktop_operation_queue::{
@@ -215,8 +215,9 @@ impl ComputerTools {
             }
             "select_text" => {
                 let target = self.resolve_target(read_select_text_target(step)?, thread)?;
-                let range: ComputerTextRange = read_select_text_range(step)?;
-                async move { Ok(action(manager.select_text(who, target, range).await?)) }.boxed()
+                let selection = read_select_text_selection(step)?;
+                async move { Ok(action(manager.select_text(who, target, selection).await?)) }
+                    .boxed()
             }
             "wait" => {
                 let duration = read_wait_duration_ms(step)?;

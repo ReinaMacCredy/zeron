@@ -16,7 +16,7 @@ use super::args::{
     read_click_gesture, read_clipboard_text, read_drag_duration_ms, read_key_or_chord,
     read_menu_path_arg, read_menu_target_arg, read_modifiers, read_nested_screenshot_target,
     read_rect, read_required_text, read_screenshot_id_arg, read_screenshot_target,
-    read_scroll_delta, read_select_text_range, read_select_text_target, read_set_value_value,
+    read_scroll_delta, read_select_text_selection, read_select_text_target, read_set_value_value,
     read_wait_duration_ms, read_window_id_arg,
 };
 use super::ax_tree::{TREE_REF_LIMIT, build_tree, render_diff, render_full};
@@ -1098,8 +1098,8 @@ impl ComputerTools {
             }
             "computer_select_text" => {
                 let target = self.resolve_target(read_select_text_target(args)?, &context.chat_id)?;
-                let range = read_select_text_range(args)?;
-                plain(&manager.select_text(thread, target, range).await?)
+                let selection = read_select_text_selection(args)?;
+                plain(&manager.select_text(thread, target, selection).await?)
             }
             _ => return Err(ToolFailure::message(format!("Unknown computer tool \"{name}\"."))),
         })
