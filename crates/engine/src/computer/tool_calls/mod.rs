@@ -103,6 +103,8 @@ impl ComputerCalls {
 
     pub fn forget_chat(&self, chat_id: &str) {
         lock(&self.foreground_asks).remove(chat_id);
+        #[cfg(target_os = "macos")]
+        super::js_tool::forget(chat_id);
     }
 
     fn foreground_wait(&self) -> Duration {
@@ -703,6 +705,11 @@ impl super::js_tool::JsHost for EngineJsHost {
     fn call(&self, tool: &str, arguments: Value) -> McpToolResult {
         if tool == super::js_tool::COMPUTER_JS_TOOL {
             return McpToolResult::error("The computer tool cannot call itself.");
+        }
+        if self.sessions.tool_turned_off(tool) {
+            return McpToolResult::error(format!(
+                "{tool} is turned off in Zeron's Settings > Tools."
+            ));
         }
         let n = self.next.fetch_add(1, Ordering::SeqCst);
         let params = ComputerActionParams {

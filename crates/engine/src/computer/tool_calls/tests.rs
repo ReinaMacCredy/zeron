@@ -1687,3 +1687,31 @@ async fn a_foreground_run_is_covered_only_when_every_app_it_reaches_is_granted()
     assert!(!raised.is_error, "the step's replay lands: {raised:?}");
     rig.core.shutdown().await;
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_computer_script_honours_the_settings_switch_of_each_action_it_runs() {
+    let backend = Scripted::default_fake();
+    let rig = Rig::new(Some(backend.clone())).await;
+    rig.settings(true);
+    let mut tools = zeron_proto::tools::ToolSettings::default();
+    tools.set_tool("computer_type_text", false);
+    rig.core.registry.set_tool_settings(tools);
+    let secret = rig.run("c1", "type").await;
+    let result = rig
+        .action(
+            &secret,
+            "computer",
+            json!({ "code": "var t = await cua.getApp({ windowId: \"fake-terminal\" }); await t.typeText(\"a\");" }),
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error, "{result:?}");
+    assert!(
+        format!("{result:?}").contains("computer_type_text is turned off"),
+        "{result:?}"
+    );
+    assert!(backend.calls_for("typeText").is_empty());
+    rig.core.shutdown().await;
+}

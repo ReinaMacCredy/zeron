@@ -1998,6 +1998,14 @@ impl SessionsEngine {
         Ok(crate::computer::visible_use::visible_use_entries(&entries))
     }
 
+    pub fn tool_turned_off(&self, name: &str) -> bool {
+        self.inner
+            .registry
+            .tool_settings()
+            .disabled(&[])
+            .contains(name)
+    }
+
     pub fn computer_chat_label(&self, chat_id: &str) -> Option<String> {
         self.inner
             .workspace()?
