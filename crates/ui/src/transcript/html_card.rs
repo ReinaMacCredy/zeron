@@ -592,31 +592,35 @@ impl Transcript {
         };
         let _ = window;
         Some(
-            div()
-                .id("html-sheet")
-                .debug_selector(|| "html-sheet".into())
-                .track_focus(&self.html_pages.sheet_focus)
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        this.close_html_sheet(cx);
-                    }
-                }))
-                .occlude()
-                .absolute()
-                .top(px(top))
-                .bottom(px(self.bottom_clearance + 8.0))
-                .left(px(24.0))
-                .right(px(24.0 + self.preview_inset))
-                .flex()
-                .flex_col()
-                .rounded(px(14.0))
-                .overflow_hidden()
-                .bg(crate::popover::surface_bg(&theme))
-                .border_1()
-                .border_color(theme.border)
-                .child(header)
-                .child(body)
-                .into_any_element(),
+            crate::frost::frosted(
+                14.0,
+                crate::frost::MENU_BLUR,
+                div()
+                    .id("html-sheet")
+                    .debug_selector(|| "html-sheet".into())
+                    .track_focus(&self.html_pages.sheet_focus)
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            this.close_html_sheet(cx);
+                        }
+                    }))
+                    .occlude()
+                    .absolute()
+                    .top(px(top))
+                    .bottom(px(self.bottom_clearance + 8.0))
+                    .left(px(24.0))
+                    .right(px(24.0 + self.preview_inset))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(14.0))
+                    .overflow_hidden()
+                    .bg(crate::popover::surface_bg(&theme))
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(header)
+                    .child(body),
+            )
+            .into_any_element(),
         )
     }
 
@@ -654,7 +658,10 @@ impl Transcript {
             },
         )
         .absolute()
-        .inset_0()
+        .top(px(12.0))
+        .bottom_0()
+        .left(px(16.0))
+        .right(px(16.0))
         .into_any_element()
     }
 }
