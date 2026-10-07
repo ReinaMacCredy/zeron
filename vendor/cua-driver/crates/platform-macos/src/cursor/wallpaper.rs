@@ -133,6 +133,7 @@ impl WallpaperTint {
     pub fn spawn(screen: usize, size: (f64, f64)) -> Self {
         let shared: Shared = Arc::default();
         let (refresh, requests) = mpsc::channel::<()>();
+        let _ = refresh.send(());
         let worker = Arc::clone(&shared);
         let _ = std::thread::Builder::new()
             .name("cursor-wallpaper".into())
@@ -356,7 +357,10 @@ mod tests {
         use objc2::runtime::AnyObject;
         use objc2::{class, msg_send};
         let screen: *mut AnyObject = unsafe { msg_send![class!(NSScreen), mainScreen] };
-        let path = platform::desktop_image_path(screen as usize).expect("desktop image path");
+        let path = std::env::var_os("FOG_PATH")
+            .map(PathBuf::from)
+            .or_else(|| platform::desktop_image_path(screen as usize))
+            .expect("desktop image path");
         let (w, h, rgba) = platform::decode_thumbnail(&path).expect("decodable wallpaper");
         let frame: objc2_foundation::NSRect = unsafe { msg_send![screen, frame] };
         let size = (frame.size.width, frame.size.height);
