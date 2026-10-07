@@ -948,30 +948,67 @@ pub fn presentation_icon(presentation: &AppshotPresentation) -> Option<Arc<gpui:
 pub fn bundle_icon(bundle: &str) -> Option<Arc<gpui::Image>> {
     #[cfg(target_os = "macos")]
     {
-        static ICONS: std::sync::OnceLock<
-            std::sync::Mutex<HashMap<String, Option<Arc<gpui::Image>>>>,
-        > = std::sync::OnceLock::new();
-        let mut icons = ICONS.get_or_init(Default::default).lock().ok()?;
-        if let Some(icon) = icons.get(bundle) {
-            return icon.clone();
-        }
-        if icons.len() >= 64 {
-            return None;
-        }
-        let icon = macos::icon_for_bundle(bundle).and_then(|bytes| {
-            crate::attachments::queue_thumbnail_image(&gpui::Image::from_bytes(
-                gpui::ImageFormat::Png,
-                bytes,
-            ))
-        });
-        icons.insert(bundle.to_string(), icon.clone());
-        icon
+        cached_icon(format!("bundle:{bundle}"), || {
+            macos::icon_for_bundle(bundle)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = bundle;
         None
     }
+}
+
+pub fn running_app_icon(
+    bundle: Option<&str>,
+    pid: Option<u32>,
+    name: Option<&str>,
+) -> Option<Arc<gpui::Image>> {
+    #[cfg(target_os = "macos")]
+    {
+        bundle
+            .and_then(bundle_icon)
+            .or_else(|| {
+                let pid = i32::try_from(pid?).ok()?;
+                cached_icon(format!("pid:{pid}"), || macos::icon_for_pid(pid))
+            })
+            .or_else(|| {
+                let name = name?.trim();
+                (!name.is_empty())
+                    .then(|| {
+                        cached_icon(format!("name:{}", name.to_lowercase()), || {
+                            macos::icon_for_app_named(name)
+                        })
+                    })
+                    .flatten()
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (bundle, pid, name);
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cached_icon(key: String, load: impl FnOnce() -> Option<Vec<u8>>) -> Option<Arc<gpui::Image>> {
+    static ICONS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Option<Arc<gpui::Image>>>>> =
+        std::sync::OnceLock::new();
+    let mut icons = ICONS.get_or_init(Default::default).lock().ok()?;
+    if let Some(icon) = icons.get(&key) {
+        return icon.clone();
+    }
+    if icons.len() >= 128 {
+        return None;
+    }
+    let icon = load().and_then(|bytes| {
+        crate::attachments::queue_thumbnail_image(&gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            bytes,
+        ))
+    });
+    icons.insert(key, icon.clone());
+    icon
 }
 
 pub fn presentations(text: &str) -> HashMap<String, AppshotPresentation> {

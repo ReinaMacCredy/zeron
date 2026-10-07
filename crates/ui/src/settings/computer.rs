@@ -1543,7 +1543,7 @@ impl Render for ComputerPage {
                 ),
                 (
                     "Follow and stop",
-                    "Watch the preview while the agent works. Press Esc or Stop on the strip to take the desktop back; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it.",
+                    "Watch the preview while the agent works. Choose Stop Using an app under Computer Use Controls in the menu bar to take that app back for the rest of the turn; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it.",
                 ),
             ];
             let mut section = div()
@@ -1684,7 +1684,7 @@ impl Render for ComputerPage {
                     &theme,
                     false,
                     "Desktop abilities",
-                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Press Esc or Stop on the strip to take the desktop back for the rest of the turn; the agent then sums up. Esc needs Input Monitoring. The chat's Stop button ends the turn.",
+                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Choose Stop Using an app under Computer Use Controls in the menu bar to take that app back for the rest of the turn; the agent then sums up. The chat's Stop button ends the turn.",
                     Some(
                         format!(
                             "{backend} · {}",

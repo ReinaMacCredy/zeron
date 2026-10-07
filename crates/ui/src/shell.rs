@@ -9302,7 +9302,7 @@ impl Shell {
                     .children(compact_status)
                     .map(|el| {
                         let alpha = if archived_muted { 0.4 } else { 0.8 };
-                        match crate::computer::strip::chat_glyph(
+                        match crate::computer::presence::chat_glyph(
                             "chat-row",
                             &id,
                             SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,

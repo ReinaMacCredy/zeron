@@ -320,7 +320,7 @@ fn split_tab_chip(
                     },
                 )
                 .map(|el| {
-                    match crate::computer::strip::chat_glyph(
+                    match crate::computer::presence::chat_glyph(
                         "session-tab",
                         &id,
                         14.0,
@@ -1326,7 +1326,7 @@ impl Shell {
                             },
                         )
                         .map(|el| {
-                            match crate::computer::strip::chat_glyph(
+                            match crate::computer::presence::chat_glyph(
                                 "session-tab",
                                 &id,
                                 14.0,

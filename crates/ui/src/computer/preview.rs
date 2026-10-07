@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -11,10 +11,11 @@ use zeron_proto::computer::{
 };
 use zeron_rpc::{RpcError, methods};
 
-use super::presence::ComputerPresenceMap;
+use super::presence::{ComputerPresenceMap, DrivenApp, cua_window};
 use crate::state::EngineHandle;
 
 pub const STILL_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
+pub const COMPLETION_FLASH: Duration = Duration::from_millis(1_600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewPhase {
@@ -120,6 +121,9 @@ pub(super) struct ChatPreview {
     floating: Option<Point<f32>>,
     thumb_closed: bool,
     user_opened: bool,
+    pub(super) apps: Vec<DrivenApp>,
+    pub(super) stopped_apps: Vec<String>,
+    finished_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +140,7 @@ pub struct PreviewView {
     pub badge: Option<StatusBadge>,
     pub wants_stills: bool,
     pub floating: Option<Point<f32>>,
+    pub completed: bool,
 }
 
 impl PreviewView {
@@ -332,6 +337,8 @@ impl ComputerPreviewStore {
             chat.user_paused_window = None;
             chat.thumb_closed = false;
             chat.user_opened = false;
+            chat.apps.clear();
+            chat.stopped_apps.clear();
             self.evicted
                 .extend(chat.tap.take().map(|frame| frame.image));
             self.evicted
@@ -359,6 +366,12 @@ impl ComputerPreviewStore {
                 if was && !active {
                     chat.user_paused = false;
                     chat.user_paused_window = None;
+                    chat.finished_at = (!stopped(state)).then(Instant::now);
+                }
+                if active && !was {
+                    chat.apps.clear();
+                    chat.stopped_apps.clear();
+                    chat.finished_at = None;
                 }
                 if active != was {
                     let next = phase_on_agent_edge(chat.phase, active);
@@ -380,13 +393,28 @@ impl ComputerPreviewStore {
                 let mut changed = self.chat(thread_id).phase.is_none()
                     && self.set_phase(thread_id, Some(PreviewPhase::Armed));
                 let chat = self.chat(thread_id);
-                let app = chat.state.as_ref().and_then(|state| {
+                let window = chat.state.as_ref().and_then(|state| {
                     state
                         .windows
                         .iter()
                         .find(|window| Some(&window.id) == window_id.as_ref())
-                        .and_then(|window| window.app_name.clone())
                 });
+                let app = window.and_then(|window| window.app_name.clone());
+                if let Some(name) = app.as_deref().filter(|name| !name.trim().is_empty())
+                    && !chat.apps.iter().any(|known| known.same_app(name))
+                {
+                    let pid = window.and_then(|window| window.pid).or_else(|| {
+                        window_id
+                            .as_deref()
+                            .and_then(cua_window)
+                            .and_then(|(pid, _)| u32::try_from(pid).ok())
+                    });
+                    chat.apps.push(DrivenApp {
+                        name: name.to_owned(),
+                        pid,
+                    });
+                    changed = true;
+                }
                 if let Some(window_id) = window_id {
                     let same_window = chat.last_window_id.as_ref() == Some(window_id);
                     let next_app = app
@@ -521,6 +549,35 @@ impl ComputerPreviewStore {
             .is_some_and(|chat| std::mem::take(&mut chat.user_opened));
         let next = phase_on_hide(self.chats.get(chat_id).and_then(|chat| chat.phase));
         self.set_phase(chat_id, next) | opened
+    }
+
+    pub fn hide_all_active(&mut self) -> bool {
+        let active: Vec<String> = self
+            .chats
+            .iter()
+            .filter(|(_, chat)| {
+                matches!(chat.phase, Some(PreviewPhase::Armed | PreviewPhase::Live))
+            })
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect();
+        active.iter().fold(false, |changed, chat_id| {
+            self.hide_for_task(chat_id) | changed
+        })
+    }
+
+    pub fn stop_app(&mut self, chat_id: &str, app: &str) -> bool {
+        let Some(chat) = self.chats.get_mut(chat_id) else {
+            return false;
+        };
+        if chat
+            .stopped_apps
+            .iter()
+            .any(|stopped| stopped.eq_ignore_ascii_case(app))
+        {
+            return false;
+        }
+        chat.stopped_apps.push(app.to_owned());
+        true
     }
 
     pub fn reopen(&mut self, chat_id: &str) -> bool {
@@ -666,6 +723,9 @@ impl ComputerPreviewStore {
             badge: status_badge(state, active, true),
             wants_stills: wanted && source == FrameSource::Stills,
             floating: chat.and_then(|chat| chat.floating),
+            completed: chat
+                .and_then(|chat| chat.finished_at)
+                .is_some_and(|at| at.elapsed() < COMPLETION_FLASH),
             frame,
         }
     }

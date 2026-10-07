@@ -27,7 +27,7 @@ mod macos {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use zeron_proto::computer::{ComputerEvent, ThreadComputerState};
-    use zeron_ui::computer::native::{status_item, target_ring};
+    use zeron_ui::computer::native::status_item;
     use zeron_ui::computer::{preview, status_menu};
     use zeron_ui::state;
 
@@ -181,7 +181,6 @@ mod macos {
         gpui_tokio::init(cx);
         gpui_base::init(cx);
         preview::init(cx);
-        target_ring::install(cx);
         let app_state = cx.new(|_| {
             let mut s = state::AppState::new();
             s.chats = vec![serde_json::from_value(json!({
@@ -242,10 +241,7 @@ mod macos {
                 thread(cx, typing.clone());
                 pause(cx, 700).await;
                 overlays("driving");
-                capture(&output, "ring-sharing-none", bounds)?;
-                target_ring::set_capturable(true);
-                pause(cx, 400).await;
-                capture(&output, "ring-driving", bounds)?;
+                capture(&output, "target-driving", bounds)?;
                 menu_bar(&output, "menubar-driving", 26.0)?;
                 status_item::open_menu();
                 pause(cx, 600).await;
@@ -259,7 +255,7 @@ mod macos {
                 paused["inputPause"] = json!({ "windowId": target, "pid": std::process::id(), "message": "Screen locked" });
                 thread(cx, paused);
                 pause(cx, 700).await;
-                capture(&output, "ring-paused", bounds)?;
+                capture(&output, "target-paused", bounds)?;
                 menu_bar(&output, "menubar-paused", 26.0)?;
 
                 thread(cx, typing.clone());
@@ -270,14 +266,14 @@ mod macos {
                 window.update(cx, |_, window, _| window.activate_window())?;
                 pause(cx, 1200).await;
                 overlays("restored");
-                capture(&output, "ring-restored", bounds)?;
+                capture(&output, "target-restored", bounds)?;
 
                 let mut revoked = typing;
                 revoked["inputStopped"] = json!(true);
                 thread(cx, revoked);
                 pause(cx, 700).await;
                 overlays("revoked");
-                capture(&output, "ring-revoked", bounds)?;
+                capture(&output, "target-revoked", bounds)?;
                 menu_bar(&output, "menubar-revoked", 26.0)?;
                 Ok(())
             }

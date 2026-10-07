@@ -4,15 +4,17 @@ use dispatch2::DispatchQueue;
 use futures::channel::mpsc::UnboundedSender;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
-    NSColor, NSEventModifierFlags, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem,
+    NSColor, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSRunningApplication,
     NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSArray, NSNumber, NSString};
+use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRect, NSSize, NSString};
 
-use crate::computer::presence::PresenceTone;
-use crate::computer::status_menu::{MenuAction, MenuRow, StatusMenu};
+use crate::computer::presence::DrivenApp;
+use crate::computer::status_menu::{MENU_TITLE, MenuAction, MenuRow, StatusMenu};
 
 const PULSE: &str = "zeron-pulse";
 
@@ -111,14 +113,12 @@ fn build_menu(
                 item.setEnabled(false);
                 item
             }
-            MenuRow::Action { label, hint, .. } => {
-                let key = if hint.as_deref() == Some("Esc") {
-                    "\u{1b}"
-                } else {
-                    ""
-                };
-                let item = menu_item(mtm, label, key);
-                item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+            MenuRow::Action { label, symbol, .. } => {
+                let item = menu_item(mtm, label, "");
+                if let Some(image) = symbol.and_then(|name| self::symbol(name, label)) {
+                    image.setTemplate(true);
+                    item.setImage(Some(&image));
+                }
                 // NSMenuItem.target is weak; representedObject keeps this menu's own target alive with it.
                 unsafe {
                     item.setTarget(Some(&target));
@@ -169,27 +169,75 @@ fn set_pulse(item: &mut Item, mtm: MainThreadMarker, on: bool) {
     item.pulsing = on;
 }
 
+const ICON_SIZE: f64 = 16.0;
+const STACK_STEP: f64 = 10.0;
+const STACK_LIMIT: usize = 3;
+
+fn symbol(name: &str, description: &str) -> Option<Retained<NSImage>> {
+    NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(name),
+        Some(&NSString::from_str(description)),
+    )
+}
+
+fn app_icon(app: &DrivenApp) -> Option<Retained<NSImage>> {
+    let pid = i32::try_from(app.pid?).ok()?;
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?.icon()
+}
+
+#[allow(deprecated)]
+fn stacked(cursor: &NSImage, icons: &[Retained<NSImage>]) -> Retained<NSImage> {
+    let width = ICON_SIZE + 4.0 + ICON_SIZE + STACK_STEP * (icons.len() as f64 - 1.0);
+    let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(width, ICON_SIZE + 2.0));
+    image.lockFocus();
+    cursor.drawInRect(NSRect::new(
+        NSPoint::new(0.0, 1.0),
+        NSSize::new(ICON_SIZE, ICON_SIZE),
+    ));
+    for (index, icon) in icons.iter().enumerate() {
+        icon.drawInRect(NSRect::new(
+            NSPoint::new(ICON_SIZE + 4.0 + STACK_STEP * index as f64, 1.0),
+            NSSize::new(ICON_SIZE, ICON_SIZE),
+        ));
+    }
+    image.unlockFocus();
+    image
+}
+
+fn button_image(menu: &StatusMenu) -> Option<Retained<NSImage>> {
+    let cursor = symbol("cursorarrow", MENU_TITLE)?;
+    if !menu.active() {
+        cursor.setTemplate(true);
+        return Some(cursor);
+    }
+    let palette = NSImageSymbolConfiguration::configurationWithPaletteColors(
+        &NSArray::from_retained_slice(&[NSColor::controlAccentColor()]),
+    );
+    let cursor = cursor.imageWithSymbolConfiguration(&palette)?;
+    let icons: Vec<_> = menu
+        .apps
+        .iter()
+        .filter_map(app_icon)
+        .take(STACK_LIMIT)
+        .collect();
+    let image = if icons.is_empty() {
+        cursor
+    } else {
+        stacked(&cursor, &icons)
+    };
+    image.setTemplate(false);
+    Some(image)
+}
+
 fn render(item: &mut Item, mtm: MainThreadMarker, menu: &StatusMenu) {
-    if let Some(button) = item.status.button(mtm) {
-        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str("cursorarrow"),
-            Some(&NSString::from_str("Zeron is controlling this Mac")),
-        );
-        let tint = match menu.tone {
-            PresenceTone::Paused => NSColor::systemYellowColor(),
-            _ => NSColor::controlAccentColor(),
-        };
-        let palette = NSImageSymbolConfiguration::configurationWithPaletteColors(
-            &NSArray::from_retained_slice(&[tint]),
-        );
-        if let Some(image) = image.and_then(|image| image.imageWithSymbolConfiguration(&palette)) {
-            image.setTemplate(false);
-            button.setImage(Some(&image));
-        }
+    if let Some(button) = item.status.button(mtm)
+        && let Some(image) = button_image(menu)
+    {
+        button.setImage(Some(&image));
     }
     let built = build_menu(mtm, &menu.rows, &item.sender);
     item.status.setMenu(Some(&built));
-    set_pulse(item, mtm, menu.tone != PresenceTone::Paused);
+    set_pulse(item, mtm, menu.active());
 }
 
 fn remove_item() {
@@ -287,37 +335,37 @@ mod tests {
     fn row(label: &str, action: MenuAction) -> MenuRow {
         MenuRow::Action {
             label: label.into(),
-            hint: None,
+            symbol: None,
             action,
         }
     }
 
-    fn foreground(allow: bool) -> MenuAction {
-        MenuAction::Foreground {
-            chat_id: "a".into(),
-            input_id: "computer-foreground-1".into(),
-            question_id: "foreground".into(),
-            allow,
+    fn stop(name: &str) -> MenuAction {
+        MenuAction::StopApp {
+            app: DrivenApp {
+                name: name.into(),
+                pid: Some(42),
+            },
+            chats: vec!["a".into()],
         }
     }
 
     #[test]
     fn a_click_on_an_open_menu_resolves_only_against_that_menus_actions() {
         let shown = vec![
-            MenuRow::Header("Zeron is controlling this Mac".into()),
+            MenuRow::Header(MENU_TITLE.into()),
             MenuRow::Separator,
-            MenuRow::Info("Ship it · Ghostty".into()),
+            row("Stop Using Ghostty", stop("Ghostty")),
+            MenuRow::Separator,
             row("Open chat", MenuAction::OpenChat("a".into())),
-            row("Stop", MenuAction::Stop("a".into())),
         ];
         let rebuilt = vec![
-            MenuRow::Header("Zeron is controlling this Mac".into()),
+            MenuRow::Header(MENU_TITLE.into()),
             MenuRow::Separator,
-            MenuRow::Info("Ship it · Ghostty".into()),
-            row("Allow for this turn", foreground(true)),
-            row("No", foreground(false)),
+            row("Stop Using Calculator", stop("Calculator")),
+            row("Stop Using Ghostty", stop("Ghostty")),
+            MenuRow::Separator,
             row("Open chat", MenuAction::OpenChat("a".into())),
-            row("Stop", MenuAction::Stop("a".into())),
         ];
         let (tags, actions) = menu_actions(&shown);
         let (_, rebuilt_actions) = menu_actions(&rebuilt);
@@ -331,11 +379,11 @@ mod tests {
                 _ => assert_eq!(*tag, None),
             }
         }
-        let open_chat = tags[3].unwrap();
+        let open_chat = tags[4].unwrap();
         assert_eq!(
             action_for_tag(&rebuilt_actions, open_chat),
-            Some(foreground(true)),
-            "one shared vec would have turned Open chat into Allow"
+            Some(stop("Ghostty")),
+            "one shared vec would have turned Open chat into a Stop"
         );
         assert_eq!(action_for_tag(&actions, -1), None);
         assert_eq!(action_for_tag(&actions, actions.len() as isize), None);

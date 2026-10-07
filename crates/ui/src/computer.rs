@@ -23,7 +23,6 @@ pub mod runtime_ownership;
 pub mod status_menu;
 #[cfg(target_os = "macos")]
 pub mod stop_native_helper;
-pub mod strip;
 pub mod thumbnail;
 
 /// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver through the
