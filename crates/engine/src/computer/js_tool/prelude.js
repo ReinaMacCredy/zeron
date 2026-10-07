@@ -170,7 +170,7 @@
     getAXState(options) {
       const opts = options || {};
       const args = { window_id: this.windowId };
-      if (opts.disableDiffing) args.diff = false;
+      if (opts.disableDiffing) args.full = true;
       const { data } = call("computer_get_state", args);
       const state = renderState(data, this);
       if (opts.emit !== false) write(state);
