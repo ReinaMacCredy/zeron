@@ -1298,6 +1298,17 @@ pub(crate) mod tests {
         panic!("condition never held");
     }
 
+    fn wait_for_enabled_controls(panel: &Entity<DevicePanel>, cx: &mut VisualTestContext) {
+        wait(cx, |cx| {
+            cx.debug_bounds("device-tool-network").is_some()
+                && panel.read_with(cx, |panel, cx| {
+                    panel
+                        .controls()
+                        .is_some_and(|controls| !controls.read(cx).disabled())
+                })
+        });
+    }
+
     pub(crate) fn calls_of(calls: &Calls, method: &str) -> Vec<serde_json::Value> {
         calls
             .lock()
@@ -2015,7 +2026,7 @@ pub(crate) mod tests {
             "settings": {"appearance": "light", "textSize": "default", "networkEnabled": true},
             "foregroundApp": {"id": "com.android.settings"}
         });
-        let (_panel, calls, cx) = android_panel(
+        let (panel, calls, cx) = android_panel(
             cx,
             &runtime,
             Arc::new(move |method| match method {
@@ -2025,7 +2036,7 @@ pub(crate) mod tests {
         );
         cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(1400.0)));
         click(cx, "device-tools-toggle");
-        wait(cx, |cx| cx.debug_bounds("device-tool-network").is_some());
+        wait_for_enabled_controls(&panel, cx);
         for absent in [
             "device-tool-push",
             "device-tool-event-log",
@@ -2059,7 +2070,7 @@ pub(crate) mod tests {
             "hostId": "local", "deviceId": "SIM", "readAt": "now",
             "settings": {"networkEnabled": true}
         });
-        let (_panel, calls, cx) = android_panel(
+        let (panel, calls, cx) = android_panel(
             cx,
             &runtime,
             Arc::new(move |method| match method {
@@ -2069,7 +2080,7 @@ pub(crate) mod tests {
         );
         cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(1400.0)));
         click(cx, "device-tools-toggle");
-        wait(cx, |cx| cx.debug_bounds("device-tool-network").is_some());
+        wait_for_enabled_controls(&panel, cx);
         let reads = calls_of(&calls, methods::GET_HUB_DEVICE_DETAIL).len();
         click(cx, "device-tool-network");
         wait(cx, |_| {

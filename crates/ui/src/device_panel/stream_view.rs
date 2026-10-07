@@ -2212,16 +2212,22 @@ mod tests {
         cx.simulate_mouse_down(start, MouseButton::Left, none);
         cx.simulate_mouse_move(middle, MouseButton::Left, none);
         cx.simulate_mouse_up(finish, MouseButton::Left, none);
-        wait(cx, |_| inputs.lock().unwrap().len() >= 4);
-        assert_touches(
-            &touches(&inputs),
-            &[
-                ("begin", 0.25, 0.5),
-                ("move", 0.5, 0.5),
-                ("move", 0.75, 0.6),
-                ("end", 0.75, 0.6),
-            ],
-        );
+        wait(cx, |_| {
+            touches(&inputs)
+                .last()
+                .is_some_and(|(phase, _, _)| phase == "end")
+        });
+        let mut expected = vec![
+            ("begin", 0.25, 0.5),
+            ("move", 0.5, 0.5),
+            ("move", 0.75, 0.6),
+            ("end", 0.75, 0.6),
+        ];
+        // Moves queued behind the in-flight begin collapse to the newest one.
+        if touches(&inputs).len() == 3 {
+            expected.remove(1);
+        }
+        assert_touches(&touches(&inputs), &expected);
 
         inputs.lock().unwrap().clear();
         let area = view.read_with(cx, |view, _| view.frame_box().unwrap());
@@ -2666,13 +2672,23 @@ mod tests {
         pinch_at(cx, over, gpui::TouchPhase::Moved, -0.1);
         pinch_at(cx, over, gpui::TouchPhase::Moved, -0.1);
         pinch_at(cx, over, gpui::TouchPhase::Ended, 0.0);
-        wait(cx, |_| !angles(&hinges).is_empty());
+        wait(cx, |_| angles(&hinges).len() == 2);
         let pinched = angles(&hinges);
         assert!(
             pinched.iter().all(|angle| *angle < 180.0 && *angle > 140.0),
             "{pinched:?}"
         );
-        settle_scene(&view, &scene, cx);
+        // The Ctrl+wheel pinch starts from the queued hinge angle, so wait for the queue to drain.
+        wait(cx, |cx| {
+            view.update(cx, |view, cx| {
+                let now = view.now();
+                scene.borrow_mut().advance(now, false);
+                cx.notify();
+            });
+            let mut scene = scene.borrow_mut();
+            let duo = scene.duo().unwrap();
+            duo.angle() == 180.0 && !duo.needs_frame()
+        });
 
         let before = angles(&hinges).len();
         let over = duo_point(&scene, DuoPanel::Inner, (0.5, 0.75));
