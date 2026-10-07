@@ -34,6 +34,7 @@
 //!   element highlight — drawn inside [`render_frame`] when the caller
 //!   supplies one via the optional argument).
 
+use crate::codex_cursor::{CodexInput, CodexState};
 use crate::{
     CompactActivity, CompactMotion, CompiledTheme, CursorAction, CursorConfig, CursorFeel,
     CursorStyle, CursorVisualState, DeliveryModifier, MotionConfig, OverlayCommand, PaintChannels,
@@ -116,6 +117,8 @@ pub struct RenderStateCore {
     /// Non-compact paths: set once the early-ack threshold has fired an
     /// arrival signal before the path physically ended.
     early_ack_fired: bool,
+    pub fog_tint: Option<[u8; 3]>,
+    pub codex: CodexState,
 }
 
 /// A compact-mode click ring at a point, elapsed seconds since it began.
@@ -189,7 +192,20 @@ impl RenderStateCore {
             compact_pulse: None,
             screen_size: None,
             early_ack_fired: false,
+            fog_tint: None,
+            codex: CodexState::default(),
         }
+    }
+
+    pub fn codex_look(&self) -> bool {
+        self.cfg.compact && self.cfg.theme_id == crate::CODEX_THEME_ID
+    }
+
+    fn codex_loading(&self) -> bool {
+        !matches!(
+            self.visual.resolved_action,
+            CursorAction::Idle | CursorAction::Click | CursorAction::Drag | CursorAction::Navigate
+        )
     }
 
     /// Where the compact arrow is painted right now: the spring-driven path
@@ -277,6 +293,9 @@ impl RenderStateCore {
         if self.compact_pulse.is_some() || activity == CompactActivity::Loading {
             return true;
         }
+        if self.codex_look() && self.codex.animating() {
+            return true;
+        }
         if self.compact_motion.is_some() && activity != CompactActivity::Paused {
             return true;
         }
@@ -299,6 +318,22 @@ impl RenderStateCore {
             if settled {
                 self.compact_motion = None;
             }
+        }
+        if self.codex_look() {
+            let feel = CursorFeel::default();
+            let input = CodexInput {
+                position: self.compact_display_pos(),
+                travelling: self.compact_motion.is_some(),
+                scoot: self.compact_motion.as_ref().is_some_and(|motion| {
+                    motion.distance() > feel.scoot_distance_threshold
+                        && motion.progress_value() < 1.0
+                }),
+                shown: self.visible && self.pos.0 >= -100.0,
+                pressed: self.pressed,
+                loading: self.codex_loading(),
+                reduced_motion: self.cfg.reduced_motion == ReducedMotion::On,
+            };
+            self.codex.tick(dt, &input, &feel);
         }
         if let Some(p) = &mut self.compact_pulse {
             p.t += dt;
@@ -351,6 +386,9 @@ impl RenderStateCore {
     /// Record the click ring for a compact ClickPulse — skipped entirely
     /// under reduced motion.
     fn compact_note_click(&mut self, x: f64, y: f64) {
+        if self.codex_look() {
+            self.codex.click();
+        }
         self.compact_pulse = if self.cfg.reduced_motion == ReducedMotion::On {
             None
         } else {
@@ -433,9 +471,17 @@ impl RenderStateCore {
     /// Return the theme that is actually being painted, including any
     /// non-fatal fallback from an unavailable launch-time selection.
     pub fn active_theme_metadata(&self) -> (String, String, String, Option<String>) {
+        if self.codex_look() {
+            return (
+                crate::CODEX_THEME_ID.into(),
+                "1".into(),
+                "codex-fog".into(),
+                None,
+            );
+        }
         if self.cfg.compact {
             return (
-                "synara.compact".into(),
+                crate::COMPACT_THEME_ID.into(),
                 "1".into(),
                 "static-vector".into(),
                 None,
@@ -770,6 +816,17 @@ impl RenderStateCore {
         // visually (post-dispatch, zero input latency) and a click leaves a
         // brief ring. Both are recorded before the command collapses to
         // SnapTo so the variant information isn't lost.
+        if self.codex_look()
+            && !self.cursor_is_revealed()
+            && matches!(
+                cmd,
+                OverlayCommand::MoveTo { .. }
+                    | OverlayCommand::SnapTo { .. }
+                    | OverlayCommand::ClickPulse { .. }
+            )
+        {
+            self.codex.conceal();
+        }
         let cmd = if self.cfg.compact {
             match cmd {
                 OverlayCommand::MoveTo { x, y, .. } => {
@@ -1073,7 +1130,8 @@ pub fn paint_cursor(
     focus_rect: Option<FocusRect>,
     backing_scale: f32,
 ) {
-    if !core.visible || core.pos.0 < -100.0 || core.idle_alpha < 0.004 {
+    let fading_out = core.codex_look() && core.codex.reveal() > 0.0;
+    if (!core.visible && !fading_out) || core.pos.0 < -100.0 || core.idle_alpha < 0.004 {
         return;
     }
 
@@ -1085,6 +1143,29 @@ pub fn paint_cursor(
     let (px, py) = ((core.pos.0 - origin_x) * s, (core.pos.1 - origin_y) * s);
     let heading = core.heading;
     let alpha_scale = core.idle_alpha as f32;
+
+    if core.codex_look() {
+        let (x, y) = core.compact_display_pos();
+        let mut channels = core.codex.channels();
+        channels.alpha *= alpha_scale as f64;
+        crate::codex_cursor::paint(
+            pm,
+            &crate::codex_cursor::CodexPaint {
+                x: (x - origin_x) * s,
+                y: (y - origin_y) * s,
+                device_scale: s,
+                channels,
+                fog: core
+                    .style
+                    .shadow
+                    .or(core.fog_tint)
+                    .unwrap_or(crate::codex_cursor::FOG_FALLBACK),
+                fill: core.style.fill,
+                rim: core.style.rim_rgb(),
+            },
+        );
+        return;
+    }
 
     if core.cfg.compact {
         // The arrow rides the spring-driven channel position so a recorded
@@ -1750,3 +1831,7 @@ mod backing_scale_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "render_state_codex_tests.rs"]
+mod codex_look_tests;

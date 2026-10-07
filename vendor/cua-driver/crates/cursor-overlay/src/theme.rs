@@ -13,6 +13,8 @@ pub use cua_driver_contract::{
 };
 
 pub const DEFAULT_THEME_ID: &str = "cua.default";
+pub const COMPACT_THEME_ID: &str = "synara.compact";
+pub const CODEX_THEME_ID: &str = "zeron.codex";
 pub const DEFAULT_THEME_VERSION: &str = "2.0.0";
 pub const THEME_PROFILE: &str = "cua-driver-actions-v2";
 pub const CANVAS_SIZE: f32 = 128.0;

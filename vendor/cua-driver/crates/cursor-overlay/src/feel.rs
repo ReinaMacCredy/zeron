@@ -331,6 +331,10 @@ impl CompactMotion {
         self.progress.value
     }
 
+    pub fn distance(&self) -> f64 {
+        self.distance
+    }
+
     fn settled(&self, feel: &CursorFeel) -> bool {
         self.progress
             .settled(1.0, feel.settle_position_eps, feel.settle_velocity_eps)
