@@ -474,12 +474,13 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
         entry(
             "computer_list_windows",
             format!(
-                "List windows topmost-first with bounds, stackingIndex and occludedBy. Use app to avoid returning unrelated windows. Pass window_id to scope input; selection does not activate it. {WINDOW_FOCUS_NOTE} Use computer_activate_window within task consent when needed; never replay uncertain input.{}",
+                "List windows topmost-first with bounds, stackingIndex and occludedBy. app filters by exact appName, ignoring case. Strips (hidden or off-screen, at most 40pt tall, or zero-area) are omitted unless include_strips. Pass window_id to scope input; selection does not activate it. {WINDOW_FOCUS_NOTE} Use computer_activate_window within task consent when needed; never replay uncertain input.{}",
                 window_list_completeness_note(dialect)
             ),
             object_schema(
                 object(json!({
-                    "app": { "type": "string", "description": "Filter by exact appName, ignoring case." },
+                    "app": { "type": "string" },
+                    "include_strips": { "type": "boolean" },
                 })),
                 &[],
             ),
@@ -842,7 +843,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_paste",
             "Paste text",
             format!(
-                "Paste text into the target control through the clipboard — the fast path for long or awkward text computer_type_text would spend many keystrokes on. It saves the current clipboard, writes the text, sends the paste shortcut, then puts the user's contents back and reports clipboardRestored. A clipboard holding an image or other non-text content cannot be saved and is replaced. {SHARED_CLIPBOARD_NOTE} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
+                "Paste text through the clipboard, the fast path for long or awkward text. It saves the current clipboard, writes the text, sends the paste shortcut, then puts the user's contents back and reports clipboardRestored. A clipboard holding an image or other non-text content cannot be saved and is replaced. {SHARED_CLIPBOARD_NOTE} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
             ),
             object_schema(paste_properties, &["text"]),
             None,

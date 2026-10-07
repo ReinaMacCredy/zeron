@@ -13,10 +13,10 @@ use super::args::{
     read_window_id_arg,
 };
 use super::desktop::{
-    Handled, json_of, limited_scroll, noted_json, pause, read_pid, readiness_json, semantic_lookup,
-    to_map, with_launch_guidance,
+    Handled, is_strip_window, json_of, limited_scroll, noted_json, pause, read_pid, readiness_json,
+    semantic_lookup, to_map, with_launch_guidance,
 };
-use super::elements::{digest_scope_key, element_change_fields, listing_fields};
+use super::elements::{RefLookup, digest_scope_key, element_change_fields, listing_fields};
 use super::results::{ToolFailure, run_step_error};
 use super::tool_input::{
     ToolArgs, ToolInputError, read_boolean_arg, read_record_arg, read_required_string_arg,
@@ -570,6 +570,7 @@ impl ComputerTools {
         let mut stopped = false;
         let mut stopped_reason = None;
         let mut last_window_id: Option<String> = None;
+        let mut failed = false;
         let cursor = self.manager.cursor_activity().clone();
         for (index, prepared_step) in prepared.into_iter().enumerate() {
             assert_desktop_operation_active()?;
@@ -628,6 +629,10 @@ impl ComputerTools {
                         return Err(DesktopOperationError::Aborted.into());
                     }
                     self.assert_turn_active(context)?;
+                    failed = true;
+                    if last_window_id.is_none() {
+                        last_window_id = self.step_window(&raw_steps[index], thread);
+                    }
                     let entry = run_step_error(&error);
                     let uncertain =
                         entry.get("effect").and_then(Value::as_str) == Some("dispatched-unknown");
@@ -648,7 +653,7 @@ impl ComputerTools {
             }
         }
         let state_fields = self
-            .closing_state(thread, last_window_id.as_deref())
+            .closing_state(thread, last_window_id.as_deref(), failed)
             .await?;
         let skipped_count = steps
             .iter()
@@ -704,10 +709,22 @@ impl ComputerTools {
         }
     }
 
+    fn step_window(&self, step: &Value, thread: &str) -> Option<String> {
+        if let Some(window_id) = step.get("window_id").and_then(Value::as_str) {
+            return Some(window_id.to_owned());
+        }
+        let element_ref = step.get("ref").and_then(Value::as_u64)?;
+        match self.state().elements.lookup_ref(thread, element_ref) {
+            RefLookup::Found(entry) => entry.window_id,
+            _ => None,
+        }
+    }
+
     async fn closing_state(
         &self,
         thread: &str,
         last_window_id: Option<&str>,
+        failed: bool,
     ) -> Result<Map<String, Value>, ToolFailure> {
         let read = async {
             assert_desktop_operation_active()?;
@@ -729,7 +746,11 @@ impl ComputerTools {
             })
         };
         match read.await {
-            Ok((state, root)) => {
+            Ok((mut state, root)) => {
+                match last_window_id {
+                    Some(window_id) => state.windows.retain(|window| window.id == window_id),
+                    None => state.windows.retain(|window| !is_strip_window(window)),
+                }
                 let elements = root.as_ref().map(|root| {
                     actionable_elements(
                         root,
@@ -756,6 +777,9 @@ impl ComputerTools {
                     fields.extend(element_change_fields(Some(before), stable, Some(40)));
                 }
                 let mut state_json = to_map(&state);
+                if failed && last_window_id.is_none() {
+                    state_json.remove("windows");
+                }
                 if let Some(stable) = &stable {
                     state_json.extend(listing_fields(stable));
                 }

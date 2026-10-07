@@ -176,6 +176,15 @@ fn args_has(args: &ToolArgs, name: &str) -> bool {
     args.contains_key(name)
 }
 
+pub(super) fn is_strip_window(window: &zeron_proto::computer::ComputerWindow) -> bool {
+    let Some(bounds) = window.bounds else {
+        return false;
+    };
+    bounds.width <= 0.0
+        || bounds.height <= 0.0
+        || (bounds.height <= 40.0 && (!window.visible || bounds.y < 0.0))
+}
+
 impl ComputerTools {
     pub(super) fn call_desktop<'a>(
         &'a self,
@@ -468,7 +477,11 @@ impl ComputerTools {
 
     async fn list_windows(&self, args: &ToolArgs) -> Handled {
         let app = read_string_arg(args, "app", false)?.map(|app| app.to_lowercase());
+        let include_strips = read_boolean_arg(args, "include_strips")?.unwrap_or(false);
         let mut result = self.manager.list_windows().await?;
+        if !include_strips {
+            result.windows.retain(|window| !is_strip_window(window));
+        }
         if let Some(app) = app {
             result.windows.retain(|window| {
                 window
@@ -498,6 +511,9 @@ impl ComputerTools {
                 window_id: window_id.clone(),
             })
             .await?;
+        if window_id.is_none() {
+            state.windows.retain(|window| !is_strip_window(window));
+        }
         let text = state.text.take();
         let root = state.root.take();
         let screenshot = state.screenshot.take();
