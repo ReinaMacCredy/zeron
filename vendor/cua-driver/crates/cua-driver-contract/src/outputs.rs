@@ -451,8 +451,11 @@ impl ToolOutput for ClipboardWriteOutput {
         if !self.supported {
             return Err("successful clipboard writes must be supported".into());
         }
-        if !matches!(self.written_type.as_str(), "text" | "image" | "file_url") {
-            return Err("written_type must be text, image, or file_url".into());
+        if !matches!(
+            self.written_type.as_str(),
+            "text" | "html" | "image" | "file_url"
+        ) {
+            return Err("written_type must be text, html, image, or file_url".into());
         }
         if !self.privacy_sensitive || !self.content_redacted_from_telemetry {
             return Err("clipboard privacy metadata must remain enabled".into());

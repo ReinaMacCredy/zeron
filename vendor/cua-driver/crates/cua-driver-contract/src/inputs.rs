@@ -851,6 +851,10 @@ pub struct ClipboardWriteInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "string_schema")]
     pub text: Option<String>,
+    /// HTML written beside `text` as a rich-text flavor; `text` stays the plain-text fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub html: Option<String>,
     /// Absolute path to a local image to place on the clipboard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "string_schema")]

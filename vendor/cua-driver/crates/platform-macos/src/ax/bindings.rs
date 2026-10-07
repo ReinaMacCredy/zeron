@@ -1024,6 +1024,7 @@ const ELEMENT_BATCH_ATTRS: &[&str] = &[
     "AXSelected",         // 13
     "AXPosition",         // 14
     "AXSize",             // 15
+    "AXExpanded",         // 16
 ];
 
 /// One element's attribute values, decoded from a single
@@ -1056,6 +1057,7 @@ pub struct ElementAttrs {
     /// in [`element_screen_rect`].
     pub frame: Option<[f64; 4]>,
     pub children: Vec<AXUIElementRef>,
+    pub expanded: Option<bool>,
 }
 
 /// Fetch every attribute the AX tree walker reads for one element in a
@@ -1106,6 +1108,7 @@ pub unsafe fn copy_element_attrs(element: AXUIElementRef) -> ElementAttrs {
         max_value: batch_slot(&slots, 12).and_then(|v| slot_number(v)),
         selected: batch_slot(&slots, 13).and_then(|v| slot_bool(v)),
         frame: slot_rect(batch_slot(&slots, 14), batch_slot(&slots, 15)),
+        expanded: batch_slot(&slots, 16).and_then(|v| slot_bool(v)),
     }
 }
 

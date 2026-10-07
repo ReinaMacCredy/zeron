@@ -114,7 +114,7 @@ fn clipboard_read() -> ToolContract {
 fn clipboard_write() -> ToolContract {
     let mut contract = contract::<ClipboardWriteInput, ClipboardWriteOutput>(
         "clipboard_write",
-        "Replace the system clipboard with exactly one value: plain text, an image from an absolute local path, or a file URL from an absolute local path. Returns the available types for read-back before paste.",
+        "Replace the system clipboard with exactly one value: plain text (optionally with html as its rich-text flavor), an image from an absolute local path, or a file URL from an absolute local path. Returns the available types for read-back before paste.",
         &["clipboard.write", "clipboard.write.text", "clipboard.write.image", "clipboard.write.file_url", "clipboard.types"],
         ToolAnnotations {
             read_only: false,
