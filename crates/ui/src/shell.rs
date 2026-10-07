@@ -15468,6 +15468,16 @@ impl Render for Shell {
                         self.promote_pr_chat(cx);
                     }
                 }
+                if self.debug_dialog.as_deref() == Some("pr-chat-send")
+                    && matches!(self.route, Route::PullRequests)
+                    && let Some(page) = self.pull_requests_page.clone()
+                {
+                    if self.debug_send_pr_chat(cx) {
+                        self.debug_dialog = None;
+                    } else if page.read(cx).chat_scope().starts_with("list") {
+                        page.update(cx, |page, cx| page.debug_prepare_chat(true, cx));
+                    }
+                }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its
                 // Usage section) once the first usage probe has landed.
                 if self.debug_dialog.as_deref() == Some("user-menu") && self.account_usage.is_some()

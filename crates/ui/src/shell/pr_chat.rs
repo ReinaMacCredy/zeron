@@ -534,6 +534,27 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn debug_send_pr_chat(&mut self, cx: &mut Context<Self>) -> bool {
+        let on_pr = self
+            .pr_chat
+            .as_ref()
+            .is_some_and(|panel| matches!(panel.context, PrChatContext::PullRequest(_)));
+        let Some(composer) = self
+            .pr_chat_tab()
+            .filter(|_| on_pr)
+            .map(|tab| tab.composer.clone())
+        else {
+            return false;
+        };
+        composer.update(cx, |composer, cx| {
+            composer.send_prompt(
+                "What does this pull request change, and is it ready to merge?".into(),
+                cx,
+            )
+        });
+        true
+    }
+
     fn pr_chat_promotable(&self, cx: &App) -> bool {
         self.pr_chat_tab()
             .is_some_and(|tab| !tab.state.read(cx).side_chat_unsaved())
