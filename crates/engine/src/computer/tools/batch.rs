@@ -784,6 +784,11 @@ impl ComputerTools {
                     state_json.extend(listing_fields(stable));
                 }
                 fields.insert("state".into(), Value::Object(state_json));
+                if let Some(app_hint) = last_window_id
+                    .and_then(|window_id| self.app_playbook(thread, &state.windows, window_id))
+                {
+                    fields.insert("appHint".into(), json!(app_hint));
+                }
                 Ok(fields)
             }
             Err(error) => {

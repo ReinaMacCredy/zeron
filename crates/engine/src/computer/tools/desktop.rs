@@ -176,6 +176,20 @@ fn args_has(args: &ToolArgs, name: &str) -> bool {
     args.contains_key(name)
 }
 
+fn app_playbook_topic(app_name: &str) -> Option<&'static str> {
+    Some(match app_name {
+        "finder" => "finder",
+        "calculator" => "calculator",
+        "slack" => "slack",
+        "notes" | "textedit" | "bbedit" | "coteditor" | "sublime text" | "pages" => "editors",
+        "terminal" | "iterm2" | "iterm" | "ghostty" | "warp" | "alacritty" | "kitty"
+        | "wezterm" | "hyper" => "terminals",
+        "code" | "visual studio code" | "cursor" | "windsurf" | "obsidian" | "notion"
+        | "discord" | "figma" | "linear" | "microsoft teams" => "electron",
+        _ => return None,
+    })
+}
+
 pub(super) fn is_strip_window(window: &zeron_proto::computer::ComputerWindow) -> bool {
     let Some(bounds) = window.bounds else {
         return false;
@@ -469,6 +483,30 @@ impl ComputerTools {
         })
     }
 
+    pub(super) fn app_playbook(
+        &self,
+        thread_id: &str,
+        windows: &[zeron_proto::computer::ComputerWindow],
+        window_id: &str,
+    ) -> Option<&'static str> {
+        let app_name = windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .and_then(|window| window.app_name.as_deref())
+            .map(str::to_lowercase)?;
+        let note = computer_help_section(app_playbook_topic(&app_name)?)?;
+        let seen = json!([thread_id, app_name]).to_string();
+        let mut tool_state = self.state();
+        if tool_state.app_hints_seen.contains(&seen) {
+            return None;
+        }
+        while tool_state.app_hints_seen.len() >= super::THREAD_KEYED_LIMIT {
+            tool_state.app_hints_seen.remove(0);
+        }
+        tool_state.app_hints_seen.push(seen);
+        Some(note)
+    }
+
     fn computer_id_payload(&self) -> Map<String, Value> {
         let mut payload = Map::new();
         payload.insert("computerId".into(), json!(self.manager.computer_id()));
@@ -539,25 +577,9 @@ impl ComputerTools {
                 .map(|elements| tool_state.elements.remember_digest(&context.chat_id, &key, elements));
             (before, stable)
         };
-        let app_hint = window_id.as_ref().and_then(|window_id| {
-            let app_name = state
-                .windows
-                .iter()
-                .find(|window| &window.id == window_id)
-                .and_then(|window| window.app_name.as_deref())
-                .map(str::to_lowercase)?;
-            let note = (app_name == "slack").then(|| computer_help_section("slack"))??;
-            let seen = json!([context.chat_id, app_name]).to_string();
-            let mut tool_state = self.state();
-            if tool_state.app_hints_seen.contains(&seen) {
-                return None;
-            }
-            while tool_state.app_hints_seen.len() >= super::THREAD_KEYED_LIMIT {
-                tool_state.app_hints_seen.remove(0);
-            }
-            tool_state.app_hints_seen.push(seen);
-            Some(note)
-        });
+        let app_hint = window_id
+            .as_deref()
+            .and_then(|window_id| self.app_playbook(&context.chat_id, &state.windows, window_id));
         let mut payload = to_map(&state);
         if want_text && let Some(text) = text {
             payload.insert("text".into(), json!(text));

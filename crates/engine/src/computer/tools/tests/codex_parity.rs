@@ -77,6 +77,66 @@ async fn list_windows_drops_strip_windows_unless_asked() {
     h.dispose().await;
 }
 
+fn app_harness() -> Harness {
+    harness_with(HarnessOptions {
+        backend: fake_with(FakeComputerBackendOptions {
+            windows: Some(vec![
+                window("calc", "Calculator", rect(40.0, 40.0, 300.0, 400.0), true),
+                window("term", "Ghostty", rect(400.0, 40.0, 600.0, 400.0), true),
+                window("misc", "Preview", rect(40.0, 500.0, 300.0, 300.0), true),
+            ]),
+            ..FakeComputerBackendOptions::default()
+        }),
+        ..HarnessOptions::default()
+    })
+}
+
+// Catches a playbook that only knows Slack, repeats on every read, leaks
+// across threads, or attaches to apps with no matching topic.
+#[tokio::test]
+async fn attaches_the_matching_app_playbook_once_per_thread_per_app() {
+    let h = app_harness();
+    let read = |window: &str| json!({ "window_id": window });
+    let calc = result_json(&h.call("computer_get_state", read("calc")).await);
+    assert_eq!(
+        calc["appHint"].as_str(),
+        crate::computer::tools::guidance::computer_help_section("calculator")
+    );
+    let again = result_json(&h.call("computer_get_state", read("calc")).await);
+    assert!(again.get("appHint").is_none(), "{again}");
+    let term = result_json(&h.call("computer_get_state", read("term")).await);
+    assert_eq!(
+        term["appHint"].as_str(),
+        crate::computer::tools::guidance::computer_help_section("terminals")
+    );
+    let misc = result_json(&h.call("computer_get_state", read("misc")).await);
+    assert!(misc.get("appHint").is_none(), "{misc}");
+    let other = h.context_for("thread-other", None);
+    let elsewhere = result_json(&h.call_in("computer_get_state", read("calc"), &other).await);
+    assert!(elsewhere["appHint"].is_string(), "{elsewhere}");
+    h.dispose().await;
+}
+
+// Catches a run's closing observation skipping the playbook on an app the
+// thread never read with computer_get_state.
+#[tokio::test]
+async fn a_run_closing_on_a_new_app_attaches_its_playbook() {
+    let h = app_harness();
+    let result = result_json(
+        &h.call(
+            "computer_run",
+            json!({ "steps": [{ "type": "click", "label": "Nowhere", "window_id": "term" }] }),
+        )
+        .await,
+    );
+    assert_eq!(
+        result["appHint"].as_str(),
+        crate::computer::tools::guidance::computer_help_section("terminals"),
+        "{result}"
+    );
+    h.dispose().await;
+}
+
 // Catches a run whose first step fails before any window is known dumping
 // the whole desktop window list into its closing state.
 #[tokio::test]
