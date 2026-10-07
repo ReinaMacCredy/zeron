@@ -1559,12 +1559,13 @@ async fn always_allow_records_the_profile_apart_from_the_browser_app() {
 }
 
 #[tokio::test]
-async fn mirrors_app_consent_and_shows_no_profile_card_outside_ask_mode() {
+async fn the_profile_card_shows_in_auto_and_full_mode_too() {
     for mode in [PermissionMode::Auto, PermissionMode::Full] {
         let (Browser { h, .. }, seen) = profile_browsers(mode);
+        h.decide(ApprovalDecision::Accept);
         let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
         assert!(!result.is_error, "{mode:?}: {result:?}");
-        assert!(profile_cards(&h).is_empty(), "{mode:?}");
+        assert_eq!(profile_cards(&h).len(), 1, "{mode:?}");
         assert_eq!(recorded(&seen).len(), 1, "{mode:?}");
         h.dispose().await;
     }
@@ -1611,6 +1612,7 @@ async fn never_launches_relaunches_or_guesses_the_users_browser() {
 #[tokio::test]
 async fn closes_only_unkept_agent_tabs_at_turn_end_and_never_a_user_tab() {
     let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    h.decide(ApprovalDecision::Accept);
     h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     h.call(
         "computer_browser_state",
@@ -1687,6 +1689,7 @@ async fn closes_only_unkept_agent_tabs_at_turn_end_and_never_a_user_tab() {
 #[tokio::test]
 async fn an_opened_tab_makes_an_omitted_tab_id_ambiguous_instead_of_defaulting_to_the_users_tab() {
     let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    h.decide(ApprovalDecision::Accept);
     h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     h.call(
         "computer_browser_state",
@@ -1717,6 +1720,7 @@ async fn an_opened_tab_makes_an_omitted_tab_id_ambiguous_instead_of_defaulting_t
 #[tokio::test]
 async fn rejects_keep_outside_a_new_tab_or_a_tab_snapshot() {
     let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    h.decide(ApprovalDecision::Accept);
     let result = h
         .call(
             "computer_browser_navigate",

@@ -23,15 +23,13 @@ impl ComputerManager {
         signal: CancellationToken,
         pid: u32,
     ) -> Result<ComputerConsent, ComputerError> {
-        let Some(mode) = self
+        if self
             .seams
             .caller(&caller.chat_id, caller.turn_id.as_deref())
             .await?
-        else {
+            .is_none()
+        {
             return Ok(ComputerConsent::Denied(None));
-        };
-        if mode != PermissionMode::Ask {
-            return Ok(ComputerConsent::Granted);
         }
         let browser = self
             .resolve_consent_app(&ComputerConsentTarget::Pid(pid))
@@ -71,7 +69,7 @@ impl ComputerManager {
         let request = ApprovalRequest {
             chat_id: caller.chat_id.clone(),
             turn_id: caller.turn_id.clone(),
-            mode,
+            mode: PermissionMode::Ask,
             signal,
             publish,
             app: Some(AppGrant {
