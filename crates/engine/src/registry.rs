@@ -96,6 +96,7 @@ struct HarnessPrefsFile {
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
     delegation: DelegationSettings,
+    tools: zeron_proto::tools::ToolSettings,
     seen_models: Vec<SeenModels>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
@@ -496,6 +497,15 @@ impl HarnessRegistry {
         self.prefs().delegation = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    pub fn tool_settings(&self) -> zeron_proto::tools::ToolSettings {
+        self.prefs().tools.clone()
+    }
+
+    pub fn set_tool_settings(&self, settings: zeron_proto::tools::ToolSettings) {
+        self.prefs().tools = settings;
+        self.persist_prefs();
     }
 
     /// The first listing for a harness seeds silently; otherwise every model
