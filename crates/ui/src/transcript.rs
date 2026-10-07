@@ -12552,7 +12552,8 @@ impl Render for Transcript {
             .child(content)
             .child(rail)
             .children(self.render_computer_preview(window, cx))
-            .children(self.render_add_to_chat(cx));
+            .children(self.render_add_to_chat(cx))
+            .children(self.render_html_sheet(window, cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {

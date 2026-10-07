@@ -11,6 +11,21 @@ const MAX_LIVE_PAGES: usize = 6;
 /// so returning to a chat shows them at once instead of reloading.
 const KEPT_PAGES: usize = 24;
 
+#[derive(Clone, Copy, PartialEq)]
+enum SheetView {
+    Live,
+    Source,
+}
+
+/// A page opened full size over the conversation.
+struct Sheet {
+    row: SharedString,
+    title: SharedString,
+    view: SheetView,
+    #[cfg(target_os = "macos")]
+    page: Option<crate::browser::inline::InlineWebView>,
+}
+
 #[derive(Clone)]
 enum PageSource {
     Loading,
@@ -25,6 +40,8 @@ pub(super) struct HtmlPages {
     used: HashMap<SharedString, u64>,
     use_clock: u64,
     heights: HashMap<SharedString, f32>,
+    sheet: Option<Sheet>,
+    sheet_focus: gpui::FocusHandle,
     theme_generation: u32,
     /// The list's viewport as of this render: rows lay out while the list
     /// state is borrowed, so they cannot ask it.
@@ -50,8 +67,6 @@ impl HtmlPages {
                 }
             }
         });
-        #[cfg(not(target_os = "macos"))]
-        let _ = cx;
         Self {
             #[cfg(target_os = "macos")]
             pages: HashMap::new(),
@@ -59,6 +74,8 @@ impl HtmlPages {
             used: HashMap::new(),
             use_clock: 0,
             heights: HashMap::new(),
+            sheet: None,
+            sheet_focus: cx.focus_handle(),
             viewport: Bounds::default(),
             theme_generation: crate::theme::style_generation(),
             #[cfg(target_os = "macos")]
@@ -108,6 +125,7 @@ impl Transcript {
     ) {
         use crate::browser::inline::InlineEvent;
         match event {
+            InlineEvent::Height(_) if key.ends_with(SHEET_SUFFIX) => {}
             InlineEvent::Height(height) => {
                 let height = height.round();
                 let previous = self.html_pages.heights.insert(key.clone(), height);
@@ -117,6 +135,11 @@ impl Transcript {
             }
             InlineEvent::OpenLink(url) => cx.open_url(&url),
             InlineEvent::Crashed => {
+                if let Some(sheet) = &mut self.html_pages.sheet
+                    && key.ends_with(SHEET_SUFFIX)
+                {
+                    sheet.page = None;
+                }
                 self.html_pages.pages.remove(&key);
                 cx.notify();
             }
@@ -144,7 +167,11 @@ impl Transcript {
         let keep: HashSet<SharedString> = alive
             .iter()
             .map(|key| (*key).clone())
-            .chain(gone.into_iter().take(KEPT_PAGES).map(|(key, _)| key.clone()))
+            .chain(
+                gone.into_iter()
+                    .take(KEPT_PAGES)
+                    .map(|(key, _)| key.clone()),
+            )
             .collect();
         let pages = &mut self.html_pages;
         pages.heights.retain(|key, _| keep.contains(key));
@@ -229,7 +256,29 @@ impl Transcript {
                     .size(px(12.0))
                     .text_color(theme.text_faint),
             )
-            .child(div().truncate().child(title.clone()));
+            .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{row_id}-expand")))
+                    .debug_selector(|| "html-render-expand".into())
+                    .flex_none()
+                    .p(px(4.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(crate::theme::ink(0.06)))
+                    .child(
+                        crate::icons::icon(crate::icons::EXPAND_ARROWS)
+                            .size(px(13.0))
+                            .text_color(theme.text_faint),
+                    )
+                    .on_click(cx.listener({
+                        let row = row_id.clone();
+                        let title = title.clone();
+                        move |this, _, window, cx| {
+                            this.open_html_sheet(row.clone(), title.clone(), window, cx)
+                        }
+                    })),
+            );
         let frame = div()
             .id(SharedString::from(format!("{row_id}-page")))
             .debug_selector(|| "html-render-page".into())
@@ -242,7 +291,13 @@ impl Transcript {
                 let frame =
                     frame.child(self.html_page_layer(row_id, &html, height, content, window, cx));
                 #[cfg(not(target_os = "macos"))]
-                let _ = (html, window);
+                let frame = {
+                    let _ = (html, window);
+                    frame.child(page_placeholder(
+                        "Live pages show on macOS. Expand to read the page source.",
+                        &theme,
+                    ))
+                };
                 frame
             }
             PageSource::Loading => frame,
@@ -278,6 +333,9 @@ impl Transcript {
             for page in self.html_pages.pages.values() {
                 page.eval(&script);
             }
+            if let Some(page) = self.html_pages.sheet.as_ref().and_then(|s| s.page.as_ref()) {
+                page.eval(&script);
+            }
         }
         if !self.html_pages.pages.contains_key(row_id) {
             if self.html_pages.pages.len() >= MAX_LIVE_PAGES
@@ -305,6 +363,9 @@ impl Transcript {
                     return gpui::Empty.into_any_element();
                 }
             }
+        }
+        if self.html_pages.sheet.is_some() {
+            return gpui::Empty.into_any_element();
         }
         let page = self.html_pages.pages[row_id].clone();
         page.set_scrolls(scrolls_inside(height, content));
@@ -343,6 +404,261 @@ pub(super) fn native_mask(
     Bounds::from_corners(point(list.left(), top_edge), point(right_edge, bottom_edge))
 }
 
+const SHEET_SUFFIX: &str = "#sheet";
+
+/// A readable download name: the title without characters file systems reject.
+fn page_file_name(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let name: String = cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(120)
+        .collect();
+    let name = name.trim();
+    format!("{}.html", if name.is_empty() { "Page" } else { name })
+}
+
+impl Transcript {
+    fn open_html_sheet(
+        &mut self,
+        row: SharedString,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.html_pages.sheet = Some(Sheet {
+            row,
+            title,
+            view: SheetView::Live,
+            #[cfg(target_os = "macos")]
+            page: None,
+        });
+        window.focus(&self.html_pages.sheet_focus, cx);
+        cx.notify();
+    }
+
+    fn close_html_sheet(&mut self, cx: &mut Context<Self>) {
+        self.html_pages.sheet = None;
+        cx.notify();
+    }
+
+    fn save_html_sheet(&mut self, cx: &mut Context<Self>) {
+        let Some(sheet) = &self.html_pages.sheet else {
+            return;
+        };
+        let Some(PageSource::Ready(html)) = self.html_pages.sources.get(&sheet.row).cloned() else {
+            return;
+        };
+        let name = page_file_name(&sheet.title);
+        let downloads = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("Downloads"))
+            .unwrap_or_else(std::env::temp_dir);
+        let chosen = cx.prompt_for_new_path(&downloads, Some(&name));
+        cx.spawn(async move |_, _| {
+            if let Ok(Ok(Some(path))) = chosen.await
+                && let Err(error) = std::fs::write(&path, html.as_bytes())
+            {
+                tracing::warn!(%error, path = %path.display(), "html page not saved");
+            }
+        })
+        .detach();
+    }
+
+    /// The expanded page, over the conversation column and under the
+    /// composer. Inline pages hide while it is open: they are native views
+    /// and would draw over it.
+    pub(super) fn render_html_sheet(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let sheet = self.html_pages.sheet.as_ref()?;
+        let (row, title, view) = (sheet.row.clone(), sheet.title.clone(), sheet.view);
+        let theme = Theme::of(cx).clone();
+        let source = match self.html_pages.sources.get(&row) {
+            Some(PageSource::Ready(html)) => html.clone(),
+            _ => {
+                self.html_pages.sheet = None;
+                return None;
+            }
+        };
+        let top = if self.doc_override.is_some() {
+            8.0
+        } else {
+            Theme::TITLEBAR_HEIGHT + 8.0
+        };
+        let segment = |label: &'static str, id: &'static str, this_view: SheetView| {
+            let on = view == this_view;
+            div()
+                .id(id)
+                .debug_selector(move || format!("html-sheet-{id}"))
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .text_size(crate::typography::ui_rems(12.5))
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .when(on, |el| el.bg(crate::theme::ink(0.08)))
+                .hover(|style| style.text_color(theme.text))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(sheet) = &mut this.html_pages.sheet {
+                        sheet.view = this_view;
+                    }
+                    cx.notify();
+                }))
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(42.0))
+            .px(px(14.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(segment("Live", "live", SheetView::Live))
+                    .child(segment("Source", "source", SheetView::Source)),
+            )
+            .child(
+                crate::popover::btn_ghost(&theme, "Save .html", "html-sheet-save")
+                    .id("html-sheet-save")
+                    .debug_selector(|| "html-sheet-save".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.save_html_sheet(cx))),
+            )
+            .child(
+                div()
+                    .id("html-sheet-close")
+                    .debug_selector(|| "html-sheet-close".into())
+                    .p(px(5.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(crate::theme::ink(0.06)))
+                    .child(
+                        crate::icons::icon(crate::icons::CLOSE)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.close_html_sheet(cx))),
+            );
+        let body = div().relative().flex_1().min_h_0();
+        let body = match view {
+            SheetView::Source => body.child(
+                div()
+                    .id("html-sheet-source")
+                    .debug_selector(|| "html-sheet-source".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .p(px(16.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text)
+                    .child(source.to_string()),
+            ),
+            SheetView::Live => {
+                #[cfg(target_os = "macos")]
+                let body = body.child(self.html_sheet_layer(&row, &source, window, cx));
+                #[cfg(not(target_os = "macos"))]
+                let body = body.child(page_placeholder(
+                    "Live pages show on macOS. Switch to Source to read the page.",
+                    &theme,
+                ));
+                body
+            }
+        };
+        let _ = window;
+        Some(
+            div()
+                .id("html-sheet")
+                .debug_selector(|| "html-sheet".into())
+                .track_focus(&self.html_pages.sheet_focus)
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_html_sheet(cx);
+                    }
+                }))
+                .occlude()
+                .absolute()
+                .top(px(top))
+                .bottom(px(self.bottom_clearance + 8.0))
+                .left(px(24.0))
+                .right(px(24.0 + self.preview_inset))
+                .flex()
+                .flex_col()
+                .rounded(px(14.0))
+                .overflow_hidden()
+                .bg(crate::popover::surface_bg(&theme))
+                .border_1()
+                .border_color(theme.border)
+                .child(header)
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn html_sheet_layer(
+        &mut self,
+        row: &SharedString,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sheet = self.html_pages.sheet.as_mut().expect("sheet is open");
+        if sheet.page.is_none() {
+            let html = crate::html_render::inject_bootstrap(source, Theme::of(cx), true);
+            match crate::browser::inline::InlineWebView::new(
+                window,
+                format!("{row}{SHEET_SUFFIX}").into(),
+                &html,
+                self.html_pages.tx.clone(),
+            ) {
+                Ok(page) => sheet.page = Some(page),
+                Err(error) => {
+                    tracing::warn!(%error, "html sheet page unavailable");
+                    return gpui::Empty.into_any_element();
+                }
+            }
+        }
+        let page = sheet.page.clone().expect("sheet page");
+        page.set_scrolls(true);
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let mask = window.content_mask().bounds;
+                page.sync_on_present(bounds, mask, window);
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+}
+
 fn page_placeholder(text: &'static str, theme: &Theme) -> AnyElement {
     div()
         .size_full()
@@ -355,4 +671,216 @@ fn page_placeholder(text: &'static str, theme: &Theme) -> AnyElement {
         .text_color(theme.text_muted)
         .child(text)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeron_doc::{MessageRole, MessageStatus};
+
+    fn parse(_: &str, text: &str) -> Arc<BlockTree> {
+        Arc::new(parse_full(text))
+    }
+
+    fn entry(status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m1".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 0,
+            device_id: "dev-a".into(),
+            status: Some(status),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: Some(4000),
+        }
+    }
+
+    fn render_part(page: Option<zeron_proto::html_render::HtmlRenderRef>) -> MessagePart {
+        MessagePart::Tool {
+            id: "p-html".into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "html_render".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            html_render: page,
+        }
+    }
+
+    fn page() -> zeron_proto::html_render::HtmlRenderRef {
+        zeron_proto::html_render::HtmlRenderRef {
+            path: "/u/html/c1/ab.html".into(),
+            title: "Chart".into(),
+            height: 420,
+        }
+    }
+
+    fn exec(id: &str) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Exec {
+                command: "ls".into(),
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            html_render: None,
+        }
+    }
+
+    fn text(id: &str, text: &str) -> MessagePart {
+        MessagePart::Text {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    fn kinds(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match &row.kind {
+                RowKind::HtmlRender { title, .. } => format!("page:{title}"),
+                RowKind::ToolGroup { compact_shell, .. } => {
+                    format!("tools{}", if *compact_shell { ":fold" } else { "" })
+                }
+                RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. } => "text".into(),
+                _ => "other".into(),
+            })
+            .filter(|kind| kind != "other")
+            .collect()
+    }
+
+    #[test]
+    fn a_settled_turn_shows_the_page_between_the_fold_and_the_reply() {
+        let parts = vec![
+            exec("p1"),
+            render_part(Some(page())),
+            exec("p2"),
+            text("t1", "Bars are tokens."),
+        ];
+        let open = rows_for_entry(
+            &entry(MessageStatus::Complete, parts.clone()),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(kinds(&open), ["tools", "page:Chart", "tools", "text"]);
+        let settled = rows_for_entry(
+            &entry(MessageStatus::Complete, parts.clone()),
+            false,
+            true,
+            &mut parse,
+        );
+        let visible: Vec<Row> = settled
+            .iter()
+            .filter(|row| row.compact_fold.is_none())
+            .cloned()
+            .collect();
+        assert_eq!(kinds(&visible), ["tools:fold", "page:Chart", "text"]);
+        assert_eq!(
+            settled
+                .iter()
+                .filter(|row| matches!(row.kind, RowKind::HtmlRender { .. }))
+                .count(),
+            1,
+            "the folded copy of the work never repeats the page"
+        );
+        let streaming = rows_for_entry(
+            &entry(MessageStatus::Streaming, parts),
+            false,
+            false,
+            &mut parse,
+        );
+        let id = |rows: &[Row]| {
+            rows.iter()
+                .find(|row| matches!(row.kind, RowKind::HtmlRender { .. }))
+                .map(|row| row.id.clone())
+        };
+        assert_eq!(id(&streaming), id(&settled));
+        assert_eq!(id(&settled).as_deref(), Some("m1#html-p-html"));
+    }
+
+    #[test]
+    fn a_call_without_a_published_page_shows_no_card() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageStatus::Complete,
+                vec![render_part(None), text("t1", "done")],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.kind, RowKind::HtmlRender { .. }))
+        );
+    }
+
+    #[test]
+    fn the_card_carries_the_owner_device_and_page_reference() {
+        let rows = rows_for_entry(
+            &entry(MessageStatus::Complete, vec![render_part(Some(page()))]),
+            false,
+            false,
+            &mut parse,
+        );
+        let Some(RowKind::HtmlRender {
+            owner,
+            path,
+            title,
+            height,
+        }) = rows
+            .iter()
+            .find(|row| matches!(row.kind, RowKind::HtmlRender { .. }))
+            .map(|row| row.kind.clone())
+        else {
+            panic!("no page row");
+        };
+        assert_eq!(
+            (owner.as_ref(), path.as_ref(), title.as_ref(), height),
+            ("dev-a", "/u/html/c1/ab.html", "Chart", 420.0)
+        );
+    }
+
+    #[test]
+    fn native_pages_never_cover_the_titlebar_composer_or_docked_preview() {
+        let list = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(900.0)));
+        let mask = native_mask(list, 38.0, 160.0, 220.0);
+        assert_eq!(mask.top(), px(38.0));
+        assert_eq!(mask.bottom(), px(740.0));
+        assert_eq!(mask.right(), px(580.0));
+        let tiny = native_mask(list, 38.0, 2000.0, 2000.0);
+        assert_eq!(tiny.size.height, px(0.0));
+        assert_eq!(tiny.size.width, px(0.0));
+    }
+
+    #[test]
+    fn download_names_drop_characters_file_systems_reject() {
+        assert_eq!(page_file_name("Q3: tokens / turn?"), "Q3 tokens turn.html");
+        assert_eq!(page_file_name("  "), "Page.html");
+        assert_eq!(page_file_name(&"a".repeat(300)).len(), 125);
+    }
 }
