@@ -457,6 +457,90 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn active_first_glides_finished_threads_above_idle_ones(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                let now = Utc::now();
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    let mut done = pin_test_chat("done");
+                    done.last_message_at = Some(now - chrono::Duration::hours(2));
+                    let mut idle = pin_test_chat("idle");
+                    idle.last_message_at = Some(now - chrono::Duration::minutes(1));
+                    idle.last_seen_at = Some(now);
+                    state.chats = vec![done, idle];
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        let epoch = shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["idle", "done"]));
+            shell.activate_sidebar_view_row(SidebarViewRow::ActiveFirst, cx);
+            shell.resort_epoch
+        });
+        shell.update(cx, |shell, cx| {
+            assert!(shell.settings.sidebar_active_first);
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["done", "idle"]));
+            assert!(shell.resort_epoch > epoch);
+            assert!(!shell.sidebar_resort.is_empty());
+            shell.state.update(cx, |state, _| {
+                let done = state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "done")
+                    .unwrap();
+                done.last_seen_at = Some(Utc::now());
+            });
+        });
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["idle", "done"]));
+        });
+    }
+
+    #[gpui::test]
     fn closing_an_unstarted_sidechat_tab_archives_its_row(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2101,6 +2185,18 @@ pub(super) fn compare_sidebar_chats(
     primary.then_with(|| left.id.cmp(&right.id))
 }
 
+pub(super) fn compare_sidebar_rows(
+    sort: SidebarSort,
+    active_first: bool,
+    left: (ChatIndicator, &zeron_proto::Chat),
+    right: (ChatIndicator, &zeron_proto::Chat),
+) -> std::cmp::Ordering {
+    let active = |status: ChatIndicator| active_first && status != ChatIndicator::Idle;
+    active(right.0)
+        .cmp(&active(left.0))
+        .then_with(|| compare_sidebar_chats(sort, left.1, right.1))
+}
+
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
 /// recipe as the composer's ref picker: filter input on top
 /// (`PaletteSearch` context so ↑↓/⏎ bubble to the card), ranked substring
@@ -2159,6 +2255,7 @@ enum SidebarViewRow {
     InOneList,
     LastUpdated,
     Created,
+    ActiveFirst,
     ShowBranch,
     ShowPullRequest,
     ShowHarness,
@@ -2176,14 +2273,15 @@ impl SidebarViewRow {
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..10)];
+    [("Organize", 0..3), ("Sort", 3..6), ("Show", 6..11)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
+    SidebarViewRow::ActiveFirst,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
     SidebarViewRow::ShowHarness,
@@ -3622,6 +3720,9 @@ impl Shell {
             }
             SidebarViewRow::LastUpdated => self.settings.sidebar_sort = SidebarSort::LastUpdated,
             SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
+            SidebarViewRow::ActiveFirst => {
+                self.settings.sidebar_active_first = !self.settings.sidebar_active_first
+            }
             SidebarViewRow::ShowBranch => {
                 self.settings.sidebar_show_branch = !self.settings.sidebar_show_branch
             }
@@ -3799,6 +3900,7 @@ impl Shell {
             "None",
             "Last updated",
             "Created",
+            "Active first",
             "Branch",
             "Pull request",
             "Harness",
@@ -3811,6 +3913,7 @@ impl Shell {
             icons::LIST,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
+            icons::BOLT,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
             icons::BOT,
@@ -3823,6 +3926,7 @@ impl Shell {
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
+            self.settings.sidebar_active_first,
             show_branch,
             show_pr,
             show_harness,
@@ -4557,12 +4661,17 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
-        let mut chats: Vec<zeron_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
-            .into_iter()
-            .map(|(_, chat)| chat.clone())
-            .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        let mut chats: Vec<_> = state.sidebar_chats(Utc::now(), filter.as_deref());
+        chats.sort_by(|left, right| {
+            compare_sidebar_rows(
+                self.settings.sidebar_sort,
+                self.settings.sidebar_active_first,
+                *left,
+                *right,
+            )
+        });
+        let chats: Vec<zeron_proto::Chat> =
+            chats.into_iter().map(|(_, chat)| chat.clone()).collect();
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -4979,7 +5088,12 @@ impl Shell {
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
             chats.sort_by(|left, right| {
-                compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
+                compare_sidebar_rows(
+                    self.settings.sidebar_sort,
+                    self.settings.sidebar_active_first,
+                    (left.0, &left.1),
+                    (right.0, &right.1),
+                )
             });
             chats
                 .into_iter()
@@ -7383,7 +7497,8 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
 
     use super::{
-        compare_sidebar_chats, grouped_visible_order, nest_linked_chats, promote_local_device_group,
+        ChatIndicator, compare_sidebar_chats, compare_sidebar_rows, grouped_visible_order,
+        nest_linked_chats, promote_local_device_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -7429,6 +7544,40 @@ mod tests {
         let beta = chat("beta");
         assert!(compare_sidebar_chats(SidebarSort::Created, &alpha, &beta).is_lt());
         assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &alpha, &beta).is_lt());
+    }
+
+    #[test]
+    fn active_first_lifts_every_live_or_unseen_status_above_idle() {
+        let stale = zeron_proto::Chat {
+            last_message_at: Some(Utc.timestamp_opt(1, 0).unwrap()),
+            ..chat("stale")
+        };
+        let fresh = chat("fresh");
+        let sort = SidebarSort::LastUpdated;
+        for status in [
+            ChatIndicator::Working,
+            ChatIndicator::AwaitingInput,
+            ChatIndicator::Errored,
+            ChatIndicator::Completed,
+        ] {
+            assert!(
+                compare_sidebar_rows(sort, true, (status, &stale), (ChatIndicator::Idle, &fresh))
+                    .is_lt()
+            );
+            assert!(
+                compare_sidebar_rows(sort, false, (status, &stale), (ChatIndicator::Idle, &fresh))
+                    .is_gt()
+            );
+        }
+        assert!(
+            compare_sidebar_rows(
+                sort,
+                true,
+                (ChatIndicator::Completed, &fresh),
+                (ChatIndicator::Working, &stale),
+            )
+            .is_lt()
+        );
     }
 
     #[test]

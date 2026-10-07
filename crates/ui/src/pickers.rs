@@ -956,6 +956,15 @@ pub struct Pickers {
 }
 
 impl Pickers {
+    pub(crate) fn model_label(&self, harness: HarnessId, id: &str) -> Option<String> {
+        self.models
+            .get(&harness)
+            .and_then(|models| models.ready())
+            .and_then(|models| models.iter().find(|model| model.id == id))
+            .map(|model| model.label.clone())
+            .or_else(|| self.defaults.label_for(id).map(str::to_owned))
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::build(state, None, cx)
     }

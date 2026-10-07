@@ -45,9 +45,6 @@ impl Shell {
     }
 
     pub(super) fn add_pull_requests_surface(&mut self, tab: PageTab, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
         let key = self.panel_key(cx);
         self.pr_surface_seq += 1;
         let id = self.pr_surface_seq;

@@ -48,6 +48,9 @@ pub mod methods {
     /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
+    /// Settings > Tools opt-outs. No params / `ToolSettings` → `ToolSettingsState`.
+    pub const GET_TOOL_SETTINGS: &str = "GetToolSettings";
+    pub const SET_TOOL_SETTINGS: &str = "SetToolSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

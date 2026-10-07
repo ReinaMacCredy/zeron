@@ -8,6 +8,10 @@ Never push, tag, or bump the version without Reina's explicit approval.
 - One branch per unit of work, in `.maestro/worktree/<slug>` with its own
   `CARGO_TARGET_DIR=$PWD/target`. Never build a worktree into the main
   checkout's `target/`.
+- Right after `git worktree add`, run `scripts/seed-worktree-target.sh` from
+  the new worktree, before its first build: it APFS-clones the main checkout's
+  `target/debug` (about 2-3 min, no extra disk) so only workspace crates
+  rebuild. Worktrees Zeron creates get this from the project's setup Action.
 - Peers edit the main checkout live. Never revert, format, or stash files
   there that you did not change.
 - Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
