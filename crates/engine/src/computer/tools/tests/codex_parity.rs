@@ -1,8 +1,190 @@
 use super::*;
 
-use zeron_proto::computer::{ComputerRect, ComputerWindow};
+use zeron_proto::computer::{
+    ComputerAxLine, ComputerAxTree, ComputerRect, ComputerUiNode, ComputerWindow,
+};
 
 use crate::computer::fake_backend::FakeComputerBackendOptions;
+
+const CALC: &str = "fake-calculator";
+
+fn ui(
+    role: &str,
+    label: Option<&str>,
+    description: Option<&str>,
+    value: Option<&str>,
+    x: f64,
+) -> Value {
+    json!({
+        "role": role,
+        "label": label,
+        "value": value,
+        "description": description,
+        "frame": { "x": 1_100.0 + x, "y": 300, "width": 40, "height": 30 },
+        "activationPoint": null,
+        "onScreen": true,
+        "windowId": CALC,
+        "children": [],
+    })
+}
+
+fn calculator_root() -> ComputerUiNode {
+    let mut window = ui("AXWindow", Some("Calculator"), None, None, 0.0);
+    window["frame"] = json!({ "x": 1_050, "y": 120, "width": 420, "height": 620 });
+    window["children"] = json!([
+        ui("AXStaticText", None, Some("Edit field"), Some("408"), 0.0),
+        ui("text-field", Some("Display"), None, Some("0"), 40.0),
+        ui("AXButton", Some("All Clear"), None, None, 80.0),
+        ui("AXButton", Some("Delete"), None, None, 120.0),
+    ]);
+    serde_json::from_value(json!({
+        "role": "desktop",
+        "label": null,
+        "value": null,
+        "description": null,
+        "frame": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+        "activationPoint": null,
+        "onScreen": true,
+        "windowId": null,
+        "children": [window],
+    }))
+    .unwrap()
+}
+
+fn calculator_harness() -> Harness {
+    harness_with(HarnessOptions {
+        backend: fake_with(FakeComputerBackendOptions {
+            root: Some(calculator_root()),
+            ..FakeComputerBackendOptions::default()
+        }),
+        ..HarnessOptions::default()
+    })
+}
+
+async fn read_tree(h: &Harness, arguments: Value) -> (String, Vec<Value>) {
+    let result = h.call("computer_get_state", arguments).await;
+    assert!(!result.is_error, "{result:?}");
+    let payload = result_json(&result);
+    (
+        payload["tree"].as_str().unwrap_or_default().to_owned(),
+        payload["elements"].as_array().cloned().unwrap_or_default(),
+    )
+}
+
+fn ref_of(elements: &[Value], label: &str) -> u64 {
+    elements
+        .iter()
+        .find(|element| element["label"] == json!(label))
+        .and_then(|element| element["ref"].as_u64())
+        .unwrap_or_else(|| panic!("no {label} in {elements:?}"))
+}
+
+// Catches discarding display-only value lines (Calculator's result), numbering
+// lines with driver DFS indices instead of refs the ref-taking tools accept,
+// and losing the hierarchy.
+#[tokio::test]
+async fn renders_a_calculator_tree_with_its_static_value_and_usable_refs() {
+    let h = calculator_harness();
+    let (tree, elements) = read_tree(&h, json!({ "window_id": CALC })).await;
+    let clear = ref_of(&elements, "All Clear");
+    let mut lines = tree.lines();
+    assert_eq!(
+        lines.next(),
+        Some("Window: \"Calculator\", App: org.kde.kcalc.")
+    );
+    assert_eq!(lines.next(), Some("window Calculator"));
+    assert!(
+        tree.contains("\n\ttext Description: Edit field, Value: 408\n"),
+        "{tree}"
+    );
+    assert!(
+        tree.contains(&format!("\n\t{clear} button All Clear\n")),
+        "{tree}"
+    );
+    let clicked = h.call("computer_click", json!({ "ref": clear })).await;
+    assert!(!clicked.is_error, "{clicked:?}");
+    h.dispose().await;
+}
+
+// Catches minting fresh numbers on every read: a re-read must show the same
+// numbers for the same elements.
+#[tokio::test]
+async fn keeps_tree_numbers_stable_across_reads() {
+    let h = calculator_harness();
+    let (first, _) = read_tree(&h, json!({ "window_id": CALC })).await;
+    let (second, _) = read_tree(&h, json!({ "window_id": CALC, "full": true })).await;
+    assert_eq!(first, second);
+    h.dispose().await;
+}
+
+// Catches re-sending the whole tree on every read, marking unchanged lines,
+// and reporting no change after a value moved.
+#[tokio::test]
+async fn returns_a_codex_diff_after_a_value_change_and_a_no_change_sentence_after() {
+    let h = calculator_harness();
+    let (_, elements) = read_tree(&h, json!({ "window_id": CALC })).await;
+    let display = ref_of(&elements, "Display");
+    let set = h
+        .call(
+            "computer_set_value",
+            json!({ "ref": display, "value": "12", "include_screenshot": false }),
+        )
+        .await;
+    assert!(!set.is_error, "{set:?}");
+    let (diff, _) = read_tree(&h, json!({ "window_id": CALC })).await;
+    assert_eq!(
+        diff,
+        format!(
+            "The following is a diff from the previous accessibility tree for Window: \"Calculator\" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\n~ {display} text field Display, Value: 12"
+        )
+    );
+    let (unchanged, _) = read_tree(&h, json!({ "window_id": CALC })).await;
+    assert_eq!(
+        unchanged,
+        "There has been no change in the accessibility tree for Window: \"Calculator\"."
+    );
+    h.dispose().await;
+}
+
+// Catches rendering the driver's menu bar into the window tree, dropping the
+// focused element's ref, or omitting the selected text.
+#[tokio::test]
+async fn renders_the_backend_tree_with_focus_and_selection() {
+    let h = calculator_harness();
+    let line =
+        |depth: u32, role: &str, title: Option<&str>, target: Option<Vec<u32>>| ComputerAxLine {
+            depth,
+            role: role.into(),
+            title: title.map(str::to_owned),
+            target,
+            ..ComputerAxLine::default()
+        };
+    h.backend.fake.set_ax_tree(Some(ComputerAxTree {
+        url: None,
+        lines: vec![
+            line(0, "AXMenuBar", None, None),
+            line(1, "AXMenuBarItem", Some("File"), None),
+            line(0, "AXWindow", Some("Calculator"), None),
+            ComputerAxLine {
+                value: Some("408".into()),
+                ..line(1, "AXStaticText", None, None)
+            },
+            line(1, "AXButton", Some("Delete"), Some(vec![0, 3])),
+        ],
+        focused: Some(line(1, "AXButton", Some("Delete"), Some(vec![0, 3]))),
+        selected_text: Some("40".into()),
+        truncated: false,
+    }));
+    let (tree, elements) = read_tree(&h, json!({ "window_id": CALC })).await;
+    let delete = ref_of(&elements, "Delete");
+    assert_eq!(
+        tree,
+        format!(
+            "Window: \"Calculator\", App: org.kde.kcalc.\nwindow Calculator\n\ttext Value: 408\n\t{delete} button Delete\nThe focused UI element is {delete} button Delete\nSelected text: ```40```"
+        )
+    );
+    h.dispose().await;
+}
 
 fn window(id: &str, app: &str, bounds: ComputerRect, visible: bool) -> ComputerWindow {
     ComputerWindow {

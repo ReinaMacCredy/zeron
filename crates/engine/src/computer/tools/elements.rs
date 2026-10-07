@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use super::ax_tree::TreeSnapshot;
 use crate::computer::ui_tree_targeting::{
     ComputerActionableElement, ComputerActionableElementChange, ComputerActionableElementRef,
     ComputerActionableElements, diff_actionable_elements,
 };
 
-const MAX_ELEMENT_REFS: usize = 512;
+const MAX_ELEMENT_REFS: usize = 4096;
 const MAX_ELEMENT_DIGESTS: usize = 64;
 
 #[derive(Default)]
@@ -21,6 +22,7 @@ struct ElementRefTable {
 pub(super) struct ElementState {
     digests: Vec<(String, ComputerActionableElements)>,
     ref_tables: HashMap<String, ElementRefTable>,
+    trees: Vec<(String, TreeSnapshot)>,
 }
 
 pub(super) enum RefLookup {
@@ -89,6 +91,27 @@ impl ElementState {
             self.digests.remove(0);
         }
         stable
+    }
+
+    pub(super) fn sync_refs(
+        &mut self,
+        thread_id: &str,
+        elements: ComputerActionableElements,
+    ) -> ComputerActionableElements {
+        self.sync_element_refs(thread_id, elements)
+    }
+
+    pub(super) fn swap_tree(&mut self, key: &str, tree: TreeSnapshot) -> Option<TreeSnapshot> {
+        let previous = self
+            .trees
+            .iter()
+            .position(|(existing, _)| existing == key)
+            .map(|index| self.trees.remove(index).1);
+        self.trees.push((key.to_owned(), tree));
+        while self.trees.len() > MAX_ELEMENT_DIGESTS {
+            self.trees.remove(0);
+        }
+        previous
     }
 
     pub(super) fn digest(&self, key: &str) -> Option<ComputerActionableElements> {
@@ -296,6 +319,7 @@ mod tests {
                         &node(label),
                         Some(format!("{token_prefix}:{index}")),
                     ),
+                    path: vec![index as u32],
                 })
                 .collect(),
             complete: true,

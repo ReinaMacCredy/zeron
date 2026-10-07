@@ -15,15 +15,15 @@ use zeron_proto::computer::{
     COMPUTER_WINDOW_LIST_MAX_LENGTH, CUA_DEFAULT_TIMEOUT_MS, CUA_MAX_REQUEST_BYTES,
     CUA_SETUP_TIMEOUT_MS, ComputerAccessibilityReport, ComputerAccessibilityStatus,
     ComputerAccessibilityTreeApp, ComputerAccessibilityTreeWindow, ComputerApp,
-    ComputerAvailability, ComputerBuildSignature, ComputerCapabilities, ComputerDeliveryMode,
-    ComputerDeliveryVerification, ComputerHealth, ComputerHealthFailure, ComputerHealthStatus,
-    ComputerHostCall, ComputerHostMethod, ComputerInputModifier, ComputerInputPause,
-    ComputerJpegMimeType, ComputerLaunchAppResult, ComputerLaunchWindowReason,
-    ComputerLaunchWindowStatus, ComputerPermission, ComputerPngMimeType, ComputerPoint,
-    ComputerRect, ComputerScreenSize, ComputerScreenshot, ComputerScrollDelta,
-    ComputerSpaceErrorCode, ComputerSpaceInventory, ComputerState, ComputerUiNode,
-    ComputerVerifyStateResult, ComputerVerifyStatus, ComputerWindow, ComputerZoomResult,
-    CuaComputerTask, CuaEffect, CuaReply, CuaToolResult, CuaTransportError,
+    ComputerAvailability, ComputerAxLine, ComputerAxTree, ComputerBuildSignature,
+    ComputerCapabilities, ComputerDeliveryMode, ComputerDeliveryVerification, ComputerHealth,
+    ComputerHealthFailure, ComputerHealthStatus, ComputerHostCall, ComputerHostMethod,
+    ComputerInputModifier, ComputerInputPause, ComputerJpegMimeType, ComputerLaunchAppResult,
+    ComputerLaunchWindowReason, ComputerLaunchWindowStatus, ComputerPermission,
+    ComputerPngMimeType, ComputerPoint, ComputerRect, ComputerScreenSize, ComputerScreenshot,
+    ComputerScrollDelta, ComputerSpaceErrorCode, ComputerSpaceInventory, ComputerState,
+    ComputerUiNode, ComputerVerifyStateResult, ComputerVerifyStatus, ComputerWindow,
+    ComputerZoomResult, CuaComputerTask, CuaEffect, CuaReply, CuaToolResult, CuaTransportError,
     computer_permission_setup_message, cua_computer_task_key, list_computer_permissions,
     parse_cua_action_diagnostics,
 };
@@ -163,6 +163,62 @@ fn text(value: Option<&Value>, max: usize) -> String {
 
 fn text1024(value: Option<&Value>) -> String {
     text(value, 1024)
+}
+
+fn cua_ax_tree(data: &Map<String, Value>, targets: &HashMap<u64, u32>) -> Option<ComputerAxTree> {
+    let nodes = data.get("tree_nodes")?.as_array()?;
+    let elements: HashMap<u64, &Value> = data
+        .get("elements")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|element| Some((element.get("element_index")?.as_u64()?, element)))
+        .collect();
+    let optional = |value: Option<&Value>, max: usize| {
+        Some(text(value, max)).filter(|value| !value.is_empty())
+    };
+    let line = |node: &Value| {
+        let index = node.get("element_index").and_then(Value::as_u64);
+        let element = index.and_then(|index| elements.get(&index));
+        let field = |name: &str| element.and_then(|element| element.get(name));
+        ComputerAxLine {
+            depth: node
+                .get("depth")
+                .and_then(Value::as_u64)
+                .map_or(0, |depth| depth.min(64) as u32),
+            role: text(node.get("role"), 128),
+            title: optional(node.get("title"), 1024),
+            description: optional(node.get("description"), 1024),
+            value: optional(node.get("value"), 16384).or_else(|| optional(field("value"), 16384)),
+            identifier: optional(node.get("identifier"), 1024),
+            help: optional(node.get("help"), 1024),
+            actions: field("actions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(|action| js_slice(action, 256).to_owned())
+                .collect(),
+            settable: node.get("settable") == Some(&Value::Bool(true)),
+            selected: field("selected").and_then(Value::as_bool),
+            enabled: field("enabled").and_then(Value::as_bool),
+            expanded: node.get("expanded").and_then(Value::as_bool),
+            target: index
+                .and_then(|index| targets.get(&index))
+                .map(|child| vec![*child]),
+        }
+    };
+    Some(ComputerAxTree {
+        url: optional(data.get("window_url"), 2048),
+        lines: nodes.iter().take(4096).map(line).collect(),
+        focused: data
+            .get("focused_element")
+            .filter(|focused| focused.is_object())
+            .map(line),
+        selected_text: optional(data.get("selected_text"), 16384),
+        truncated: data.get("tree_truncated") == Some(&Value::Bool(true)),
+    })
 }
 
 fn number(value: Option<&Value>) -> f64 {
@@ -1841,6 +1897,7 @@ impl CuaInner {
             text: None,
             screenshot: None,
             captured_at: now_iso(),
+            ax_tree: None,
         };
         if has_missing {
             return Ok(state);
@@ -1908,6 +1965,7 @@ impl CuaInner {
         let window = &resolved.window;
         let mut children = Vec::new();
         let mut elements = Vec::new();
+        let mut targets = HashMap::new();
         if let Some(values) = data.get("elements").and_then(Value::as_array) {
             for value in values.iter().take(1024) {
                 let element = record(Some(value));
@@ -1918,6 +1976,9 @@ impl CuaInner {
                 let Some(frame) = optional_rect(element.get("frame")) else {
                     continue;
                 };
+                if let Some(index) = element.get("element_index").and_then(Value::as_u64) {
+                    targets.insert(index, children.len() as u32);
+                }
                 let label = text1024(element.get("label"));
                 let description = text1024(element.get("value_description"));
                 let node = ComputerUiNode {
@@ -1985,6 +2046,7 @@ impl CuaInner {
             children,
         };
         self.remember_tree(&window_id, root.clone(), elements);
+        state.ax_tree = cua_ax_tree(&data, &targets);
         if options.include_screenshot {
             match self.preview_image(&result, &window.id)? {
                 Ok(screenshot) => {

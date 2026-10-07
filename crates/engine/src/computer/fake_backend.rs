@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use zeron_proto::computer::{
     ComputerAccessibilityTreeApp, ComputerAccessibilityTreeWindow, ComputerApp,
-    ComputerAvailability, ComputerBuildSignature, ComputerCapabilities,
+    ComputerAvailability, ComputerAxTree, ComputerBuildSignature, ComputerCapabilities,
     ComputerDeliveryVerification, ComputerHealth, ComputerHealthStatus, ComputerInputModifier,
     ComputerJpegMimeType, ComputerLaunchAppResult, ComputerPermission, ComputerPngMimeType,
     ComputerPoint, ComputerRect, ComputerScreenSize, ComputerScreenshot, ComputerState,
@@ -210,6 +210,7 @@ struct FakeState {
     cursor: ComputerPoint,
     disposed: bool,
     live_shields: Vec<String>,
+    ax_tree: Option<ComputerAxTree>,
 }
 
 impl FakeState {
@@ -307,6 +308,7 @@ impl FakeComputerBackend {
                 cursor: ComputerPoint { x: 0.0, y: 0.0 },
                 disposed: false,
                 live_shields: Vec::new(),
+                ax_tree: None,
             }),
             listeners: ComputerBackendListeners::default(),
             frame_listener: Mutex::new(None),
@@ -374,6 +376,10 @@ impl FakeComputerBackend {
 
     pub fn set_root(&self, root: ComputerUiNode) {
         self.state().root = root;
+    }
+
+    pub fn set_ax_tree(&self, ax_tree: Option<ComputerAxTree>) {
+        self.state().ax_tree = ax_tree;
     }
 
     pub fn root(&self) -> ComputerUiNode {
@@ -616,9 +622,9 @@ impl ComputerBackend for FakeComputerBackend {
             self.screenshot_of_region(workspace, None)
         });
         let windows = self.list_windows().await?;
-        let (screen_size, root) = {
+        let (screen_size, root, ax_tree) = {
             let state = self.state();
-            (state.screen_size, state.root.clone())
+            (state.screen_size, state.root.clone(), state.ax_tree.clone())
         };
         Ok(ComputerState {
             input_pause: None,
@@ -632,6 +638,7 @@ impl ComputerBackend for FakeComputerBackend {
             text: None,
             screenshot,
             captured_at: (self.now)(),
+            ax_tree,
         })
     }
 

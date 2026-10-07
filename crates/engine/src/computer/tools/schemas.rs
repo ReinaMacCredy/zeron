@@ -489,7 +489,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
         entry(
             "computer_get_state",
             format!(
-                "Read labeled controls and values before acting; prefer semantic targets. {WINDOW_FOCUS_NOTE} Returns elements by default, without an image or duplicate text. Stable refs distinguish duplicates and remain bound to their original elements; use ref on later actions. A one-window listing hoists its id to elementWindowId. window_id scopes inspection; include_screenshot adds {overview_scope} (or that window). {SCREENSHOT_FRAME_NOTE} Use window_id or label_contains to narrow results marked elementsTruncated/elementsOmitted."
+                "Read labeled controls and values before acting; prefer semantic targets. {WINDOW_FOCUS_NOTE} Returns elements (no image) with stable refs that distinguish duplicates; use ref on later actions. A one-window listing hoists its id to elementWindowId. window_id adds tree: the window's hierarchy and values numbered by ref; repeat reads return a diff unless full:true. include_screenshot adds {overview_scope} (or that window). {SCREENSHOT_FRAME_NOTE} Narrow elementsTruncated/elementsOmitted results with window_id or label_contains."
             ),
             object_schema(
                 object(json!({
@@ -513,9 +513,10 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
                         "type": "string",
                         "description": "Filter elements by case-insensitive label substring, including truncated results.",
                     },
+                    "full": { "type": "boolean" },
                     "diff": {
                         "type": "boolean",
-                        "description": "Return elementChanges (added/removed/changed) since this scope's last read (same window_id and label_contains); the first lists all as added. Position-only changes are omitted; inspect an image for layout.",
+                        "description": "Return elementChanges since this scope's last read (same window_id and label_contains); the first lists all as added.",
                     },
                 })),
                 &[],

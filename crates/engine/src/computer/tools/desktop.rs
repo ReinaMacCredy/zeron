@@ -19,6 +19,7 @@ use super::args::{
     read_scroll_delta, read_select_text_range, read_select_text_target, read_set_value_value,
     read_wait_duration_ms, read_window_id_arg,
 };
+use super::ax_tree::{TREE_REF_LIMIT, build_tree, render_diff, render_full};
 use super::elements::{
     RefLookup, digest_scope_key, element_change_fields, listing_fields,
 };
@@ -45,8 +46,8 @@ use crate::computer::screenshot_frames::{
     screenshot_delta_to_desktop, screenshot_point_to_desktop, screenshot_rect_to_desktop,
 };
 use crate::computer::ui_tree_targeting::{
-    ComputerActionableElementFilter, ComputerTargetErrorCode, normalize_label_spaces,
-    resolve_computer_semantic_target,
+    ComputerActionableElementFilter, ComputerTargetErrorCode, actionable_elements_limited,
+    normalize_label_spaces, resolve_computer_semantic_target,
 };
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 use crate::computer::wait_for_control::{
@@ -483,6 +484,37 @@ impl ComputerTools {
         })
     }
 
+    fn tree_text(
+        &self,
+        thread_id: &str,
+        window_id: &str,
+        windows: &[zeron_proto::computer::ComputerWindow],
+        ax_tree: Option<&zeron_proto::computer::ComputerAxTree>,
+        root: &zeron_proto::computer::ComputerUiNode,
+        full: bool,
+    ) -> Option<String> {
+        let listing = actionable_elements_limited(
+            root,
+            &ComputerActionableElementFilter {
+                window_id: Some(window_id.to_owned()),
+                label_contains: None,
+            },
+            self.native_identity(),
+            TREE_REF_LIMIT,
+        );
+        let mut tool_state = self.state();
+        let listing = tool_state.elements.sync_refs(thread_id, listing);
+        let window = windows.iter().find(|window| window.id == window_id);
+        let snapshot = build_tree(window, window_id, ax_tree, Some(root), &listing)?;
+        let key = digest_scope_key(thread_id, Some(window_id), None);
+        Some(
+            match tool_state.elements.swap_tree(&key, snapshot.clone()) {
+                Some(previous) if !full => render_diff(&previous, &snapshot),
+                _ => render_full(&snapshot),
+            },
+        )
+    }
+
     pub(super) fn app_playbook(
         &self,
         thread_id: &str,
@@ -577,12 +609,27 @@ impl ComputerTools {
                 .map(|elements| tool_state.elements.remember_digest(&context.chat_id, &key, elements));
             (before, stable)
         };
+        let ax_tree = state.ax_tree.take();
+        let tree = match (window_id.as_deref(), root.as_ref()) {
+            (Some(window_id), Some(root)) => self.tree_text(
+                &context.chat_id,
+                window_id,
+                &state.windows,
+                ax_tree.as_ref(),
+                root,
+                read_boolean_arg(args, "full")?.unwrap_or(false),
+            ),
+            _ => None,
+        };
         let app_hint = window_id
             .as_deref()
             .and_then(|window_id| self.app_playbook(&context.chat_id, &state.windows, window_id));
         let mut payload = to_map(&state);
         if want_text && let Some(text) = text {
             payload.insert("text".into(), json!(text));
+        }
+        if let Some(tree) = tree {
+            payload.insert("tree".into(), json!(tree));
         }
         if let Some(stable) = &stable {
             payload.extend(if want_diff {
