@@ -366,7 +366,8 @@ impl ComputerPreviewStore {
                 if was && !active {
                     chat.user_paused = false;
                     chat.user_paused_window = None;
-                    chat.finished_at = (!stopped(state)).then(Instant::now);
+                    chat.finished_at = (!stopped(state) && chat.phase == Some(PreviewPhase::Live))
+                        .then(Instant::now);
                 }
                 if active && !was {
                     chat.apps.clear();
@@ -543,10 +544,10 @@ impl ComputerPreviewStore {
     }
 
     pub fn hide_for_task(&mut self, chat_id: &str) -> bool {
-        let opened = self
-            .chats
-            .get_mut(chat_id)
-            .is_some_and(|chat| std::mem::take(&mut chat.user_opened));
+        let opened = self.chats.get_mut(chat_id).is_some_and(|chat| {
+            let flashing = chat.finished_at.take().is_some();
+            std::mem::take(&mut chat.user_opened) | flashing
+        });
         let next = phase_on_hide(self.chats.get(chat_id).and_then(|chat| chat.phase));
         self.set_phase(chat_id, next) | opened
     }
@@ -679,9 +680,12 @@ impl ComputerPreviewStore {
         let phase = chat.and_then(|chat| chat.phase);
         let user_opened = chat.is_some_and(|chat| chat.user_opened);
         let shown = self.settings.auto_open_computer_pane || user_opened;
+        let completed = chat
+            .and_then(|chat| chat.finished_at)
+            .is_some_and(|at| at.elapsed() < COMPLETION_FLASH);
         let open = match phase {
             Some(PreviewPhase::Live) => shown,
-            Some(PreviewPhase::Ended) => user_opened,
+            Some(PreviewPhase::Ended) => user_opened || (shown && completed),
             _ => false,
         };
         let active = chat.is_some_and(|chat| {
@@ -723,9 +727,7 @@ impl ComputerPreviewStore {
             badge: status_badge(state, active, true),
             wants_stills: wanted && source == FrameSource::Stills,
             floating: chat.and_then(|chat| chat.floating),
-            completed: chat
-                .and_then(|chat| chat.finished_at)
-                .is_some_and(|at| at.elapsed() < COMPLETION_FLASH),
+            completed,
             frame,
         }
     }
@@ -1230,15 +1232,29 @@ pub(crate) mod tests {
     fn a_finished_drive_flashes_complete_but_a_revoked_one_does_not() {
         let mut store = ComputerPreviewStore::default();
         driving(&mut store, "a");
+        store.mark_live("a");
         assert!(!store.view("a").completed);
         store.apply_event(&ComputerEvent::ThreadState {
             state: Box::new(thread_state("a", false)),
         });
         assert!(store.view("a").completed, "the turn finished");
+        assert!(store.view("a").open, "the card stays up for the checkmark");
         driving(&mut store, "a");
         assert!(!store.view("a").completed, "a new drive clears it");
 
+        driving(&mut store, "c");
+        store.mark_live("c");
+        store.hide_for_task("c");
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("c", false)),
+        });
+        assert!(
+            !store.view("c").completed && !store.view("c").open,
+            "a hidden preview never pops back for the checkmark"
+        );
+
         driving(&mut store, "b");
+        store.mark_live("b");
         let mut revoked = thread_state("b", false);
         revoked.input_stopped = Some(true);
         store.apply_event(&ComputerEvent::ThreadState {
@@ -1462,7 +1478,10 @@ pub(crate) mod tests {
             state: Box::new(thread_state("a", false)),
         });
         assert_eq!(store.view("a").phase, Some(PreviewPhase::Ended));
-        assert!(!store.view("a").open, "the drive's end closes it");
+        assert!(
+            store.view("a").completed && store.view("a").open,
+            "the drive's end keeps it up only for the checkmark"
+        );
         assert!(store.reopen("a"), "an ended drive reopens too");
         assert!(store.view("a").open);
         assert!(store.hide_for_task("a"));

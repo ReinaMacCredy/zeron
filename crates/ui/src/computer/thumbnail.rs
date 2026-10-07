@@ -12,6 +12,7 @@ pub const THUMBNAIL_HEIGHT: f32 = 118.0;
 pub struct ComputerThumbnail {
     store: Entity<ComputerPreviewStore>,
     chat_id: Option<String>,
+    completion_repaint: Option<gpui::Task<()>>,
     #[cfg(feature = "appshots-fixture")]
     painted: Option<gpui::Bounds<gpui::Pixels>>,
     _observer: Subscription,
@@ -23,6 +24,7 @@ impl ComputerThumbnail {
             _observer: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             chat_id: None,
+            completion_repaint: None,
             #[cfg(feature = "appshots-fixture")]
             painted: None,
         }
@@ -47,6 +49,18 @@ impl Render for ComputerThumbnail {
             return div().into_any_element();
         };
         let view = self.store.read(cx).view(chat);
+        if view.completed && self.completion_repaint.is_none() {
+            self.completion_repaint = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(super::preview::COMPLETION_FLASH)
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.completion_repaint = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         let theme = Theme::of(cx);
         let body = match &view.frame {
             Some(frame) => img(ImageSource::Render(frame.image.clone()))
@@ -74,6 +88,9 @@ impl Render for ComputerThumbnail {
             .border_color(crate::theme::hairline(0.1))
             .bg(gpui::black())
             .child(body)
+            .when(view.completed, |thumb| {
+                thumb.child(super::preview_card::completion_check(theme))
+            })
             .when_some(view.status_label, |thumb, label| {
                 thumb.child(
                     div()
