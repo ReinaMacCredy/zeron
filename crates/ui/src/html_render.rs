@@ -188,7 +188,7 @@ pub fn retheme_script(theme: &Theme, inline: bool) -> String {
 
 fn bootstrap_markup(scan: &str, theme: &Theme, inline: bool) -> String {
     let mut markup = String::new();
-    let head = &scan[..scan.len().min(4096)];
+    let head = &scan[..scan.floor_char_boundary(4096)];
     if !(contains_ci(head, "<meta") && contains_ci(head, "charset")) {
         markup.push_str("<meta charset=\"utf-8\">");
     }
@@ -354,7 +354,10 @@ pub fn inject_bootstrap(html: &str, theme: &Theme, inline: bool) -> String {
         return format!("{}<head>{markup}</head>{}", &html[..at], &html[at..]);
     }
     let trimmed = html.trim_start();
-    if trimmed.len() >= 9 && trimmed[..9].eq_ignore_ascii_case("<!doctype") {
+    if trimmed
+        .get(..9)
+        .is_some_and(|start| start.eq_ignore_ascii_case("<!doctype"))
+    {
         let start = html.len() - trimmed.len();
         let at = tag_end(&scan, start);
         return format!("{}<head>{markup}</head>{}", &html[..at], &html[at..]);
@@ -424,6 +427,15 @@ mod tests {
         let out = inject_bootstrap(page, &theme(), false);
         assert_eq!(out.matches("charset").count(), 1);
         assert_eq!(out.matches("viewport").count(), 1);
+    }
+
+    #[test]
+    fn multibyte_text_at_the_scan_cutoffs_never_panics() {
+        let page = format!("<p>{}ở</p>{}", "a".repeat(4092), "b".repeat(100));
+        assert!(!page.is_char_boundary(4096));
+        assert!(inject_bootstrap(&page, &theme(), true).ends_with(&page));
+        let page = "<!doctypở html><p>x</p>";
+        assert!(inject_bootstrap(page, &theme(), false).ends_with(page));
     }
 
     #[test]
