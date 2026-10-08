@@ -158,6 +158,7 @@ icon_assets![
     (MAGNIFER, "magnifer"),
     // Compact magnifier with a distinct handle, matching the linear icon family.
     (PALETTE_SEARCH, "palette-search"),
+    (PALETTE, "palette"),
     (COMMAND, "command"),
     (DOCUMENT, "document"),
     (DOCUMENT_ADD, "document-add"),

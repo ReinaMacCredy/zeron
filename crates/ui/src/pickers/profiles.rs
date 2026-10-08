@@ -2,7 +2,7 @@ use super::*;
 
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
-use crate::agent_profiles::{ProfileWrite, glyph, mode_label, summary};
+use crate::agent_profiles::{ProfileWrite, brand_badge, glyph, mode_label, summary};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ProfilePick {
@@ -432,7 +432,7 @@ impl Pickers {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.activate_profile_index(ix, cx);
                     }))
-                    .child(glyph(profile.icon, profile.color, 24.0))
+                    .child(brand_badge(profile.harness, 24.0, theme.text))
                     .child(
                         div()
                             .flex_1()

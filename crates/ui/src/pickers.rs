@@ -5325,7 +5325,9 @@ impl Pickers {
         }
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
-            let is_viewed = !favorites_view && viewed == Some(harness);
+            let is_viewed = !favorites_view
+                && self.model_rail != ModelRail::Profiles
+                && viewed == Some(harness);
             let (icon_path, tint) = harness_brand_icon(harness);
             tabs =
                 tabs.child(

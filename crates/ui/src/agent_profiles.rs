@@ -39,7 +39,7 @@ pub fn profile_icon(icon: AgentProfileIcon) -> &'static str {
         AgentProfileIcon::Eye => crate::icons::EYE,
         AgentProfileIcon::Bolt => crate::icons::BOLT,
         AgentProfileIcon::Sparkle => crate::icons::MAGIC_STICK_3,
-        AgentProfileIcon::Palette => crate::icons::PALETTE_SEARCH,
+        AgentProfileIcon::Palette => crate::icons::PALETTE,
         AgentProfileIcon::Hammer => crate::icons::LUCIDE_HAMMER,
         AgentProfileIcon::Book => crate::icons::LUCIDE_BOOK_OPEN,
         AgentProfileIcon::Checklist => crate::icons::CHECKLIST,
@@ -74,6 +74,23 @@ pub fn glyph(icon: AgentProfileIcon, color: AgentProfileColor, size: f32) -> imp
             crate::icons::icon(profile_icon(icon))
                 .size(px((size * 0.58).round()))
                 .text_color(gpui::white()),
+        )
+}
+
+pub fn brand_badge(harness: HarnessId, size: f32, fallback: Hsla) -> impl IntoElement {
+    let (path, tint) = crate::pickers::harness_brand_icon(harness);
+    div()
+        .flex_none()
+        .size(px(size))
+        .rounded(px((size * 0.28).round()))
+        .bg(crate::theme::ink(0.06))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(path)
+                .size(px((size * 0.58).round()))
+                .text_color(tint.unwrap_or(fallback)),
         )
 }
 
