@@ -474,7 +474,7 @@ async fn start(
         20,
     )
     .await?;
-    host.expect(json!({"type":"openDevices"}), "devicesOpened", 5)
+    host.open_devices()
         .await
         .map_err(|_| VoiceRejection::DeviceUnavailable)?;
     // Keep devices muted/suppressed until the engine confirms the owner stream.

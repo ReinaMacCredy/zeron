@@ -23,6 +23,11 @@ try:
         elif kind=='startTransport':send({'type':'offer','sdp':'fixture-offer'})
         elif kind=='applyAnswer':assert frame['sdp']=='fixture-answer';send({'type':'transportReady'})
         elif kind=='openDevices':
+            manifest=pathlib.Path(__file__).resolve().parents[1]/'manifest.json'
+            version=json.loads(manifest.read_text())['appVersion'] if manifest.exists() else '0.159.0'
+            expected={'type':'openDevices'}
+            if tuple(map(int,version.split('.'))) >= (0,161,0):expected['selection']={}
+            assert frame==expected
             if (root/'helper-mode').exists() and (root/'helper-mode').read_text().strip()=='exit-open':sys.exit(25)
             send({'type':'devicesOpened'})
         elif kind=='setAudioControls':

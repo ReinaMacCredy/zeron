@@ -18,6 +18,7 @@ pub struct NativeHost {
     stop: tokio_util::sync::CancellationToken,
     input: ChildStdin,
     output: ChildStdout,
+    device_selection: bool,
 }
 impl Drop for NativeHost {
     fn drop(&mut self) {
@@ -93,6 +94,7 @@ impl NativeHost {
         path: &Path,
         stop: tokio_util::sync::CancellationToken,
     ) -> Result<Self, VoiceRejection> {
+        let device_selection = helper_device_selection(path)?;
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             Self::command(path).arg("--build-commit").output(),
@@ -124,6 +126,7 @@ impl NativeHost {
             stop: stop.clone(),
             input,
             output,
+            device_selection,
         };
         // A helper that cannot start its runtime (e.g. a library that no longer
         // matches its runtime.json) exits here; that is the runtime, not the call.
@@ -216,6 +219,15 @@ impl NativeHost {
     pub async fn controls(&mut self, muted: bool) -> Result<(), VoiceRejection> {
         self.expect(json!({"type":"setAudioControls","controls":{"microphoneMuted":muted,"speakerSuppressed":false}}),"audioControlsApplied",5).await
     }
+    pub async fn open_devices(&mut self) -> Result<(), VoiceRejection> {
+        let mut message = json!({"type":"openDevices"});
+        // Codex 0.161 requires selection even for the default devices. Older
+        // helpers reject that field, despite sharing the same protocol version.
+        if self.device_selection {
+            message["selection"] = json!({});
+        }
+        self.expect(message, "devicesOpened", 5).await
+    }
     /// Synchronous local shutdown, independent of pending RPC or helper I/O.
     pub fn close(&self) {
         self.stop.cancel();
@@ -235,6 +247,27 @@ impl NativeHost {
             .ok_or(VoiceRejection::Protocol)?;
         Ok((mic, speaker))
     }
+}
+
+fn helper_device_selection(path: &Path) -> Result<bool, VoiceRejection> {
+    let root = path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(VoiceRejection::NativeRuntimeUnavailable)?;
+    let bytes = match std::fs::read(root.join("manifest.json")) {
+        Ok(bytes) => bytes,
+        // The pinned development runtime and older fixtures may omit the
+        // upstream manifest; they use the original openDevices format.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(VoiceRejection::NativeRuntimeUnavailable),
+    };
+    let manifest: Value =
+        serde_json::from_slice(&bytes).map_err(|_| VoiceRejection::NativeRuntimeUnavailable)?;
+    let version = manifest["appVersion"]
+        .as_str()
+        .and_then(|v| semver::Version::parse(v).ok())
+        .ok_or(VoiceRejection::Unsupported)?;
+    Ok(version >= semver::Version::new(0, 161, 0))
 }
 
 fn runtime_target() -> Result<&'static str, VoiceRejection> {
@@ -461,6 +494,70 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn desktop_media_opens_default_devices_with_old_and_new_helpers() {
+        use std::os::unix::fs::PermissionsExt;
+        use zeron_voice_session::VoiceMediaEndpoint;
+
+        for version in [None, Some("0.159.0"), Some("0.160.0"), Some("0.161.0")] {
+            let dir = tempfile::tempdir().unwrap();
+            let codex = codex_package(dir.path(), version.unwrap_or("0.160.0"), true);
+            let helper = installed_helper(&codex).unwrap();
+            std::fs::write(
+                &helper,
+                include_bytes!("../../harness/tests/fixtures/fake-codex-voice-host.py"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if let Some(version) = version {
+                std::fs::write(
+                    helper
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("manifest.json"),
+                    json!({"appVersion":version}).to_string(),
+                )
+                .unwrap();
+            }
+            let media = DesktopMedia {
+                path: helper,
+                host: Default::default(),
+                stop: Default::default(),
+            };
+            media.prepare().await.unwrap();
+            media.offer().await.unwrap();
+            media
+                .apply_answer(
+                    zeron_proto::voice::remote::Sdp::new("fixture-answer".into()).unwrap(),
+                )
+                .await
+                .unwrap();
+            media.set_muted(true).await.unwrap();
+            assert_eq!(media.levels().await.unwrap(), (1024, 0));
+            media.stop.cancel();
+        }
+    }
+
+    #[test]
+    fn malformed_helper_metadata_is_not_treated_as_a_legacy_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = codex_package(dir.path(), "0.161.0", true);
+        let helper = installed_helper(&codex).unwrap();
+        let manifest = helper
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("manifest.json");
+        for contents in ["{", "{}", r#"{"appVersion":"invalid"}"#] {
+            std::fs::write(&manifest, contents).unwrap();
+            assert!(helper_device_selection(&helper).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn helper_that_cannot_start_its_runtime_is_a_runtime_failure() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -537,8 +634,7 @@ impl zeron_voice_session::VoiceMediaEndpoint for DesktopMedia {
             20,
         )
         .await?;
-        host.expect(json!({"type":"openDevices"}), "devicesOpened", 5)
-            .await?;
+        host.open_devices().await?;
         host.expect(json!({"type":"setAudioControls","controls":{"microphoneMuted":true,"speakerSuppressed":true}}),"audioControlsApplied",5).await
     }
     async fn set_muted(&self, muted: bool) -> Result<(), VoiceRejection> {
