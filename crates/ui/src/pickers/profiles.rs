@@ -452,11 +452,30 @@ impl Pickers {
                             .gap(px(1.0))
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(12.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(profile.name.clone())),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(crate::typography::ui_rems(12.5))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(profile.name.clone())),
+                                    )
+                                    .when(profile.by_agent, |el| {
+                                        el.child(
+                                            div()
+                                                .flex_none()
+                                                .px(px(5.0))
+                                                .rounded(px(4.0))
+                                                .bg(crate::theme::ink(0.08))
+                                                .text_size(crate::typography::ui_rems(10.0))
+                                                .text_color(theme.text_muted)
+                                                .child("by agent"),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -1047,6 +1066,7 @@ mod tests {
             model_options: Default::default(),
             notes: notes.into(),
             instructions: String::new(),
+            by_agent: false,
         }
     }
 

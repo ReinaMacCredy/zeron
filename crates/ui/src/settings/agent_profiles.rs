@@ -829,7 +829,16 @@ impl Render for AgentProfilesPage {
                                 div()
                                     .flex_1()
                                     .min_w(px(160.0))
-                                    .child(widgets::row_title(&theme, profile.name.clone()))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(widgets::row_title(&theme, profile.name.clone()))
+                                            .when(profile.by_agent, |el| {
+                                                el.child(widgets::badge(&theme, "by agent"))
+                                            }),
+                                    )
                                     .child(
                                         div()
                                             .flex()

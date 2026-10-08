@@ -88,6 +88,15 @@ impl AgentProfilesStore {
         profile_id: Option<&str>,
         draft: AgentProfileDraft,
     ) -> Result<AgentProfilesSnapshot, EngineError> {
+        self.upsert_as(profile_id, draft, false)
+    }
+
+    pub fn upsert_as(
+        &self,
+        profile_id: Option<&str>,
+        draft: AgentProfileDraft,
+        by_agent: bool,
+    ) -> Result<AgentProfilesSnapshot, EngineError> {
         let draft = normalize_draft(draft)?;
         self.mutate(|profiles| {
             let index = match profile_id {
@@ -119,6 +128,7 @@ impl AgentProfilesStore {
                 model_options: draft.model_options,
                 notes: draft.notes,
                 instructions: draft.instructions,
+                by_agent,
             };
             if index == profiles.len() {
                 profiles.push(profile);
@@ -279,6 +289,18 @@ mod tests {
         assert!(store.upsert(Some("missing"), draft("x")).is_err());
         assert_eq!(ids(&store.delete("reviewer").unwrap()), ["quick"]);
         assert!(store.delete("reviewer").is_err());
+    }
+
+    #[test]
+    fn an_agent_save_marks_the_profile_until_a_person_saves_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AgentProfilesStore::open(temp.path()).unwrap();
+        let snapshot = store.upsert_as(None, draft("Docs"), true).unwrap();
+        assert!(snapshot.profiles[0].by_agent);
+        let snapshot = store.upsert(Some("docs"), draft("Docs")).unwrap();
+        assert!(!snapshot.profiles[0].by_agent);
+        let snapshot = store.upsert_as(Some("docs"), draft("Docs"), true).unwrap();
+        assert!(snapshot.profiles[0].by_agent);
     }
 
     #[test]
