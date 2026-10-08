@@ -4675,9 +4675,12 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let height = self.menu_geometry().height.min(self.open_model_height);
+        let fits_content = self.model_rail == ModelRail::Profiles && self.profile_edit.is_none();
         popover::popover_card_flush(&theme)
             .w(px(width))
-            .h(px(self.menu_geometry().height.min(self.open_model_height)))
+            .when(!fits_content, |el| el.h(px(height)))
+            .when(fits_content, |el| el.max_h(px(height)))
             .when(self.compact_model_picker(cx), |el| {
                 el.h(px(self.compact_motion.frame_height))
             })
@@ -5482,18 +5485,18 @@ impl Pickers {
             .id("model-list-scroll-host")
             .relative()
             .flex_none()
-            .h(px(if profiles_view {
-                list_height + tray_height
-            } else {
-                list_height
-            }))
+            .when(profiles_view, |el| el.max_h(px(list_height + tray_height)))
+            .when(!profiles_view, |el| el.h(px(list_height)))
             .py(px(popover::CARD_INSET))
             // A whisper of wash keeps the scrolling band readable between
             // the pinned chrome above and the traits tray below.
             .bg(crate::theme::ink(0.02))
             .on_hover(cx.listener(Self::on_menu_list_hover))
             .child(match model_list {
-                _ if self.model_rail == ModelRail::Profiles => self.render_profile_list(cx),
+                _ if profiles_view => self.render_profile_list(
+                    list_height + tray_height - 2.0 * popover::CARD_INSET,
+                    cx,
+                ),
                 Some(list) => {
                     popover::faded_menu_list(&self.model_scroll_base(), list).into_any_element()
                 }
@@ -11479,8 +11482,6 @@ mod tests {
                 let mut profile = zeron_proto::AgentProfile {
                     id: "reviewer".into(),
                     name: "Reviewer".into(),
-                    icon: Default::default(),
-                    color: Default::default(),
                     harness: HarnessId::Codex,
                     model: Some("gpt".into()),
                     reasoning: None,

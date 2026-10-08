@@ -1,81 +1,9 @@
 use gpui::{App, Hsla, IntoElement, ParentElement as _, Styled as _, div, px};
 use serde_json::{Value, json};
-use zeron_proto::{
-    AgentProfile, AgentProfileColor, AgentProfileDraft, AgentProfileIcon, AgentProfilesSnapshot,
-    HarnessId,
-};
+use zeron_proto::{AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, HarnessId};
 use zeron_rpc::methods;
 
 use crate::state::EngineHandle;
-
-pub const PROFILE_ICONS: [AgentProfileIcon; 12] = [
-    AgentProfileIcon::Bot,
-    AgentProfileIcon::Code,
-    AgentProfileIcon::Eye,
-    AgentProfileIcon::Bolt,
-    AgentProfileIcon::Sparkle,
-    AgentProfileIcon::Palette,
-    AgentProfileIcon::Hammer,
-    AgentProfileIcon::Book,
-    AgentProfileIcon::Checklist,
-    AgentProfileIcon::Terminal,
-    AgentProfileIcon::Globe,
-    AgentProfileIcon::Search,
-];
-
-pub const PROFILE_COLORS: [AgentProfileColor; 6] = [
-    AgentProfileColor::Slate,
-    AgentProfileColor::Blue,
-    AgentProfileColor::Violet,
-    AgentProfileColor::Green,
-    AgentProfileColor::Amber,
-    AgentProfileColor::Rose,
-];
-
-pub fn profile_icon(icon: AgentProfileIcon) -> &'static str {
-    match icon {
-        AgentProfileIcon::Bot => crate::icons::BOT,
-        AgentProfileIcon::Code => crate::icons::FILE_CODE,
-        AgentProfileIcon::Eye => crate::icons::EYE,
-        AgentProfileIcon::Bolt => crate::icons::BOLT,
-        AgentProfileIcon::Sparkle => crate::icons::MAGIC_STICK_3,
-        AgentProfileIcon::Palette => crate::icons::PALETTE,
-        AgentProfileIcon::Hammer => crate::icons::LUCIDE_HAMMER,
-        AgentProfileIcon::Book => crate::icons::LUCIDE_BOOK_OPEN,
-        AgentProfileIcon::Checklist => crate::icons::CHECKLIST,
-        AgentProfileIcon::Terminal => crate::icons::TERMINAL,
-        AgentProfileIcon::Globe => crate::icons::GLOBE,
-        AgentProfileIcon::Search => crate::icons::MAGNIFER,
-    }
-}
-
-pub fn profile_color(color: AgentProfileColor) -> Hsla {
-    gpui::rgb(match color {
-        AgentProfileColor::Slate => 0x7D8794,
-        AgentProfileColor::Blue => 0x5B8DEF,
-        AgentProfileColor::Violet => 0x9D7CF4,
-        AgentProfileColor::Green => 0x3FB68B,
-        AgentProfileColor::Amber => 0xE0A43A,
-        AgentProfileColor::Rose => 0xE5677F,
-    })
-    .into()
-}
-
-pub fn glyph(icon: AgentProfileIcon, color: AgentProfileColor, size: f32) -> impl IntoElement {
-    div()
-        .flex_none()
-        .size(px(size))
-        .rounded(px((size * 0.28).round()))
-        .bg(profile_color(color))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            crate::icons::icon(profile_icon(icon))
-                .size(px((size * 0.58).round()))
-                .text_color(gpui::white()),
-        )
-}
 
 pub fn brand_badge(harness: HarnessId, size: f32, fallback: Hsla) -> impl IntoElement {
     let (path, tint) = crate::pickers::harness_brand_icon(harness);
@@ -119,8 +47,6 @@ pub fn mode_label(mode: zeron_proto::PermissionMode) -> &'static str {
 pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
     AgentProfileDraft {
         name: profile.name.clone(),
-        icon: profile.icon,
-        color: profile.color,
         harness: profile.harness,
         model: profile.model.clone(),
         reasoning: profile.reasoning,
@@ -133,8 +59,6 @@ pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
 pub fn blank_draft(harness: HarnessId) -> AgentProfileDraft {
     AgentProfileDraft {
         name: String::new(),
-        icon: AgentProfileIcon::default(),
-        color: AgentProfileColor::default(),
         harness,
         model: None,
         reasoning: None,
@@ -225,8 +149,6 @@ mod tests {
         let mut profile = AgentProfile {
             id: "r".into(),
             name: "Reviewer".into(),
-            icon: AgentProfileIcon::Eye,
-            color: AgentProfileColor::Blue,
             harness: HarnessId::Codex,
             model: Some("gpt-5.6".into()),
             reasoning: Some(ReasoningLevel::XHigh),

@@ -111,8 +111,6 @@ impl AgentProfilesStore {
             let profile = AgentProfile {
                 id,
                 name: draft.name,
-                icon: draft.icon,
-                color: draft.color,
                 harness: draft.harness,
                 model: draft.model,
                 reasoning: draft.reasoning,
@@ -226,8 +224,6 @@ mod tests {
     fn draft(name: &str) -> AgentProfileDraft {
         AgentProfileDraft {
             name: name.into(),
-            icon: Default::default(),
-            color: Default::default(),
             harness: HarnessId::ClaudeCode,
             model: Some(" opus ".into()),
             reasoning: Some(ReasoningLevel::High),

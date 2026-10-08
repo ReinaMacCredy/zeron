@@ -10,8 +10,7 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::agent_profiles::{
-    PROFILE_COLORS, PROFILE_ICONS, ProfileWrite, blank_draft, draft_of, glyph, mode_label,
-    profile_color, profile_icon, summary,
+    ProfileWrite, blank_draft, brand_badge, draft_of, mode_label, summary,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::pickers::{harness_brand_icon, offered_harnesses, reasoning_label};
@@ -468,61 +467,6 @@ impl AgentProfilesPage {
             })
             .render(&self.effort_select, cx);
 
-        let mut icon_row = div().flex().flex_row().flex_wrap().gap(px(6.0));
-        for icon in PROFILE_ICONS {
-            let selected = icon == draft.icon;
-            icon_row = icon_row.child(
-                div()
-                    .id(SharedString::from(format!("profile-icon-{icon:?}")))
-                    .size(px(30.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(if selected {
-                        theme.text_muted
-                    } else {
-                        theme.border
-                    })
-                    .bg(if selected {
-                        crate::theme::ink(0.10)
-                    } else {
-                        crate::theme::ink(0.03)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit_draft(cx, |draft| draft.icon = icon)
-                    }))
-                    .child(
-                        crate::icons::icon(profile_icon(icon))
-                            .size(px(15.0))
-                            .text_color(theme.text_muted),
-                    ),
-            );
-        }
-        let mut color_row = div().flex().flex_row().gap(px(8.0)).items_center();
-        for color in PROFILE_COLORS {
-            let selected = color == draft.color;
-            color_row = color_row.child(
-                div()
-                    .id(SharedString::from(format!("profile-color-{color:?}")))
-                    .size(px(20.0))
-                    .rounded_full()
-                    .bg(profile_color(color))
-                    .border_2()
-                    .border_color(if selected {
-                        theme.text
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit_draft(cx, |draft| draft.color = color)
-                    })),
-            );
-        }
-
         let field = |label: &str, control: AnyElement| {
             div()
                 .flex()
@@ -597,15 +541,13 @@ impl AgentProfilesPage {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(glyph(draft.icon, draft.color, 24.0))
+                    .child(brand_badge(draft.harness, 24.0, theme.text))
                     .child(popover::dialog_title(&theme, title)),
             )
             .child(field(
                 "Name",
                 popover::dialog_field(name.into_any_element()).into_any_element(),
             ))
-            .child(field("Icon", icon_row.into_any_element()))
-            .child(field("Color", color_row.into_any_element()))
             .child(
                 div()
                     .flex()
@@ -727,21 +669,18 @@ impl Render for AgentProfilesPage {
                         self.model_label(profile.harness, profile.model.as_deref()).as_deref(),
                     );
                     let arrow = |id: &'static str, path: &'static str, enabled: bool, to: usize| {
-                        div()
+                        widgets::action_button(&theme, widgets::ActionTone::Quiet)
                             .id((id, ix))
-                            .size(px(26.0))
-                            .rounded(px(7.0))
-                            .flex()
-                            .items_center()
+                            .size(px(32.0))
+                            .px_0()
+                            .py_0()
                             .justify_center()
                             .when(enabled, |el| {
-                                el.cursor_pointer()
-                                    .hover(|s| s.bg(crate::theme::ink(0.06)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.move_profile(ix, to, cx)
-                                    }))
+                                el.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.move_profile(ix, to, cx)
+                                }))
                             })
-                            .when(!enabled, |el| el.opacity(0.3))
+                            .when(!enabled, |el| el.opacity(0.35).cursor_default())
                             .child(
                                 crate::icons::icon(path)
                                     .size(px(14.0))
@@ -751,7 +690,7 @@ impl Render for AgentProfilesPage {
                     block = block.child(
                         widgets::card_row(&theme, ix == 0)
                             .gap(px(12.0))
-                            .child(glyph(profile.icon, profile.color, 30.0))
+                            .child(brand_badge(profile.harness, 30.0, theme.text))
                             .child(
                                 div()
                                     .flex_1()
@@ -764,7 +703,6 @@ impl Render for AgentProfilesPage {
                                             .gap(px(5.0))
                                             .text_size(crate::typography::ui_rems(12.0))
                                             .text_color(theme.text_muted)
-                                            .child(brand_mark(profile.harness))
                                             .child(SharedString::from(line)),
                                     )
                                     .when(!profile.notes.is_empty(), |el| {
@@ -778,29 +716,40 @@ impl Render for AgentProfilesPage {
                                         )
                                     }),
                             )
-                            .child(arrow(
-                                "profile-up",
-                                crate::icons::ALT_ARROW_UP,
-                                ix > 0,
-                                ix.saturating_sub(1),
-                            ))
-                            .child(arrow(
-                                "profile-down",
-                                crate::icons::ALT_ARROW_DOWN,
-                                ix + 1 < count,
-                                ix + 1,
-                            ))
                             .child(
-                                widgets::text_action(&theme, widgets::ActionTone::Filled, "Edit")
-                                    .id(("profile-edit", ix))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_editor(
-                                            Some(edit_id.clone()),
-                                            edit_draft.clone(),
-                                            cx,
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .child(arrow(
+                                        "profile-up",
+                                        crate::icons::ALT_ARROW_UP,
+                                        ix > 0,
+                                        ix.saturating_sub(1),
+                                    ))
+                                    .child(arrow(
+                                        "profile-down",
+                                        crate::icons::ALT_ARROW_DOWN,
+                                        ix + 1 < count,
+                                        ix + 1,
+                                    ))
+                                    .child(
+                                        widgets::text_action(
+                                            &theme,
+                                            widgets::ActionTone::Filled,
+                                            "Edit",
                                         )
-                                    })),
+                                        .id(("profile-edit", ix))
+                                        .ml(px(6.0))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_editor(
+                                                Some(edit_id.clone()),
+                                                edit_draft.clone(),
+                                                cx,
+                                            )
+                                        })),
+                                    ),
                             ),
                     );
                 }

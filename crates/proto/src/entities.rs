@@ -1870,45 +1870,11 @@ pub struct ProjectActionDraft {
     pub run_on_worktree_create: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AgentProfileIcon {
-    #[default]
-    Bot,
-    Code,
-    Eye,
-    Bolt,
-    Sparkle,
-    Palette,
-    Hammer,
-    Book,
-    Checklist,
-    Terminal,
-    Globe,
-    Search,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AgentProfileColor {
-    #[default]
-    Slate,
-    Blue,
-    Violet,
-    Green,
-    Amber,
-    Rose,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentProfile {
     pub id: String,
     pub name: String,
-    #[serde(default)]
-    pub icon: AgentProfileIcon,
-    #[serde(default)]
-    pub color: AgentProfileColor,
     pub harness: HarnessId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1926,10 +1892,6 @@ pub struct AgentProfile {
 #[serde(rename_all = "camelCase")]
 pub struct AgentProfileDraft {
     pub name: String,
-    #[serde(default)]
-    pub icon: AgentProfileIcon,
-    #[serde(default)]
-    pub color: AgentProfileColor,
     pub harness: HarnessId,
     #[serde(default)]
     pub model: Option<String>,

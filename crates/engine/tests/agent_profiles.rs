@@ -42,8 +42,6 @@ async fn agent_profiles_crud_over_rpc_survives_a_restart() {
                     "model": "gpt-5.6",
                     "reasoning": "xhigh",
                     "permissionMode": "ask",
-                    "icon": "eye",
-                    "color": "blue",
                     "notes": "Review a diff."
                 }}),
             )

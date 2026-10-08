@@ -48,7 +48,8 @@ pub(crate) fn contained_menu(
                 limits,
                 trigger_height,
             })
-            .priority(1),
+            // Above `modal` (priority 2): a settings dialog can host a dropdown.
+            .priority(3),
         )
         .into_any_element()
 }

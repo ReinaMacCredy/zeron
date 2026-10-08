@@ -380,7 +380,11 @@ impl Pickers {
         window.dispatch_action(Box::new(crate::agent_profiles::OpenAgentProfileEditor), cx);
     }
 
-    pub(super) fn render_profile_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_profile_list(
+        &mut self,
+        max_height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let profiles = self.visible_profiles(cx);
         let switching = self
@@ -389,7 +393,8 @@ impl Pickers {
             .flatten();
         let mut list = div()
             .id("profile-menu-scroll")
-            .size_full()
+            .w_full()
+            .max_h(px(max_height))
             .overflow_y_scroll()
             .flex()
             .flex_col()
@@ -1030,8 +1035,6 @@ mod tests {
         AgentProfile {
             id: name.to_lowercase(),
             name: name.into(),
-            icon: Default::default(),
-            color: Default::default(),
             harness: HarnessId::Codex,
             model: None,
             reasoning: None,

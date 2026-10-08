@@ -2528,7 +2528,7 @@ mod tests {
                 }
                 methods::LIST_AGENT_PROFILES => Ok(RpcReply::Value(json!({ "profiles": [
                     {
-                        "id": "reviewer", "name": "Reviewer", "icon": "eye", "color": "blue",
+                        "id": "reviewer", "name": "Reviewer",
                         "harness": "codex", "model": "gpt-5.6-luna", "reasoning": "high",
                         "permissionMode": "ask", "modelOptions": { "speed": "fast" },
                         "notes": "Review a diff."
@@ -3752,7 +3752,6 @@ mod tests {
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0]["id"], "reviewer");
         assert_eq!(profiles[0]["whenToUse"], "Review a diff.");
-        assert!(profiles[0].get("icon").is_none());
     }
 
     #[tokio::test]
