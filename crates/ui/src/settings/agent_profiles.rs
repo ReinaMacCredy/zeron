@@ -12,7 +12,7 @@ use zeron_rpc::methods;
 use crate::agent_profiles::{
     ProfileWrite, blank_draft, brand_badge, draft_of, mode_label, summary,
 };
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
 use crate::pickers::{harness_brand_icon, offered_harnesses, reasoning_label};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -682,9 +682,8 @@ impl AgentProfilesPage {
                 "Instructions",
                 popover::dialog_field(
                     div()
-                        .h(px(80.0))
-                        .overflow_hidden()
-                        .child(instructions)
+                        .h(crate::typography::ui_rems(INPUT_LINE_HEIGHT * 5.0))
+                        .child(scrolling_field(instructions))
                         .into_any_element(),
                 )
                 .into_any_element(),
@@ -700,9 +699,8 @@ impl AgentProfilesPage {
                 "When to use",
                 popover::dialog_field(
                     div()
-                        .h(px(56.0))
-                        .overflow_hidden()
-                        .child(notes)
+                        .h(crate::typography::ui_rems(INPUT_LINE_HEIGHT * 3.0))
+                        .child(scrolling_field(notes))
                         .into_any_element(),
                 )
                 .into_any_element(),

@@ -970,18 +970,24 @@ impl Pickers {
                     .into_any_element(),
             ))
             .child(
-                div().child(label("When to use")).child(
-                    div()
-                        .h(px(40.0))
-                        .px(px(9.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.12))
-                        .bg(crate::theme::ink(0.03))
-                        .overflow_hidden()
-                        .child(notes),
-                ),
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(label("When to use"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(40.0))
+                            .px(px(9.0))
+                            .py(px(6.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(crate::theme::hairline(0.12))
+                            .bg(crate::theme::ink(0.03))
+                            .overflow_hidden()
+                            .child(crate::composer::scrolling_field(notes)),
+                    ),
             )
             .when_some(error, |el, error| {
                 el.child(
