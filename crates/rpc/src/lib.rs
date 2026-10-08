@@ -249,6 +249,10 @@ pub mod methods {
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
+    pub const LIST_AGENT_PROFILES: &str = "ListAgentProfiles";
+    pub const UPSERT_AGENT_PROFILE: &str = "UpsertAgentProfile";
+    pub const DELETE_AGENT_PROFILE: &str = "DeleteAgentProfile";
+    pub const REORDER_AGENT_PROFILES: &str = "ReorderAgentProfiles";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";

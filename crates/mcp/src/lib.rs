@@ -26,7 +26,9 @@ use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
 use zeron_proto::html_render;
 use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
-use zeron_proto::{Chat, Session, Space, UserInputAnswer};
+use zeron_proto::{
+    AgentProfile, AgentProfilesSnapshot, Chat, PermissionMode, Session, Space, UserInputAnswer,
+};
 use zeron_rpc::{RpcClient, methods};
 
 /// The MCP revision this server was written against; a client's own value
@@ -382,7 +384,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "orchestrator_capabilities",
-            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
+            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, the agent profiles the user saved (pick one by its whenToUse and pass its id to delegate_task), and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -392,6 +394,7 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "Self-contained task for one delegated child agent/subagent." },
+                    "profile": { "type": "string", "description": "Agent profile id from orchestrator_capabilities. It sets harness, model, reasoning, permission mode and model options; target and permissionMode override it." },
                     "target": {
                         "type": "object",
                         "properties": {
@@ -1023,6 +1026,23 @@ impl ThreadTools {
         let limits = self
             .call_engine(methods::GET_DELEGATION_SETTINGS, json!({}))
             .await?;
+        let profiles: Vec<Value> = self
+            .agent_profiles()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|profile| {
+                json!({
+                    "id": profile.id,
+                    "name": profile.name,
+                    "harness": profile.harness,
+                    "model": profile.model,
+                    "reasoning": profile.reasoning,
+                    "permissionMode": profile.permission_mode,
+                    "whenToUse": profile.notes,
+                })
+            })
+            .collect();
         let config = caller.config.as_ref();
         Ok(json!({
             "parentThreadId": caller.id,
@@ -1032,6 +1052,7 @@ impl ThreadTools {
             "permissionMode": config.map(|c| c.permission_mode),
             "depth": caller.delegation.as_ref().map_or(0, |d| d.depth),
             "harnesses": harnesses,
+            "profiles": profiles,
             "features": {
                 "appOwnedSubagents": true,
                 "asyncPolling": true,
@@ -1040,6 +1061,28 @@ impl ThreadTools {
                 "maxRunningChildren": limits["maxRunningChildren"],
             },
         }))
+    }
+
+    async fn agent_profiles(&self) -> Result<Vec<AgentProfile>, String> {
+        let snapshot = self
+            .call_engine(methods::LIST_AGENT_PROFILES, json!({}))
+            .await?;
+        serde_json::from_value::<AgentProfilesSnapshot>(snapshot)
+            .map(|snapshot| snapshot.profiles)
+            .map_err(|err| format!("{}: {err}", methods::LIST_AGENT_PROFILES))
+    }
+
+    async fn agent_profile(&self, id: &str) -> Result<AgentProfile, String> {
+        let profiles = self.agent_profiles().await?;
+        let ids: Vec<&str> = profiles.iter().map(|profile| profile.id.as_str()).collect();
+        let missing = format!(
+            "profile_unavailable: no agent profile {id}; available: {}",
+            ids.join(", ")
+        );
+        profiles
+            .into_iter()
+            .find(|profile| profile.id == id)
+            .ok_or(missing)
     }
 
     pub async fn delegate_task(&self, args: &Value) -> Result<Value, String> {
@@ -1052,13 +1095,36 @@ impl ThreadTools {
             Some("wait") => true,
             Some(_) => return Err("mode must be async or wait".into()),
         };
-        let target = &args["target"];
         let (caller, _) = self.peers().await?;
+        let profile = match args["profile"].as_str().filter(|id| !id.trim().is_empty()) {
+            Some(id) => Some(self.agent_profile(id).await?),
+            None => None,
+        };
+        let target = &profile_target(profile.as_ref(), &args["target"]);
         self.check_model(&caller, target, "model_unavailable: ")
             .await?;
-        let permission_mode = args["permissionMode"]
+        let permission_mode = match args["permissionMode"]
             .as_str()
-            .filter(|mode| *mode != "inherit");
+            .filter(|mode| *mode != "inherit")
+        {
+            Some(mode) => Some(json!(mode)),
+            None => profile
+                .as_ref()
+                .and_then(|profile| profile.permission_mode)
+                .filter(|mode| {
+                    let owner = caller
+                        .config
+                        .as_ref()
+                        .map_or(PermissionMode::Ask, |c| c.permission_mode);
+                    permission_rank(*mode) <= permission_rank(owner)
+                })
+                .map(|mode| json!(mode)),
+        };
+        let model_options = profile
+            .as_ref()
+            .filter(|profile| target["harness"] == json!(profile.harness))
+            .filter(|profile| !profile.model_options.is_empty())
+            .map(|profile| profile.model_options.clone());
         let mut view = self
             .call_engine(
                 methods::DELEGATE_TASK,
@@ -1071,6 +1137,7 @@ impl ThreadTools {
                     "model": target["model"].as_str(),
                     "reasoning": target["reasoning"].as_str(),
                     "permissionMode": permission_mode,
+                    "modelOptions": model_options,
                     "wait": wait,
                     "clientRequestId": args["clientRequestId"].as_str(),
                 }),
@@ -1742,6 +1809,30 @@ fn new_peer_entries(
             json!({ "id": rendered["id"], "fromChatId": rendered["fromChatId"], "text": rendered["text"] })
         })
         .collect()
+}
+
+fn profile_target(profile: Option<&AgentProfile>, target: &Value) -> Value {
+    let Some(profile) = profile else {
+        return target.clone();
+    };
+    let given = |key: &str| target.get(key).filter(|value| value.is_string()).cloned();
+    let profile_harness = json!(profile.harness);
+    let harness = given("harness").unwrap_or_else(|| profile_harness.clone());
+    let model = given("model").or_else(|| {
+        (harness == profile_harness)
+            .then(|| profile.model.clone().map(Value::from))
+            .flatten()
+    });
+    let reasoning = given("reasoning").or_else(|| profile.reasoning.map(|level| json!(level)));
+    json!({ "harness": harness, "model": model, "reasoning": reasoning })
+}
+
+fn permission_rank(mode: PermissionMode) -> u8 {
+    match mode {
+        PermissionMode::Ask => 0,
+        PermissionMode::Auto => 1,
+        PermissionMode::Full => 2,
+    }
 }
 
 fn wait_timeout(args: &Value) -> Duration {
@@ -2435,6 +2526,15 @@ mod tests {
                         },
                     }))
                 }
+                methods::LIST_AGENT_PROFILES => Ok(RpcReply::Value(json!({ "profiles": [
+                    {
+                        "id": "reviewer", "name": "Reviewer", "icon": "eye", "color": "blue",
+                        "harness": "codex", "model": "gpt-5.6-luna", "reasoning": "high",
+                        "permissionMode": "ask", "modelOptions": { "speed": "fast" },
+                        "notes": "Review a diff."
+                    },
+                    { "id": "builder", "name": "Builder", "harness": "codex", "permissionMode": "full" }
+                ] }))),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -3583,6 +3683,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_profile_fills_the_target_and_explicit_fields_override_it() {
+        let rig = rig(fixture());
+        rig.tools
+            .delegate_task(&json!({ "task": "x", "profile": "reviewer" }))
+            .await
+            .unwrap();
+        rig.tools
+            .delegate_task(
+                &json!({ "task": "x", "profile": "reviewer", "target": { "model": "gpt-5" } }),
+            )
+            .await
+            .unwrap();
+        rig.tools
+            .delegate_task(&json!({ "task": "x", "profile": "reviewer", "target": { "harness": "claude-code" } }))
+            .await
+            .unwrap();
+        rig.tools
+            .delegate_task(&json!({ "task": "x", "profile": "builder" }))
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::DELEGATE_TASK);
+        assert_eq!(sent[0]["harness"], "codex");
+        assert_eq!(sent[0]["model"], "gpt-5.6-luna");
+        assert_eq!(sent[0]["reasoning"], "high");
+        assert_eq!(sent[0]["permissionMode"], "ask");
+        assert_eq!(sent[0]["modelOptions"], json!({ "speed": "fast" }));
+        assert_eq!(sent[1]["model"], "gpt-5");
+        assert_eq!(sent[2]["harness"], "claude-code");
+        assert_eq!(sent[2]["model"], Value::Null);
+        assert_eq!(sent[2]["modelOptions"], Value::Null);
+        assert_eq!(
+            sent[3]["permissionMode"],
+            Value::Null,
+            "a profile never widens the caller's mode"
+        );
+
+        let err = rig
+            .tools
+            .delegate_task(&json!({ "task": "x", "profile": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("profile_unavailable"), "{err}");
+        assert!(err.contains("reviewer, builder"), "{err}");
+        assert_eq!(logged(&rig.calls, methods::DELEGATE_TASK).len(), 4);
+    }
+
+    #[tokio::test]
     async fn capabilities_list_models_per_harness_and_the_settings_limits() {
         let out = rig(fixture())
             .tools
@@ -3601,6 +3748,11 @@ mod tests {
         assert_eq!(out["parentThreadId"], "a");
         assert_eq!(out["features"]["maxDepth"], 2);
         assert_eq!(out["depth"], 0);
+        let profiles = out["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["id"], "reviewer");
+        assert_eq!(profiles[0]["whenToUse"], "Review a diff.");
+        assert!(profiles[0].get("icon").is_none());
     }
 
     #[tokio::test]

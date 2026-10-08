@@ -12,7 +12,7 @@ pub const DELEGATION_GUIDANCE: &str = "## Zeron delegation
 
 The `zeron` MCP server runs child agents on any installed harness and model. Treat these distinctly:
 
-- A delegated task is child work owned by this chat. Call `orchestrator_capabilities` for the harnesses and models available, from the same catalog as the composer; a native subagent tool's model list is not the full list. Prefer native subagent tools for same-harness work only when they support the chosen model. Use `delegate_task` with that harness and model when native tools cannot, including for same-harness work, for a different harness, or when the user asks for a Zeron child task. Keep each returned `taskId` and use `task_status` or `task_cancel` with it. Its `childThreadId` is backing storage for the child; do not replace delegation with `create_thread`.
+- A delegated task is child work owned by this chat. Call `orchestrator_capabilities` for the harnesses and models available, from the same catalog as the composer; a native subagent tool's model list is not the full list. When it lists agent profiles, pick the one whose `whenToUse` fits the task and pass its id as `profile`. Prefer native subagent tools for same-harness work only when they support the chosen model. Use `delegate_task` with that harness and model when native tools cannot, including for same-harness work, for a different harness, or when the user asks for a Zeron child task. Keep each returned `taskId` and use `task_status` or `task_cancel` with it. Its `childThreadId` is backing storage for the child; do not replace delegation with `create_thread`.
 - An async child's completion wakes this chat with a message naming its taskId, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers, then read the result with `task_status`. Use mode `wait` only when this turn needs the result before it can continue.
 - `create_thread` opens an ordinary top-level chat. Use it only when the user asks for separate/new threads or conversations, never merely because they said \"subagent\" or asked for parallel delegated work.
 
@@ -46,6 +46,8 @@ pub struct DelegateTaskParams {
     pub reasoning: Option<ReasoningLevel>,
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    #[serde(default)]
+    pub model_options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     pub wait: bool,
     #[serde(default)]
@@ -330,6 +332,11 @@ impl DocHost {
             params.model.as_deref(),
             params.reasoning,
         );
+        if let Some(options) = &params.model_options {
+            config
+                .get_or_insert_with(|| self.default_chat_config())
+                .model_options = options.clone();
+        }
         if let Some(mode) = params.permission_mode {
             let config = config.get_or_insert_with(|| self.default_chat_config());
             if permission_rank(mode) > permission_rank(config.permission_mode) {

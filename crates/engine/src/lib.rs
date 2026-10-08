@@ -16,6 +16,7 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod agent_profiles;
 pub mod auth;
 mod background_output;
 pub mod change_requests;
@@ -55,6 +56,7 @@ pub mod workspace_files;
 pub mod workspace_host;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
+pub use agent_profiles::AgentProfilesStore;
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};
 pub use diff_sync::{
@@ -145,6 +147,7 @@ pub struct EngineCore {
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
+    pub agent_profiles: AgentProfilesStore,
     pub previews: zeron_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
@@ -275,6 +278,7 @@ impl EngineCore {
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
+        let agent_profiles = AgentProfilesStore::open(profile.store_root())?;
         let previews = zeron_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
             device_id.clone(),
@@ -348,6 +352,7 @@ impl EngineCore {
             workspace_files,
             terminals,
             project_actions,
+            agent_profiles,
             previews,
             change_requests,
             diff_sync,
@@ -495,6 +500,7 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
+        .with_agent_profiles(self.agent_profiles.clone())
         .with_computer(self.computer.clone())
         .with_device_hub(self.device_hub.clone())
         .with_html_preview(self.html_preview.clone())

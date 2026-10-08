@@ -409,6 +409,17 @@ fn normalize_draft(draft: ProjectActionDraft) -> Result<ProjectActionDraft, Engi
 }
 
 fn unique_action_id(name: &str, actions: &[ProjectAction]) -> String {
+    unique_slug_id(name, "action", MAX_PROJECT_ACTION_ID_BYTES, |id| {
+        actions.iter().any(|action| action.id == id)
+    })
+}
+
+pub(crate) fn unique_slug_id(
+    name: &str,
+    fallback: &str,
+    max_bytes: usize,
+    taken: impl Fn(&str) -> bool,
+) -> String {
     let mut slug = String::new();
     let mut needs_separator = false;
     for ch in name.chars().flat_map(char::to_lowercase) {
@@ -423,25 +434,22 @@ fn unique_action_id(name: &str, actions: &[ProjectAction]) -> String {
         }
     }
     if slug.is_empty() {
-        slug.push_str("action");
+        slug.push_str(fallback);
     }
-    truncate_utf8(&mut slug, MAX_PROJECT_ACTION_ID_BYTES);
-    if !actions.iter().any(|action| action.id == slug) {
+    truncate_utf8(&mut slug, max_bytes);
+    if !taken(&slug) {
         return slug;
     }
     for suffix in 2usize.. {
         let suffix = format!("-{suffix}");
         let mut candidate = slug.clone();
-        truncate_utf8(
-            &mut candidate,
-            MAX_PROJECT_ACTION_ID_BYTES.saturating_sub(suffix.len()),
-        );
+        truncate_utf8(&mut candidate, max_bytes.saturating_sub(suffix.len()));
         candidate.push_str(&suffix);
-        if !actions.iter().any(|action| action.id == candidate) {
+        if !taken(&candidate) {
             return candidate;
         }
     }
-    unreachable!("the numeric action id suffix space is unbounded")
+    unreachable!("the numeric id suffix space is unbounded")
 }
 
 fn truncate_utf8(value: &mut String, max_bytes: usize) {
@@ -459,14 +467,22 @@ fn truncate_utf8(value: &mut String, max_bytes: usize) {
 }
 
 fn persist(path: &Path, file: &ProjectActionsFile) -> Result<(), EngineError> {
-    let mut bytes = serde_json::to_vec_pretty(file)
-        .map_err(|err| EngineError::Other(format!("serialize project Actions: {err}")))?;
+    persist_json(path, file)
+}
+
+pub(crate) fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<(), EngineError> {
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|err| EngineError::Other(format!("serialize {}: {err}", path.display())))?;
     bytes.push(b'\n');
     let parent = path
         .parent()
-        .ok_or_else(|| EngineError::Other("Project Actions store has no parent".into()))?;
+        .ok_or_else(|| EngineError::Other(format!("{} has no parent", path.display())))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| EngineError::Other(format!("{} has no file name", path.display())))?
+        .to_string_lossy();
     std::fs::create_dir_all(parent)?;
-    let temp_path = parent.join(format!(".{STORE_FILE}.tmp-{}", Uuid::new_v4()));
+    let temp_path = parent.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
     let result = (|| -> Result<(), EngineError> {
         let mut temp = std::fs::OpenOptions::new()
             .create_new(true)

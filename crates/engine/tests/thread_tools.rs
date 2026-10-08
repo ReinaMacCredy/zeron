@@ -896,6 +896,30 @@ async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
 }
 
 #[tokio::test]
+async fn a_delegated_child_takes_the_model_options_it_was_given() {
+    let rig = rig(Duration::from_millis(5));
+    let mut params = delegate("try the fast tier");
+    params.model_options = Some(
+        serde_json::json!({ "speed": "fast" })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    );
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .expect("delegate");
+    let row = rig.core.workspace.chat(&view.task_id).unwrap().unwrap();
+    assert_eq!(
+        row.config.expect("child config").model_options["speed"],
+        "fast"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_finished_child_wakes_its_idle_owner_once_and_task_status_acknowledges() {
     let rig = rig(Duration::from_millis(5));
     let view = rig

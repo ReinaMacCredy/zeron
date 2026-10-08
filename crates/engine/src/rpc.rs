@@ -63,12 +63,13 @@ use tokio::sync::watch;
 
 use zeron_doc::{MessagePart, SessionCommandPayload};
 use zeron_proto::{
-    ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
-    ProjectActionDraft, Space, ToolCall, WorkspaceScope,
+    AgentProfileDraft, ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId,
+    HarnessUpdatePolicy, ProjectActionDraft, Space, ToolCall, WorkspaceScope,
 };
 use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
+use crate::agent_profiles::AgentProfilesStore;
 use crate::auth::Auth;
 use crate::change_requests::CheckoutChangeRequests;
 use crate::computer::runtime::ComputerRuntime;
@@ -393,6 +394,35 @@ struct UpsertProjectActionParams {
 struct DeleteProjectActionParams {
     space_id: String,
     action_id: String,
+}
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, crate::EngineError> + Send + 'static,
+) -> Result<T, RpcError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|err| RpcError::Failed(err.to_string()))?
+        .map_err(|err| RpcError::Failed(err.to_string()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertAgentProfileParams {
+    #[serde(default)]
+    profile_id: Option<String>,
+    profile: AgentProfileDraft,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteAgentProfileParams {
+    profile_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReorderAgentProfilesParams {
+    profile_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -760,6 +790,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
+    agent_profiles: Option<AgentProfilesStore>,
     previews: Option<zeron_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
@@ -809,6 +840,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
+            agent_profiles: None,
             previews: None,
             change_requests,
             diff_sync,
@@ -824,6 +856,11 @@ impl EngineRpc {
             html_preview: Default::default(),
             engine_info,
         }
+    }
+
+    pub fn with_agent_profiles(mut self, agent_profiles: AgentProfilesStore) -> Self {
+        self.agent_profiles = Some(agent_profiles);
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -930,6 +967,12 @@ impl EngineRpc {
         self.local_import
             .as_ref()
             .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
+    }
+
+    fn agent_profiles_store(&self) -> Result<AgentProfilesStore, RpcError> {
+        self.agent_profiles
+            .clone()
+            .ok_or_else(|| RpcError::Failed("agent profiles are not available".into()))
     }
 
     fn local_project_action_space(&self, space_id: &str) -> Result<Space, RpcError> {
@@ -1935,6 +1978,10 @@ fn forwardable(method: &str) -> bool {
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
+            | methods::LIST_AGENT_PROFILES
+            | methods::UPSERT_AGENT_PROFILE
+            | methods::DELETE_AGENT_PROFILE
+            | methods::REORDER_AGENT_PROFILES
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -4298,6 +4345,28 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::LIST_AGENT_PROFILES => {
+                RpcReply::value(&self.agent_profiles_store()?.snapshot())
+            }
+            methods::UPSERT_AGENT_PROFILE => {
+                let p: UpsertAgentProfileParams = parse_params(params)?;
+                let store = self.agent_profiles_store()?;
+                let snapshot = blocking(move || store.upsert(p.profile_id.as_deref(), p.profile))
+                    .await?;
+                RpcReply::value(&snapshot)
+            }
+            methods::DELETE_AGENT_PROFILE => {
+                let p: DeleteAgentProfileParams = parse_params(params)?;
+                let store = self.agent_profiles_store()?;
+                let snapshot = blocking(move || store.delete(&p.profile_id)).await?;
+                RpcReply::value(&snapshot)
+            }
+            methods::REORDER_AGENT_PROFILES => {
+                let p: ReorderAgentProfilesParams = parse_params(params)?;
+                let store = self.agent_profiles_store()?;
+                let snapshot = blocking(move || store.reorder(&p.profile_ids)).await?;
+                RpcReply::value(&snapshot)
             }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;
