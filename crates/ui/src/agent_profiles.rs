@@ -1,4 +1,7 @@
-use gpui::{App, Hsla, IntoElement, ParentElement as _, Styled as _, div, px};
+use gpui::{
+    App, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    Stateful, Styled as _, div, px,
+};
 use serde_json::{Value, json};
 use zeron_proto::{AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, HarnessId};
 use zeron_rpc::methods;
@@ -23,17 +26,110 @@ pub fn brand_badge(harness: HarnessId, size: f32, fallback: Hsla) -> impl IntoEl
 }
 
 pub fn summary(profile: &AgentProfile, harness_name: &str, model_label: Option<&str>) -> String {
+    summary_line(
+        harness_name,
+        model_label.or(profile.model.as_deref()),
+        profile.permission_mode,
+        profile.reasoning,
+    )
+}
+
+pub fn draft_summary(
+    draft: &AgentProfileDraft,
+    harness_name: &str,
+    model_label: Option<&str>,
+) -> String {
+    let line = summary_line(
+        harness_name,
+        model_label.or(draft.model.as_deref()),
+        draft.permission_mode,
+        draft.reasoning,
+    );
+    let name = draft.name.trim();
+    if name.is_empty() {
+        line
+    } else {
+        format!("{name} · {line}")
+    }
+}
+
+fn summary_line(
+    harness_name: &str,
+    model: Option<&str>,
+    mode: Option<zeron_proto::PermissionMode>,
+    reasoning: Option<zeron_proto::ReasoningLevel>,
+) -> String {
     let mut parts = vec![harness_name.to_string()];
-    if let Some(model) = model_label.or(profile.model.as_deref()) {
+    if let Some(model) = model {
         parts.push(model.to_string());
     }
-    if let Some(mode) = profile.permission_mode {
+    if let Some(mode) = mode {
         parts.push(mode_label(mode).to_string());
     }
-    if let Some(level) = profile.reasoning {
+    if let Some(level) = reasoning {
         parts.push(crate::pickers::reasoning_label(level).to_string());
     }
     parts.join(" · ")
+}
+
+pub fn char_count(text: &str, limit: usize) -> SharedString {
+    format!("{} / {limit}", text.chars().count()).into()
+}
+
+pub fn expand_toggle(id: &'static str, expanded: bool, muted: Hsla) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .top(px(4.0))
+        .right(px(4.0))
+        .size(px(22.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(crate::theme::ink(0.05))
+        .hover(|s| s.bg(crate::theme::ink(0.1)))
+        .child(
+            crate::icons::icon(if expanded {
+                crate::icons::LUCIDE_MINIMIZE_2
+            } else {
+                crate::icons::LUCIDE_MAXIMIZE_2
+            })
+            .size(px(12.0))
+            .text_color(muted),
+        )
+}
+
+pub fn folded_row(id: &'static str, text: impl Into<SharedString>, muted: Hsla) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(30.0))
+        .px(px(9.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(crate::theme::hairline(0.12))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(crate::theme::ink(0.05)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(muted)
+                .child(text.into()),
+        )
+        .child(
+            crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                .size(px(11.0))
+                .flex_none()
+                .text_color(muted),
+        )
 }
 
 pub fn mode_label(mode: zeron_proto::PermissionMode) -> &'static str {
@@ -169,5 +265,10 @@ mod tests {
         profile.permission_mode = None;
         assert_eq!(summary(&profile, "Codex", None), "Codex");
         assert_eq!(draft_of(&profile).name, "Reviewer");
+        assert_eq!(
+            draft_summary(&draft_of(&profile), "Codex", None),
+            "Reviewer · Codex"
+        );
+        assert_eq!(char_count("ừ ok", 2000).as_ref(), "4 / 2000");
     }
 }

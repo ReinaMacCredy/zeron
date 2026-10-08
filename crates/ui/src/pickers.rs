@@ -964,6 +964,7 @@ pub struct Pickers {
     profile_edit: Option<profiles::ProfileEdit>,
     profile_focus_pending: bool,
     boot_profile_edit: bool,
+    boot_profile_settings: bool,
 }
 
 impl Pickers {
@@ -1144,10 +1145,16 @@ impl Pickers {
         // headless compositors, so captures need a data-side path.
         let boot_knob = std::env::var("ZERON_OPEN_PICKER").ok();
         let boot_profiles =
-            title.is_none() && matches!(boot_knob.as_deref(), Some("profiles" | "profile-edit"));
+            title.is_none()
+                && matches!(
+                    boot_knob.as_deref(),
+                    Some("profiles" | "profile-edit" | "profile-settings")
+                );
         let boot_open = match boot_knob.as_deref() {
             _ if title.is_some() => None,
-            Some("model" | "profiles" | "profile-edit") => Some(PickerKind::HarnessModel),
+            Some("model" | "profiles" | "profile-edit" | "profile-settings") => {
+                Some(PickerKind::HarnessModel)
+            }
             Some("traits") => Some(PickerKind::HarnessModel),
             Some("branch") => Some(PickerKind::Branch),
             Some("checkout") => Some(PickerKind::Checkout),
@@ -1260,7 +1267,9 @@ impl Pickers {
             profiles_task: None,
             profile_edit: None,
             profile_focus_pending: false,
-            boot_profile_edit: boot_knob.as_deref() == Some("profile-edit") && boot_profiles,
+            boot_profile_edit: boot_profiles
+                && matches!(boot_knob.as_deref(), Some("profile-edit" | "profile-settings")),
+            boot_profile_settings: boot_profiles && boot_knob.as_deref() == Some("profile-settings"),
         }
     }
 
@@ -3765,12 +3774,9 @@ impl Pickers {
             cx.stop_propagation();
             return;
         }
-        if let Some(edit) = self.profile_edit.as_ref() {
+        if let Some(edit) = self.profile_edit.as_mut() {
             if event.keystroke.key == "escape" {
-                if edit.choosing.is_some() {
-                    if let Some(edit) = self.profile_edit.as_mut() {
-                        edit.choosing = None;
-                    }
+                if edit.choosing.take().is_some() || std::mem::take(&mut edit.expanded) {
                     cx.notify();
                 } else {
                     self.close_profile_edit(cx);
@@ -7652,6 +7658,13 @@ impl Render for Pickers {
                 crate::agent_profiles::draft_of(&profile),
                 cx,
             );
+            if let Some(edit) = self.profile_edit.as_mut() {
+                edit.expanded =
+                    std::env::var("ZERON_OPEN_PROFILE_FIELD").is_ok_and(|field| field == "notes");
+            }
+            if std::mem::take(&mut self.boot_profile_settings) {
+                self.open_profile_in_settings(window, cx);
+            }
         }
         // A popover opened data-side (ZERON_OPEN_PICKER) never went through
         // `toggle`, so kick its loads here (all ensure_* are idempotent).
@@ -11535,6 +11548,48 @@ mod tests {
                 let config = row(pickers, cx);
                 assert_eq!(config.model.as_deref(), Some("gpt"));
                 assert_eq!(config.permission_mode, PermissionMode::Full);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn escape_folds_an_expanded_profile_note_before_closing_the_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        let escape = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("escape").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.open.open(PickerKind::HarnessModel);
+                let mut draft = crate::agent_profiles::blank_draft(HarnessId::ClaudeCode);
+                draft.name = "Planner".into();
+                draft.notes = "Plan any task.\n".repeat(40);
+                pickers.open_profile_edit(Some("planner".into()), draft, cx);
+                pickers.profile_edit.as_mut().unwrap().expanded = true;
+            })
+            .unwrap();
+        draw(cx);
+        handle
+            .update(cx, |pickers, window, cx| {
+                pickers.on_key_down(&escape, window, cx);
+                let edit = pickers.profile_edit.as_ref().expect("edit stays open");
+                assert!(!edit.expanded);
+            })
+            .unwrap();
+        draw(cx);
+        handle
+            .update(cx, |pickers, window, cx| {
+                pickers.on_key_down(&escape, window, cx);
+                assert!(pickers.profile_edit.is_none());
             })
             .unwrap();
     }

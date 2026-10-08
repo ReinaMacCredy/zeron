@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, Focusable as _, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
@@ -10,7 +11,8 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::agent_profiles::{
-    ProfileWrite, blank_draft, brand_badge, draft_of, mode_label, summary,
+    ProfileWrite, blank_draft, brand_badge, char_count, draft_of, draft_summary, expand_toggle,
+    folded_row, mode_label, summary,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
 use crate::pickers::{harness_brand_icon, offered_harnesses, reasoning_label};
@@ -31,10 +33,17 @@ struct Editor {
     name: Entity<ComposerInput>,
     notes: Entity<ComposerInput>,
     instructions: Entity<ComposerInput>,
+    expanded: Option<LongField>,
     error: Option<SharedString>,
     saving: bool,
     confirm_delete: bool,
     _events: [Subscription; 3],
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LongField {
+    Instructions,
+    Notes,
 }
 
 pub struct AgentProfilesPage {
@@ -44,6 +53,7 @@ pub struct AgentProfilesPage {
     harnesses: Vec<HarnessDescriptor>,
     models: HashMap<HarnessId, Vec<Model>>,
     editor: Option<Editor>,
+    boot_expand: Option<LongField>,
     harness_select: widgets::SelectState,
     model_select: widgets::SelectState,
     mode_select: widgets::SelectState,
@@ -84,6 +94,11 @@ impl AgentProfilesPage {
             harnesses: Vec::new(),
             models: HashMap::new(),
             editor: None,
+            boot_expand: match std::env::var("ZERON_OPEN_PROFILE_FIELD").as_deref() {
+                Ok("instructions") => Some(LongField::Instructions),
+                Ok("notes") => Some(LongField::Notes),
+                _ => None,
+            },
             harness_select: Default::default(),
             model_select: Default::default(),
             mode_select: Default::default(),
@@ -303,6 +318,7 @@ impl AgentProfilesPage {
             name,
             notes,
             instructions,
+            expanded: self.boot_expand.take(),
             error: None,
             saving: false,
             confirm_delete: false,
@@ -312,11 +328,29 @@ impl AgentProfilesPage {
     }
 
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.editor.take().is_none() {
-            return false;
+        match self.editor.as_mut() {
+            None => return false,
+            Some(editor) if editor.expanded.is_some() => editor.expanded = None,
+            Some(_) => self.editor = None,
         }
         cx.notify();
         true
+    }
+
+    fn expand(&mut self, field: Option<LongField>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        editor.expanded = field;
+        if let Some(field) = field {
+            let input = match field {
+                LongField::Instructions => &editor.instructions,
+                LongField::Notes => &editor.notes,
+            };
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
     }
 
     fn edit_draft(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut AgentProfileDraft)) {
@@ -471,6 +505,7 @@ impl AgentProfilesPage {
         let name = editor.name.clone();
         let notes = editor.notes.clone();
         let instructions = editor.instructions.clone();
+        let expanded = editor.expanded;
         let error = editor.error.clone();
         let confirm_delete = editor.confirm_delete;
         let saving = editor.saving;
@@ -640,6 +675,61 @@ impl AgentProfilesPage {
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             );
 
+        let hint = |text: &'static str| {
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let long_field = |which: LongField,
+                          height: gpui::DefiniteLength,
+                          cx: &mut Context<Self>| {
+            let (label, input, limit, toggle_id, text) = match which {
+                LongField::Instructions => (
+                    "Instructions",
+                    instructions.clone(),
+                    zeron_engine::agent_profiles::MAX_INSTRUCTIONS_CHARS,
+                    "profile-instructions-expand",
+                    "Added to the agent's system prompt on every run of a chat using this profile.",
+                ),
+                LongField::Notes => (
+                    "When to use",
+                    notes.clone(),
+                    zeron_engine::agent_profiles::MAX_AGENT_PROFILE_NOTES_CHARS,
+                    "profile-notes-expand",
+                    "Agents read this to pick a profile for delegate_task.",
+                ),
+            };
+            let open = expanded == Some(which);
+            let title = field_label(&theme, label).when(open, |el| {
+                el.flex()
+                    .child(div().flex_1())
+                    .child(char_count(input.read(cx).text(), limit))
+            });
+            div()
+                .flex()
+                .flex_col()
+                .child(title)
+                .child(
+                    popover::dialog_field(
+                        div()
+                            .h(height)
+                            .child(scrolling_field(input))
+                            .into_any_element(),
+                    )
+                    .relative()
+                    .pr(px(34.0))
+                    .child(
+                        expand_toggle(toggle_id, open, theme.text_muted).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.expand((!open).then_some(which), window, cx)
+                            },
+                        )),
+                    ),
+                )
+                .child(hint(text))
+        };
         let card = popover::dialog_card(&theme)
             .id("agent-profile-card")
             .w(px(460.0))
@@ -647,8 +737,7 @@ impl AgentProfilesPage {
             .aria_label(title)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
-                    this.editor = None;
-                    cx.notify();
+                    this.dismiss_on_escape(cx);
                     cx.stop_propagation();
                 }
             }))
@@ -659,59 +748,67 @@ impl AgentProfilesPage {
                     .gap(px(10.0))
                     .child(brand_badge(draft.harness, 24.0, theme.text))
                     .child(popover::dialog_title(&theme, title)),
-            )
-            .child(field(
-                "Name",
-                popover::dialog_field(name.into_any_element()).into_any_element(),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.0))
-                    .child(field("Agent", harness_select.into_any_element()))
-                    .child(field("Model", model_select.into_any_element())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.0))
-                    .child(field("Mode", mode_select.into_any_element()))
-                    .child(field("Effort", effort_select.into_any_element())),
-            )
-            .child(field(
-                "Instructions",
-                popover::dialog_field(
-                    div()
-                        .h(crate::typography::ui_rems(INPUT_LINE_HEIGHT * 5.0))
-                        .child(scrolling_field(instructions))
-                        .into_any_element(),
+            );
+        let card = match expanded {
+            Some(open) => {
+                let (other, other_label) = match open {
+                    LongField::Instructions => (LongField::Notes, "When to use"),
+                    LongField::Notes => (LongField::Instructions, "Instructions"),
+                };
+                let mut folded = draft.clone();
+                folded.name = name.read(cx).text().to_string();
+                let line = draft_summary(
+                    &folded,
+                    &self.harness_name(draft.harness),
+                    self.model_label(draft.harness, draft.model.as_deref())
+                        .as_deref(),
+                );
+                let tall = px((f32::from(viewport.height) - 340.0).clamp(160.0, 440.0));
+                card.child(
+                    folded_row("profile-folded", line, theme.text_muted)
+                        .mt(px(12.0))
+                        .on_click(cx.listener(|this, _, window, cx| this.expand(None, window, cx))),
                 )
-                .into_any_element(),
-            ))
-            .child(
-                div()
-                    .mt(px(4.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .child("Added to the agent's system prompt on every run of a chat using this profile."),
-            )
-            .child(field(
-                "When to use",
-                popover::dialog_field(
-                    div()
-                        .h(crate::typography::ui_rems(INPUT_LINE_HEIGHT * 3.0))
-                        .child(scrolling_field(notes))
-                        .into_any_element(),
+                .child(
+                    folded_row("profile-folded-other", other_label, theme.text_muted)
+                        .mt(px(6.0))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.expand(Some(other), window, cx)
+                        })),
                 )
-                .into_any_element(),
-            ))
-            .child(
-                div()
-                    .mt(px(4.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .child("Agents read this to pick a profile for delegate_task."),
-            )
+                .child(long_field(open, tall.into(), cx))
+            }
+            None => card
+                .child(field(
+                    "Name",
+                    popover::dialog_field(name.into_any_element()).into_any_element(),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(12.0))
+                        .child(field("Agent", harness_select.into_any_element()))
+                        .child(field("Model", model_select.into_any_element())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(12.0))
+                        .child(field("Mode", mode_select.into_any_element()))
+                        .child(field("Effort", effort_select.into_any_element())),
+                )
+                .child(long_field(
+                    LongField::Instructions,
+                    crate::typography::ui_rems(INPUT_LINE_HEIGHT * 5.0).into(),
+                    cx,
+                ))
+                .child(long_field(
+                    LongField::Notes,
+                    crate::typography::ui_rems(INPUT_LINE_HEIGHT * 3.0).into(),
+                    cx,
+                )),
+        };
+        let card = card
             .when_some(error, |el, error| {
                 el.child(
                     div()
