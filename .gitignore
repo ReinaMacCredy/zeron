@@ -15,3 +15,7 @@ xcuserdata/
 .claude
 CLAUDE.md
 /scripts/**/__pycache__/
+/.maestro/
+/docs/**/*.html
+/tmp/
+/.mcp.json
