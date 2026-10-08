@@ -125,6 +125,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "delegate_task",
                 "Delegate one task to a Zeron-owned child agent of this chat.",
             ),
+            tool(
+                "agent_profiles",
+                "Create, change or remove the agent profiles in the model picker when asked.",
+            ),
             needs(
                 "task_status",
                 "Read a delegated task created by this chat.",

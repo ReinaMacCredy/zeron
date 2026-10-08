@@ -1890,6 +1890,8 @@ pub struct AgentProfile {
     pub notes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_agent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

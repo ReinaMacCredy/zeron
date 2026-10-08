@@ -411,6 +411,8 @@ struct UpsertAgentProfileParams {
     #[serde(default)]
     profile_id: Option<String>,
     profile: AgentProfileDraft,
+    #[serde(default)]
+    by_agent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4370,7 +4372,7 @@ impl RpcService for EngineRpc {
             methods::UPSERT_AGENT_PROFILE => {
                 let p: UpsertAgentProfileParams = parse_params(params)?;
                 let store = self.agent_profiles_store()?;
-                let snapshot = blocking(move || store.upsert(p.profile_id.as_deref(), p.profile))
+                let snapshot = blocking(move || store.upsert_as(p.profile_id.as_deref(), p.profile, p.by_agent))
                     .await?;
                 RpcReply::value(&snapshot)
             }

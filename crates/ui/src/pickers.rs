@@ -11508,6 +11508,7 @@ mod tests {
                     model_options: Default::default(),
                     notes: String::new(),
                     instructions: String::new(),
+                    by_agent: false,
                 };
                 pickers.apply_profile(&profile, cx);
                 let pending = pickers.pending_model_switch.clone().expect("dialog");

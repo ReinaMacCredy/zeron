@@ -27,7 +27,8 @@ use zeron_proto::html_render;
 use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
-    AgentProfile, AgentProfilesSnapshot, Chat, PermissionMode, Session, Space, UserInputAnswer,
+    AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId, PermissionMode,
+    ReasoningLevel, Session, Space, UserInputAnswer,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -274,6 +275,26 @@ pub fn tool_list() -> Value {
                     "command": { "type": "string", "maxLength": 16384 },
                     "icon": { "type": "string", "enum": ["play", "test", "lint", "configure", "build", "debug"], "description": "Defaults to play." },
                     "runOnWorktreeCreate": { "type": "boolean", "description": "Defaults to false." }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "agent_profiles",
+            "description": "Manage the person's agent profiles: named bundles of harness, model, reasoning, permission mode, instructions and a when-to-use note, shown in the model picker's Profiles tab and listed by orchestrator_capabilities. Use this only when the person asks to create, change or remove a profile. `list` returns them. `upsert` saves one: omit `profileId` to add (name and harness are required), or pass it to change only the fields you send; an empty string clears model, notes or instructions. `instructions` are added to the agent's system prompt on every run of a chat using the profile, so write them as a role brief. `permissionMode` can never exceed this chat's own permission mode, also when editing a profile that already has a higher one. `delete` removes one by `profileId`. Profiles you save stay marked as written by an agent until the person saves them in Settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "upsert", "delete"] },
+                    "profileId": { "type": "string" },
+                    "name": { "type": "string", "maxLength": 80 },
+                    "harness": { "type": "string", "description": "Harness id from orchestrator_capabilities." },
+                    "model": { "type": "string", "description": "Model id as that harness names it; empty keeps the chat's model." },
+                    "reasoning": { "type": "string", "enum": REASONING_LEVELS },
+                    "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"] },
+                    "notes": { "type": "string", "maxLength": 2000, "description": "When to use this profile." },
+                    "instructions": { "type": "string", "maxLength": 16000 }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -562,6 +583,7 @@ impl ThreadTools {
             "ask_user" => self.ask_user(args).await,
             "terminal" => self.terminal(args).await,
             "project_actions" => self.project_actions(args).await,
+            "agent_profiles" => self.manage_agent_profiles(args).await,
             "html_render" => self.html_render(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
@@ -1512,6 +1534,54 @@ impl ThreadTools {
         }
     }
 
+    pub async fn manage_agent_profiles(&self, args: &Value) -> Result<Value, String> {
+        let profile_id = args["profileId"].as_str().filter(|id| !id.is_empty());
+        match args["action"].as_str().unwrap_or_default() {
+            "list" => {
+                self.call_engine(methods::LIST_AGENT_PROFILES, json!({}))
+                    .await
+            }
+            "upsert" => {
+                let (caller, _) = self.peers().await?;
+                let existing = match profile_id {
+                    Some(id) => Some(self.agent_profile(id).await?),
+                    None => None,
+                };
+                let draft = profile_draft(existing.as_ref(), args)?;
+                let owner = caller
+                    .config
+                    .as_ref()
+                    .map_or(PermissionMode::Ask, |config| config.permission_mode);
+                if let Some(mode) = draft.permission_mode
+                    && permission_rank(mode) > permission_rank(owner)
+                {
+                    return Err(format!(
+                        "permission_escalation_denied: this chat runs in {} mode, so a profile it saves may not use {}",
+                        json!(owner).as_str().unwrap_or_default(),
+                        json!(mode).as_str().unwrap_or_default()
+                    ));
+                }
+                let target = json!({ "harness": draft.harness, "model": draft.model });
+                self.check_model(&caller, &target, "model_unavailable: ")
+                    .await?;
+                self.call_engine(
+                    methods::UPSERT_AGENT_PROFILE,
+                    json!({ "profileId": profile_id, "profile": draft, "byAgent": true }),
+                )
+                .await
+            }
+            "delete" => {
+                let profile_id = profile_id.ok_or("profileId is required")?;
+                self.call_engine(
+                    methods::DELETE_AGENT_PROFILE,
+                    json!({ "profileId": profile_id }),
+                )
+                .await
+            }
+            _ => Err("action must be list, upsert or delete".into()),
+        }
+    }
+
     async fn device_tool(&self, name: &str, args: &Value) -> Result<Value, String> {
         let method = match name {
             "device_list" => methods::DEVICE_TOOL_LIST,
@@ -1826,6 +1896,69 @@ fn profile_target(profile: Option<&AgentProfile>, target: &Value) -> Value {
     });
     let reasoning = given("reasoning").or_else(|| profile.reasoning.map(|level| json!(level)));
     json!({ "harness": harness, "model": model, "reasoning": reasoning })
+}
+
+fn profile_draft(
+    existing: Option<&AgentProfile>,
+    args: &Value,
+) -> Result<AgentProfileDraft, String> {
+    let text = |key: &str| args[key].as_str().map(str::trim);
+    let parse = |key: &str| -> Result<Option<Value>, String> {
+        Ok(text(key).filter(|value| !value.is_empty()).map(Value::from))
+    };
+    let harness = match parse("harness")? {
+        Some(value) => serde_json::from_value::<HarnessId>(value.clone()).map_err(|_| {
+            format!("unknown harness {value}; use an id from orchestrator_capabilities")
+        })?,
+        None => existing
+            .map(|profile| profile.harness)
+            .ok_or("harness is required for a new profile")?,
+    };
+    let reasoning = match parse("reasoning")? {
+        Some(value) => {
+            Some(serde_json::from_value::<ReasoningLevel>(value).map_err(|err| err.to_string())?)
+        }
+        None => existing.and_then(|profile| profile.reasoning),
+    };
+    let permission_mode = match parse("permissionMode")? {
+        Some(value) => {
+            Some(serde_json::from_value::<PermissionMode>(value).map_err(|err| err.to_string())?)
+        }
+        None => existing.and_then(|profile| profile.permission_mode),
+    };
+    let same_harness = existing.is_some_and(|profile| profile.harness == harness);
+    let model = match text("model") {
+        Some(model) => Some(model.to_string()).filter(|model| !model.is_empty()),
+        None => existing
+            .filter(|_| same_harness)
+            .and_then(|profile| profile.model.clone()),
+    };
+    let kept = |key: &str, current: Option<&String>| {
+        text(key)
+            .map(str::to_string)
+            .or_else(|| current.cloned())
+            .unwrap_or_default()
+    };
+    let name = kept("name", existing.map(|profile| &profile.name));
+    if name.is_empty() {
+        return Err("name is required for a new profile".into());
+    }
+    Ok(AgentProfileDraft {
+        name,
+        harness,
+        model,
+        reasoning,
+        permission_mode,
+        model_options: existing
+            .filter(|_| same_harness)
+            .map(|profile| profile.model_options.clone())
+            .unwrap_or_default(),
+        notes: kept("notes", existing.map(|profile| &profile.notes)),
+        instructions: kept(
+            "instructions",
+            existing.map(|profile| &profile.instructions),
+        ),
+    })
 }
 
 fn permission_rank(mode: PermissionMode) -> u8 {
@@ -2155,7 +2288,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 25] = [
+    const THREAD_TOOLS: [&str; 26] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2168,6 +2301,7 @@ mod tests {
         "ask_user",
         "terminal",
         "project_actions",
+        "agent_profiles",
         "html_preview",
         "html_render",
         "device_list",
@@ -2536,6 +2670,13 @@ mod tests {
                     },
                     { "id": "builder", "name": "Builder", "harness": "codex", "permissionMode": "full" }
                 ] }))),
+                methods::UPSERT_AGENT_PROFILE | methods::DELETE_AGENT_PROFILE => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    Ok(RpcReply::Value(json!({ "profiles": [] })))
+                }
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -3680,6 +3821,85 @@ mod tests {
                 .delegate_task(&json!({ "task": "x", "mode": "later" }))
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_saves_profiles_within_its_own_permission_mode() {
+        let rig = rig(fixture());
+        let tools = &rig.tools;
+        let created = |args: Value| async move {
+            let mut args = args;
+            args["action"] = json!("upsert");
+            tools.call("agent_profiles", &args).await
+        };
+        assert!(
+            created(json!({ "harness": "codex" })).await.is_err(),
+            "name is required"
+        );
+        assert!(
+            created(json!({ "name": "X" })).await.is_err(),
+            "harness is required"
+        );
+        assert!(
+            created(json!({ "name": "X", "harness": "nope" }))
+                .await
+                .is_err()
+        );
+        let denied =
+            created(json!({ "name": "Root", "harness": "codex", "permissionMode": "full" }))
+                .await
+                .unwrap_err();
+        assert!(
+            denied.starts_with("permission_escalation_denied"),
+            "{denied}"
+        );
+        let inherited = created(json!({ "profileId": "builder", "notes": "Builds." }))
+            .await
+            .unwrap_err();
+        assert!(
+            inherited.starts_with("permission_escalation_denied"),
+            "editing a Full profile from an Ask chat is an escalation: {inherited}"
+        );
+        assert!(logged(&rig.calls, methods::UPSERT_AGENT_PROFILE).is_empty());
+
+        created(
+            json!({ "name": "Docs", "harness": "codex", "model": "gpt-5", "permissionMode": "ask",
+            "instructions": "Write docs only." }),
+        )
+        .await
+        .unwrap();
+        created(
+            json!({ "profileId": "reviewer", "instructions": "Report findings with file:line." }),
+        )
+        .await
+        .unwrap();
+        let sent = logged(&rig.calls, methods::UPSERT_AGENT_PROFILE);
+        assert_eq!(sent[0]["byAgent"], true);
+        assert_eq!(sent[0]["profileId"], Value::Null);
+        assert_eq!(sent[0]["profile"]["instructions"], "Write docs only.");
+        assert_eq!(sent[1]["profileId"], "reviewer");
+        assert_eq!(sent[1]["profile"]["model"], "gpt-5.6-luna");
+        assert_eq!(sent[1]["profile"]["notes"], "Review a diff.");
+        assert_eq!(
+            sent[1]["profile"]["modelOptions"],
+            json!({ "speed": "fast" })
+        );
+        assert_eq!(
+            sent[1]["profile"]["instructions"],
+            "Report findings with file:line."
+        );
+
+        tools
+            .call(
+                "agent_profiles",
+                &json!({ "action": "delete", "profileId": "docs" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            logged(&rig.calls, methods::DELETE_AGENT_PROFILE)[0]["profileId"],
+            "docs"
         );
     }
 

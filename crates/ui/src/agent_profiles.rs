@@ -158,6 +158,7 @@ mod tests {
             model_options: Default::default(),
             notes: String::new(),
             instructions: String::new(),
+            by_agent: false,
         };
         assert_eq!(
             summary(&profile, "Codex", Some("GPT-5.6")),
