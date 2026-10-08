@@ -11,6 +11,7 @@ pub(super) struct ProfilePick {
     reasoning: Option<ReasoningLevel>,
     permission_mode: Option<PermissionMode>,
     model_options: serde_json::Map<String, serde_json::Value>,
+    instructions: String,
 }
 
 impl ProfilePick {
@@ -21,6 +22,7 @@ impl ProfilePick {
             reasoning: profile.reasoning,
             permission_mode: profile.permission_mode,
             model_options: profile.model_options.clone(),
+            instructions: profile.instructions.clone(),
         }
     }
 
@@ -42,6 +44,7 @@ impl ProfilePick {
         if !self.model_options.is_empty() {
             config.model_options = self.model_options.clone();
         }
+        config.instructions = self.instructions.clone();
     }
 }
 
@@ -208,6 +211,7 @@ impl Pickers {
             if let Some(mode) = pick.permission_mode {
                 self.config.permission_mode = mode;
             }
+            self.config.instructions = pick.instructions.clone();
             if !pick.model_options.is_empty()
                 && let Some(model) = pick
                     .model
@@ -234,6 +238,7 @@ impl Pickers {
         draft.reasoning = resolved.reasoning;
         draft.permission_mode = Some(resolved.permission_mode);
         draft.model_options = resolved.model_options;
+        draft.instructions = resolved.instructions;
         draft
     }
 
@@ -1041,6 +1046,7 @@ mod tests {
             permission_mode: None,
             model_options: Default::default(),
             notes: notes.into(),
+            instructions: String::new(),
         }
     }
 
@@ -1070,6 +1076,7 @@ mod tests {
                 .unwrap(),
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: PermissionMode::Full,
+            instructions: String::new(),
         };
         let mut same = profile("Same", "");
         same.harness = HarnessId::ClaudeCode;

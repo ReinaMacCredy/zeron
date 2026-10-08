@@ -105,6 +105,7 @@ impl Rig {
                     model_options: Default::default(),
                     sandbox: SandboxLevel::DangerFullAccess,
                     permission_mode: Default::default(),
+                    instructions: String::new(),
                 },
             )
             .unwrap();

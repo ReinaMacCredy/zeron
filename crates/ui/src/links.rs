@@ -135,6 +135,7 @@ mod tests {
                 model_options: Default::default(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
+                instructions: String::new(),
             }),
             last_message_preview: None,
             last_message_at: None,

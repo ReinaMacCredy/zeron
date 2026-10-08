@@ -606,6 +606,7 @@ async fn chat_config_selects_the_run_harness() {
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
+                instructions: String::new(),
             }),
             None,
         )

@@ -53,6 +53,7 @@ pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
         permission_mode: profile.permission_mode,
         model_options: profile.model_options.clone(),
         notes: profile.notes.clone(),
+        instructions: profile.instructions.clone(),
     }
 }
 
@@ -65,6 +66,7 @@ pub fn blank_draft(harness: HarnessId) -> AgentProfileDraft {
         permission_mode: None,
         model_options: Default::default(),
         notes: String::new(),
+        instructions: String::new(),
     }
 }
 
@@ -155,6 +157,7 @@ mod tests {
             permission_mode: Some(PermissionMode::Ask),
             model_options: Default::default(),
             notes: String::new(),
+            instructions: String::new(),
         };
         assert_eq!(
             summary(&profile, "Codex", Some("GPT-5.6")),

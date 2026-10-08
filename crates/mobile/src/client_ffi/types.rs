@@ -837,6 +837,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
             permission_mode: Default::default(),
+            instructions: String::new(),
         })
     }
 }

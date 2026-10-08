@@ -311,6 +311,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         model_options: Default::default(),
         sandbox: SandboxLevel::ReadOnly,
         permission_mode: zeron_proto::PermissionMode::Auto,
+        instructions: String::new(),
     };
     rig.core
         .workspace
@@ -905,6 +906,7 @@ async fn a_delegated_child_takes_the_model_options_it_was_given() {
             .cloned()
             .unwrap(),
     );
+    params.instructions = Some("Review only.".into());
     let view = rig
         .core
         .doc_host
@@ -912,10 +914,9 @@ async fn a_delegated_child_takes_the_model_options_it_was_given() {
         .await
         .expect("delegate");
     let row = rig.core.workspace.chat(&view.task_id).unwrap().unwrap();
-    assert_eq!(
-        row.config.expect("child config").model_options["speed"],
-        "fast"
-    );
+    let config = row.config.expect("child config");
+    assert_eq!(config.model_options["speed"], "fast");
+    assert_eq!(config.instructions, "Review only.");
     rig.core.shutdown().await;
 }
 
@@ -1696,6 +1697,86 @@ async fn a_published_page_lands_on_its_tool_part_and_leaves_with_the_chat() {
     assert!(
         !std::path::Path::new(&path).exists(),
         "deleting the chat deletes its pages"
+    );
+    core.shutdown().await;
+}
+
+struct GuidanceHarness {
+    guidance: Arc<Mutex<Option<Option<String>>>>,
+}
+
+#[async_trait]
+impl Harness for GuidanceHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Guidance"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        *self.guidance.lock().unwrap() = Some(
+            controls
+                .tool_server
+                .as_ref()
+                .and_then(|server| server.guidance.clone()),
+        );
+        Ok(futures::stream::iter(vec![Ok(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        })])
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
+    let guidance = Arc::new(Mutex::new(None));
+    let rig = rig_on(Arc::new(GuidanceHarness {
+        guidance: guidance.clone(),
+    }));
+    let core = &rig.core;
+    core.sessions.set_tool_server_port(1);
+    core.registry
+        .set_system_prompt("Reply in Vietnamese.")
+        .unwrap();
+    core.workspace
+        .set_chat_config(
+            "lead",
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                permission_mode: Default::default(),
+                instructions: "Review only.".into(),
+            },
+        )
+        .unwrap();
+    queue_human_run(core, "lead", "cmd-1", "msg-1");
+    wait_for(|| guidance.lock().unwrap().is_some(), "the run").await;
+    let text = guidance.lock().unwrap().clone().unwrap().unwrap();
+    assert!(
+        text.starts_with("Reply in Vietnamese.\n\nReview only."),
+        "{text}"
     );
     core.shutdown().await;
 }

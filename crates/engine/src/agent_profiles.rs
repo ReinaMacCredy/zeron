@@ -11,6 +11,7 @@ pub const MAX_AGENT_PROFILES: usize = 50;
 pub const MAX_AGENT_PROFILE_NAME_CHARS: usize = 80;
 pub const MAX_AGENT_PROFILE_NOTES_CHARS: usize = 2000;
 pub const MAX_AGENT_PROFILE_ID_BYTES: usize = 64;
+pub const MAX_INSTRUCTIONS_CHARS: usize = 16_000;
 
 const STORE_FILE: &str = "agent-profiles.json";
 const STORE_VERSION: u32 = 1;
@@ -117,6 +118,7 @@ impl AgentProfilesStore {
                 permission_mode: draft.permission_mode,
                 model_options: draft.model_options,
                 notes: draft.notes,
+                instructions: draft.instructions,
             };
             if index == profiles.len() {
                 profiles.push(profile);
@@ -204,6 +206,12 @@ fn normalize_draft(draft: AgentProfileDraft) -> Result<AgentProfileDraft, Engine
             "Profile notes must not exceed {MAX_AGENT_PROFILE_NOTES_CHARS} characters"
         )));
     }
+    let instructions = draft.instructions.trim().to_string();
+    if instructions.chars().count() > MAX_INSTRUCTIONS_CHARS {
+        return Err(EngineError::Other(format!(
+            "Profile instructions must not exceed {MAX_INSTRUCTIONS_CHARS} characters"
+        )));
+    }
     let model = draft
         .model
         .map(|model| model.trim().to_string())
@@ -211,6 +219,7 @@ fn normalize_draft(draft: AgentProfileDraft) -> Result<AgentProfileDraft, Engine
     Ok(AgentProfileDraft {
         name,
         notes,
+        instructions,
         model,
         ..draft
     })
@@ -230,6 +239,7 @@ mod tests {
             permission_mode: Some(PermissionMode::Ask),
             model_options: Default::default(),
             notes: " Review a diff. ".into(),
+            instructions: " Review only. ".into(),
         }
     }
 
@@ -246,6 +256,7 @@ mod tests {
         assert_eq!(ids(&snapshot), ["ui-work", "ui-work-2"]);
         assert_eq!(snapshot.profiles[0].model.as_deref(), Some("opus"));
         assert_eq!(snapshot.profiles[0].notes, "Review a diff.");
+        assert_eq!(snapshot.profiles[0].instructions, "Review only.");
 
         let reopened = AgentProfilesStore::open(temp.path()).unwrap();
         assert_eq!(reopened.snapshot(), snapshot);

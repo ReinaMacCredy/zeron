@@ -170,6 +170,8 @@ pub struct ChatConfig {
     /// the field existed keep today's unattended behavior.
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.
@@ -1886,6 +1888,8 @@ pub struct AgentProfile {
     pub model_options: serde_json::Map<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1903,6 +1907,8 @@ pub struct AgentProfileDraft {
     pub model_options: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub notes: String,
+    #[serde(default)]
+    pub instructions: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

@@ -79,6 +79,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
                 model_options: Default::default(),
                 sandbox: SandboxLevel::DangerFullAccess,
                 permission_mode: Default::default(),
+                instructions: String::new(),
             },
         )
         .unwrap();

@@ -5564,6 +5564,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
+            instructions: String::new(),
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -5589,6 +5590,7 @@ mod tests {
                 model_options: serde_json::Map::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
+                instructions: String::new(),
             },
         );
     }

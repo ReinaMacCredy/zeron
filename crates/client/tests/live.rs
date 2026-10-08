@@ -84,6 +84,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             model_options: Default::default(),
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: Default::default(),
+            instructions: String::new(),
         }),
         last_message_preview: None,
         last_message_at: Some(now),

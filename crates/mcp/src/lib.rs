@@ -1138,6 +1138,7 @@ impl ThreadTools {
                     "reasoning": target["reasoning"].as_str(),
                     "permissionMode": permission_mode,
                     "modelOptions": model_options,
+                    "instructions": profile.as_ref().map(|profile| profile.instructions.clone()),
                     "wait": wait,
                     "clientRequestId": args["clientRequestId"].as_str(),
                 }),
@@ -2531,7 +2532,7 @@ mod tests {
                         "id": "reviewer", "name": "Reviewer",
                         "harness": "codex", "model": "gpt-5.6-luna", "reasoning": "high",
                         "permissionMode": "ask", "modelOptions": { "speed": "fast" },
-                        "notes": "Review a diff."
+                        "notes": "Review a diff.", "instructions": "Never edit files."
                     },
                     { "id": "builder", "name": "Builder", "harness": "codex", "permissionMode": "full" }
                 ] }))),
@@ -3709,6 +3710,7 @@ mod tests {
         assert_eq!(sent[0]["reasoning"], "high");
         assert_eq!(sent[0]["permissionMode"], "ask");
         assert_eq!(sent[0]["modelOptions"], json!({ "speed": "fast" }));
+        assert_eq!(sent[0]["instructions"], "Never edit files.");
         assert_eq!(sent[1]["model"], "gpt-5");
         assert_eq!(sent[2]["harness"], "claude-code");
         assert_eq!(sent[2]["model"], Value::Null);

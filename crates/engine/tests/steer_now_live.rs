@@ -108,6 +108,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                 model_options: Default::default(),
                 sandbox: SandboxLevel::DangerFullAccess,
                 permission_mode: Default::default(),
+                instructions: String::new(),
             },
         )
         .unwrap();

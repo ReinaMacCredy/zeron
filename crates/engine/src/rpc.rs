@@ -421,6 +421,12 @@ struct DeleteAgentProfileParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetSystemPromptParams {
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReorderAgentProfilesParams {
     profile_ids: Vec<String>,
 }
@@ -1982,6 +1988,8 @@ fn forwardable(method: &str) -> bool {
             | methods::UPSERT_AGENT_PROFILE
             | methods::DELETE_AGENT_PROFILE
             | methods::REORDER_AGENT_PROFILES
+            | methods::GET_SYSTEM_PROMPT
+            | methods::SET_SYSTEM_PROMPT
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -4345,6 +4353,16 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::GET_SYSTEM_PROMPT => {
+                RpcReply::value(&serde_json::json!({ "prompt": self.registry.system_prompt() }))
+            }
+            methods::SET_SYSTEM_PROMPT => {
+                let p: SetSystemPromptParams = parse_params(params)?;
+                self.registry
+                    .set_system_prompt(&p.prompt)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "prompt": self.registry.system_prompt() }))
             }
             methods::LIST_AGENT_PROFILES => {
                 RpcReply::value(&self.agent_profiles_store()?.snapshot())

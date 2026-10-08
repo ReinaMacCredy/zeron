@@ -149,6 +149,7 @@ pub struct DraftConfig {
     /// How the new session's agent actions are approved (defaults to Full —
     /// the unattended behavior every chat had before the chip existed).
     pub permission_mode: PermissionMode,
+    pub instructions: String,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -189,6 +190,7 @@ pub struct ResolvedRunConfig {
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub permission_mode: PermissionMode,
+    pub instructions: String,
 }
 
 impl ResolvedRunConfig {
@@ -201,6 +203,7 @@ impl ResolvedRunConfig {
             model_options: self.model_options.clone(),
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: self.permission_mode,
+            instructions: self.instructions.clone(),
         })
     }
 }
@@ -1614,6 +1617,7 @@ impl Pickers {
                 reasoning: self.explicit_reasoning(cx),
                 model_options: self.explicit_options(cx),
                 permission_mode: self.effective_permission_mode(cx),
+                instructions: self.effective_instructions(cx),
             };
         }
         ResolvedRunConfig {
@@ -1626,6 +1630,18 @@ impl Pickers {
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
             permission_mode: self.effective_permission_mode(cx),
+            instructions: self.effective_instructions(cx),
+        }
+    }
+
+    fn effective_instructions(&self, cx: &App) -> String {
+        match self.chat_row(cx) {
+            Some(chat) => chat
+                .config
+                .as_ref()
+                .map(|config| config.instructions.clone())
+                .unwrap_or_default(),
+            None => self.config.instructions.clone(),
         }
     }
 
@@ -2826,6 +2842,7 @@ impl Pickers {
         // Preserve fields the pickers don't own.
         if let Some(existing) = self.chat_row(cx).and_then(|c| c.config.as_ref()) {
             config.sandbox = existing.sandbox;
+            config.instructions = existing.instructions.clone();
         }
         change(&mut config);
         // Reasoning must stay concrete for whatever model the row now names —
@@ -10409,6 +10426,7 @@ mod tests {
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
+            instructions: String::new(),
         });
         assert_eq!(
             chat_harness_marks(&chat),
@@ -11287,6 +11305,7 @@ mod tests {
                         model_options: Default::default(),
                         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                         permission_mode: Default::default(),
+                        instructions: String::new(),
                     }),
                     last_message_preview: None,
                     last_message_at: None,
@@ -11488,6 +11507,7 @@ mod tests {
                     permission_mode: Some(PermissionMode::Ask),
                     model_options: Default::default(),
                     notes: String::new(),
+                    instructions: String::new(),
                 };
                 pickers.apply_profile(&profile, cx);
                 let pending = pickers.pending_model_switch.clone().expect("dialog");

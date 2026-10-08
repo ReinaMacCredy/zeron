@@ -49,6 +49,8 @@ pub struct DelegateTaskParams {
     #[serde(default)]
     pub model_options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
     pub wait: bool,
     #[serde(default)]
     pub client_request_id: Option<String>,
@@ -254,6 +256,7 @@ impl DocHost {
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: PermissionMode::Ask,
+            instructions: String::new(),
         }
     }
 
@@ -332,6 +335,23 @@ impl DocHost {
             params.model.as_deref(),
             params.reasoning,
         );
+        match params
+            .instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => {
+                config
+                    .get_or_insert_with(|| self.default_chat_config())
+                    .instructions = text.to_string();
+            }
+            None => {
+                if let Some(config) = config.as_mut() {
+                    config.instructions.clear();
+                }
+            }
+        }
         if let Some(options) = &params.model_options {
             config
                 .get_or_insert_with(|| self.default_chat_config())

@@ -545,7 +545,15 @@ impl Inner {
         #[cfg(not(target_os = "macos"))]
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
+        let system_prompt = self.registry.system_prompt();
+        let instructions = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id))
+            .map(|config| config.instructions)
+            .unwrap_or_default();
         let blocks: Vec<&str> = [
+            Some(system_prompt.as_str()).filter(|text| !text.is_empty()),
+            Some(instructions.as_str()).filter(|text| !text.is_empty()),
             computer_guidance
                 .as_deref()
                 .filter(|_| live(ToolGroup::Computer)),
@@ -5692,6 +5700,32 @@ mod tests {
         }
         registry.set_tool_settings(settings);
         assert_eq!(guidance(true), None);
+    }
+
+    #[test]
+    fn the_host_system_prompt_leads_the_run_guidance() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let registry = Arc::new(HarnessRegistry::new());
+        let sessions = SessionsEngine::new("host".into(), journal, registry.clone());
+        sessions.set_tool_server_port(4242);
+        let mut settings = zeron_proto::tools::ToolSettings::default();
+        settings.set_group(ToolGroup::Delegation, false);
+        settings.set_tool("html_render", false);
+        registry.set_tool_settings(settings);
+        let guidance = || {
+            sessions
+                .inner
+                .tool_server_for("chat", "secret", false)
+                .and_then(|server| server.guidance)
+        };
+        assert_eq!(guidance(), None);
+        registry
+            .set_system_prompt("  Always reply in Vietnamese.  ")
+            .unwrap();
+        assert_eq!(guidance().as_deref(), Some("Always reply in Vietnamese."));
+        assert!(registry.set_system_prompt(&"x".repeat(16_001)).is_err());
     }
 
     fn request_with_resume(session: &str) -> RunRequest {

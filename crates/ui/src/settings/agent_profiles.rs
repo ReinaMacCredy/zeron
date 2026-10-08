@@ -30,10 +30,11 @@ struct Editor {
     draft: AgentProfileDraft,
     name: Entity<ComposerInput>,
     notes: Entity<ComposerInput>,
+    instructions: Entity<ComposerInput>,
     error: Option<SharedString>,
     saving: bool,
     confirm_delete: bool,
-    _events: [Subscription; 2],
+    _events: [Subscription; 3],
 }
 
 pub struct AgentProfilesPage {
@@ -51,8 +52,12 @@ pub struct AgentProfilesPage {
     task: Option<Task<()>>,
     catalog_task: Option<Task<()>>,
     model_tasks: HashMap<HarnessId, Task<()>>,
+    system_prompt: Loadable<String>,
+    system_prompt_input: Entity<ComposerInput>,
+    system_prompt_task: Option<Task<()>>,
     _state: Subscription,
     _changed: Subscription,
+    _system_prompt_events: Subscription,
 }
 
 impl AgentProfilesPage {
@@ -65,6 +70,12 @@ impl AgentProfilesPage {
         });
         let changed = cx.observe_global::<crate::agent_profiles::AgentProfilesChanged>(
             |page: &mut Self, cx| page.load(cx),
+        );
+        let system_prompt_input =
+            cx.new(|cx| ComposerInput::new("Always reply in Vietnamese.", cx));
+        let system_prompt_events = cx.subscribe(
+            &system_prompt_input,
+            |_: &mut Self, _, _: &ComposerInputEvent, cx| cx.notify(),
         );
         let mut page = Self {
             state,
@@ -81,8 +92,12 @@ impl AgentProfilesPage {
             task: None,
             catalog_task: None,
             model_tasks: HashMap::new(),
+            system_prompt: Loadable::Idle,
+            system_prompt_input,
+            system_prompt_task: None,
             _state: observer,
             _changed: changed,
+            _system_prompt_events: system_prompt_events,
         };
         page.load(cx);
         page
@@ -94,6 +109,10 @@ impl AgentProfilesPage {
         };
         if matches!(self.profiles, Loadable::Idle) {
             self.profiles = Loadable::Loading;
+        }
+        if matches!(self.system_prompt, Loadable::Idle) {
+            self.system_prompt = Loadable::Loading;
+            self.call_system_prompt(None, cx);
         }
         let list_engine = engine.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -163,6 +182,90 @@ impl AgentProfilesPage {
         self.model_tasks.insert(harness, task);
     }
 
+    fn call_system_prompt(&mut self, save: Option<String>, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let (method, params) = match &save {
+            Some(prompt) => (
+                methods::SET_SYSTEM_PROMPT,
+                serde_json::json!({ "prompt": prompt }),
+            ),
+            None => (methods::GET_SYSTEM_PROMPT, serde_json::json!({})),
+        };
+        let loading = save.is_none();
+        self.system_prompt_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(method, params).await;
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(value) => {
+                        let prompt = value["prompt"].as_str().unwrap_or_default().to_string();
+                        page.system_prompt_input
+                            .update(cx, |input, cx| input.set_text(prompt.clone(), cx));
+                        page.system_prompt = Loadable::Ready(prompt);
+                    }
+                    Err(error) if loading => {
+                        page.system_prompt = Loadable::Error(error.to_string())
+                    }
+                    Err(error) => page.error = Some(format!("Could not save: {error}").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_system_prompt(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let saved = self.system_prompt.ready().cloned();
+        let current = self.system_prompt_input.read(cx).text().trim().to_string();
+        let dirty = saved.as_ref().is_some_and(|saved| *saved != current);
+        div()
+            .flex()
+            .flex_col()
+            .child(widgets::section_label(theme, "System prompt").mt(px(28.0)))
+            .child(
+                widgets::section_card(theme).mt(px(8.0)).child(
+                    widgets::card_row(theme, true)
+                        .flex_col()
+                        .items_stretch()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child("Added to every agent's system prompt on this device, before a profile's own instructions."),
+                        )
+                        .child(popover::dialog_field(
+                            div()
+                                .h(px(72.0))
+                                .overflow_hidden()
+                                .child(self.system_prompt_input.clone())
+                                .into_any_element(),
+                        ))
+                        .child(
+                            div().flex().justify_end().child(
+                                widgets::text_action(
+                                    theme,
+                                    widgets::ActionTone::Filled,
+                                    "Save",
+                                )
+                                .id("system-prompt-save")
+                                .when(!dirty, |el| el.opacity(0.4).cursor_default())
+                                .when(dirty, |el| {
+                                    el.on_click(cx.listener(|this, _, _, cx| {
+                                        let prompt =
+                                            this.system_prompt_input.read(cx).text().to_string();
+                                        this.call_system_prompt(Some(prompt), cx);
+                                    }))
+                                }),
+                            ),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn open_editor(
         &mut self,
         profile_id: Option<String>,
@@ -175,6 +278,16 @@ impl AgentProfilesPage {
             ComposerInput::new("Use for UI work: components, layout and design tokens.", cx)
         });
         notes.update(cx, |input, cx| input.set_text(draft.notes.clone(), cx));
+        let instructions = cx.new(|cx| {
+            ComposerInput::new("You review diffs. Never edit files; report findings.", cx)
+        });
+        instructions.update(cx, |input, cx| {
+            input.set_text(draft.instructions.clone(), cx)
+        });
+        let instructions_events = cx.subscribe(
+            &instructions,
+            |_: &mut Self, _, _: &ComposerInputEvent, cx| cx.notify(),
+        );
         let name_events = cx.subscribe(&name, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.save(cx);
@@ -189,10 +302,11 @@ impl AgentProfilesPage {
             draft,
             name,
             notes,
+            instructions,
             error: None,
             saving: false,
             confirm_delete: false,
-            _events: [name_events, notes_events],
+            _events: [name_events, notes_events, instructions_events],
         });
         cx.notify();
     }
@@ -270,6 +384,7 @@ impl AgentProfilesPage {
         let mut draft = editor.draft.clone();
         draft.name = editor.name.read(cx).text().trim().to_string();
         draft.notes = editor.notes.read(cx).text().trim().to_string();
+        draft.instructions = editor.instructions.read(cx).text().trim().to_string();
         if draft.name.is_empty() {
             editor.error = Some("Give the profile a name.".into());
             cx.notify();
@@ -355,6 +470,7 @@ impl AgentProfilesPage {
         let editing = editor.profile_id.is_some();
         let name = editor.name.clone();
         let notes = editor.notes.clone();
+        let instructions = editor.instructions.clone();
         let error = editor.error.clone();
         let confirm_delete = editor.confirm_delete;
         let saving = editor.saving;
@@ -561,6 +677,24 @@ impl AgentProfilesPage {
                     .gap(px(12.0))
                     .child(field("Mode", mode_select.into_any_element()))
                     .child(field("Effort", effort_select.into_any_element())),
+            )
+            .child(field(
+                "Instructions",
+                popover::dialog_field(
+                    div()
+                        .h(px(80.0))
+                        .overflow_hidden()
+                        .child(instructions)
+                        .into_any_element(),
+                )
+                .into_any_element(),
+            ))
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .child("Added to the agent's system prompt on every run of a chat using this profile."),
             )
             .child(field(
                 "When to use",
@@ -812,7 +946,8 @@ impl Render for AgentProfilesPage {
                                             })),
                                     )
                                 })
-                                .child(body),
+                                .child(body)
+                                .child(self.render_system_prompt(&theme, cx)),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

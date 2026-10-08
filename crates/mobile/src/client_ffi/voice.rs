@@ -403,6 +403,7 @@ impl CoreClient {
                     model_options: Default::default(),
                     sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                     permission_mode: Default::default(),
+                    instructions: String::new(),
                 };
                 zeron_voice_session::run(
                     control,

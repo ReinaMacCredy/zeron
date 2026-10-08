@@ -97,6 +97,7 @@ struct HarnessPrefsFile {
     titles: TitleSettings,
     delegation: DelegationSettings,
     tools: zeron_proto::tools::ToolSettings,
+    system_prompt: String,
     seen_models: Vec<SeenModels>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
@@ -495,6 +496,23 @@ impl HarnessRegistry {
             return Err("Delegation limits must be at least 1".into());
         }
         self.prefs().delegation = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    pub fn system_prompt(&self) -> String {
+        self.prefs().system_prompt.clone()
+    }
+
+    pub fn set_system_prompt(&self, prompt: &str) -> Result<(), String> {
+        let prompt = prompt.trim();
+        if prompt.chars().count() > crate::agent_profiles::MAX_INSTRUCTIONS_CHARS {
+            return Err(format!(
+                "The system prompt must not exceed {} characters",
+                crate::agent_profiles::MAX_INSTRUCTIONS_CHARS
+            ));
+        }
+        self.prefs().system_prompt = prompt.to_string();
         self.persist_prefs();
         Ok(())
     }
