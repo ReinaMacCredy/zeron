@@ -2,7 +2,7 @@ use super::*;
 
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
-use crate::agent_profiles::{ProfileWrite, brand_badge, glyph, mode_label, summary};
+use crate::agent_profiles::{ProfileWrite, brand_badge, mode_label, summary};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ProfilePick {
@@ -722,7 +722,7 @@ impl Pickers {
             .items_center()
             .gap(px(8.0))
             .child(back)
-            .child(glyph(draft.icon, draft.color, 18.0))
+            .child(brand_badge(draft.harness, 20.0, theme.text))
             .child(
                 div()
                     .min_w_0()
@@ -802,7 +802,7 @@ impl Pickers {
 
         let label = |text: &'static str| {
             div()
-                .mb(px(4.0))
+                .mb(px(3.0))
                 .text_size(crate::typography::ui_rems(11.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
@@ -911,10 +911,10 @@ impl Pickers {
             .min_h_0()
             .overflow_y_scroll()
             .px(px(12.0))
-            .py(px(10.0))
+            .py(px(8.0))
             .flex()
             .flex_col()
-            .gap(px(9.0))
+            .gap(px(6.0))
             .child(
                 div()
                     .child(label("Name"))
@@ -943,7 +943,7 @@ impl Pickers {
             .child(
                 div().child(label("When to use")).child(
                     div()
-                        .h(px(48.0))
+                        .h(px(40.0))
                         .px(px(9.0))
                         .py(px(6.0))
                         .rounded(px(8.0))

@@ -3871,7 +3871,9 @@ impl Pickers {
                     // Continue from model rows into the pinned settings triggers.
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx)
-                            + if self.compact_model_picker(cx) {
+                            + if self.compact_model_picker(cx)
+                                || self.model_rail == ModelRail::Profiles
+                            {
                                 0
                             } else {
                                 self.setting_groups(cx).len()
@@ -5475,11 +5477,16 @@ impl Pickers {
             });
 
         let model_scrollbar = popover::rail(self, "model-scrollbar", &theme, cx);
+        let profiles_view = self.model_rail == ModelRail::Profiles;
         let list_host = div()
             .id("model-list-scroll-host")
             .relative()
             .flex_none()
-            .h(px(list_height))
+            .h(px(if profiles_view {
+                list_height + tray_height
+            } else {
+                list_height
+            }))
             .py(px(popover::CARD_INSET))
             // A whisper of wash keeps the scrolling band readable between
             // the pinned chrome above and the traits tray below.
@@ -5509,6 +5516,7 @@ impl Pickers {
         //    the list (the separate Traits popover folded in here — user
         //    request). Hidden entirely when the selected model has neither.
         let has_tray = !compact
+            && !profiles_view
             && self.title.is_none()
             && (!self.trait_ladder(cx).is_empty()
                 || self
