@@ -22,6 +22,7 @@ use crate::state::AppState;
 use crate::theme::Theme;
 
 const GRID_MAX_WIDTH: f32 = 880.0;
+const GRID_PADDING_X: f32 = 24.0;
 const COLUMN_GAP: f32 = 10.0;
 const CARD_RADIUS: f32 = 10.0;
 const ROW_HEIGHT: f32 = 28.0;
@@ -70,6 +71,7 @@ pub struct HomeView {
     customize: popover::Popup<()>,
     collapse_since: Option<Instant>,
     grid_height: std::rc::Rc<std::cell::Cell<f32>>,
+    composer_inset: f32,
     services: Source<ListeningServices>,
     services_all_ports: bool,
     stats: Source<SystemStats>,
@@ -111,6 +113,7 @@ impl HomeView {
             customize: popover::Popup::default(),
             collapse_since: None,
             grid_height: Default::default(),
+            composer_inset: 0.0,
             services: Source::default(),
             services_all_ports: false,
             stats: Source::default(),
@@ -122,6 +125,11 @@ impl HomeView {
             scroll: ScrollHandle::new(),
             _ticker: ticker,
         }
+    }
+
+    pub fn set_composer_frame(&mut self, column_width: f32, composer_width: f32) {
+        let row = column_width.min(GRID_MAX_WIDTH) - 2.0 * GRID_PADDING_X;
+        self.composer_inset = ((row - composer_width) / 2.0).max(0.0);
     }
 
     fn visible(&self) -> bool {
@@ -2062,7 +2070,13 @@ impl Render for HomeView {
             .flex()
             .justify_center()
             .child(pill)
-            .child(div().absolute().right_0().top(px(4.0)).child(customize));
+            .child(
+                div()
+                    .absolute()
+                    .right(px(self.composer_inset * (1.0 - reveal)))
+                    .top(px(4.0))
+                    .child(customize),
+            );
         let measured = self.grid_height.clone();
         let natural = measured.get();
         let grid = div()
@@ -2097,7 +2111,7 @@ impl Render for HomeView {
                         .w_full()
                         .max_w(px(GRID_MAX_WIDTH))
                         .mx_auto()
-                        .px(px(24.0))
+                        .px(px(GRID_PADDING_X))
                         .pb(px(48.0))
                         .flex()
                         .flex_col()

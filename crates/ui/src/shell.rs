@@ -12654,6 +12654,7 @@ impl Shell {
             has_selection,
             chip_opacity,
             harness_update_card.is_some(),
+            main_content_width,
             window,
             cx,
         );
@@ -12862,6 +12863,7 @@ impl Shell {
         has_selection: bool,
         opacity: f32,
         notice_below: bool,
+        column_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -12894,6 +12896,9 @@ impl Shell {
                 home
             }
         };
+        home.update(cx, |home, _| {
+            home.set_composer_frame(column_width, f32::from(pill.size.width))
+        });
         let top = f32::from(pill.bottom()) + HOME_GRID_GAP;
         Some(
             div()
