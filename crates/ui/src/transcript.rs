@@ -113,6 +113,7 @@ pub const CHIP_CARD_HEIGHT: f32 = 30.0;
 /// header inside a 30px bordered card clips 2px off the bottom and every
 /// glyph/icon reads high (user report).
 const CHIP_HEADER_HEIGHT: f32 = CHIP_CARD_HEIGHT - 2.0;
+const CHIP_CARD_PAD_X: f32 = 8.0;
 /// Child labels and expanded text share one edge beneath the compact summary.
 /// The child gutter reserves room for
 /// a longer elbow, a 4px break before the icon, and an 8px icon-to-text gap.
@@ -10039,7 +10040,11 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, theme));
+                            .child(
+                                div()
+                                    .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
+                                    .child(detail_body(invocation, None, theme)),
+                            );
                     }
                     if let Some(detail) = detail.as_deref() {
                         panel = panel
@@ -10049,7 +10054,15 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(detail, detail_highlights[ix].clone(), theme));
+                            .child(
+                                div()
+                                    .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
+                                    .child(detail_body(
+                                        detail,
+                                        detail_highlights[ix].clone(),
+                                        theme,
+                                    )),
+                            );
                     }
                     if let Some(ChipAffordance { blob_ref, label }) = affordance {
                         let loading = matches!(
@@ -10062,6 +10075,7 @@ impl Transcript {
                             .flex_none()
                             .flex()
                             .items_center()
+                            .when(!collapses, |row| row.px(px(CHIP_CARD_PAD_X)))
                             .text_size(px(TOOL_TEXT_SIZE))
                             .text_color(theme.text_faint)
                             .child(label);
@@ -11191,7 +11205,13 @@ fn detail_body(
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     theme: &Theme,
 ) -> AnyElement {
-    let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
+    let body = div()
+        .debug_selector(|| "tool-detail-body".into())
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden();
     match detail {
         // No comment layer: an inline tool diff is a record of what the
         // agent already did, not a review surface.
@@ -11470,7 +11490,7 @@ fn chip_header_row(
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .px(px(if activity { 0.0 } else { 8.0 }))
+        .px(px(if activity { 0.0 } else { CHIP_CARD_PAD_X }))
         .text_size(px(TOOL_LABEL_SIZE))
         .line_height(px(TOOL_LABEL_LINE_HEIGHT))
         .when(!activity, |row| {
@@ -15063,6 +15083,82 @@ mod tests {
                 this.blob_fetch_order.keys().collect::<Vec<_>>()
             );
         });
+    }
+
+    #[gpui::test]
+    fn agent_card_body_is_inset_like_its_header(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, _| {
+            this.chat_id = Some("chat".into());
+            this.folds.insert(
+                "row".into(),
+                FoldState {
+                    open: Some(true),
+                    ..Default::default()
+                },
+            );
+        });
+        struct GroupFixture(Entity<Transcript>);
+        impl Render for GroupFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let call = ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "delegate_task".into(),
+                    input: None,
+                };
+                let tools = Arc::new(vec![ToolItem {
+                    part_id: "toolu_d".into(),
+                    invocation: call_block(&call).map(Arc::new),
+                    call,
+                    is_error: false,
+                    resolved: false,
+                    detail: None,
+                    output_ref: None,
+                    output_bytes: None,
+                    diff_ref: None,
+                    subagent_ref: None,
+                    subagent_status: None,
+                    subagent_tail: None,
+                    app: None,
+                    kind: ToolItemKind::Call,
+                }]);
+                let group = self.0.update(cx, |this, cx| {
+                    this.render_tool_group(
+                        &"row".into(),
+                        &tools,
+                        &"Delegated 1 task".into(),
+                        false,
+                        None,
+                        false,
+                        &theme,
+                        cx,
+                    )
+                });
+                div().w(px(600.0)).h(px(400.0)).child(group)
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| GroupFixture(transcript.clone()));
+        cx.run_until_parked();
+        let header = cx
+            .debug_bounds("tool-chip-header-0")
+            .expect("chip header painted");
+        if cx.debug_bounds("tool-detail-body").is_none() {
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+        }
+        let body = cx
+            .debug_bounds("tool-detail-body")
+            .expect("card body painted");
+        assert_eq!(body.left(), header.left() + px(CHIP_CARD_PAD_X));
+        assert_eq!(body.right(), header.right() - px(CHIP_CARD_PAD_X));
     }
 
     #[gpui::test]
