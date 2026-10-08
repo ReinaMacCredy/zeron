@@ -568,6 +568,7 @@ pub enum SettingsSection {
     /// labeled "Providers".
     Harnesses,
     Tools,
+    AgentProfiles,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
@@ -588,7 +589,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 15] = [
+    pub const ALL: [SettingsSection; 16] = [
         SettingsSection::General,
         SettingsSection::Home,
         SettingsSection::Appearance,
@@ -597,6 +598,7 @@ impl SettingsSection {
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
         SettingsSection::Tools,
+        SettingsSection::AgentProfiles,
         SettingsSection::Devices,
         SettingsSection::Files,
         SettingsSection::Appshots,
@@ -638,6 +640,7 @@ impl SettingsSection {
             SettingsSection::Devices => "devices",
             SettingsSection::Harnesses => "providers",
             SettingsSection::Tools => "tools",
+            SettingsSection::AgentProfiles => "agent-profiles",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
@@ -661,6 +664,7 @@ impl SettingsSection {
             "providers" | "harnesses" => SettingsSection::Harnesses,
             "agents" => SettingsSection::Agents,
             "tools" => SettingsSection::Tools,
+            "agent-profiles" | "profiles" => SettingsSection::AgentProfiles,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
             "notifications" => SettingsSection::Notifications,
@@ -690,6 +694,7 @@ impl SettingsSection {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Tools => "Tools",
+            SettingsSection::AgentProfiles => "Agent profiles",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
@@ -716,6 +721,7 @@ impl SettingsSection {
             ],
             SettingsSection::Agents => &["account", "login", "usage", "provider"],
             SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
+            SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
@@ -2285,6 +2291,7 @@ pub struct Shell {
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
+    agent_profiles_page: Option<Entity<crate::settings::agent_profiles::AgentProfilesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
     home_settings_page: Option<Entity<HomeSettingsPage>>,
@@ -2925,6 +2932,7 @@ impl Shell {
             settings_restore_pending: false,
             nav,
             devices_page: None,
+            agent_profiles_page: None,
             archived_page: None,
             source_control_page: None,
             home_settings_page: None,
@@ -6114,6 +6122,24 @@ impl Shell {
         .detach();
     }
 
+    fn open_agent_profile_editor(&mut self, cx: &mut Context<Self>) {
+        let pending = cx
+            .try_global::<crate::agent_profiles::PendingProfileEdit>()
+            .and_then(|pending| pending.0.clone());
+        cx.set_global(crate::agent_profiles::PendingProfileEdit(None));
+        self.open_settings(SettingsSection::AgentProfiles, cx);
+        let page = self
+            .agent_profiles_page
+            .get_or_insert_with(|| {
+                let state = self.state.clone();
+                cx.new(|cx| crate::settings::agent_profiles::AgentProfilesPage::new(state, cx))
+            })
+            .clone();
+        if let Some((profile_id, draft)) = pending {
+            page.update(cx, |page, cx| page.open_editor(profile_id, draft, cx));
+        }
+    }
+
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let section = section.canonical();
         self.command_palette = None;
@@ -6184,6 +6210,10 @@ impl Shell {
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             SettingsSection::Harnesses => self
                 .harnesses_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            SettingsSection::AgentProfiles => self
+                .agent_profiles_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             SettingsSection::Appearance => self
@@ -6259,6 +6289,18 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match section {
+            SettingsSection::AgentProfiles => {
+                if self.agent_profiles_page.is_none() {
+                    let state = self.state.clone();
+                    self.agent_profiles_page = Some(cx.new(|cx| {
+                        crate::settings::agent_profiles::AgentProfilesPage::new(state, cx)
+                    }));
+                }
+                match &self.agent_profiles_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
                     let state = self.state.clone();
@@ -8628,6 +8670,7 @@ impl Shell {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Tools => icons::LUCIDE_HAMMER,
+            SettingsSection::AgentProfiles => icons::BOT,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
@@ -15323,6 +15366,11 @@ impl Render for Shell {
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(
+                |this, _: &crate::agent_profiles::OpenAgentProfileEditor, _, cx| {
+                    this.open_agent_profile_editor(cx)
+                },
+            ))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| {
                 this.cycle_navigation(true, window, cx)
             }))

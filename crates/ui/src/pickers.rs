@@ -13,6 +13,7 @@
 //! rendered as skeletons / inline errors with Retry.
 
 mod compact;
+mod profiles;
 
 use crate::roll_text::{roll_text, rolling};
 use std::collections::{HashMap, HashSet};
@@ -508,6 +509,7 @@ enum ModelName {
 enum ModelRail {
     All,
     Favorites,
+    Profiles,
     #[default]
     Harness,
 }
@@ -746,6 +748,7 @@ struct PendingModelSwitch {
     from: String,
     to: String,
     harness: Option<HarnessId>,
+    profile: Option<profiles::ProfilePick>,
 }
 
 /// A model pick on an existing chat warns before it lands only when there
@@ -952,6 +955,12 @@ pub struct Pickers {
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
+    _profiles_observe: Subscription,
+    profiles: Loadable<Vec<zeron_proto::AgentProfile>>,
+    profiles_task: Option<Task<()>>,
+    profile_edit: Option<profiles::ProfileEdit>,
+    profile_focus_pending: bool,
+    boot_profile_edit: bool,
 }
 
 impl Pickers {
@@ -1120,12 +1129,22 @@ impl Pickers {
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
-        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch` boots
-        // with that popover open — synthetic input can't reach the app on
+        let profiles_observe = cx.observe_global::<crate::agent_profiles::AgentProfilesChanged>(
+            |this: &mut Self, cx| {
+                if !matches!(this.profiles, Loadable::Idle) {
+                    this.ensure_profiles(cx);
+                }
+            },
+        );
+        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch|profiles|profile-edit`
+        // boots with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
-        let boot_open = match std::env::var("ZERON_OPEN_PICKER").ok().as_deref() {
+        let boot_knob = std::env::var("ZERON_OPEN_PICKER").ok();
+        let boot_profiles =
+            title.is_none() && matches!(boot_knob.as_deref(), Some("profiles" | "profile-edit"));
+        let boot_open = match boot_knob.as_deref() {
             _ if title.is_some() => None,
-            Some("model") => Some(PickerKind::HarnessModel),
+            Some("model" | "profiles" | "profile-edit") => Some(PickerKind::HarnessModel),
             Some("traits") => Some(PickerKind::HarnessModel),
             Some("branch") => Some(PickerKind::Branch),
             Some("checkout") => Some(PickerKind::Checkout),
@@ -1177,7 +1196,11 @@ impl Pickers {
             draft_owner,
             chat_override: None,
             open,
-            model_rail: ModelRail::default(),
+            model_rail: if boot_profiles {
+                ModelRail::Profiles
+            } else {
+                ModelRail::default()
+            },
             setting_menu: None,
             setting_active: 0,
             setting_on_left: false,
@@ -1229,6 +1252,12 @@ impl Pickers {
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
+            _profiles_observe: profiles_observe,
+            profiles: Loadable::Idle,
+            profiles_task: None,
+            profile_edit: None,
+            profile_focus_pending: false,
+            boot_profile_edit: boot_knob.as_deref() == Some("profile-edit") && boot_profiles,
         }
     }
 
@@ -1656,6 +1685,7 @@ impl Pickers {
         self.compact_effort_dragging = false;
         self.cancel_setting_hover();
         self.pending_model_switch = None;
+        self.profile_edit = None;
         self.viewed_harness = None;
         self.setting_menu = None;
         self.setting_bounds = None;
@@ -1844,6 +1874,7 @@ impl Pickers {
                 // possibly from another viewer) — every open revalidates,
                 // keeping current rows visible until the fresh catalog lands.
                 self.ensure_harnesses(true, cx);
+                self.ensure_profiles(cx);
                 // Model discovery can recover after a slow/plugin-heavy ACP
                 // cold start. Revalidate on every open instead of pinning a
                 // timeout/fallback result until the application restarts.
@@ -2426,6 +2457,7 @@ impl Pickers {
                     from,
                     to,
                     harness: None,
+                    profile: None,
                 });
                 cx.notify();
                 return;
@@ -2483,6 +2515,7 @@ impl Pickers {
             from,
             to,
             harness: Some(harness),
+            profile: None,
         });
         cx.notify();
     }
@@ -2520,11 +2553,14 @@ impl Pickers {
                 switch_hint(harness).to_string(),
             ),
         };
-        self.update_chat_config(cx, Some(note), move |config| {
-            if let Some(harness) = pending.harness {
-                config.harness = harness;
+        self.update_chat_config(cx, Some(note), move |config| match pending.profile {
+            Some(pick) => pick.write(config),
+            None => {
+                if let Some(harness) = pending.harness {
+                    config.harness = harness;
+                }
+                config.model = Some(pending.model_id)
             }
-            config.model = Some(pending.model_id)
         });
         self.animate_close(cx);
         cx.notify();
@@ -3012,12 +3048,20 @@ impl Pickers {
 
     /// The picker's visible row count (keyboard nav bounds).
     fn model_rows_len(&self, cx: &App) -> usize {
+        if self.model_rail == ModelRail::Profiles {
+            return self.profile_rows_len(cx);
+        }
         self.model_rows(cx).len()
     }
 
     /// Enter on the harness/model popover: pick the highlighted model.
     fn activate_model_row(&mut self, cx: &mut Context<Self>) {
-        if self.setting_menu.is_some() {
+        if self.model_rail == ModelRail::Profiles
+            && self.setting_menu.is_none()
+            && self.active < self.model_rows_len(cx)
+        {
+            self.activate_profile_index(self.active, cx);
+        } else if self.setting_menu.is_some() {
             self.activate_setting_choice(cx);
         } else if self.compact_model_picker(cx) && self.compact_model_list {
             self.activate_model_index(self.active, cx);
@@ -3702,6 +3746,20 @@ impl Pickers {
                 _ => {}
             }
             cx.stop_propagation();
+            return;
+        }
+        if let Some(edit) = self.profile_edit.as_ref() {
+            if event.keystroke.key == "escape" {
+                if edit.choosing.is_some() {
+                    if let Some(edit) = self.profile_edit.as_mut() {
+                        edit.choosing = None;
+                    }
+                    cx.notify();
+                } else {
+                    self.close_profile_edit(cx);
+                }
+                cx.stop_propagation();
+            }
             return;
         }
         if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
@@ -5128,6 +5186,11 @@ impl Pickers {
             Loadable::Ready(_) => {}
         }
 
+        if self.profile_edit.is_some()
+            && let Some(edit) = self.render_profile_edit(height, window, cx)
+        {
+            return edit;
+        }
         let viewed = self.rail_harness(cx);
         let model_scroll = self.model_scroll.clone();
         let query = self.search.read(cx).text().trim().to_string();
@@ -5202,6 +5265,8 @@ impl Pickers {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.setting_menu = None;
                     this.model_rail = ModelRail::Favorites;
+                    this.search
+                        .update(cx, |input, cx| input.set_placeholder("Search models…", cx));
                     // Anchor on the selected row when it's starred, else
                     // the top — never a stray second highlight.
                     this.active = this.selected_model_index(cx);
@@ -5221,6 +5286,43 @@ impl Pickers {
                 )
                 .when(favorites_view, |el| el.child(tab_indicator(theme.accent))),
         );
+        if self.title.is_none() {
+            let profiles_view = self.model_rail == ModelRail::Profiles;
+            tabs = tabs.child(
+                div()
+                    .id("model-tab-profiles")
+                    .relative()
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .rounded(px(popover::MENU_ITEM_RADIUS))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .when(!profiles_view, |el| {
+                        el.hover(|s| s.bg(crate::theme::ink(0.06)))
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.setting_menu = None;
+                        this.model_rail = ModelRail::Profiles;
+                        this.active = 0;
+                        this.search.update(cx, |input, cx| {
+                            input.set_placeholder("Search profiles…", cx)
+                        });
+                        cx.notify();
+                    }))
+                    .child(
+                        crate::icons::icon(crate::icons::LUCIDE_USER_ROUND)
+                            .size(px(15.0))
+                            .text_color(if profiles_view {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            }),
+                    )
+                    .when(profiles_view, |el| el.child(tab_indicator(theme.accent))),
+            );
+        }
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
             let is_viewed = !favorites_view && viewed == Some(harness);
@@ -5241,6 +5343,9 @@ impl Pickers {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.setting_menu = None;
                             this.model_rail = ModelRail::Harness;
+                            this.search.update(cx, |input, cx| {
+                                input.set_placeholder("Search models…", cx)
+                            });
                             this.pick_harness(harness, cx);
                             cx.notify();
                         }))
@@ -5379,6 +5484,7 @@ impl Pickers {
             .bg(crate::theme::ink(0.02))
             .on_hover(cx.listener(Self::on_menu_list_hover))
             .child(match model_list {
+                _ if self.model_rail == ModelRail::Profiles => self.render_profile_list(cx),
                 Some(list) => {
                     popover::faded_menu_list(&self.model_scroll_base(), list).into_any_element()
                 }
@@ -6993,6 +7099,7 @@ fn scoped_model_rows<'a>(
         ModelRail::All => true,
         ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
         ModelRail::Harness => Some(descriptor.id) == effective,
+        ModelRail::Profiles => false,
     };
     if !query.is_empty() {
         // Rank: label prefix < label substring < description hit; stars,
@@ -7037,6 +7144,7 @@ fn scoped_model_rows<'a>(
         return ranked.into_iter().map(|(_, _, _, row)| row).collect();
     }
     match rail {
+        ModelRail::Profiles => Vec::new(),
         ModelRail::All | ModelRail::Favorites => {
             let mut rows = Vec::new();
             for descriptor in descriptors {
@@ -7499,6 +7607,21 @@ impl Render for Pickers {
         self.prefetch_models(false, cx);
         if self.boot_switch_pending {
             self.debug_open_model_switch(window, cx);
+        }
+        if self.open_kind() == Some(PickerKind::HarnessModel)
+            && matches!(self.profiles, Loadable::Idle)
+        {
+            self.ensure_profiles(cx);
+        }
+        if self.boot_profile_edit
+            && let Some(profile) = self.profiles.ready().and_then(|p| p.first()).cloned()
+        {
+            self.boot_profile_edit = false;
+            self.open_profile_edit(
+                Some(profile.id.clone()),
+                crate::agent_profiles::draft_of(&profile),
+                cx,
+            );
         }
         // A popover opened data-side (ZERON_OPEN_PICKER) never went through
         // `toggle`, so kick its loads here (all ensure_* are idempotent).
@@ -11331,6 +11454,55 @@ mod tests {
                     pickers.viewed_harness, None,
                     "the dialog's close drops the browsed tab"
                 );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_profile_on_another_harness_switches_behind_the_dialog_and_lands_its_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.open.open(PickerKind::HarnessModel);
+                let mut profile = zeron_proto::AgentProfile {
+                    id: "reviewer".into(),
+                    name: "Reviewer".into(),
+                    icon: Default::default(),
+                    color: Default::default(),
+                    harness: HarnessId::Codex,
+                    model: Some("gpt".into()),
+                    reasoning: None,
+                    permission_mode: Some(PermissionMode::Ask),
+                    model_options: Default::default(),
+                    notes: String::new(),
+                };
+                pickers.apply_profile(&profile, cx);
+                let pending = pickers.pending_model_switch.clone().expect("dialog");
+                assert_eq!(pending.harness, Some(HarnessId::Codex));
+                assert_eq!(pending.to, "GPT");
+                let row = |pickers: &Pickers, cx: &App| {
+                    pickers.chat_row(cx).unwrap().config.clone().unwrap()
+                };
+                assert_eq!(row(pickers, cx).harness, HarnessId::ClaudeCode);
+
+                pickers.confirm_model_switch(cx);
+                let config = row(pickers, cx);
+                assert_eq!(config.harness, HarnessId::Codex);
+                assert_eq!(config.model.as_deref(), Some("gpt"));
+                assert_eq!(config.permission_mode, PermissionMode::Ask);
+
+                profile.model = None;
+                profile.permission_mode = Some(PermissionMode::Full);
+                pickers.apply_profile(&profile, cx);
+                assert!(
+                    pickers.pending_model_switch.is_none(),
+                    "same harness, no model change: no dialog"
+                );
+                let config = row(pickers, cx);
+                assert_eq!(config.model.as_deref(), Some("gpt"));
+                assert_eq!(config.permission_mode, PermissionMode::Full);
             })
             .unwrap();
     }
