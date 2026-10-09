@@ -173,6 +173,10 @@
       const windows = visibleWindows(call("computer_list_windows", { app: info.name }).data.windows || []).filter((w) =>
         twins.some((t) => t.pid === w.pid),
       );
+      if (!windows.length)
+        throw new Error(
+          `Several ${info.name} instances are running (pids ${twins.map((t) => t.pid).join(", ")}) and none has a usable window. Use cua.listWindows() and cua.getApp({ windowId }).`,
+        );
       throw new Error(
         `Several ${info.name} instances are running. Pick a window with cua.getApp({ windowId }): ${windows
           .map((w) => `"${w.id}" (pid ${w.pid}, ${JSON.stringify(w.title || "")})`)

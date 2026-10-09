@@ -595,11 +595,17 @@ async fn get_app_by_name_refuses_when_several_instances_run() {
     let outcome = exec(
         "js-app-twins",
         &host,
-        "try { await cua.getApp(\"Helium\"); } catch (e) { nodeRepl.write(e.message); } var a = await cua.getApp({ windowId: \"cua:14:5\" }); nodeRepl.write(a.windowId);",
+        "try { await cua.getApp(\"Helium\"); } catch (e) { nodeRepl.write(e.message); } try { await cua.getApp(\"Dia\"); } catch (e) { nodeRepl.write(e.message); } var a = await cua.getApp({ windowId: \"cua:14:5\" }); nodeRepl.write(a.windowId);",
     )
     .await;
     assert_eq!(outcome.error, None, "{}", texts(&outcome));
     let text = texts(&outcome);
+    assert!(
+        text.contains(
+            "Several Dia instances are running (pids 12, 13) and none has a usable window."
+        ),
+        "{text}"
+    );
     assert!(
         text.contains(r#"Several Helium instances are running. Pick a window with cua.getApp({ windowId }): "cua:11:83" (pid 11, "Inbox"), "cua:14:5" (pid 14, "Build PC")."#),
         "{text}"
