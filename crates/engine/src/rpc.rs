@@ -987,6 +987,26 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
     }
 
+    fn detach_profile_from_chats(&self, profile_id: &str) -> Result<(), RpcError> {
+        let local_device = self.doc_host.device_id();
+        let chats = self.workspace.watch_chats().borrow().clone();
+        for chat in chats.iter().filter(|chat| chat.device_id == local_device) {
+            let Some(mut config) = chat
+                .config
+                .clone()
+                .filter(|config| config.profile_id.as_deref() == Some(profile_id))
+            else {
+                continue;
+            };
+            config.profile_id = None;
+            config.instructions.clear();
+            self.workspace
+                .set_chat_config(&chat.id, &config)
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn agent_profiles_store(&self) -> Result<AgentProfilesStore, RpcError> {
         self.agent_profiles
             .clone()
@@ -4414,7 +4434,9 @@ impl RpcService for EngineRpc {
             methods::DELETE_AGENT_PROFILE => {
                 let p: DeleteAgentProfileParams = parse_params(params)?;
                 let store = self.agent_profiles_store()?;
+                let profile_id = p.profile_id.clone();
                 let snapshot = blocking(move || store.delete(&p.profile_id)).await?;
+                self.detach_profile_from_chats(&profile_id)?;
                 RpcReply::value(&snapshot)
             }
             methods::REORDER_AGENT_PROFILES => {
