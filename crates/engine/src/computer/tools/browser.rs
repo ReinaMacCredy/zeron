@@ -1254,6 +1254,10 @@ fn browser_entries() -> Vec<ComputerToolEntry> {
                         "enum": ["dom_refs_v1", "semantic_v2"],
                         "description": "Snapshot contract version; semantic_v2 is the richer outline.",
                     },
+                    "screenshot_only": {
+                        "type": "boolean",
+                        "description": "With include_screenshot, capture the tab without a new snapshot, so the latest refs stay valid.",
+                    },
                     "scope_ref": {
                         "type": "string",
                         "description": "Limit the observation to this ref's subtree.",
@@ -1504,6 +1508,7 @@ fn browser_entries() -> Vec<ComputerToolEntry> {
                     "target_id": target_id_property(),
                     "tab_id": tab_id_property(),
                     "ref": ref_property(),
+                    "input_route": { "type": "string", "enum": ["trusted", "dom_event"] },
                 },
                 "required": ["target_id", "ref"],
                 "additionalProperties": false,

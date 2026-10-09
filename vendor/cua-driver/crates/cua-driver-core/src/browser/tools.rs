@@ -316,6 +316,11 @@ impl GetBrowserStateTool {
                         "default": false,
                         "description": "With include_screenshot, capture the whole scrollable page (height capped at 16384 CSS px) instead of the viewport."
                     },
+                    "screenshot_only": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "With include_screenshot, capture the tab without taking a snapshot, so refs from the latest snapshot stay valid."
+                    },
                 },
                 "additionalProperties": true
             }),
@@ -398,6 +403,24 @@ impl Tool for GetBrowserStateTool {
             };
             if full_page && !include_screenshot {
                 return ToolResult::error("full_page requires include_screenshot=true");
+            }
+            if include_screenshot && args.get("screenshot_only").and_then(Value::as_bool) == Some(true) {
+                return match self
+                    .engine
+                    .capture_tab_screenshot(&session, &target_id, &tab_id, full_page)
+                    .await
+                {
+                    Ok(screenshot) => with_tab_screenshot(
+                        ToolResult::text("tab screenshot").with_structured(json!({
+                            "status": "ok",
+                            "mode": "screenshot",
+                            "target_id": target_id,
+                            "tab_id": tab_id,
+                        })),
+                        screenshot,
+                    ),
+                    Err(refusal) => refusal.to_tool_result(),
+                };
             }
             if snapshot_format != "dom_refs_v1" && snapshot_format != "semantic_v2" {
                 return ToolResult::error(format!(
@@ -1749,6 +1772,91 @@ pub struct BrowserTypeTool {
     engine: Arc<BrowserEngine>,
 }
 
+// Enter as a page sees it from a keyboard: keydown, keypress and keyup on the
+// field, then the implicit form submission the browser performs when keydown
+// was not prevented.
+const DOM_PRESS_ENTER: &str = r#"function() {
+    /*cua-dom-enter*/
+    if (typeof this.focus === 'function') this.focus();
+    const init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true, composed: true };
+    const down = this.dispatchEvent(new KeyboardEvent('keydown', init));
+    this.dispatchEvent(new KeyboardEvent('keypress', init));
+    this.dispatchEvent(new KeyboardEvent('keyup', init));
+    let submitted = false;
+    if (down && this.form && this.tagName === 'INPUT' && typeof this.form.requestSubmit === 'function') {
+        this.form.requestSubmit();
+        submitted = true;
+    }
+    return { dispatched: true, prevented: !down, submitted: submitted };
+}"#;
+
+async fn dom_event_enter(
+    validated: &ValidatedTab,
+    ext_ref: &str,
+    backend_node_id: i64,
+    cdp: &str,
+) -> ToolResult {
+    let conn = &validated.conn;
+    let object_id = conn
+        .call(
+            Some(cdp),
+            "DOM.resolveNode",
+            json!({ "backendNodeId": backend_node_id }),
+        )
+        .await
+        .ok()
+        .and_then(|resolved| {
+            resolved["object"]["objectId"]
+                .as_str()
+                .map(str::to_owned)
+        });
+    let Some(object_id) = object_id else {
+        return BrowserRefusal::new(
+            BrowserRefusalCode::BrowserRefStale,
+            "the ref's node no longer resolves in the live page",
+        )
+        .to_tool_result();
+    };
+    let pressed = conn
+        .call(
+            Some(cdp),
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": object_id,
+                "functionDeclaration": DOM_PRESS_ENTER,
+                "returnByValue": true,
+            }),
+        )
+        .await;
+    let payload = match pressed {
+        Ok(value) if value.get("exceptionDetails").is_none() => value["result"]["value"].clone(),
+        _ => {
+            return uncertain_dom_text_result(
+                &validated.tab.tab_id,
+                "the synthetic Enter reply could not be read",
+            )
+        }
+    };
+    ToolResult::text(format!(
+        "dispatched synthetic DOM Enter on {ext_ref} in {}; application effect not verified \
+         (trust-gated controls may ignore untrusted events). Refresh page state and verify \
+         the expected postcondition",
+        validated.tab.tab_id
+    ))
+    .with_structured(json!({
+        "status": "ok",
+        "effect": "unverifiable",
+        "route": "dom_event",
+        "target_id": validated.record.target_id,
+        "tab_id": validated.tab.tab_id,
+        "ref": ext_ref,
+        "mode": "keystrokes",
+        "dispatched": payload["dispatched"].as_bool() == Some(true),
+        "prevented": payload["prevented"].as_bool() == Some(true),
+        "submitted": payload["submitted"].as_bool() == Some(true),
+    }))
+}
+
 fn uncertain_dom_text_result(tab_id: &str, reason: &str) -> ToolResult {
     ToolResult::text(format!(
         "text insertion was attempted in {tab_id}, but its effect is unverified: {reason}. \
@@ -1803,8 +1911,9 @@ impl BrowserTypeTool {
                         "description": "\"trusted\" (default): CDP Input events. It \
                             refuses rather than foregrounding a standalone browser. \
                             \"dom_event\": synthetic full-background DOM insertion for \
-                            input, textarea, and contenteditable refs (mode must be \
-                            insert_text). Dispatch is read back from the live element, \
+                            input, textarea, and contenteditable refs (mode insert_text), \
+                            or a synthetic Enter with implicit form submission (mode \
+                            keystrokes, text \"\\n\"). Dispatch is read back from the live element, \
                             but it does not prove the application accepted the text; \
                             refresh page state and verify the expected postcondition."
                     },
@@ -2083,10 +2192,13 @@ impl Tool for BrowserTypeTool {
         // The synthetic route replaces text through the element's own value,
         // so per-character key semantics do not exist for it; say so instead
         // of pretending keystrokes mode has a background route.
-        if route == TypeRoute::DomEvent && mode != "insert_text" {
+        let dom_enter = route == TypeRoute::DomEvent
+            && mode == "keystrokes"
+            && matches!(text.as_str(), "\n" | "\r");
+        if route == TypeRoute::DomEvent && mode != "insert_text" && !dom_enter {
             return ToolResult::error(
-                "input_route=dom_event supports mode=insert_text only; \
-                 mode=keystrokes has no synthetic route — use insert_text, the native \
+                "input_route=dom_event supports mode=insert_text, and mode=keystrokes only \
+                 for a single Enter (\"\\n\"); other keystrokes have no synthetic route — use insert_text, the native \
                  element-text route, or an authorized foreground",
             );
         }
@@ -2180,6 +2292,9 @@ impl Tool for BrowserTypeTool {
         // Explicit synthetic background route: DOM-only focus + insertion +
         // read-back. It sends no Input-domain event, so a standalone browser
         // stays in the background. Never entered implicitly.
+        if dom_enter {
+            return dom_event_enter(&validated, &ext_ref, entry.backend_node_id, cdp).await;
+        }
         if route == TypeRoute::DomEvent {
             return self
                 .dom_event_type(

@@ -497,17 +497,22 @@
   };
 
   class Tab {
-    constructor(browser, tabId, title, url, background) {
+    constructor(browser, tabId, title, url) {
       this.browser = browser;
       this.id = tabId;
       this.targetId = browser.binding.target_id;
       this.title = title || "";
       this.url = url || "";
-      this.background = !!background;
     }
 
     ids(extra) {
       return Object.assign({ target_id: this.targetId, tab_id: this.id }, extra || {});
+    }
+
+    // Trusted CDP input would raise the user's browser window, so the driver only
+    // admits the DOM route for a signed-in profile in the background.
+    input(extra) {
+      return this.ids(Object.assign(this.browser.browserId === "isolated" ? {} : { input_route: "dom_event" }, extra));
     }
 
     label() {
@@ -522,7 +527,7 @@
     }
 
     getScreenshot(options) {
-      const shot = call("computer_browser_state", this.ids({ include_screenshot: true }));
+      const shot = call("computer_browser_state", this.ids({ include_screenshot: true, screenshot_only: true }));
       const first = shot.images[0];
       if (!first) throw new Error("No tab screenshot was returned.");
       const image = new ZeronImage(first.mimeType, first.data);
@@ -537,14 +542,13 @@
     click(ref) {
       if (typeof ref !== "number" && typeof ref !== "string")
         throw new Error("Tab click takes an element ref from getAXState().");
-      // Chromium drops trusted pointer input on a tab that is not on screen.
-      call("computer_browser_click", this.ids(this.background ? { ref, input_route: "dom_event" } : { ref }));
+      call("computer_browser_click", this.input({ ref }));
       action("browser_click", this.label());
     }
 
     typeText(ref, text) {
       if (ref === null || ref === undefined) throw new Error("Pass the field ref from getAXState() to typeText.");
-      call("computer_browser_type", this.ids({ ref, text: String(text) }));
+      call("computer_browser_type", this.input({ ref, text: String(text) }));
       action("browser_type", this.label(), text);
     }
 
@@ -555,7 +559,7 @@
     pressKey(ref, key) {
       const name = normalizeKey(key);
       if (name !== "enter") throw new Error("Browser tabs support pressKey(ref, \"Return\") only.");
-      call("computer_browser_press", this.ids({ ref }));
+      call("computer_browser_press", this.input({ ref }));
       action("browser_press", this.label(), key);
     }
 
@@ -684,7 +688,7 @@
               tabs.find((t) => String(t.url || "").startsWith(reference.url))
             : null;
       if (!found) throw new Error("No open tab matches that reference.");
-      const tab = new Tab(browser, found.tab_id, found.title, found.url, found.active === false);
+      const tab = new Tab(browser, found.tab_id, found.title, found.url);
       tab.getAXState();
       return tab;
     },
@@ -705,7 +709,7 @@
           url: String(url || "about:blank"),
           new_tab: true,
         }).structured;
-        tab = new Tab(browser, opened.tab_id, "", url, true);
+        tab = new Tab(browser, opened.tab_id, "", url);
         binding.tabs.push({ tab_id: opened.tab_id, title: "", url: String(url || "about:blank") });
         action("browser_navigate", browser.name, url);
       }

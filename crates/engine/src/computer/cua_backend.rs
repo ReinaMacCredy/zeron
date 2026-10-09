@@ -4188,6 +4188,7 @@ impl CuaInner {
             args.insert("tab_id".into(), json!(tab_id));
         }
         args.insert("include_screenshot".into(), Value::Bool(true));
+        args.insert("screenshot_only".into(), Value::Bool(true));
         let call = Self::host_call(HostRequest {
             name: Some("get_browser_state".into()),
             args: Value::Object(args),
