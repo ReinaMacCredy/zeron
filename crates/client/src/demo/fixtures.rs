@@ -437,6 +437,7 @@ pub(crate) fn seed(
                 sandbox: SandboxLevel::WorkspaceWrite,
                 permission_mode: Default::default(),
                 instructions: String::new(),
+                profile_id: None,
             }),
             last_message_preview: Some(demo.preview.into()),
             last_message_at: Some(ms(last)),

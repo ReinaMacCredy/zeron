@@ -118,8 +118,9 @@ pub async fn list(
 pub async fn write(
     engine: &EngineHandle,
     write: ProfileWrite,
+    target: Option<Value>,
 ) -> Result<Vec<AgentProfile>, String> {
-    let (method, params) = match write {
+    let (method, mut params) = match write {
         ProfileWrite::Upsert { profile_id, draft } => (
             methods::UPSERT_AGENT_PROFILE,
             json!({ "profileId": profile_id, "profile": draft }),
@@ -133,6 +134,9 @@ pub async fn write(
             json!({ "profileIds": profile_ids }),
         ),
     };
+    if let Some(target) = target {
+        params["targetDeviceId"] = target;
+    }
     engine
         .client()
         .call_as::<AgentProfilesSnapshot>(method, params)

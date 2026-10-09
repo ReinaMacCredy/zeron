@@ -312,6 +312,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         sandbox: SandboxLevel::ReadOnly,
         permission_mode: zeron_proto::PermissionMode::Auto,
         instructions: String::new(),
+        profile_id: None,
     };
     rig.core
         .workspace
@@ -917,6 +918,50 @@ async fn a_delegated_child_takes_the_model_options_it_was_given() {
     let config = row.config.expect("child config");
     assert_eq!(config.model_options["speed"], "fast");
     assert_eq!(config.instructions, "Review only.");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_delegated_child_names_its_own_profile_never_the_owners() {
+    let rig = rig(Duration::from_millis(5));
+    rig.core
+        .workspace
+        .set_chat_config(
+            "lead",
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                permission_mode: Default::default(),
+                instructions: "Plan only.".into(),
+                profile_id: Some("planner".into()),
+            },
+        )
+        .unwrap();
+    let child_profile = |task: &str, profile: Option<&str>| {
+        let mut params = delegate(task);
+        params.profile_id = profile.map(str::to_string);
+        params.instructions = profile.map(|_| "Review only.".to_string());
+        let core = &rig.core;
+        async move {
+            let view = core
+                .doc_host
+                .delegate_task(params, Default::default())
+                .await
+                .expect("delegate");
+            let row = core.workspace.chat(&view.task_id).unwrap().unwrap();
+            row.config.expect("child config").profile_id
+        }
+    };
+    assert_eq!(
+        child_profile("review it", Some("reviewer"))
+            .await
+            .as_deref(),
+        Some("reviewer")
+    );
+    assert_eq!(child_profile("just do it", None).await, None);
     rig.core.shutdown().await;
 }
 
@@ -1768,6 +1813,7 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 permission_mode: Default::default(),
                 instructions: "Review only.".into(),
+                profile_id: None,
             },
         )
         .unwrap();
