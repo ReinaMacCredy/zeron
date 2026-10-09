@@ -313,6 +313,8 @@ fn browser_product(name: &str, bundle_id: &str) -> BrowserProduct {
         BrowserProduct::Opera
     } else if bundle_id.starts_with("company.thebrowser.browser") || name == "arc" {
         BrowserProduct::Arc
+    } else if bundle_id.starts_with("net.imput.helium") || name == "helium" {
+        BrowserProduct::Helium
     } else if bundle_id == "com.apple.safari" || name == "safari" {
         BrowserProduct::Safari
     } else if bundle_id.contains("firefox") || name == "firefox" {
@@ -420,6 +422,7 @@ fn default_user_data_dir(product: BrowserProduct) -> Option<PathBuf> {
         BrowserProduct::GoogleChrome => "Library/Application Support/Google/Chrome",
         BrowserProduct::MicrosoftEdge => "Library/Application Support/Microsoft Edge",
         BrowserProduct::Chromium => "Library/Application Support/Chromium",
+        BrowserProduct::Helium => "Library/Application Support/net.imput.helium",
         _ => return None,
     };
     Some(home.join(relative))
@@ -889,6 +892,7 @@ impl BrowserPlatform for MacOsBrowserPlatform {
                 | BrowserProduct::Vivaldi
                 | BrowserProduct::Opera
                 | BrowserProduct::Arc
+                | BrowserProduct::Helium
         ) {
             BrowserProcessRole::StandaloneConsumer
         } else {
@@ -1695,13 +1699,12 @@ mod tests {
     fn helium_classifies_as_chromium_by_name_or_bundle_id() {
         assert!(is_chromium("Helium", "net.imput.helium"));
         assert!(is_chromium("", "net.imput.helium"));
-        // No Helium kind exists and none is required: the CDP route gates on
-        // the engine family, while process_role stays honest about a product
-        // the adapter cannot name.
         assert_eq!(
             browser_product("Helium", "net.imput.helium"),
-            BrowserProduct::Other
+            BrowserProduct::Helium
         );
+        assert!(default_user_data_dir(BrowserProduct::Helium)
+            .is_some_and(|dir| dir.ends_with("Library/Application Support/net.imput.helium")));
         // `is_chromium` is a product-token check only. A Helium helper shares
         // the product token; `classify_browser` derives the Helper role from
         // the name/arguments and endpoint admission refuses that role, exactly

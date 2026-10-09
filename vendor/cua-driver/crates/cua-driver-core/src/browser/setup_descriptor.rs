@@ -33,6 +33,7 @@ const EDGE_TITLES: &[&str] = &[
     "Inspect with Microsoft Edge DevTools",
     "Inspect with Edge DevTools",
 ];
+const HELIUM_TITLES: &[&str] = &["Inspect with Chrome Developer Tools"];
 const CHROME_TAB_CLOSE_LABELS: &[&str] = &["Close"];
 const EDGE_TAB_CLOSE_LABELS: &[&str] = &["Close tab"];
 
@@ -56,6 +57,16 @@ const CHROMIUM: BrowserSetupDescriptor = BrowserSetupDescriptor {
     tab_close_labels: CHROME_TAB_CLOSE_LABELS,
 };
 
+const HELIUM: BrowserSetupDescriptor = BrowserSetupDescriptor {
+    product: BrowserProduct::Helium,
+    product_name: "Helium",
+    setup_url: "helium://inspect/#remote-debugging",
+    page_titles: HELIUM_TITLES,
+    page_heading: "Remote debugging",
+    checkbox_label: "Allow remote debugging for this browser instance",
+    tab_close_labels: CHROME_TAB_CLOSE_LABELS,
+};
+
 const EDGE: BrowserSetupDescriptor = BrowserSetupDescriptor {
     product: BrowserProduct::MicrosoftEdge,
     product_name: "Microsoft Edge",
@@ -73,6 +84,7 @@ pub fn existing_profile_setup_descriptor(
         BrowserProduct::GoogleChrome => Some(&CHROME),
         BrowserProduct::Chromium => Some(&CHROMIUM),
         BrowserProduct::MicrosoftEdge => Some(&EDGE),
+        BrowserProduct::Helium => Some(&HELIUM),
         _ => None,
     }
 }
@@ -101,6 +113,9 @@ mod tests {
                 .product,
             BrowserProduct::Chromium
         );
+        let helium = existing_profile_setup_descriptor(BrowserProduct::Helium).unwrap();
+        assert_eq!(helium.setup_url, "helium://inspect/#remote-debugging");
+        assert_eq!(helium.page_titles, ["Inspect with Chrome Developer Tools"]);
         for product in [
             BrowserProduct::Brave,
             BrowserProduct::Firefox,

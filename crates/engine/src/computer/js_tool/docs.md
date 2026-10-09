@@ -69,8 +69,8 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 ## Browsers
 
 - Browser ids:
-  - `"com.google.Chrome"` (or `"Chrome"`), Edge and Chromium are the user's running, signed-in profile. Attaching asks the user once.
-  - Other Chromium browsers (Helium, Dia, Arc, Brave, Vivaldi, Opera) are listed under `appOnlyBrowsers` in `cua.getState()`: drive their windows as apps.
+  - `"com.google.Chrome"` (or `"Chrome"`), Edge, Chromium and Helium are the user's running, signed-in profile. Attaching asks the user once.
+  - Other Chromium browsers (Dia, Arc, Brave, Vivaldi, Opera) are listed under `appOnlyBrowsers` in `cua.getState()`: drive their windows as apps.
   - `"isolated"` is a separate headless browser without the user's cookies. Never swap one for the other silently.
 - `cua.createBrowserTab("Chrome", url)` opens a background tab in the user's browser.
 - Tabs you open close when the turn ends:

@@ -321,6 +321,8 @@ const BROWSERS: &[&str] = &[
     "com.brave.browser",
     "com.operasoftware.opera",
     "com.vivaldi.vivaldi",
+    "net.imput.helium",
+    "company.thebrowser.dia",
     "safari",
     "google chrome",
     "chrome",
@@ -330,6 +332,8 @@ const BROWSERS: &[&str] = &[
     "brave browser",
     "opera",
     "vivaldi",
+    "helium",
+    "dia",
 ];
 
 const FILES: &[&str] = &["com.apple.finder", "finder"];
@@ -968,6 +972,8 @@ mod tests {
             ("Mail", Some("com.apple.mail")),
             ("Safari", Some("com.apple.Safari")),
             ("Google Chrome", None),
+            ("Helium", Some("net.imput.helium")),
+            ("Dia", Some("company.thebrowser.dia")),
             ("Finder", Some("com.apple.finder")),
         ] {
             assert!(

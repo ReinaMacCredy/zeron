@@ -96,7 +96,9 @@ impl JsHost for FakeHost {
                 { "pid": 7, "name": "Calculator", "bundleId": "com.apple.calculator", "running": true },
                 { "pid": 9, "name": "Google Chrome", "bundleId": "com.google.Chrome", "running": true },
                 { "pid": 11, "name": "Helium", "bundleId": "net.imput.helium", "running": true },
-                { "pid": 12, "name": "Helium", "bundleId": "net.imput.helium", "running": true }
+                { "pid": 14, "name": "Helium", "bundleId": "net.imput.helium", "running": true },
+                { "pid": 12, "name": "Dia", "bundleId": "company.thebrowser.dia", "running": true },
+                { "pid": 13, "name": "Dia", "bundleId": "company.thebrowser.dia", "running": true }
             ] })),
             "computer_type_text" if self.type_warning => json_result(json!({
                 "action": "type_text",
@@ -523,16 +525,29 @@ async fn running_chromium_browsers_without_page_access_are_explained_in_the_stat
     let outcome = exec(
         "js-browsers",
         &host,
-        "var s = await cua.getState({ emit: false }); nodeRepl.write(JSON.stringify([s.browsers.map(b => b.id), s.appOnlyBrowsers.map(b => b.name)])); try { await cua.createBrowserTab(\"Helium\", \"https://example.com\"); } catch (e) { nodeRepl.write(e.message); }",
+        "var s = await cua.getState({ emit: false }); nodeRepl.write(JSON.stringify([s.browsers.map(b => b.id), s.appOnlyBrowsers.map(b => b.name)])); try { await cua.createBrowserTab(\"Dia\", \"https://example.com\"); } catch (e) { nodeRepl.write(e.message); }",
     )
     .await;
     assert_eq!(outcome.error, None, "{}", texts(&outcome));
     let text = texts(&outcome);
     assert!(
-        text.contains(r#"[["com.google.Chrome"],["Helium"]]"#),
+        text.contains(
+            r#"[["com.google.Chrome","net.imput.helium#11","net.imput.helium#14"],["Dia"]]"#
+        ),
         "{text}"
     );
-    assert!(text.contains("Helium is Chromium-based"), "{text}");
+    assert!(text.contains("Dia is Chromium-based"), "{text}");
+    let twins = exec(
+        "js-browser-twins",
+        &host,
+        "try { await cua.createBrowserTab(\"Helium\", \"https://example.com\"); } catch (e) { nodeRepl.write(e.message); }",
+    )
+    .await;
+    assert!(
+        texts(&twins).contains(r#"Several Helium instances are running. Pick one by id: "net.imput.helium#11", "net.imput.helium#14"."#),
+        "{}",
+        texts(&twins)
+    );
 }
 
 #[tokio::test]

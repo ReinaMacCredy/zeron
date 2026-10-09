@@ -356,21 +356,31 @@
     "com.google.Chrome": "Chrome",
     "com.microsoft.edgemac": "Edge",
     "org.chromium.Chromium": "Chromium",
+    "net.imput.helium": "Helium",
   };
 
   const APP_ONLY_BROWSERS = {
     "com.brave.Browser": "Brave",
-    "net.imput.helium": "Helium",
     "company.thebrowser.dia": "Dia",
     "company.thebrowser.Browser": "Arc",
     "com.vivaldi.Vivaldi": "Vivaldi",
     "com.operasoftware.Opera": "Opera",
   };
 
-  const runningBrowsers = () =>
-    (call("computer_list_apps").data.apps || [])
-      .filter((a) => a.running && BROWSER_BUNDLES[a.bundleId])
-      .map((a) => ({ id: a.bundleId, name: BROWSER_BUNDLES[a.bundleId], pid: a.pid, appName: a.name }));
+  const runningBrowsers = () => {
+    const apps = (call("computer_list_apps").data.apps || []).filter((a) => a.running && BROWSER_BUNDLES[a.bundleId]);
+    return apps.map((a) => {
+      const twins = apps.filter((b) => b.bundleId === a.bundleId).length > 1;
+      const name = BROWSER_BUNDLES[a.bundleId];
+      return {
+        id: twins ? `${a.bundleId}#${a.pid}` : a.bundleId,
+        name: twins ? `${name} (pid ${a.pid})` : name,
+        family: name,
+        pid: a.pid,
+        appName: a.name,
+      };
+    });
+  };
 
   const appOnlyBrowsers = (apps) =>
     apps
@@ -379,7 +389,7 @@
         id: a.bundleId,
         name: APP_ONLY_BROWSERS[a.bundleId],
         pageTool: false,
-        reason: `${APP_ONLY_BROWSERS[a.bundleId]} is Chromium-based, but Zeron can only turn on page access for Chrome, Edge and Chromium. Drive it as an app with cua.getApp({ windowId }), or open the page in Chrome or the isolated browser.`,
+        reason: `${APP_ONLY_BROWSERS[a.bundleId]} is Chromium-based, but Zeron can only turn on page access for Chrome, Edge, Chromium and Helium. Drive it as an app with cua.getApp({ windowId }), or open the page in Chrome or the isolated browser.`,
       }));
 
   class Browser {
@@ -433,9 +443,21 @@
   const browserById = (id) => {
     if (!id || id === "isolated" || id === "iab") return new Browser({ id: "isolated", name: "Isolated browser" });
     const wanted = String(id).toLowerCase();
-    const found = runningBrowsers().find(
-      (b) => b.id.toLowerCase() === wanted || b.name.toLowerCase() === wanted || b.appName.toLowerCase() === wanted,
+    const running = runningBrowsers();
+    const exact = running.filter((b) => b.id.toLowerCase() === wanted);
+    const named = running.filter(
+      (b) =>
+        b.id.split("#")[0].toLowerCase() === wanted ||
+        b.family.toLowerCase() === wanted ||
+        b.appName.toLowerCase() === wanted,
     );
+    const matches = exact.length ? exact : named;
+    if (matches.length > 1) {
+      throw new Error(
+        `Several ${matches[0].family} instances are running. Pick one by id: ${matches.map((b) => `"${b.id}"`).join(", ")}.`,
+      );
+    }
+    const found = matches[0];
     if (!found) {
       const other = appOnlyBrowsers(call("computer_list_apps").data.apps || []).find(
         (b) => b.id.toLowerCase() === wanted || b.name.toLowerCase() === wanted,
