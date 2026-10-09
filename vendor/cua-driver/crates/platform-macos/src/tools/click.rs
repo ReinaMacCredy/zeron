@@ -907,6 +907,11 @@ impl Tool for ClickTool {
                             // (already gated for this exact window).
                             if crate::ax::exact_target::element_window_id(element)
                                 != Some(hit_test_wid)
+                                && !crate::ax::exact_target::element_in_attached_window(
+                                    pid,
+                                    element,
+                                    hit_test_wid,
+                                )
                             {
                                 CFRelease(element as _);
                                 return Ok(false);

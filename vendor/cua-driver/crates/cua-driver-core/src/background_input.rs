@@ -42,6 +42,10 @@ pub enum ElementAncestry {
     /// The live element ascends to an AX window whose CGWindowID is the
     /// requested one.
     ProvenDescendant,
+    /// The live element belongs to another window of the process but is also
+    /// reachable from the requested window's AX subtree, such as a page's JS
+    /// alert. Only an exact semantic AX action may address it.
+    AttachedModal,
     /// The live element ascends to a different window of the same process.
     OutsideTargetWindow,
     /// Ancestry could not be resolved (dead element, SPI failure). An address
@@ -222,6 +226,18 @@ pub fn decide_background_input(
 
     match facts.element {
         ElementAncestry::NotAddressed | ElementAncestry::ProvenDescendant => {}
+        ElementAncestry::AttachedModal if action == BackgroundAction::AxSemantic => {}
+        ElementAncestry::AttachedModal => {
+            return refuse(
+                refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
+                format!(
+                    "the addressed element is in a dialog attached to window {}; only an \
+                     exact element action (press by element) can reach it in the background",
+                    target.window_id
+                ),
+                Some("accessibility"),
+            );
+        }
         ElementAncestry::OutsideTargetWindow | ElementAncestry::Unproven => {
             return refuse(
                 refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
@@ -236,7 +252,10 @@ pub fn decide_background_input(
     }
 
     let retained_off_space_semantic = action == BackgroundAction::AxSemantic
-        && facts.element == ElementAncestry::ProvenDescendant;
+        && matches!(
+            facts.element,
+            ElementAncestry::ProvenDescendant | ElementAncestry::AttachedModal
+        );
     if !facts.ax_window_present && !retained_off_space_semantic {
         return refuse(
             refusal_codes::OFF_SPACE_OR_AX_UNRESOLVED,
@@ -314,8 +333,8 @@ pub fn decide_background_input(
                     format!(
                         "pid {} owns {} other eligible top-level window(s); process-scoped \
                          key events cannot be proven to reach window {} and could mutate a \
-                         sibling window. Use an exact element action, the page tool for \
-                         browser content, or delivery_mode:\"foreground\"",
+                         sibling window. Use an exact element action (press a dialog's button or \
+                         set a field's value by element) or the page tool for browser content",
                         target.pid, facts.competing_keyboard_destinations, target.window_id
                     ),
                     Some("accessibility"),
@@ -664,6 +683,27 @@ mod tests {
                     code_of(decide_background_input(TARGET, &facts, action)),
                     refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
                     "{action:?} with {element:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_attached_dialog_accepts_only_an_exact_semantic_press() {
+        let facts = BackgroundTargetFacts {
+            element: ElementAncestry::AttachedModal,
+            competing_keyboard_destinations: 1,
+            ..matched_facts()
+        };
+        for action in ALL_ACTIONS {
+            let decision = decide_background_input(TARGET, &facts, action);
+            if action == BackgroundAction::AxSemantic {
+                assert!(decision.is_execute(), "{action:?}");
+            } else {
+                assert_eq!(
+                    code_of(decision),
+                    refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
+                    "{action:?}"
                 );
             }
         }

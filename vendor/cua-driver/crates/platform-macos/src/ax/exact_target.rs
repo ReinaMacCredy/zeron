@@ -7,14 +7,14 @@
 //! top-level keyboard destinations, and addressed-element ancestry. All reads are
 //! bounded and fail closed — an unreadable fact never unlocks a route.
 
-use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
+use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
 use cua_driver_core::background_input::{
     BackgroundTargetFacts, ElementAncestry, WindowServerOwnership,
 };
 
 use super::bindings::{
-    ax_get_window_id, copy_ax_windows, copy_bool_attr, copy_element_attr, copy_string_attr,
-    focused_element_of_pid, AXUIElementCreateApplication, AXUIElementRef,
+    ax_get_window_id, copy_ax_windows, copy_bool_attr, copy_children, copy_element_attr,
+    copy_string_attr, focused_element_of_pid, AXUIElementCreateApplication, AXUIElementRef,
     AXUIElementSetMessagingTimeout,
 };
 use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
@@ -72,6 +72,85 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
         CFRelease(current as CFTypeRef);
     }
     resolved
+}
+
+/// Nodes a dialog-attachment proof may visit in the requested window.
+const ATTACHED_SEARCH_BUDGET: usize = 4_000;
+
+/// Whether `element`, which reports another window of `pid`, is reachable from
+/// the AX subtree of window `window_id`. Chromium shows a page's JS alert this
+/// way: the alert is its own top-level window, but its dialog group is also a
+/// child inside the browser window's root view, so the browser window's state
+/// lists the alert's buttons. The proof mirrors that walk: it finds the
+/// element's top container below its own window and searches the requested
+/// window's subtree, outside web content, for that same container.
+///
+/// # Safety
+///
+/// `element` must be a valid `AXUIElementRef` for the duration of the call.
+pub unsafe fn element_in_attached_window(
+    pid: i32,
+    element: AXUIElementRef,
+    window_id: u32,
+) -> bool {
+    let mut container = element;
+    CFRetain(container as CFTypeRef);
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        let Some(parent) = copy_element_attr(container, "AXParent") else {
+            CFRelease(container as CFTypeRef);
+            return false;
+        };
+        AXUIElementSetMessagingTimeout(parent, GATE_TIMEOUT_SECONDS);
+        let role = copy_string_attr(parent, "AXRole");
+        if matches!(role.as_deref(), Some("AXWindow") | Some("AXSheet")) {
+            let own = ax_get_window_id(parent);
+            CFRelease(parent as CFTypeRef);
+            if own.is_none() || own == Some(window_id) {
+                CFRelease(container as CFTypeRef);
+                return false;
+            }
+            break;
+        }
+        CFRelease(container as CFTypeRef);
+        if matches!(role.as_deref(), Some("AXApplication") | None) {
+            CFRelease(parent as CFTypeRef);
+            return false;
+        }
+        container = parent;
+    }
+
+    let app = AXUIElementCreateApplication(pid);
+    if app.is_null() {
+        CFRelease(container as CFTypeRef);
+        return false;
+    }
+    AXUIElementSetMessagingTimeout(app, GATE_TIMEOUT_SECONDS);
+    let mut queue = std::collections::VecDeque::new();
+    for window in copy_ax_windows(app) {
+        if queue.is_empty() && ax_get_window_id(window) == Some(window_id) {
+            queue.push_back(window);
+        } else {
+            CFRelease(window as CFTypeRef);
+        }
+    }
+    CFRelease(app as CFTypeRef);
+
+    let mut found = false;
+    let mut visited = 0;
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        if !found && visited <= ATTACHED_SEARCH_BUDGET {
+            AXUIElementSetMessagingTimeout(node, GATE_TIMEOUT_SECONDS);
+            if CFEqual(node as CFTypeRef, container as CFTypeRef) != 0 {
+                found = true;
+            } else if copy_string_attr(node, "AXRole").as_deref() != Some("AXWebArea") {
+                queue.extend(copy_children(node));
+            }
+        }
+        CFRelease(node as CFTypeRef);
+    }
+    CFRelease(container as CFTypeRef);
+    found
 }
 
 /// The process's focused AX element, but only when it provably belongs to the
@@ -321,8 +400,14 @@ pub fn gather_background_facts(
                     ptr as AXUIElementRef,
                     super::tree::AX_MESSAGING_TIMEOUT_SECONDS,
                 );
-                match element_window_id(ptr as AXUIElementRef) {
+                let probed = element_window_id(ptr as AXUIElementRef);
+                match probed {
                     Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
+                    Some(_)
+                        if element_in_attached_window(pid, ptr as AXUIElementRef, window_id) =>
+                    {
+                        ElementAncestry::AttachedModal
+                    }
                     Some(_) => ElementAncestry::OutsideTargetWindow,
                     None => ElementAncestry::Unproven,
                 }
