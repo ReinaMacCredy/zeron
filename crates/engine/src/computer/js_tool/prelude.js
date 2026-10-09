@@ -419,7 +419,8 @@
         const state = call("computer_browser_state", { pid: this.pid }).structured;
         this.binding = { target_id: state.target_id, tabs: state.tabs || [] };
       } else {
-        const window = windowsFor(this.appName, this.pid)[0];
+        const windows = windowsFor(this.appName, this.pid);
+        const window = windows.find((w) => !windows.some((o) => o !== w && inside(w.bounds, o.bounds))) || windows[0];
         if (!window) throw new Error(`${this.name} has no open window to attach to.`);
         const windowNumber = Number(String(window.id).split(":").pop());
         call("computer_browser_prepare", {
@@ -435,13 +436,34 @@
     }
 
     tabs() {
-      this.binding = null;
       return this.attach().tabs;
     }
   }
 
+  const renderTabState = (snapshot, fallback) => {
+    if (!snapshot || typeof snapshot !== "object") return fallback;
+    const page = snapshot.page || {};
+    const lines = [`Tab: "${page.title || ""}", URL: ${page.url || snapshot.url || ""}.`];
+    if (typeof snapshot.outline === "string" && snapshot.outline.trim()) lines.push(snapshot.outline.trimEnd());
+    else
+      for (const r of snapshot.refs || [])
+        lines.push(`${r.ref} ${r.role || r.node || ""} ${r.name || r.label || ""}`.trimEnd());
+    if (typeof snapshot.text_digest === "string" && snapshot.text_digest.trim())
+      lines.push("Text:", snapshot.text_digest.trimEnd());
+    const more = snapshot.snapshot && snapshot.snapshot.continuation;
+    if (more) lines.push(`More of the page is not shown (continuation ${JSON.stringify(more)}).`);
+    return lines.join("\n");
+  };
+
+  const boundBrowsers = new Map();
+  const cachedBrowser = (info) => {
+    const key = `${info.id}:${info.pid || ""}`;
+    if (!boundBrowsers.has(key)) boundBrowsers.set(key, new Browser(info));
+    return boundBrowsers.get(key);
+  };
+
   const browserById = (id) => {
-    if (!id || id === "isolated" || id === "iab") return new Browser({ id: "isolated", name: "Isolated browser" });
+    if (!id || id === "isolated" || id === "iab") return cachedBrowser({ id: "isolated", name: "Isolated browser" });
     const wanted = String(id).toLowerCase();
     const running = runningBrowsers();
     const exact = running.filter((b) => b.id.toLowerCase() === wanted);
@@ -465,7 +487,7 @@
       if (other) throw new Error(other.reason);
       throw new Error(`Browser "${id}" is not running. Use cua.listBrowsers() to see what is available.`);
     }
-    return new Browser(found);
+    return cachedBrowser(found);
   };
 
   class Tab {
@@ -486,8 +508,8 @@
     }
 
     getAXState(options) {
-      const result = call("computer_browser_state", this.ids());
-      const state = result.data && typeof result.data.tree === "string" ? result.data.tree : result.text;
+      const result = call("computer_browser_state", this.ids({ snapshot_format: "semantic_v2" }));
+      const state = renderTabState(result.structured, result.text);
       if (!options || options.emit !== false) write(state);
       return state;
     }
@@ -537,6 +559,8 @@
 
     close() {
       call("computer_browser_navigate", this.ids({ close_tab: true }));
+      const binding = this.browser.binding;
+      if (binding) binding.tabs = binding.tabs.filter((t) => t.tab_id !== this.id);
       action("browser_close", this.label());
     }
 
@@ -674,6 +698,7 @@
           new_tab: true,
         }).structured;
         tab = new Tab(browser, opened.tab_id, "", url);
+        binding.tabs.push({ tab_id: opened.tab_id, title: "", url: String(url || "about:blank") });
         action("browser_navigate", browser.name, url);
       }
       tab.getAXState();

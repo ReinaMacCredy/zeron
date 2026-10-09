@@ -148,7 +148,8 @@ pub(crate) async fn browser_protected_resource_scope(
         .map_err(|error| error.message)?;
     let target = validated.record;
     let tab = validated.tab;
-    let requested_origin = if tool_name == "browser_navigate" {
+    let closes_tab = args.get("close_tab").and_then(Value::as_bool) == Some(true);
+    let requested_origin = if tool_name == "browser_navigate" && !closes_tab {
         let requested = args
             .get("url")
             .and_then(Value::as_str)

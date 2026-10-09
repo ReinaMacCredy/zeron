@@ -189,10 +189,17 @@ impl InputGate {
         }
         if addressed_element {
             let window_id = facts.and_then(super::modal_guard::ElementFacts::window_id);
+            // A dialog control can report the dialog's own window id; it still
+            // belongs to the target whose captured modal is its ancestor.
             let target = state
                 .concurrent_targets
                 .values()
                 .find(|target| Some(target.window_id) == window_id)
+                .or_else(|| {
+                    state.concurrent_targets.values().find(|target| {
+                        target.has_modal() && target.verify_modal(true, facts).is_ok()
+                    })
+                })
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "modal_target_mismatch: the semantic element's window cannot be proven"

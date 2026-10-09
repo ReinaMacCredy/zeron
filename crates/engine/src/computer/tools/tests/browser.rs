@@ -1738,3 +1738,42 @@ async fn rejects_keep_outside_a_new_tab_or_a_tab_snapshot() {
     assert!(recorded(&seen).is_empty());
     h.dispose().await;
 }
+
+#[tokio::test]
+async fn the_agent_closes_a_tab_it_opened_but_never_the_users_tab() {
+    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    h.decide(ApprovalDecision::Accept);
+    h.call("computer_browser_prepare", attach(CHROME_PID)).await;
+    h.call(
+        "computer_browser_state",
+        json!({ "pid": CHROME_PID, "window_id": 7 }),
+    )
+    .await;
+    let user = h
+        .call(
+            "computer_browser_navigate",
+            json!({ "target_id": "bt-1", "tab_id": "tab-user", "close_tab": true }),
+        )
+        .await;
+    assert!(subset(
+        user.structured_content.as_ref().unwrap(),
+        &json!({ "status": "refused", "refusal": { "code": "browser_tab_not_owned" } })
+    ));
+    assert!(closed_tabs(&seen).is_empty());
+    h.call(
+        "computer_browser_navigate",
+        json!({ "target_id": "bt-1", "tab_id": "tab-user", "url": "https://example.com/mine", "new_tab": true }),
+    )
+    .await;
+    let mine = h
+        .call(
+            "computer_browser_navigate",
+            json!({ "target_id": "bt-1", "tab_id": "tab-mine", "close_tab": true }),
+        )
+        .await;
+    assert!(!mine.is_error, "{mine:?}");
+    assert_eq!(closed_tabs(&seen), ["tab-mine"]);
+    h.tools.turn_ended(THREAD, "turn-1").await;
+    assert_eq!(closed_tabs(&seen), ["tab-mine"]);
+    h.dispose().await;
+}

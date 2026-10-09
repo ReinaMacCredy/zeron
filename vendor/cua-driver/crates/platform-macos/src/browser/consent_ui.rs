@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, iter};
 
-use core_foundation::base::{CFRelease, CFTypeRef};
+use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
 use cua_driver_core::browser::{
     BrowserConsentOutcome, BrowserConsentRequest, BrowserRefusal, BrowserRefusalCode,
 };
@@ -88,6 +88,32 @@ fn remote_debugging_sheet_present(nodes: &[AXNode]) -> bool {
     })
 }
 
+// The window walk can reach one sheet twice (inside the window and as a
+// top-level child) through different proxy pointers for the same element.
+fn same_element(a: usize, b: usize) -> bool {
+    #[cfg(test)]
+    {
+        a == b
+    }
+    #[cfg(not(test))]
+    {
+        a == b || unsafe { CFEqual(a as CFTypeRef, b as CFTypeRef) != 0 }
+    }
+}
+
+fn distinct_elements(matches: Vec<(usize, String)>) -> Vec<(usize, String)> {
+    let mut distinct: Vec<(usize, String)> = Vec::new();
+    for (element, label) in matches {
+        let seen = distinct
+            .iter()
+            .any(|(known, _)| same_element(*known, element));
+        if !seen {
+            distinct.push((element, label));
+        }
+    }
+    distinct
+}
+
 fn exact_allow_button(nodes: &[AXNode]) -> Result<Option<usize>, BrowserRefusal> {
     let mut matches = Vec::new();
     for (sheet_index, sheet) in nodes
@@ -123,16 +149,23 @@ fn exact_allow_button(nodes: &[AXNode]) -> Result<Option<usize>, BrowserRefusal>
                 || (identifier.contains("allow")
                     && (identifier.contains("debug") || identifier.contains("confirm")));
             if semantic_allow {
-                matches.push(node.element_ptr);
+                matches.push((node.element_ptr, format!("{label} [{identifier}]")));
             }
         }
     }
-    match matches.as_slice() {
+    match distinct_elements(matches).as_slice() {
         [] => Ok(None),
-        [element] => Ok(Some(*element)),
-        _ => Err(refusal(
+        [(element, _)] => Ok(Some(*element)),
+        several => Err(refusal(
             BrowserRefusalCode::BrowserWrongTargetRefused,
-            "multiple semantic allow actions matched the browser consent sheet",
+            format!(
+                "multiple semantic allow actions matched the browser consent sheet: {}",
+                several
+                    .iter()
+                    .map(|(_, label)| label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         )),
     }
 }
@@ -163,13 +196,13 @@ fn exact_cancel_button(nodes: &[AXNode]) -> Result<Option<usize>, BrowserRefusal
                 && node.actions.iter().any(|action| action == "AXPress")
                 && normalized_text(node) == "cancel"
             {
-                matches.push(node.element_ptr);
+                matches.push((node.element_ptr, normalized_text(node)));
             }
         }
     }
-    match matches.as_slice() {
+    match distinct_elements(matches).as_slice() {
         [] => Ok(None),
-        [element] => Ok(Some(*element)),
+        [(element, _)] => Ok(Some(*element)),
         _ => Err(refusal(
             BrowserRefusalCode::BrowserWrongTargetRefused,
             "multiple semantic cancel actions matched the browser consent sheet",
@@ -434,12 +467,27 @@ mod tests {
         let nodes = vec![
             node("AXSheet", 1, Some("Allow remote debugging?"), &[]),
             node("AXButton", 2, Some("Allow"), &["AXPress"]),
-            node("AXButton", 2, Some("Allow"), &["AXPress"]),
+            AXNode {
+                element_ptr: 8,
+                ..node("AXButton", 2, Some("Allow"), &["AXPress"])
+            },
         ];
         assert_eq!(
             exact_allow_button(&nodes).unwrap_err().code,
             BrowserRefusalCode::BrowserWrongTargetRefused
         );
+    }
+
+    #[test]
+    fn one_sheet_reached_twice_by_the_walk_is_one_allow_action() {
+        let nodes = vec![
+            node("AXWindow", 0, Some("Helium"), &[]),
+            node("AXSheet", 1, Some("Allow remote debugging?"), &[]),
+            node("AXButton", 2, Some("Allow"), &["AXPress"]),
+            node("AXSheet", 0, Some("Allow remote debugging?"), &[]),
+            node("AXButton", 1, Some("Allow"), &["AXPress"]),
+        ];
+        assert_eq!(exact_allow_button(&nodes).unwrap(), Some(7));
     }
 
     #[test]

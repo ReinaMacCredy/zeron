@@ -279,11 +279,21 @@ fn new_tab_button(
     descriptor: &BrowserSetupDescriptor,
 ) -> Result<usize, BrowserRefusal> {
     unique_actionable(nodes, "AXButton", "New Tab", "AXPress")?.ok_or_else(|| {
+        let near: Vec<String> = nodes
+            .iter()
+            .filter(|node| field_equals(node, "New Tab"))
+            .map(|node| format!("{} {:?}", node.role, node.actions))
+            .collect();
         refusal(
             BrowserRefusalCode::BrowserWrongTargetRefused,
             format!(
-                "the approved {} window has no exact New Tab button",
-                descriptor.product_name
+                "the approved {} window has no exact New Tab button (New Tab elements: {})",
+                descriptor.product_name,
+                if near.is_empty() {
+                    "none".to_owned()
+                } else {
+                    near.join("; ")
+                }
             ),
         )
     })

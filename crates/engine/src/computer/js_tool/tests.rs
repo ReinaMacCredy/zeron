@@ -136,11 +136,21 @@ impl JsHost for FakeHost {
                     _ => McpToolResult::error("Missing required integer field: window_id"),
                 }
             }
+            "computer_browser_state" if arguments_has(&self.calls, "snapshot_format") => {
+                structured_result(json!({
+                    "status": "ok",
+                    "page": { "title": "Mail", "url": "https://mail.example" },
+                    "outline": "button \"Compose\" [p1:3]",
+                    "text_digest": "Inbox (3) [p1:9]"
+                }))
+            }
             "computer_browser_navigate" => {
                 json_result(json!({ "target_id": "bt-1", "tab_id": "tab-new", "opened_tab": true }))
             }
             "computer_list_windows" => {
                 let mut windows = vec![
+                    json!({ "id": "cua:9:4", "title": "Allow remote debugging?", "appName": "Google Chrome", "pid": 9, "visible": true,
+                      "bounds": { "x": 200, "y": 200, "width": 448, "height": 238 }, "stackingIndex": 1 }),
                     json!({ "id": "cua:9:3", "title": "Mail", "appName": "Google Chrome", "pid": 9, "visible": true,
                       "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 2 }),
                     json!({ "id": "cua:7:1", "title": "", "appName": "Calculator", "pid": 7, "visible": false,
@@ -355,6 +365,11 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
     assert!(prepare.get("allow_launch").is_none());
     let navigate = &host.args("computer_browser_navigate")[0];
     assert_eq!(navigate["new_tab"], json!(true));
+    assert!(
+        texts(&outcome).contains("Tab: \"Mail\", URL: https://mail.example.\nbutton \"Compose\" [p1:3]\nText:\nInbox (3) [p1:9]"),
+        "{}",
+        texts(&outcome)
+    );
     assert_eq!(navigate["tab_id"], json!("tab-user"));
     assert!(
         host.args("computer_browser_state")

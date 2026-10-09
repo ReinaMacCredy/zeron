@@ -79,6 +79,8 @@ const EXISTING_PROFILE_NO_LAUNCH: &str = "strategy existing_profile attaches to 
 
 const OPENED_TAB_NOTE: &str = "This tab is yours and closes when your turn ends. To leave it open, call computer_browser_state({target_id, tab_id, keep}) with keep \"deliverable\" (the user should see it) or \"handoff\" (you continue next turn).";
 
+const CLOSE_ONLY_OPENED: &str = "close applies only to tabs you opened in this chat; the user's own tabs are never closed. Nothing was sent.";
+
 const KEEP_ONLY_OPENED: &str = "keep applies only to tabs you opened with new_tab; this tab is the user's and is never closed.";
 
 const PID_ONLY_BIND_REFUSED: &str = "A pid-only bind is for a live driver-owned headless browser. An existing desktop browser needs a native-window bind with computer_browser_state({pid,window_id}) and a verified CDP endpoint. Only a successful bind returns target_id for computer_browser_navigate and other browser actions. If that bind is unavailable, use the exact desktop window through computer_get_state and native Computer actions; do not send pid/window_id to browser actions or silently replace the user's profile.";
@@ -596,6 +598,18 @@ impl ComputerBrowserTools {
             .is_some()
     }
 
+    fn is_opened_tab(&self, thread_id: &str, target_id: &str, tab_id: &str) -> bool {
+        lock(&self.opened_tabs).iter().any(|tab| {
+            tab.thread_id == thread_id && tab.target_id == target_id && tab.tab_id == tab_id
+        })
+    }
+
+    fn forget_opened_tab(&self, thread_id: &str, target_id: &str, tab_id: &str) {
+        lock(&self.opened_tabs).retain(|tab| {
+            !(tab.thread_id == thread_id && tab.target_id == target_id && tab.tab_id == tab_id)
+        });
+    }
+
     fn tabs_to_close(&self, thread_id: &str, turn_id: &str) -> Vec<(String, String)> {
         let mut close = Vec::new();
         lock(&self.opened_tabs).retain_mut(|tab| {
@@ -787,7 +801,34 @@ impl ComputerBrowserTools {
             .into());
         }
         effective.remove("keep");
-        effective.remove("close_tab");
+        let closes_tab = name == "computer_browser_navigate"
+            && args.get("close_tab") == Some(&Value::Bool(true));
+        let closed_tab = if closes_tab {
+            let ids = (
+                effective.get("target_id").and_then(Value::as_str),
+                effective.get("tab_id").and_then(Value::as_str),
+            );
+            match ids {
+                (Some(target_id), Some(tab_id))
+                    if self.is_opened_tab(&context.chat_id, target_id, tab_id) =>
+                {
+                    Some((target_id.to_owned(), tab_id.to_owned()))
+                }
+                _ => {
+                    return Ok(refuse(
+                        effective,
+                        BrowserRefusal {
+                            code: "browser_tab_not_owned",
+                            message: CLOSE_ONLY_OPENED.to_owned(),
+                            detail: None,
+                        },
+                    ));
+                }
+            }
+        } else {
+            effective.remove("close_tab");
+            None
+        };
         if name == "computer_browser_prepare" && args.contains_key("strategy") {
             let refusal = if !wants_existing_profile(args) {
                 Some((
@@ -911,6 +952,11 @@ impl ComputerBrowserTools {
         } else {
             dispatch.await
         }?;
+        if let Some((target_id, tab_id)) = &closed_tab
+            && result.is_error != Some(true)
+        {
+            self.forget_opened_tab(&context.chat_id, target_id, tab_id);
+        }
         self.remember_target_tabs(&context.chat_id, result.structured_content.as_ref());
         self.remember_target_pid(
             &context.chat_id,
