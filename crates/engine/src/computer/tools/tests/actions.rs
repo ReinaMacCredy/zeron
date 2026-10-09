@@ -1927,3 +1927,62 @@ async fn clamps_a_drag_duration_to_the_bound_its_schema_advertises() {
     );
     h.dispose().await;
 }
+
+#[tokio::test]
+async fn warns_when_typing_reaches_no_focused_field_in_a_window_that_has_fields() {
+    let field = |label: &str, y: f64| ComputerUiNode {
+        editable: Some(true),
+        ..node(
+            "AXTextField",
+            Some(label),
+            rect(100.0, y, 300.0, 40.0),
+            None,
+            Some("w1"),
+            Vec::new(),
+        )
+    };
+    let root = node(
+        "window",
+        Some("Shop"),
+        rect(0.0, 0.0, 800.0, 600.0),
+        None,
+        Some("w1"),
+        vec![field("Address", 20.0), field("Search", 200.0)],
+    );
+    let h = with_backend(fake_with(FakeComputerBackendOptions {
+        root: Some(root),
+        windows: Some(vec![ComputerWindow {
+            visible: true,
+            ..window("w1", "Shop", Some(rect(0.0, 0.0, 800.0, 600.0)))
+        }]),
+        ..FakeComputerBackendOptions::default()
+    }));
+    h.backend
+        .fake
+        .set_ax_tree(Some(zeron_proto::computer::ComputerAxTree {
+            url: None,
+            lines: Vec::new(),
+            focused: Some(zeron_proto::computer::ComputerAxLine {
+                role: "AXWebArea".into(),
+                ..Default::default()
+            }),
+            selected_text: None,
+            truncated: false,
+        }));
+    let result = h
+        .call(
+            "computer_type_text",
+            json!({ "window_id": "w1", "text": "5700X3D" }),
+        )
+        .await;
+    assert!(!result.is_error, "{result:?}");
+    let warning = result_json(&result)["warning"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        warning.contains("No text field in this window has keyboard focus"),
+        "{result:?}"
+    );
+    h.dispose().await;
+}

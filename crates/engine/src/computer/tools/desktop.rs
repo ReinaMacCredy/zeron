@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use zeron_proto::computer::{
     ComputerActionResult, ComputerDeliveryVerification, ComputerLaunchAppResult, ComputerPoint,
-    ComputerScreenshot, ComputerTarget, CuaEffect, McpContent, McpToolResult,
+    ComputerScreenshot, ComputerTarget, ComputerUiNode, CuaEffect, McpContent, McpToolResult,
 };
 
 use super::args::{
@@ -47,7 +47,7 @@ use crate::computer::screenshot_frames::{
 };
 use crate::computer::ui_tree_targeting::{
     ComputerActionableElementFilter, ComputerTargetErrorCode, actionable_elements_limited,
-    normalize_label_spaces, resolve_computer_semantic_target,
+    is_writable_text_node, normalize_label_spaces, resolve_computer_semantic_target,
 };
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 
@@ -1315,7 +1315,16 @@ impl ComputerTools {
                 "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
             )
         }) else {
-            return Ok(None);
+            fn has_text_field(node: &ComputerUiNode) -> bool {
+                is_writable_text_node(node) || node.children.iter().any(has_text_field)
+            }
+            let through_keyboard_focus = result.point.is_none();
+            return Ok((through_keyboard_focus
+                && state
+                    .root
+                    .as_ref()
+                    .is_some_and(|root| root.children.iter().any(has_text_field)))
+                .then(|| "No text field in this window has keyboard focus, so the typed text may have gone nowhere. Click the field you mean, then type and read its value.".to_owned()));
         };
         let value = focused.value.unwrap_or_default();
         if value.contains(typed) {
