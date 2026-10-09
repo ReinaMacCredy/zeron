@@ -388,6 +388,18 @@ impl State {
         }
     }
 
+    fn task_takeover(&self, task: Option<&CuaComputerTask>, input: &Value) -> bool {
+        match task {
+            Some(task) => self
+                .takeover_targets
+                .get(&cua_computer_task_key(task))
+                .is_some_and(|held| {
+                    target_from_args(input, None).is_none_or(|target| target.pid == held.pid)
+                }),
+            None => !self.takeover_targets.is_empty(),
+        }
+    }
+
     fn last_user_input(&self, task: Option<&CuaComputerTask>) -> Option<Instant> {
         match task {
             Some(task) => self
@@ -824,8 +836,7 @@ impl Host {
                         .zip(target_from_args(&call.args, None))
                         .is_some_and(|(held, read)| held.pid == read.pid)
                 });
-            let task_takeover = state.takeover_targets.contains(&task_key(task.as_ref()))
-                || (task.is_none() && !state.takeover_targets.is_empty());
+            let task_takeover = state.task_takeover(task.as_ref(), &call.args);
             let refuse = paused
                 && task_takeover
                 && (CUA_ACTION_TOOLS.contains(&name.as_str()) || name == "check_input_ready");
@@ -933,8 +944,7 @@ impl Host {
             self.has_browser_recovery_observation(&request.input, task.as_ref());
         {
             let mut state = self.state.borrow_mut();
-            let task_takeover = state.takeover_targets.contains(&task_key(task.as_ref()))
-                || (task.is_none() && !state.takeover_targets.is_empty());
+            let task_takeover = state.task_takeover(task.as_ref(), &request.input);
             let action = CUA_ACTION_TOOLS.contains(&name.as_str());
             let browser_mutation = CUA_BROWSER_MUTATION_TOOLS.contains(&name.as_str());
             let unrecovered_browser =

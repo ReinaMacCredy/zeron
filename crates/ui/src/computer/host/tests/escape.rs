@@ -581,6 +581,36 @@ async fn does_not_let_another_task_window_preview_or_mismatched_read_clear_nativ
 }
 
 #[tokio::test]
+async fn a_takeover_refuses_only_the_touched_app_while_the_task_works_in_another() {
+    let f = fixture(Driver::default());
+    let owner = task("moved-on", Some("turn"));
+    let touched = json!({ "pid": 700, "window_id": 900 });
+    let sibling = json!({ "pid": 700, "window_id": 901 });
+    let other = json!({ "pid": 701, "window_id": 950 });
+    let observe = |args: &Value| {
+        call("get_window_state")
+            .args(args.clone())
+            .observe(true)
+            .task(&owner)
+    };
+    let press = |args: &Value| {
+        let mut args = args.clone();
+        args["key"] = json!("enter");
+        call("press_key").args(args).task(&owner)
+    };
+    f.send(observe(&touched)).await;
+    assert!(f.host.physical_input(pointer(700, 900)).await);
+    f.wait_for("interrupt-ack").await;
+    past_cooldown().await;
+    f.send(observe(&other)).await;
+    assert_clean_ok(&f.send(press(&other)).await);
+    assert_paused(&f.send(press(&sibling)).await);
+    assert_paused(&f.send(press(&touched)).await);
+    f.send(observe(&touched)).await;
+    assert_clean_ok(&f.send(press(&touched)).await);
+}
+
+#[tokio::test]
 async fn fences_input_after_uncertain_focus_restoration_until_a_fresh_model_observation() {
     let restore_failure = json!({
         "isError": true,
