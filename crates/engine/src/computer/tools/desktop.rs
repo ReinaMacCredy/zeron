@@ -52,6 +52,7 @@ use crate::computer::ui_tree_targeting::{
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 
 pub(crate) const COMPUTER_TEXT_NOT_APPLIED_CODE: &str = "computer_text_not_applied";
+const TYPED_TEXT_SETTLE: Duration = Duration::from_millis(250);
 use crate::computer::wait_for_control::{
     ComputerControlReadiness, ComputerControlReadinessStatus, ComputerTargetLookup,
     wait_for_control,
@@ -1285,6 +1286,21 @@ impl ComputerTools {
         })
     }
 
+    async fn focused_field_state(
+        &self,
+        window_id: &str,
+    ) -> Result<zeron_proto::computer::ComputerState, ComputerError> {
+        assert_desktop_operation_active()?;
+        self.manager
+            .get_state(ComputerStateRequest {
+                include_screenshot: Some(false),
+                include_text: false,
+                include_tree: Some(true),
+                window_id: Some(window_id.to_owned()),
+            })
+            .await
+    }
+
     async fn typed_text_readback(
         &self,
         text: &str,
@@ -1299,16 +1315,22 @@ impl ComputerTools {
         else {
             return Ok(None);
         };
-        assert_desktop_operation_active()?;
-        let state = self
-            .manager
-            .get_state(ComputerStateRequest {
-                include_screenshot: Some(false),
-                include_text: false,
-                include_tree: Some(true),
-                window_id: Some(window_id),
-            })
-            .await?;
+        let mut state = self.focused_field_state(&window_id).await?;
+        let still_empty = |state: &zeron_proto::computer::ComputerState| {
+            state
+                .ax_tree
+                .as_ref()
+                .and_then(|ax| ax.focused.as_ref())
+                .is_some_and(|line| {
+                    line.value
+                        .as_deref()
+                        .is_none_or(|value| value.trim().is_empty())
+                })
+        };
+        if still_empty(&state) {
+            tokio::time::sleep(TYPED_TEXT_SETTLE).await;
+            state = self.focused_field_state(&window_id).await?;
+        }
         let Some(focused) = state.ax_tree.and_then(|ax| ax.focused).filter(|line| {
             matches!(
                 line.role.as_str(),
