@@ -2,7 +2,10 @@ use super::*;
 
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
-use crate::agent_profiles::{ProfileWrite, brand_badge, mode_label, summary};
+use crate::agent_profiles::{
+    ProfileWrite, brand_badge, char_count, draft_summary, expand_toggle, folded_row, mode_label,
+    summary,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ProfilePick {
@@ -152,6 +155,7 @@ pub(super) struct ProfileEdit {
     name: Entity<ComposerInput>,
     notes: Entity<ComposerInput>,
     pub(super) choosing: Option<EditField>,
+    pub(super) expanded: bool,
     saving: bool,
     error: Option<SharedString>,
     _events: [Subscription; 2],
@@ -467,6 +471,7 @@ impl Pickers {
             name,
             notes,
             choosing: None,
+            expanded: false,
             saving: false,
             error: None,
             _events: [name_events, notes_events],
@@ -542,7 +547,7 @@ impl Pickers {
         cx.notify();
     }
 
-    fn open_profile_in_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_profile_in_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.profile_edit.as_ref() else {
             return;
         };
@@ -1272,6 +1277,7 @@ impl Pickers {
         let notes = edit.notes.clone();
         let error = edit.error.clone();
         let saving = edit.saving;
+        let expanded = edit.expanded;
         let two = |a: AnyElement, b: AnyElement| {
             div()
                 .flex()
@@ -1279,6 +1285,43 @@ impl Pickers {
                 .child(div().flex_1().min_w_0().child(a))
                 .child(div().flex_1().min_w_0().child(b))
         };
+        let notes_label = if expanded {
+            label("When to use")
+                .flex()
+                .child(div().flex_1())
+                .child(char_count(
+                    notes.read(cx).text(),
+                    zeron_engine::agent_profiles::MAX_AGENT_PROFILE_NOTES_CHARS,
+                ))
+        } else {
+            label("When to use")
+        };
+        let notes_field = div().flex_1().flex().flex_col().child(notes_label).child(
+            div()
+                .relative()
+                .flex_1()
+                .min_h(px(40.0))
+                .pl(px(9.0))
+                .pr(px(30.0))
+                .py(px(6.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.12))
+                .bg(crate::theme::ink(0.03))
+                .overflow_hidden()
+                .child(crate::composer::scrolling_field(notes.clone()))
+                .child(
+                    expand_toggle("profile-edit-notes-expand", expanded, theme.text_muted)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(edit) = this.profile_edit.as_mut() {
+                                edit.expanded = !edit.expanded;
+                            }
+                            let handle = notes.read(cx).focus_handle(cx);
+                            window.focus(&handle, cx);
+                            cx.notify();
+                        })),
+                ),
+        );
         let body = div()
             .id("profile-edit-body")
             .flex_1()
@@ -1288,8 +1331,33 @@ impl Pickers {
             .py(px(8.0))
             .flex()
             .flex_col()
-            .gap(px(6.0))
-            .child(
+            .gap(px(6.0));
+        let body = if expanded {
+            let mut folded = draft.clone();
+            folded.name = name.read(cx).text().to_string();
+            body.child(
+                folded_row(
+                    "profile-edit-folded",
+                    draft_summary(
+                        &folded,
+                        harness_display_name(draft.harness),
+                        draft
+                            .model
+                            .as_deref()
+                            .map(|model| self.profile_model_label(draft.harness, model))
+                            .as_deref(),
+                    ),
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(edit) = this.profile_edit.as_mut() {
+                        edit.expanded = false;
+                    }
+                    cx.notify();
+                })),
+            )
+        } else {
+            body.child(
                 div()
                     .child(label("Name"))
                     .child(field_box().child(div().flex_1().min_w_0().child(name))),
@@ -1314,28 +1382,15 @@ impl Pickers {
                     .child(effort_chooser)
                     .into_any_element(),
             ))
-            .child(
-                div().child(label("When to use")).child(
-                    div()
-                        .h(px(40.0))
-                        .px(px(9.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.12))
-                        .bg(crate::theme::ink(0.03))
-                        .overflow_hidden()
-                        .child(notes),
-                ),
+        };
+        let body = body.child(notes_field).when_some(error, |el, error| {
+            el.child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.danger)
+                    .child(error),
             )
-            .when_some(error, |el, error| {
-                el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.danger)
-                        .child(error),
-                )
-            });
+        });
         let footer =
             div()
                 .flex_none()

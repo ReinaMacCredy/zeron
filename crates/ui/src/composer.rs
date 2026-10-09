@@ -2390,6 +2390,20 @@ impl ComposerInput {
         self
     }
 
+    pub fn set_viewport_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if self.viewport_height != Some(height)
+            || self.settled_viewport_height != Some(height)
+            || self.resizing
+            || self.overflow_top_padding != 0.0
+        {
+            self.resizing = false;
+            self.overflow_top_padding = 0.0;
+            self.viewport_height = Some(height);
+            self.settled_viewport_height = Some(height);
+            cx.notify();
+        }
+    }
+
     fn set_key_context(&mut self, key_context: &'static str, cx: &mut Context<Self>) {
         if self.key_context != key_context {
             self.key_context = key_context;
@@ -4849,6 +4863,33 @@ impl Focusable for ComposerInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+pub fn scrolling_field(input: Entity<ComposerInput>) -> gpui::Div {
+    let measured = input.clone();
+    let focused = input.clone();
+    div().relative().size_full().child(
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                let handle = focused.read(cx).focus_handle.clone();
+                window.focus(&handle, cx);
+            })
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        measured.update(cx, |input, cx| {
+                            input.set_viewport_height(f32::from(bounds.size.height), cx)
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(input),
+    )
 }
 
 impl EntityInputHandler for ComposerInput {
@@ -13443,19 +13484,8 @@ impl Render for Composer {
             // would keep the compact pill's one-line viewport and a wrapped
             // note would vanish under the scroll fades.
             let height = wizard_input_height(content_height);
-            self.input.update(cx, |input, cx| {
-                if input.viewport_height != Some(height)
-                    || input.settled_viewport_height != Some(height)
-                    || input.resizing
-                    || input.overflow_top_padding != 0.0
-                {
-                    input.resizing = false;
-                    input.overflow_top_padding = 0.0;
-                    input.viewport_height = Some(height);
-                    input.settled_viewport_height = Some(height);
-                    cx.notify();
-                }
-            });
+            self.input
+                .update(cx, |input, cx| input.set_viewport_height(height, cx));
             let wizard = self.render_wizard(cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
@@ -14940,6 +14970,61 @@ mod tests {
                 cx,
             );
             assert!(window.focused(cx).is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn scrolling_field_caps_the_input_at_its_box(cx: &mut gpui::TestAppContext) {
+        struct Field(Entity<ComposerInput>);
+        impl Render for Field {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div()
+                        .w(px(200.0))
+                        .h(px(60.0))
+                        .child(scrolling_field(self.0.clone())),
+                )
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let host = cx.add_window(|_, cx| {
+            Field(cx.new(|cx| {
+                let mut input = ComposerInput::new("Notes", cx);
+                input.set_text("A note line.\n".repeat(12), cx);
+                input
+            }))
+        });
+        let draw = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..2 {
+                cx.run_until_parked();
+                cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+            }
+        };
+        draw(cx);
+        let input = host.read_with(cx, |host, _| host.0.clone()).unwrap();
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.viewport_height, Some(60.0));
+            assert_eq!(input.last_bounds.unwrap().size.height, px(60.0));
+            assert!(input_max_scroll(input.content_height, 60.0) > 0.0);
+        });
+
+        input.update(cx, |input, cx| input.set_text("Short", cx));
+        draw(cx);
+        let below = point(px(100.0), px(50.0));
+        assert!(input.read_with(cx, |input, _| input.last_bounds.unwrap().bottom() < below.y));
+        cx.update_window(host.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: below,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
     }
