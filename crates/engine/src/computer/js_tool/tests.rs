@@ -12,6 +12,7 @@ struct FakeHost {
     calls: Mutex<Vec<(String, Value)>>,
     refuse: Option<(&'static str, &'static str)>,
     refuse_browser: Option<&'static str>,
+    refuse_action: Option<&'static str>,
     dialog: bool,
     type_warning: bool,
     native_error: Option<&'static str>,
@@ -84,6 +85,17 @@ impl JsHost for FakeHost {
                 })
                 .to_string(),
             );
+        }
+        if self.refuse_action == Some(tool) {
+            return McpToolResult {
+                content: vec![McpContent::Text {
+                    text: "refused: the ref is no longer in the page".into(),
+                }],
+                structured_content: Some(
+                    json!({ "effect": "refused", "code": "browser_ref_stale" }),
+                ),
+                ..McpToolResult::default()
+            };
         }
         if self.refuse_browser == Some(tool) {
             return structured_result(json!({ "status": "refused", "refusal": {
@@ -612,4 +624,24 @@ async fn a_failed_top_level_declaration_leaves_its_name_usable() {
     let again = exec("js-tdz", &host, "let tab = 5; tab").await;
     assert_eq!(again.error, None, "{}", texts(&again));
     assert!(texts(&again).ends_with('5'), "{}", texts(&again));
+}
+
+#[tokio::test]
+async fn an_action_the_driver_refuses_throws_instead_of_passing_silently() {
+    let host = Arc::new(FakeHost {
+        refuse_action: Some("computer_browser_click"),
+        ..FakeHost::default()
+    });
+    let outcome = exec(
+        "js-refused-action",
+        &host,
+        "var tab = await cua.createBrowserTab(\"Chrome\", \"https://example.com\"); await tab.click(\"p1:3\"); nodeRepl.write(\"AFTER_MARK\");",
+    )
+    .await;
+    let error = outcome.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("browser_ref_stale: refused: the ref is no longer in the page"),
+        "{error}"
+    );
+    assert!(!texts(&outcome).contains("AFTER_MARK"));
 }

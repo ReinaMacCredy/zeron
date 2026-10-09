@@ -993,12 +993,27 @@ impl ComputerBrowserTools {
             }
         }
         if audited {
+            let outcome = computer_browser_effect(name, &bounded, &result);
+            let failed = matches!(
+                outcome.effect,
+                ComputerAuditEffect::Refused | ComputerAuditEffect::Error
+            );
+            let message = failed
+                .then(|| {
+                    result
+                        .content
+                        .iter()
+                        .flatten()
+                        .find_map(|part| part.text.clone())
+                })
+                .flatten()
+                .map(|text| crate::computer::backend::clamp_computer_message(&text, ""));
             self.audit(
                 tools,
                 name,
                 effective,
                 context,
-                computer_browser_effect(name, &bounded, &result),
+                AuditOutcome { message, ..outcome },
             );
         }
         let result = augment_browser_result(name, effective, result);

@@ -32,10 +32,16 @@
     return null;
   };
 
-  const refusalMessage = (structured) => {
-    if (!structured || structured.status !== "refused") return null;
-    const refusal = structured.refusal || {};
-    return `${refusal.code || "refused"}: ${refusal.message || "The browser call was refused."}`;
+  const refusalMessage = (structured, text) => {
+    if (!structured) return null;
+    if (structured.status === "refused") {
+      const refusal = structured.refusal || {};
+      return `${refusal.code || "refused"}: ${refusal.message || text || "The browser call was refused."}`;
+    }
+    if (structured.effect === "refused") {
+      return `${structured.code || "refused"}: ${structured.message || text || "The action was refused."}`;
+    }
+    return null;
   };
 
   const call = (tool, args) => {
@@ -43,7 +49,7 @@
     const first = (result.content || []).find((c) => c.type === "text");
     const data = first ? parse(first.text) : null;
     const structured = result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
-    const message = errorMessage(result, data) || refusalMessage(structured);
+    const message = errorMessage(result, data) || refusalMessage(structured, textOf(result));
     if (message) throw new Error(message);
     const images = (result.content || []).filter((c) => c.type === "image");
     return { data: data || structured || {}, structured: structured || data || {}, text: first ? first.text : "", images, raw: result };
