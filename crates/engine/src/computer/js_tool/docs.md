@@ -63,7 +63,7 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 ## Native apps
 
 - `cua.getApp("Calculator")` accepts an app name, bundle id or path. It launches the app in the background if needed and binds its frontmost usable window.
-- `cua.getApp({ windowId })` binds an exact window.
+- `cua.getApp({ windowId })` binds an exact window. A name that matches several running instances of one app is refused with their window ids; pick one.
 - Input goes to the app in the background, without taking the user's focus.
 
 ## Browsers

@@ -163,12 +163,23 @@
   const findApp = (target) => {
     const apps = call("computer_list_apps").data.apps || [];
     const wanted = String(target).toLowerCase();
-    return (
+    const info =
       apps.find((a) => (a.bundleId || "").toLowerCase() === wanted) ||
       apps.find((a) => (a.name || "").toLowerCase() === wanted) ||
       apps.find((a) => (a.launchPath || "").toLowerCase() === wanted) ||
-      apps.find((a) => (a.launchPath || "").toLowerCase().endsWith("/" + wanted + ".app"))
-    );
+      apps.find((a) => (a.launchPath || "").toLowerCase().endsWith("/" + wanted + ".app"));
+    const twins = info && info.running && info.bundleId ? apps.filter((a) => a.running && a.bundleId === info.bundleId) : [];
+    if (twins.length > 1) {
+      const windows = visibleWindows(call("computer_list_windows", { app: info.name }).data.windows || []).filter((w) =>
+        twins.some((t) => t.pid === w.pid),
+      );
+      throw new Error(
+        `Several ${info.name} instances are running. Pick a window with cua.getApp({ windowId }): ${windows
+          .map((w) => `"${w.id}" (pid ${w.pid}, ${JSON.stringify(w.title || "")})`)
+          .join(", ")}.`,
+      );
+    }
+    return info;
   };
 
   const windowsFor = (appName, pid) => {

@@ -169,6 +169,10 @@ impl JsHost for FakeHost {
                       "bounds": { "x": 0, "y": 0, "width": 1512, "height": 33 }, "stackingIndex": 1 }),
                     json!({ "id": "cua:7:2", "title": "Calculator", "appName": "Calculator", "pid": 7, "visible": true,
                       "bounds": { "x": 10, "y": 10, "width": 230, "height": 408 }, "stackingIndex": 5 }),
+                    json!({ "id": "cua:11:83", "title": "Inbox", "appName": "Helium", "pid": 11, "visible": true,
+                      "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 6 }),
+                    json!({ "id": "cua:14:5", "title": "Build PC", "appName": "Helium", "pid": 14, "visible": true,
+                      "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 7 }),
                 ];
                 if self.dialog {
                     windows.push(json!({ "id": "cua:7:9", "title": "ttgshop.vn says", "appName": "Calculator", "pid": 7,
@@ -582,6 +586,32 @@ async fn running_chromium_browsers_without_page_access_are_explained_in_the_stat
         texts(&twins).contains(r#"Several Helium instances are running. Pick one by id: "net.imput.helium#11", "net.imput.helium#14"."#),
         "{}",
         texts(&twins)
+    );
+}
+
+#[tokio::test]
+async fn get_app_by_name_refuses_when_several_instances_run() {
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-app-twins",
+        &host,
+        "try { await cua.getApp(\"Helium\"); } catch (e) { nodeRepl.write(e.message); } var a = await cua.getApp({ windowId: \"cua:14:5\" }); nodeRepl.write(a.windowId);",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    let text = texts(&outcome);
+    assert!(
+        text.contains(r#"Several Helium instances are running. Pick a window with cua.getApp({ windowId }): "cua:11:83" (pid 11, "Inbox"), "cua:14:5" (pid 14, "Build PC")."#),
+        "{text}"
+    );
+    assert!(text.contains("cua:14:5"), "{text}");
+    assert!(
+        !host
+            .args("computer_get_state")
+            .iter()
+            .any(|args| args.to_string().contains("cua:11:83")),
+        "{:?}",
+        host.args("computer_get_state")
     );
 }
 
