@@ -39,6 +39,33 @@ pub(super) fn digest_scope_key(
     json!([thread_id, window_id, label_contains]).to_string()
 }
 
+// Refs follow (window, role, label, ordinal). Among same-label siblings an
+// ordinal shifts when one appears or goes, so a number whose element now sits
+// elsewhere would point at a different control (a tab's Close taking a gone
+// popup's Close). Such a number is not reused; a lone label keeps its number
+// when it moves.
+fn moved_duplicate(
+    table: &ElementRefTable,
+    existing: usize,
+    item: &ComputerActionableElementRef,
+) -> bool {
+    let Some(previous) = table.entries.get(&existing) else {
+        return false;
+    };
+    let frame = |entry: &ComputerActionableElementRef| {
+        entry
+            .observed
+            .as_ref()
+            .map(|observed| observed.node.frame.clone())
+    };
+    let sibling = json!([item.window_id, item.role, item.label, 1]).to_string();
+    let duplicated = item.ordinal > 0 || table.by_key.contains_key(&sibling);
+    duplicated
+        && frame(previous).is_some()
+        && frame(item).is_some()
+        && frame(previous) != frame(item)
+}
+
 impl ElementState {
     fn sync_element_refs(
         &mut self,
@@ -63,8 +90,13 @@ impl ElementState {
         for (index, item) in stable.items.iter_mut().enumerate() {
             let id = &stable.ref_index[index];
             let key = &keys[index];
-            let element_ref = match table.by_key.get(key) {
-                Some(existing) => *existing,
+            let reused = table
+                .by_key
+                .get(key)
+                .copied()
+                .filter(|existing| !moved_duplicate(table, *existing, id));
+            let element_ref = match reused {
+                Some(existing) => existing,
                 None => {
                     let minted = table.next;
                     table.next += 1;

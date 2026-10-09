@@ -439,9 +439,11 @@ fn top_level_var(code: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if let Some(end) = literal_end(&chars, i, previous) {
+        if let Some((end, comment)) = literal_end(&chars, i, previous) {
             out.extend(&chars[i..end]);
-            previous = 'a';
+            if !comment {
+                previous = 'a';
+            }
             i = end;
             continue;
         }
@@ -481,7 +483,7 @@ fn starts_declaration(chars: &[char], at: usize, keyword: &str) -> bool {
             .is_some_and(|after| after.is_whitespace())
 }
 
-fn literal_end(chars: &[char], at: usize, previous: char) -> Option<usize> {
+fn literal_end(chars: &[char], at: usize, previous: char) -> Option<(usize, bool)> {
     let c = chars[at];
     let next = chars.get(at + 1).copied();
     let scan = |from: usize, close: &mut dyn FnMut(usize) -> bool| {
@@ -492,21 +494,31 @@ fn literal_end(chars: &[char], at: usize, previous: char) -> Option<usize> {
         (j + 1).min(chars.len())
     };
     match c {
-        '"' | '\'' | '`' => Some(scan(at + 1, &mut |j| chars[j] == c)),
-        '/' if next == Some('/') => Some(scan(at, &mut |j| chars[j] == '\n')),
-        '/' if next == Some('*') => Some(scan(at + 2, &mut |j| {
-            chars[j] == '/' && chars[j - 1] == '*'
-        })),
+        '"' | '\'' | '`' => Some((scan(at + 1, &mut |j| chars[j] == c), false)),
+        '/' if next == Some('/') => {
+            let end = chars[at..]
+                .iter()
+                .position(|&ch| ch == '\n')
+                .map_or(chars.len(), |offset| at + offset);
+            Some((end, true))
+        }
+        '/' if next == Some('*') => Some((
+            scan(at + 2, &mut |j| chars[j] == '/' && chars[j - 1] == '*'),
+            true,
+        )),
         '/' if "(,=:[!&|?{};+-*%<>~^\n".contains(previous) => {
             let mut class = false;
-            Some(scan(at + 1, &mut |j| {
-                match chars[j] {
-                    '[' => class = true,
-                    ']' => class = false,
-                    _ => {}
-                }
-                chars[j] == '/' && !class
-            }))
+            Some((
+                scan(at + 1, &mut |j| {
+                    match chars[j] {
+                        '[' => class = true,
+                        ']' => class = false,
+                        _ => {}
+                    }
+                    chars[j] == '/' && !class
+                }),
+                false,
+            ))
         }
         _ => None,
     }

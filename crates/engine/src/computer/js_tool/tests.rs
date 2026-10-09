@@ -615,6 +615,16 @@ fn only_top_level_declarations_become_var() {
     );
 }
 
+#[test]
+fn templates_and_comments_do_not_hide_or_fake_declarations() {
+    assert_eq!(
+        super::top_level_var(
+            "// let us start\nlet total = `${items.map((i) => { let x = i; return x; }).join(\", \")}`;\nconst done = true; /* let */ let after = 1;"
+        ),
+        "// let us start\nvar total = `${items.map((i) => { let x = i; return x; }).join(\", \")}`;\nvar done = true; /* let */ var after = 1;"
+    );
+}
+
 #[tokio::test]
 async fn a_failed_top_level_declaration_leaves_its_name_usable() {
     let host = Arc::new(FakeHost::default());

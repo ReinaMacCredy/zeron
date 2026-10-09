@@ -206,6 +206,15 @@ async fn a_gone_popup_close_never_rebinds_to_the_tab_close_with_the_same_label()
     *f.knobs().token_generation.as_mut().unwrap() += 1;
     let outcome = click(&tools, &context, popup).await;
     assert_eq!(outcome["error"], json!(true), "{outcome}");
+    tools
+        .call(
+            "computer_get_state",
+            args(json!({ "window_id": WINDOW })),
+            &context,
+        )
+        .await;
+    let outcome = click(&tools, &context, popup).await;
+    assert_eq!(outcome["error"], json!(true), "{outcome}");
     assert!(f.named("click").iter().all(|call| {
         call.args
             .get("element_token")
