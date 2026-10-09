@@ -174,3 +174,43 @@ async fn a_ref_whose_element_is_gone_fails_after_one_fresh_read() {
     assert_eq!(f.named("click").len(), 2);
     manager.dispose().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_gone_popup_close_never_rebinds_to_the_tab_close_with_the_same_label() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    let close = |token: &str, y: i64| {
+        json!({
+            "role": "AXButton",
+            "label": "Close",
+            "frame": { "x": -290, "y": y, "width": 40, "height": 20 },
+            "element_token": token,
+            "actions": ["AXPress"],
+        })
+    };
+    f.set_elements(vec![close("popup-close", 300), close("tab-close", 10)]);
+    f.knobs().token_generation = Some(0);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let listing = tools
+        .call(
+            "computer_get_state",
+            args(json!({ "window_id": WINDOW })),
+            &context,
+        )
+        .await;
+    let popup = ref_for(&result_json(&listing), "Close");
+    f.knobs().elements.remove(0);
+    *f.knobs().token_generation.as_mut().unwrap() += 1;
+    let outcome = click(&tools, &context, popup).await;
+    assert_eq!(outcome["error"], json!(true), "{outcome}");
+    assert!(f.named("click").iter().all(|call| {
+        call.args
+            .get("element_token")
+            .and_then(Value::as_str)
+            .is_none_or(|token| !token.starts_with("tab-close"))
+    }));
+    manager.dispose().await;
+}

@@ -227,8 +227,10 @@
       else if (shot.data && shot.data.screenshot && shot.data.screenshot.screenshotId)
         this.screenshotId = shot.data.screenshot.screenshotId;
       const first = shot.images[0];
-      if (!first) throw new Error("No screenshot was returned for " + this.appName + ".");
-      const image = new ZeronImage(first.mimeType, first.data);
+      const unchanged = shot.data && shot.data.screenshotUnchanged;
+      if (!first && !(unchanged && this.lastImage)) throw new Error("No screenshot was returned for " + this.appName + ".");
+      const image = first ? new ZeronImage(first.mimeType, first.data) : this.lastImage;
+      this.lastImage = image;
       if (!options || options.emit !== false) emitImage(image);
       return image;
     }

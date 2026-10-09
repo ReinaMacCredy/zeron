@@ -179,6 +179,10 @@ impl JsHost for FakeHost {
             "computer_get_state" => json_result(
                 json!({ "tree": "Window: \"Calculator\", App: Calculator.\n7 text Value: 42" }),
             ),
+            "computer_screenshot" if self.args(tool).len() > 1 => json_result(json!({
+                "screenshotUnchanged": true,
+                "screenshotId": "shot-1"
+            })),
             "computer_screenshot" => McpToolResult {
                 content: vec![
                     McpContent::Text {
@@ -644,4 +648,17 @@ async fn an_action_the_driver_refuses_throws_instead_of_passing_silently() {
         "{error}"
     );
     assert!(!texts(&outcome).contains("AFTER_MARK"));
+}
+
+#[tokio::test]
+async fn an_unchanged_window_still_returns_its_screenshot() {
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-unchanged-shot",
+        &host,
+        "var c = await cua.getApp(\"Calculator\"); var a = await c.getScreenshot({ emit: false }); var b = await c.getScreenshot({ emit: false }); b.data === a.data",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert!(texts(&outcome).ends_with("true"), "{}", texts(&outcome));
 }

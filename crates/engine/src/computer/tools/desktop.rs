@@ -327,26 +327,20 @@ impl ComputerTools {
             self.native_identity(),
             TREE_REF_LIMIT,
         );
-        let same: Vec<&ComputerActionableElementRef> = listing
-            .ref_index
-            .iter()
-            .filter(|candidate| candidate.role == entry.role && candidate.label == entry.label)
-            .collect();
         let frame = |candidate: &ComputerActionableElementRef| {
             candidate
                 .observed
                 .as_ref()
                 .map(|observed| observed.node.frame.clone())
         };
-        let fresh = match same.as_slice() {
-            [only] => Some(*only),
-            _ => same
-                .iter()
-                .find(|candidate| {
-                    candidate.ordinal == entry.ordinal && frame(candidate) == frame(&entry)
-                })
-                .copied(),
-        };
+        // Only the same element may take over the ref: a same-label control in
+        // another place (a tab's Close once a popup's Close is gone) must not.
+        let fresh = listing.ref_index.iter().find(|candidate| {
+            candidate.role == entry.role
+                && candidate.label == entry.label
+                && frame(candidate).is_some()
+                && frame(candidate) == frame(&entry)
+        });
         match fresh.filter(|fresh| fresh.observed.is_some()) {
             Some(fresh) => {
                 let fresh = fresh.clone();
