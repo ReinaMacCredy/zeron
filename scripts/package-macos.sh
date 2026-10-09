@@ -2,10 +2,11 @@
 # macOS packaging: build the release binary for the host arch and produce
 #   target/package/zeron-<version>-macos-<arch>.dmg          (user download)
 #   target/package/zeron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Zeron.app (unsigned unless CODESIGN_IDENTITY is set).
+# containing Zeron.app, signed with CODESIGN_IDENTITY, else the first Developer
+# ID Application or Apple Development identity in the keychain, else ad-hoc.
 #
 # Usage: scripts/package-macos.sh
-# Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
+# Env:   CODESIGN_IDENTITY="Developer ID Application: …" to pick the identity.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #        API key (.p8) for notarization; all three set → notarize + staple the
 #        app and the dmg, which removes the Gatekeeper warning entirely.
@@ -52,17 +53,26 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/zeron.icns"
 rm -rf "$ICONSET"
 
-if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+# Ad-hoc pins TCC grants to the cdhash, so every rebuild would lose them.
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  IDENTITY="$(sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' <<<"$IDENTITIES" | head -1)"
+  [[ -n "$IDENTITY" ]] || IDENTITY="$(sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' <<<"$IDENTITIES" | head -1)"
+fi
+if [[ -n "$IDENTITY" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
-  # No --deep (Apple deprecated it): the nested driver is signed first, then
-  # the bundle seals it.
-  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.cua-driver "$DRIVER"
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+  SIGN=(--options runtime --timestamp --sign "$IDENTITY")
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
-  codesign --deep --force --entitlements "$ROOT/dist/macos/voice.entitlements" --sign - "$APP"
+  SIGN=(--sign -)
+  echo "warning: no signing identity found; ad-hoc builds lose their macOS privacy grants on every rebuild" >&2
 fi
+# No --deep (Apple deprecated it): the nested driver is signed first, then
+# the bundle seals it.
+codesign --force "${SIGN[@]}" --identifier sh.zeron.cua-driver "$DRIVER"
+codesign --force "${SIGN[@]}" --entitlements "$ROOT/dist/macos/Dictation.entitlements" "$APP"
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may
 # still exit 0 depending on the notarytool version — the `stapler staple` that
