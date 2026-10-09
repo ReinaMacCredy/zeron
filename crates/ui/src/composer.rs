@@ -18618,6 +18618,7 @@ mod tests {
 
     fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
         UserInputQuestion {
+            approval: false,
             id: id.into(),
             header: "Header".into(),
             question: format!("Question {id}"),

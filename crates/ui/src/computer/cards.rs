@@ -1084,6 +1084,7 @@ mod tests {
         question: &str,
     ) -> UserInputQuestion {
         UserInputQuestion {
+            approval: false,
             id: "consent".into(),
             header: "Computer".into(),
             question: question.into(),

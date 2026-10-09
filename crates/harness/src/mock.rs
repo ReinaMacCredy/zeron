@@ -28,6 +28,7 @@ static MOCK_COST_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 fn question_script() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion {
+            approval: false,
             id: "q-sync".into(),
             header: "Question".into(),
             question: "Which sync strategy should the rewrite use?".into(),
@@ -42,6 +43,7 @@ fn question_script() -> Vec<UserInputQuestion> {
             kind: None,
         },
         UserInputQuestion {
+            approval: false,
             id: "q-gates".into(),
             header: "Question".into(),
             question: "Which suites should gate the merge?".into(),

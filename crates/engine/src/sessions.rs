@@ -2041,6 +2041,14 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    pub fn awaits_input(&self, chat_id: &str, request_id: &str) -> bool {
+        lock(&self.inner.runs).get(chat_id).is_some_and(|run| {
+            lock(&run.pending_inputs)
+                .get(request_id)
+                .is_some_and(|resolver| !resolver.is_closed())
+        })
+    }
+
     pub fn raise_input(
         &self,
         chat_id: &str,
@@ -5068,11 +5076,17 @@ async fn drive_run(
                 inner.remember_harness_session(&chat_id, session_id, &run_cwd);
                 note_fork_history_session(&doc, carried_history, session_id);
             }
-            AgentEvent::InputRequested { questions, .. } => {
+            AgentEvent::InputRequested {
+                request_id,
+                questions,
+            } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
                 if !questions.iter().any(UserInputQuestion::is_computer) {
                     inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
+                    if let Some(host) = inner.doc_host() {
+                        host.offer_input_wakes(&chat_id, request_id, questions);
+                    }
                 }
             }
             AgentEvent::InputResolved { request_id, .. } => {

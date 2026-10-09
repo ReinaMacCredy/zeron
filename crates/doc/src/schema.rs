@@ -2566,6 +2566,7 @@ mod computer_marker_tests {
 
     fn question() -> UserInputQuestion {
         UserInputQuestion {
+            approval: false,
             id: "q1".into(),
             header: "Foreground".into(),
             question: "Can I bring Safari to the front?".into(),

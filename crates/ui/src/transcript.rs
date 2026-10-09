@@ -19752,6 +19752,7 @@ mod computer_tests {
             id: "i1".into(),
             request_id: "computer-consent-1".into(),
             questions: vec![UserInputQuestion {
+                approval: false,
                 id: "consent".into(),
                 header: "Computer".into(),
                 question: "Allow Computer for this task? The agent will use this Mac's apps until this response ends.".into(),
@@ -19774,6 +19775,7 @@ mod computer_tests {
             id: "f1".into(),
             request_id: "f1".into(),
             questions: vec![UserInputQuestion {
+                approval: false,
                 id: "foreground".into(),
                 header: "Computer".into(),
                 question:
@@ -19896,6 +19898,7 @@ mod computer_tests {
             id: "q1".into(),
             request_id: "approval-1".into(),
             questions: vec![UserInputQuestion {
+                approval: false,
                 id: "q".into(),
                 header: "Run command?".into(),
                 question: "Allow once?".into(),

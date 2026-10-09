@@ -5848,6 +5848,7 @@ mod tests {
             from_chat_id: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            input_request: None,
         };
         state.push_echo("c1", echo("held"));
         state.push_echo("c1", echo("sent"));

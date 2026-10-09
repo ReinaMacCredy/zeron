@@ -1212,6 +1212,7 @@ fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
         .map(str::to_owned)
         .unwrap_or_else(|| input.to_string());
     UserInputQuestion {
+        approval: true,
         id: uuid::Uuid::new_v4().to_string(),
         header: format!("Allow {tool_name}?"),
         question: format!("Claude wants to use {tool_name}: {detail}"),
@@ -1235,6 +1236,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
             let field =
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             UserInputQuestion {
+                approval: false,
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),
                 question: field(["question", "prompt"]).unwrap_or("").into(),

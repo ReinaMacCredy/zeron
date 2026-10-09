@@ -164,6 +164,16 @@ struct SendThreadMessageParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetThreadWatchesParams {
+    chat_id: String,
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AskUserParams {
     chat_id: String,
     run_secret: String,
@@ -2580,6 +2590,14 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::SET_THREAD_WATCHES => {
+                let p: SetThreadWatchesParams = parse_params(params)?;
+                let watching = self
+                    .doc_host
+                    .set_thread_watches_for(&p.chat_id, &p.add, &p.remove)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "watching": watching }))
             }
             methods::DELEGATE_TASK => {
                 let p: crate::doc_host::DelegateTaskParams = parse_params(params)?;

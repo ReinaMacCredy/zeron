@@ -204,6 +204,10 @@ fn working(core: &EngineCore, chat_id: &str) -> bool {
 
 /// A person's own run on `chat_id`, the way a viewport queues it.
 fn queue_human_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &str) {
+    queue_run(core, chat_id, command_id, message_id, "human prompt");
+}
+
+fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &str, prompt: &str) {
     let handle = core.doc_host.open(chat_id).expect("open chat");
     handle
         .doc()
@@ -211,7 +215,7 @@ fn queue_human_run(core: &EngineCore, chat_id: &str, command_id: &str, message_i
             id: command_id.into(),
             payload: SessionCommandPayload::Run {
                 request: RunRequest {
-                    prompt: "human prompt".into(),
+                    prompt: prompt.into(),
                     harness: None,
                     model: None,
                     reasoning: None,
@@ -1779,4 +1783,326 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
         "{text}"
     );
     core.shutdown().await;
+}
+
+struct AskingHarness {
+    prompts: Arc<Mutex<Vec<String>>>,
+    approval: bool,
+}
+
+#[async_trait]
+impl Harness for AskingHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Asking"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.prompts.lock().unwrap().push(request.prompt.clone());
+        let asks =
+            request.prompt.contains("please ask") && !request.prompt.contains("waiting for input");
+        let holds = request.prompt.contains("please hold");
+        let approval = self.approval;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "ask-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-ask".into(),
+                    assistant_message_id: "a-ask".into(),
+                }))
+                .await;
+            let mut text = "noted".to_string();
+            if holds {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+            if asks {
+                let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    id: "q-curl".into(),
+                    header: "Agent question".into(),
+                    question: "Execute `curl -o main.jpg https://example.com/a.jpg`".into(),
+                    options: vec!["Yes, proceed".into(), "No".into()],
+                    multi_select: false,
+                    kind: None,
+                    prefill: None,
+                    multiline: false,
+                    approval,
+                }])
+                .await
+                .unwrap_or_default();
+                text = answers
+                    .first()
+                    .and_then(|a| a.labels.first().cloned())
+                    .unwrap_or_else(|| "no answer".into());
+            }
+            let _ = tx.send(Ok(AgentEvent::TextDelta { text })).await;
+            let _ = tx
+                .send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-ask".into()),
+                }))
+                .await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+fn asking_rig(approval: bool) -> Rig {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let rig = rig_on(Arc::new(AskingHarness {
+        prompts: prompts.clone(),
+        approval,
+    }));
+    Rig { prompts, ..rig }
+}
+
+fn pending_request(core: &EngineCore, chat_id: &str) -> Option<String> {
+    entries(core, chat_id).iter().rev().find_map(|entry| {
+        entry.parts.iter().find_map(|part| match part {
+            zeron_doc::MessagePart::Input {
+                request_id,
+                resolved: false,
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn prompts_with(rig: &Rig, needle: &str) -> Vec<String> {
+    rig.prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|prompt| prompt.contains(needle))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_child_blocked_on_a_tool_approval_wakes_its_owner_with_the_request() {
+    let rig = asking_rig(true);
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate("please ask before downloading"),
+            Default::default(),
+        )
+        .await
+        .expect("delegate");
+    let child = view.task_id.clone();
+    wait_for(
+        || pending_request(&rig.core, &child).is_some(),
+        "the child's approval card",
+    )
+    .await;
+    let request = pending_request(&rig.core, &child).unwrap();
+    wait_for(
+        || !prompts_with(&rig, "is waiting for input").is_empty(),
+        "the owner's input wake",
+    )
+    .await;
+    let wake = prompts_with(&rig, "is waiting for input").remove(0);
+    assert!(
+        wake.starts_with(&format!("Delegated task {child} (")),
+        "{wake}"
+    );
+    assert!(wake.contains(&format!("requestId {request}")), "{wake}");
+    assert!(
+        wake.contains("- tool approval q-curl: Execute `curl -o main.jpg"),
+        "{wake}"
+    );
+    assert!(
+        wake.contains("Options: \"Yes, proceed\" | \"No\""),
+        "{wake}"
+    );
+    let woken = entries(&rig.core, "lead");
+    assert!(
+        woken
+            .iter()
+            .any(|e| e.from_chat_id.as_deref() == Some(child.as_str())),
+        "the wake reads as a message from the child"
+    );
+
+    assert!(
+        rig.core
+            .sessions
+            .respond_input(
+                &child,
+                &request,
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-curl".into(),
+                    labels: vec!["Yes, proceed".into()],
+                }],
+            )
+            .unwrap()
+    );
+    wait_for(
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Completed,
+        "the child to finish",
+    )
+    .await;
+    wait_for(|| idle(&rig.core, "lead"), "the owner's turns").await;
+    assert_eq!(
+        prompts_with(&rig, "is waiting for input").len(),
+        1,
+        "one wake per request"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_watched_peer_that_asks_wakes_its_watcher_and_an_unwatched_one_does_not() {
+    let rig = asking_rig(false);
+    for peer in ["watched", "unwatched"] {
+        rig.core
+            .workspace
+            .create_chat(peer, Some("space-tt"), None, None, None)
+            .expect("peer chat");
+    }
+    assert!(
+        rig.core
+            .doc_host
+            .set_thread_watches_for("lead", &["lead".into()], &[])
+            .is_err(),
+        "a chat cannot watch itself"
+    );
+    assert!(
+        rig.core
+            .doc_host
+            .set_thread_watches_for("lead", &["nobody".into()], &[])
+            .is_err(),
+        "only live threads can be watched"
+    );
+    let watching = rig
+        .core
+        .doc_host
+        .set_thread_watches_for("lead", &["watched".into()], &[])
+        .expect("watch");
+    assert_eq!(watching, vec!["watched".to_string()]);
+
+    queue_run(
+        &rig.core,
+        "unwatched",
+        "cmd-u",
+        "msg-u",
+        "please ask about the plan",
+    );
+    wait_for(
+        || pending_request(&rig.core, "unwatched").is_some(),
+        "the unwatched question",
+    )
+    .await;
+    queue_run(
+        &rig.core,
+        "watched",
+        "cmd-w",
+        "msg-w",
+        "please ask about the plan",
+    );
+    wait_for(
+        || !prompts_with(&rig, "is waiting for input").is_empty(),
+        "the watcher's wake",
+    )
+    .await;
+    let wakes = prompts_with(&rig, "is waiting for input");
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert!(
+        wakes[0].starts_with("Watched thread watched ("),
+        "{}",
+        wakes[0]
+    );
+    assert!(wakes[0].contains("- question q-curl:"), "{}", wakes[0]);
+
+    let watching = rig
+        .core
+        .doc_host
+        .set_thread_watches_for("lead", &[], &["watched".into()])
+        .expect("unwatch");
+    assert!(watching.is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
+    let rig = asking_rig(true);
+    queue_run(
+        &rig.core,
+        "lead",
+        "cmd-l",
+        "msg-l",
+        "please hold for a second",
+    );
+    wait_for(|| working(&rig.core, "lead"), "the owner's own turn").await;
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate("please ask before downloading"),
+            Default::default(),
+        )
+        .await
+        .expect("delegate");
+    let child = view.task_id.clone();
+    wait_for(
+        || pending_request(&rig.core, &child).is_some() && queue_len(&rig.core, "lead") > 0,
+        "the wake queued behind the owner's turn",
+    )
+    .await;
+    let request = pending_request(&rig.core, &child).unwrap();
+    assert!(
+        rig.core
+            .sessions
+            .respond_input(
+                &child,
+                &request,
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-curl".into(),
+                    labels: vec!["Yes, proceed".into()],
+                }],
+            )
+            .unwrap()
+    );
+    wait_for(
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Completed,
+        "the child to finish",
+    )
+    .await;
+    wait_for(
+        || !prompts_with(&rig, "reached a terminal state").is_empty(),
+        "the completion wake",
+    )
+    .await;
+    wait_for(|| idle(&rig.core, "lead"), "the owner's turns").await;
+    assert!(
+        prompts_with(&rig, "is waiting for input").is_empty(),
+        "the answered question never reached the owner"
+    );
+    rig.core.shutdown().await;
 }
