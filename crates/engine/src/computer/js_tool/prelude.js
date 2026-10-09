@@ -491,12 +491,13 @@
   };
 
   class Tab {
-    constructor(browser, tabId, title, url) {
+    constructor(browser, tabId, title, url, background) {
       this.browser = browser;
       this.id = tabId;
       this.targetId = browser.binding.target_id;
       this.title = title || "";
       this.url = url || "";
+      this.background = !!background;
     }
 
     ids(extra) {
@@ -530,7 +531,8 @@
     click(ref) {
       if (typeof ref !== "number" && typeof ref !== "string")
         throw new Error("Tab click takes an element ref from getAXState().");
-      call("computer_browser_click", this.ids({ ref }));
+      // Chromium drops trusted pointer input on a tab that is not on screen.
+      call("computer_browser_click", this.ids(this.background ? { ref, input_route: "dom_event" } : { ref }));
       action("browser_click", this.label());
     }
 
@@ -676,12 +678,12 @@
               tabs.find((t) => String(t.url || "").startsWith(reference.url))
             : null;
       if (!found) throw new Error("No open tab matches that reference.");
-      const tab = new Tab(browser, found.tab_id, found.title, found.url);
+      const tab = new Tab(browser, found.tab_id, found.title, found.url, found.active === false);
       tab.getAXState();
       return tab;
     },
 
-    createBrowserTab(browserId, url, options) {
+    async createBrowserTab(browserId, url, options) {
       const browser = browserById(browserId);
       const binding = browser.attach();
       const anchor = binding.tabs.find((t) => t.active) || binding.tabs[0];
@@ -697,12 +699,19 @@
           url: String(url || "about:blank"),
           new_tab: true,
         }).structured;
-        tab = new Tab(browser, opened.tab_id, "", url);
+        tab = new Tab(browser, opened.tab_id, "", url, true);
         binding.tabs.push({ tab_id: opened.tab_id, title: "", url: String(url || "about:blank") });
         action("browser_navigate", browser.name, url);
       }
-      tab.getAXState();
-      return tab;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          tab.getAXState();
+          return tab;
+        } catch (error) {
+          if (attempt >= 10 || !/origin could not be proven/.test(error.message)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
     },
   };
 

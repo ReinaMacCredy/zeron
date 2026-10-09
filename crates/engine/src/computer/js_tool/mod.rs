@@ -93,7 +93,12 @@ fn action_summary(actions: &[Value]) -> Option<String> {
             key["app"] = json!(app);
         }
         if let Some(detail) = action.get("detail").and_then(Value::as_str) {
-            key["detail"] = json!(detail.chars().take(24).collect::<String>());
+            let short = if detail.chars().count() > 24 {
+                format!("{}…", detail.chars().take(23).collect::<String>())
+            } else {
+                detail.to_owned()
+            };
+            key["detail"] = json!(short);
         }
         match runs.last_mut() {
             Some((last, count)) if *last == key => *count += 1,
@@ -318,22 +323,7 @@ impl ReplState {
     }
 
     fn evaluate(&self, code: &str, timeout: Duration) -> Option<String> {
-        let code = &relax_const(code);
-        let first = self.evaluate_once(code, timeout);
-        let Some(error) = &first else {
-            return None;
-        };
-        let Some(name) = redeclared_name(error) else {
-            return first;
-        };
-        let rewritten = rewrite_redeclaration(code, &name);
-        if rewritten == *code {
-            return first;
-        }
-        self.shared.lock_sink().content.push(McpContent::Text {
-            text: format!("Warning: {name} was already declared; reassigned it instead."),
-        });
-        self.evaluate_once(&rewritten, timeout)
+        self.evaluate_once(&top_level_var(code), timeout)
     }
 
     fn evaluate_once(&self, code: &str, timeout: Duration) -> Option<String> {
@@ -439,31 +429,86 @@ fn timeout_message(timeout: Duration, cancelled: bool) -> String {
     }
 }
 
-fn redeclared_name(error: &str) -> Option<String> {
-    let start = error.find("redeclaration of '")? + "redeclaration of '".len();
-    let rest = &error[start..];
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_owned())
+// A failed `let x = await ...` at the top of a call leaves `x` uninitialized
+// for the rest of the chat; `var` has no such dead zone.
+fn top_level_var(code: &str) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut depth = 0usize;
+    let mut previous = ';';
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(end) = literal_end(&chars, i, previous) {
+            out.extend(&chars[i..end]);
+            previous = 'a';
+            i = end;
+            continue;
+        }
+        match c {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0
+            && matches!(previous, ';' | '}' | '\n')
+            && let Some(keyword) = ["let", "const"]
+                .into_iter()
+                .find(|keyword| starts_declaration(&chars, i, keyword))
+        {
+            out.push_str("var");
+            i += keyword.len();
+            previous = 'a';
+            continue;
+        }
+        out.push(c);
+        if !c.is_whitespace() || c == '\n' {
+            previous = c;
+        }
+        i += 1;
+    }
+    out
 }
 
-fn relax_const(code: &str) -> String {
-    static CONST: OnceLock<regex::Regex> = OnceLock::new();
-    CONST
-        .get_or_init(|| regex::Regex::new(r"(^|[;{}(]|\n)(\s*)const\s").expect("valid regex"))
-        .replace_all(code, "${1}${2}let ")
-        .into_owned()
+fn starts_declaration(chars: &[char], at: usize, keyword: &str) -> bool {
+    let word: Vec<char> = keyword.chars().collect();
+    let boundary =
+        at == 0 || !(chars[at - 1].is_alphanumeric() || matches!(chars[at - 1], '_' | '$'));
+    boundary
+        && chars[at..].starts_with(&word)
+        && chars
+            .get(at + word.len())
+            .is_some_and(|after| after.is_whitespace())
 }
 
-fn rewrite_redeclaration(code: &str, name: &str) -> String {
-    let pattern = format!(
-        r"(^|[;{{}}(]|\n)(\s*)(?:let|const|var)\s+{}\b",
-        regex::escape(name)
-    );
-    match regex::Regex::new(&pattern) {
-        Ok(declaration) => declaration
-            .replace_all(code, format!("${{1}}${{2}}{name}").as_str())
-            .into_owned(),
-        Err(_) => code.to_owned(),
+fn literal_end(chars: &[char], at: usize, previous: char) -> Option<usize> {
+    let c = chars[at];
+    let next = chars.get(at + 1).copied();
+    let scan = |from: usize, close: &mut dyn FnMut(usize) -> bool| {
+        let mut j = from;
+        while j < chars.len() && !close(j) {
+            j += if chars[j] == '\\' { 2 } else { 1 };
+        }
+        (j + 1).min(chars.len())
+    };
+    match c {
+        '"' | '\'' | '`' => Some(scan(at + 1, &mut |j| chars[j] == c)),
+        '/' if next == Some('/') => Some(scan(at, &mut |j| chars[j] == '\n')),
+        '/' if next == Some('*') => Some(scan(at + 2, &mut |j| {
+            chars[j] == '/' && chars[j - 1] == '*'
+        })),
+        '/' if "(,=:[!&|?{};+-*%<>~^\n".contains(previous) => {
+            let mut class = false;
+            Some(scan(at + 1, &mut |j| {
+                match chars[j] {
+                    '[' => class = true,
+                    ']' => class = false,
+                    _ => {}
+                }
+                chars[j] == '/' && !class
+            }))
+        }
+        _ => None,
     }
 }
 

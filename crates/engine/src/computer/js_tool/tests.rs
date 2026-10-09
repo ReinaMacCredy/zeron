@@ -282,12 +282,12 @@ async fn a_refusal_from_the_pipeline_surfaces_as_a_thrown_error_with_its_message
 }
 
 #[tokio::test]
-async fn redeclaring_a_lexical_binding_reassigns_it_with_a_warning() {
+async fn redeclaring_a_top_level_binding_in_a_later_call_reassigns_it() {
     let host = Arc::new(FakeHost::default());
     exec("js-e", &host, "const step = 1;").await;
     let outcome = exec("js-e", &host, "const step = 2; step").await;
     assert_eq!(outcome.error, None, "{}", texts(&outcome));
-    assert!(texts(&outcome).contains("step was already declared"));
+    assert!(texts(&outcome).ends_with('2'), "{}", texts(&outcome));
 }
 
 #[tokio::test]
@@ -354,7 +354,7 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
     let outcome = exec(
         "js-j",
         &host,
-        "var tab = await cua.createBrowserTab(\"Chrome\", \"https://example.com\"); await tab.markDeliverable();",
+        "var tab = await cua.createBrowserTab(\"Chrome\", \"https://example.com\"); await tab.click(\"p1:3\"); await tab.markDeliverable();",
     )
     .await;
     assert_eq!(outcome.error, None, "{}", texts(&outcome));
@@ -365,6 +365,10 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
     assert!(prepare.get("allow_launch").is_none());
     let navigate = &host.args("computer_browser_navigate")[0];
     assert_eq!(navigate["new_tab"], json!(true));
+    assert_eq!(
+        host.args("computer_browser_click")[0]["input_route"],
+        json!("dom_event")
+    );
     assert!(
         texts(&outcome).contains("Tab: \"Mail\", URL: https://mail.example.\nbutton \"Compose\" [p1:3]\nText:\nInbox (3) [p1:9]"),
         "{}",
@@ -583,4 +587,29 @@ async fn a_native_error_throws_its_code_and_message_without_typed_tool_guidance(
         "{error}"
     );
     assert!(!error.contains("Computer routing reminder"), "{error}");
+}
+
+#[test]
+fn only_top_level_declarations_become_var() {
+    assert_eq!(
+        super::top_level_var(
+            "let a = 1; for (let i = 0; i < 2; i++) { let b = i; }\nconst s = `let x`; /let\\/x/.test(s); letter = 2;"
+        ),
+        "var a = 1; for (let i = 0; i < 2; i++) { let b = i; }\nvar s = `let x`; /let\\/x/.test(s); letter = 2;"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_top_level_declaration_leaves_its_name_usable() {
+    let host = Arc::new(FakeHost::default());
+    let failed = exec(
+        "js-tdz",
+        &host,
+        "let tab = await (async () => { throw new Error(\"not yet\"); })();",
+    )
+    .await;
+    assert!(failed.error.unwrap_or_default().contains("not yet"));
+    let again = exec("js-tdz", &host, "let tab = 5; tab").await;
+    assert_eq!(again.error, None, "{}", texts(&again));
+    assert!(texts(&again).ends_with('5'), "{}", texts(&again));
 }

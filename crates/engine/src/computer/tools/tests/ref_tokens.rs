@@ -113,7 +113,7 @@ async fn a_ref_past_the_first_sixty_elements_still_clicks_after_another_action()
     manager.dispose().await;
 }
 
-async fn listed(f: &Fixture, tools: &ComputerTools, context: &ComputerToolContext) -> u64 {
+async fn listed(tools: &ComputerTools, context: &ComputerToolContext) -> u64 {
     let listing = tools
         .call(
             "computer_get_state",
@@ -144,7 +144,7 @@ async fn a_ref_whose_token_expired_outside_the_tool_retries_once_on_a_fresh_read
     page(&f, 10);
     let (manager, tools) = tools(&f);
     let context = context();
-    let element_ref = listed(&f, &tools, &context).await;
+    let element_ref = listed(&tools, &context).await;
     *f.knobs().token_generation.as_mut().unwrap() += 1;
     let outcome = click(&tools, &context, element_ref).await;
     assert_eq!(outcome["error"], json!(false), "{outcome}");
@@ -161,7 +161,7 @@ async fn a_ref_whose_element_is_gone_fails_after_one_fresh_read() {
     page(&f, 10);
     let (manager, tools) = tools(&f);
     let context = context();
-    let element_ref = listed(&f, &tools, &context).await;
+    let element_ref = listed(&tools, &context).await;
     f.knobs().elements.remove(5);
     *f.knobs().token_generation.as_mut().unwrap() += 1;
     let outcome = click(&tools, &context, element_ref).await;
