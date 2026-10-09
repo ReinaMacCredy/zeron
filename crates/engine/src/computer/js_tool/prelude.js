@@ -446,11 +446,35 @@
     }
   }
 
+  const withoutEchoedImages = (outline) => {
+    const parse = (line) => {
+      const match = /^(\s*)- (\w+) \S+(?: "(.*?)")?/.exec(line);
+      return match ? { indent: match[1].length, role: match[2], name: match[3] || "" } : null;
+    };
+    const kept = [];
+    let parent = null;
+    for (const line of outline.split("\n")) {
+      const node = parse(line);
+      const echo =
+        node &&
+        parent &&
+        node.role === "image" &&
+        parent.role === "link" &&
+        node.indent > parent.indent &&
+        (!node.name || node.name === parent.name);
+      if (!echo) {
+        kept.push(line);
+        parent = node;
+      }
+    }
+    return kept.join("\n");
+  };
+
   const renderTabState = (snapshot, fallback) => {
     if (!snapshot || typeof snapshot !== "object") return fallback;
     const page = snapshot.page || {};
     const lines = [`Tab: "${page.title || ""}", URL: ${page.url || snapshot.url || ""}.`];
-    if (typeof snapshot.outline === "string" && snapshot.outline.trim()) lines.push(snapshot.outline.trimEnd());
+    if (typeof snapshot.outline === "string" && snapshot.outline.trim()) lines.push(withoutEchoedImages(snapshot.outline.trimEnd()));
     else
       for (const r of snapshot.refs || [])
         lines.push(`${r.ref} ${r.role || r.node || ""} ${r.name || r.label || ""}`.trimEnd());

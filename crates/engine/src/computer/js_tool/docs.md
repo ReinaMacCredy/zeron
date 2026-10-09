@@ -72,7 +72,9 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
   - `"com.google.Chrome"` (or `"Chrome"`), Edge, Chromium and Helium are the user's running, signed-in profile. Attaching asks the user once.
   - Other Chromium browsers (Dia, Arc, Brave, Vivaldi, Opera) are listed under `appOnlyBrowsers` in `cua.getState()`: drive their windows as apps.
   - `"isolated"` is a separate headless browser without the user's cookies. Never swap one for the other silently.
-- `cua.createBrowserTab("Chrome", url)` opens a background tab in the user's browser.
+- `cua.createBrowserTab("Chrome", url)` opens a background tab in the user's browser. When several instances run, pick one by its id from `cua.getState()` (for example `"net.imput.helium#814"`).
+- In the user's browser, tab clicks, typing and `pressKey(ref, "Return")` are DOM events, so the window never comes to the front. Controls that demand a real user gesture (file pickers, some downloads) may ignore them: then drive the window as an app.
+- Refs come from the latest `tab.getAXState()`; read it again after the page changes.
 - Tabs you open close when the turn ends:
   - `tab.markDeliverable()` keeps one for the user;
   - `tab.markHandoff()` keeps it through the next turn.

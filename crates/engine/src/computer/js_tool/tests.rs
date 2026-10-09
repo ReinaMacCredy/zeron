@@ -152,7 +152,7 @@ impl JsHost for FakeHost {
                 structured_result(json!({
                     "status": "ok",
                     "page": { "title": "Mail", "url": "https://mail.example" },
-                    "outline": "button \"Compose\" [p1:3]",
+                    "outline": "button \"Compose\" [p1:3]\n- link p1:4 \"Ryzen 5\"\n  - image p1:5 \"Ryzen 5\"\n- link p1:6 \"Ryzen 7\"\n  - image p1:7",
                     "text_digest": "Inbox (3) [p1:9]"
                 }))
             }
@@ -382,7 +382,7 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
         json!("dom_event")
     );
     assert!(
-        texts(&outcome).contains("Tab: \"Mail\", URL: https://mail.example.\nbutton \"Compose\" [p1:3]\nText:\nInbox (3) [p1:9]"),
+        texts(&outcome).contains("Tab: \"Mail\", URL: https://mail.example.\nbutton \"Compose\" [p1:3]\n- link p1:4 \"Ryzen 5\"\n- link p1:6 \"Ryzen 7\"\nText:\nInbox (3) [p1:9]"),
         "{}",
         texts(&outcome)
     );
