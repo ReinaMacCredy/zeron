@@ -30,7 +30,7 @@ use crate::computer::desktop_operation_queue::{
     OperationSignal, assert_desktop_operation_active, desktop_operation_signal,
     with_desktop_delivery_mode,
 };
-use crate::computer::element_identity::ObservedComputerTarget;
+use crate::computer::element_identity::{ObservedComputerTarget, observed_computer_target_node};
 use crate::computer::ui_tree_targeting::{
     ComputerTargetError, ComputerTargetErrorCode, activation_point_for_node, is_writable_text_node,
 };
@@ -839,7 +839,8 @@ impl ComputerManager {
                 && count == 1
                 && modifiers.is_empty()
                 && (self.backend.supports_action(semantic, "AXPress")
-                    || is_pressable_role(&semantic.node.role))
+                    || (observed_computer_target_node(&target).is_some()
+                        && is_pressable_role(&semantic.node.role)))
             {
                 assert_desktop_operation_active()?;
                 let native = if self.agent_dialect() == ComputerAgentDialect::Macos {
