@@ -82,12 +82,14 @@ pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open.",
+            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. An awaiting_input row carries the question it is blocked on as `pendingInput` (answer it with respond_to_input); status is a snapshot, so a thread that keeps asking permission can read idle a moment later. `createdByChatId` names the chat whose agent opened it with create_thread; `delegatedByChatId` and `delegationStatus` name the chat that owns it as a delegate_task child and how that task stands. `parentId` keeps only threads opened or delegated by that thread (\"self\" for this chat), `spaceId` only one project's threads. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Every row is a real sidebar chat the human can open.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "includeArchived": { "type": "boolean" },
                     "status": { "type": "string", "enum": ["idle", "working", "awaiting_input", "errored"] },
+                    "parentId": { "type": "string", "description": "A thread id, or \"self\" for this chat." },
+                    "spaceId": { "type": "string", "description": "A project id from list_projects." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
                     "cursor": { "type": "string", "description": "nextCursor from the previous page with the same filters." }
                 },
@@ -693,11 +695,17 @@ impl ThreadTools {
                 .filter(|n| (1..=200).contains(n))
                 .ok_or("limit must be between 1 and 200")? as usize,
         };
-        let cursor = match args.get("cursor") {
-            None => None,
-            Some(Value::String(cursor)) => Some(cursor.as_str()),
-            _ => return Err("cursor must be a string".into()),
+        let optional = |key: &str| match args.get(key) {
+            None => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.as_str())),
+            _ => Err(format!("{key} must be a string")),
         };
+        let cursor = optional("cursor")?;
+        let parent = optional("parentId")?.map(|id| match id {
+            "self" => self.chat_id.as_str(),
+            id => id,
+        });
+        let space = optional("spaceId")?;
         let (_, mut peers) = self.peers().await?;
         peers.sort_by(|a, b| a.id.cmp(&b.id));
         if let Some(cursor) = cursor
@@ -712,6 +720,14 @@ impl ThreadTools {
             .filter(|chat| {
                 (include_archived || !chat.archived)
                     && cursor.is_none_or(|cursor| chat.id.as_str() > cursor)
+                    && parent.is_none_or(|parent| {
+                        chat.created_by_chat_id.as_deref() == Some(parent)
+                            || chat
+                                .delegation
+                                .as_ref()
+                                .is_some_and(|d| d.delegated_by_chat_id == parent)
+                    })
+                    && space.is_none_or(|space| chat.space_id.as_deref() == Some(space))
                     && filter.is_none_or(|status| status_of(&sessions, &chat.id, now) == status)
             })
             .take(limit + 1)
@@ -734,21 +750,29 @@ impl ThreadTools {
         let summary = self
             .call_engine(methods::GET_THREAD_SUMMARY, json!({"chatId": chat.id}))
             .await?;
+        let status = status_of(sessions, &chat.id, now);
+        let pending = match status {
+            "awaiting_input" => pending_input(&self.entries_of(&chat.id).await?, None),
+            _ => None,
+        };
         Ok(json!({
             "id": chat.id,
             "title": chat.title,
             "spaceId": chat.space_id,
-            "status": status_of(sessions, &chat.id, now),
+            "status": status,
             "archived": chat.archived,
             "harness": chat.config.as_ref().map(|c| c.harness),
             "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
             "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
             "createdByChatId": chat.created_by_chat_id,
+            "delegatedByChatId": chat.delegation.as_ref().map(|d| &d.delegated_by_chat_id),
+            "delegationStatus": chat.delegation.as_ref().map(|d| d.status),
             "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
             "isThisChat": chat.id == self.chat_id,
             "entryCount": summary["entryCount"],
             "lastRole": summary["lastRole"],
             "lastText": summary["lastText"],
+            "pendingInput": pending,
         }))
     }
 
@@ -2952,6 +2976,82 @@ mod tests {
                 ("e", false),
                 ("new-1", false)
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_links_delegated_children_and_carries_their_pending_question() {
+        let mut fake = fixture();
+        let mut kid = chat("kid", Some("s2"), false, None);
+        kid["delegation"] = json!({
+            "delegatedByChatId": "a", "depth": 1, "anchor": "m1", "wake": "always",
+            "status": "running", "startedAt": "2026-09-18T10:00:00Z"
+        });
+        fake.chats.push(kid);
+        fake.session_snapshots[0].push(session("kid", "awaitingInput", 0));
+        fake.entries.push(entry(
+            "m6",
+            "assistant",
+            vec![input_part("r-1", false, None)],
+        ));
+        let rig = rig(fake);
+
+        let out = rig
+            .tools
+            .list_threads(&json!({ "parentId": "self" }))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = out["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["b", "kid", "new-1"]);
+        let kid = &out["threads"][1];
+        assert!(kid["createdByChatId"].is_null());
+        assert_eq!(kid["delegatedByChatId"], "a");
+        assert_eq!(kid["delegationStatus"], "running");
+        assert_eq!(kid["status"], "awaiting_input");
+        assert_eq!(kid["pendingInput"]["requestId"], "r-1");
+        assert_eq!(kid["pendingInput"]["questions"][0]["question"], "Ship it?");
+        assert!(out["threads"][0]["pendingInput"].is_null());
+        assert!(out["threads"][0]["delegatedByChatId"].is_null());
+        assert_eq!(
+            rig.calls
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| *read == "FULL_TRANSCRIPT")
+                .count(),
+            1,
+            "only the awaiting row loads its transcript"
+        );
+
+        let out = rig
+            .tools
+            .list_threads(&json!({ "spaceId": "s2" }))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = out["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["c", "kid"]);
+        let out = rig
+            .tools
+            .list_threads(&json!({ "parentId": "c" }))
+            .await
+            .unwrap();
+        assert!(out["threads"].as_array().unwrap().is_empty());
+        assert!(
+            rig.tools
+                .list_threads(&json!({ "parentId": 1 }))
+                .await
+                .is_err()
         );
     }
 
