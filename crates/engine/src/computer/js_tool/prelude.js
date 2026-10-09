@@ -25,14 +25,20 @@
     return null;
   };
 
+  const refusalMessage = (structured) => {
+    if (!structured || structured.status !== "refused") return null;
+    const refusal = structured.refusal || {};
+    return `${refusal.code || "refused"}: ${refusal.message || "The browser call was refused."}`;
+  };
+
   const call = (tool, args) => {
     const result = JSON.parse(__zeron_call(tool, JSON.stringify(args || {})));
     const first = (result.content || []).find((c) => c.type === "text");
     const data = first ? parse(first.text) : null;
-    const message = errorMessage(result, data);
+    const structured = result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+    const message = errorMessage(result, data) || refusalMessage(structured);
     if (message) throw new Error(message);
     const images = (result.content || []).filter((c) => c.type === "image");
-    const structured = result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
     return { data: data || structured || {}, structured: structured || data || {}, text: first ? first.text : "", images, raw: result };
   };
 
@@ -347,19 +353,21 @@
           allow_launch: true,
           profile: { mode: "isolated_named", name: "zeron" },
         }).structured;
-        this.pid = prepared.pid || this.pid;
+        this.pid = prepared.prepared_pid || this.pid;
+        if (!this.pid) throw new Error("The isolated browser did not report its process id.");
         const state = call("computer_browser_state", { pid: this.pid }).structured;
         this.binding = { target_id: state.target_id, tabs: state.tabs || [] };
       } else {
         const window = windowsFor(this.appName, this.pid)[0];
         if (!window) throw new Error(`${this.name} has no open window to attach to.`);
+        const windowNumber = Number(String(window.id).split(":").pop());
         call("computer_browser_prepare", {
           pid: this.pid,
-          window_id: window.id,
+          window_id: windowNumber,
           strategy: { kind: "existing_profile" },
         });
-        const state = call("computer_browser_state", { pid: this.pid, window_id: window.id }).structured;
-        this.binding = { target_id: state.target_id, tabs: state.tabs || [], window_id: window.id };
+        const state = call("computer_browser_state", { pid: this.pid, window_id: windowNumber }).structured;
+        this.binding = { target_id: state.target_id, tabs: state.tabs || [], window_id: windowNumber };
       }
       if (!this.binding.target_id) throw new Error(`Could not bind ${this.name}.`);
       return this.binding;

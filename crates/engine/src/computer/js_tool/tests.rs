@@ -11,6 +11,7 @@ use super::{JsHost, JsOutcome, JsRequest, run};
 struct FakeHost {
     calls: Mutex<Vec<(String, Value)>>,
     refuse: Option<(&'static str, &'static str)>,
+    refuse_browser: Option<&'static str>,
     delay: Duration,
 }
 
@@ -47,6 +48,16 @@ fn json_result(value: Value) -> McpToolResult {
     McpToolResult::text(value.to_string())
 }
 
+fn structured_result(value: Value) -> McpToolResult {
+    McpToolResult {
+        content: vec![McpContent::Text {
+            text: "browser call".into(),
+        }],
+        structured_content: Some(value),
+        ..McpToolResult::default()
+    }
+}
+
 impl JsHost for FakeHost {
     fn call(&self, tool: &str, arguments: Value) -> McpToolResult {
         self.calls
@@ -61,16 +72,48 @@ impl JsHost for FakeHost {
                 json!({ "error": { "code": "computer_input_paused", "message": message } }),
             );
         }
+        if self.refuse_browser == Some(tool) {
+            return structured_result(json!({ "status": "refused", "refusal": {
+                "code": "browser_origin_refused",
+                "message": "That origin is blocked."
+            } }));
+        }
         match tool {
             "computer_list_apps" => json_result(json!({ "apps": [
                 { "pid": 7, "name": "Calculator", "bundleId": "com.apple.calculator", "running": true },
                 { "pid": 9, "name": "Google Chrome", "bundleId": "com.google.Chrome", "running": true }
             ] })),
-            "computer_browser_state" if arguments_has(&self.calls, "window_id") => {
-                json_result(json!({
-                    "target_id": "bt-1",
-                    "tabs": [{ "tab_id": "tab-user", "title": "Mail", "url": "https://mail.example", "active": true }]
-                }))
+            "computer_browser_prepare" if arguments_has(&self.calls, "strategy") => {
+                if self.args(tool).last().unwrap()["window_id"].is_u64() {
+                    structured_result(
+                        json!({ "status": "ok", "action": "attached_existing_profile" }),
+                    )
+                } else {
+                    structured_result(json!({ "status": "refused", "refusal": {
+                        "code": "browser_target_required",
+                        "message": "strategy existing_profile needs its exact pid and window_id."
+                    } }))
+                }
+            }
+            "computer_browser_prepare" => {
+                structured_result(json!({ "status": "ok", "prepared": true, "prepared_pid": 4242 }))
+            }
+            "computer_browser_state" if !arguments_has(&self.calls, "target_id") => {
+                let args = self.args(tool).pop().unwrap();
+                if !args["pid"].is_u64() {
+                    return McpToolResult::error("Missing required integer field: pid");
+                }
+                match &args["window_id"] {
+                    Value::Null => structured_result(json!({
+                        "target_id": "bt-iso",
+                        "tabs": [{ "tab_id": "tab-iso", "title": "", "url": "about:blank", "active": true }]
+                    })),
+                    id if id.is_u64() => structured_result(json!({
+                        "target_id": "bt-1",
+                        "tabs": [{ "tab_id": "tab-user", "title": "Mail", "url": "https://mail.example", "active": true }]
+                    })),
+                    _ => McpToolResult::error("Missing required integer field: window_id"),
+                }
             }
             "computer_browser_navigate" => {
                 json_result(json!({ "target_id": "bt-1", "tab_id": "tab-new", "opened_tab": true }))
@@ -279,6 +322,7 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
     let prepare = &host.args("computer_browser_prepare")[0];
     assert_eq!(prepare["strategy"], json!({ "kind": "existing_profile" }));
     assert_eq!(prepare["pid"], json!(9));
+    assert_eq!(prepare["window_id"], json!(3));
     assert!(prepare.get("allow_launch").is_none());
     let navigate = &host.args("computer_browser_navigate")[0];
     assert_eq!(navigate["new_tab"], json!(true));
@@ -288,6 +332,38 @@ async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_
             .iter()
             .any(|args| args["keep"] == json!("deliverable") && args["tab_id"] == json!("tab-new"))
     );
+}
+
+#[tokio::test]
+async fn an_isolated_tab_binds_with_the_prepared_pid() {
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-iso",
+        &host,
+        "var tab = await cua.createBrowserTab(\"isolated\", \"https://example.com\"); tab.id",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert_eq!(host.args("computer_browser_state")[0]["pid"], json!(4242));
+    assert!(texts(&outcome).ends_with("tab-iso"), "{}", texts(&outcome));
+}
+
+#[tokio::test]
+async fn a_refused_browser_call_throws_its_refusal_instead_of_continuing() {
+    let host = Arc::new(FakeHost {
+        refuse_browser: Some("computer_browser_navigate"),
+        ..FakeHost::default()
+    });
+    let outcome = exec(
+        "js-refused",
+        &host,
+        "await cua.createBrowserTab(\"Chrome\", \"https://example.com\"); nodeRepl.write(\"AFTER_MARK\");",
+    )
+    .await;
+    let error = outcome.error.clone().unwrap_or_default();
+    assert!(error.contains("browser_origin_refused"), "{error}");
+    assert!(error.contains("That origin is blocked."), "{error}");
+    assert!(!texts(&outcome).contains("AFTER_MARK"));
 }
 
 #[tokio::test]
