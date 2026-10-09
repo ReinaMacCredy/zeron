@@ -1,6 +1,6 @@
 use super::*;
 
-use zeron_proto::computer::{ComputerDeliveryMode, ComputerHostCall};
+use zeron_proto::computer::{ComputerDeliveryMode, ComputerDeliveryVerification, ComputerHostCall};
 
 use crate::computer::cua_backend::tests::{Fixture, FixtureOptions, assert_subset, fixture_with};
 use crate::computer::desktop_operation_queue::with_desktop_delivery_mode;
@@ -421,5 +421,53 @@ async fn presses_a_web_button_that_advertises_no_actions_instead_of_refusing_its
     let clicks = f.named("click");
     assert_eq!(clicks.len(), 1);
     assert_eq!(f.last_args("click")["element_token"], json!("web-button"));
+    manager.dispose().await;
+}
+
+#[tokio::test]
+async fn types_into_the_focused_web_field_when_the_window_also_has_an_address_bar() {
+    let f = native(37);
+    f.set_elements(vec![
+        json!({
+            "element_index": 0,
+            "role": "AXTextField",
+            "label": "Address and search bar",
+            "frame": { "x": -290, "y": 10, "width": 120, "height": 20 },
+            "element_token": "omnibox",
+        }),
+        json!({
+            "element_index": 1,
+            "role": "AXTextField",
+            "frame": { "x": -290, "y": 40, "width": 120, "height": 20 },
+            "element_token": "web-field",
+            "in_web_content": true,
+        }),
+    ]);
+    f.knobs().window_state_extra = json!({
+        "tree_nodes": [
+            { "depth": 0, "role": "AXTextField", "element_index": 0, "title": "Address and search bar" },
+            { "depth": 0, "role": "AXTextField", "element_index": 1, "settable": true },
+        ],
+        "focused_element": { "depth": 0, "role": "AXTextField", "element_index": 1, "settable": true },
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let manager = gateway_manager(&f);
+    let result = drive(&manager, || {
+        manager.type_text(Some(THREAD), "5600X3D", Some(WINDOW))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        f.last_args("set_value")["element_token"],
+        json!("web-field")
+    );
+    assert_eq!(f.last_args("set_value")["append"], json!(true));
+    assert_eq!(
+        result.delivery.map(|delivery| delivery.verified),
+        Some(ComputerDeliveryVerification::Confirmed)
+    );
+    assert!(f.named("type_text").is_empty());
     manager.dispose().await;
 }

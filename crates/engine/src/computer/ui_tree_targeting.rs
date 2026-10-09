@@ -343,6 +343,11 @@ const SEMANTIC_TEXT_ROLES: &[&str] = &[
     "textarea",
 ];
 
+pub fn is_writable_text_node(node: &ComputerUiNode) -> bool {
+    node.editable != Some(false)
+        && (node.editable == Some(true) || SEMANTIC_TEXT_ROLES.contains(&node.role.as_str()))
+}
+
 pub fn resolve_computer_unique_text_target<'a>(
     root: &'a ComputerUiNode,
     window_id: &str,
@@ -352,11 +357,7 @@ pub fn resolve_computer_unique_text_target<'a>(
     let candidates: Vec<&ComputerUiNode> = flatten_ui_tree(root)
         .into_iter()
         .filter(|node| {
-            in_window(node)
-                && (allow_offscreen || node.on_screen)
-                && node.editable != Some(false)
-                && (node.editable == Some(true)
-                    || SEMANTIC_TEXT_ROLES.contains(&node.role.as_str()))
+            in_window(node) && (allow_offscreen || node.on_screen) && is_writable_text_node(node)
         })
         .collect();
     let visible = if allow_offscreen { "" } else { "visible " };

@@ -22,7 +22,7 @@ use crate::computer::backend::{
     ComputerAgentDialect, ComputerBackendActionResult, ComputerBackendError, ComputerBackendMethod,
     ComputerBrowserCall, ComputerBrowserCallResult, ComputerCaptureRequest, ComputerError,
     ComputerLaunchOptions, ComputerMenuBackendTarget, ComputerMenuTarget, ComputerPasteFormat,
-    ComputerStateOptions, ComputerTextSelection, clamp_computer_message,
+    ComputerResolvedTarget, ComputerStateOptions, ComputerTextSelection, clamp_computer_message,
 };
 use crate::computer::call_context::{mark_computer_call, timed_computer_leg};
 use crate::computer::denylist::ComputerDenylistError;
@@ -31,7 +31,9 @@ use crate::computer::desktop_operation_queue::{
     with_desktop_delivery_mode,
 };
 use crate::computer::element_identity::ObservedComputerTarget;
-use crate::computer::ui_tree_targeting::{ComputerTargetError, ComputerTargetErrorCode};
+use crate::computer::ui_tree_targeting::{
+    ComputerTargetError, ComputerTargetErrorCode, activation_point_for_node, is_writable_text_node,
+};
 use crate::computer::ui_tree_text::describe_computer_ui_tree;
 use crate::computer::utf8_truncation::{clamp_text_to_length, utf16_len};
 use crate::computer::visible_use::ComputerForegroundAuthorization;
@@ -1059,6 +1061,26 @@ impl ComputerManager {
                 Err(ComputerError::Target(error)) if error.unresolved_text_control => {}
                 Err(error) => return Err(error),
             }
+            if let Some(focused) = self.focused_text_target(window_id).await? {
+                return self
+                    .with_background_window_control(thread_id, window_id, || async {
+                        assert_desktop_operation_active()?;
+                        let result = timed_computer_leg(
+                            "dispatch",
+                            self.backend
+                                .type_text(text, Some(window_id), Some(&focused)),
+                        )
+                        .await?;
+                        Ok(self.action_result(
+                            thread_id,
+                            "computer_type_text",
+                            Some(focused.point),
+                            Some(result),
+                            Some(window_id),
+                        ))
+                    })
+                    .await;
+            }
             return self
                 .with_background_process_control(thread_id, Some(window_id), || async move {
                     let result = self
@@ -1095,6 +1117,42 @@ impl ComputerManager {
             None,
         )
         .await
+    }
+
+    async fn focused_text_target(
+        &self,
+        window_id: &str,
+    ) -> Result<Option<ComputerResolvedTarget>, ComputerError> {
+        let state = self
+            .get_state(ComputerStateRequest {
+                include_screenshot: Some(false),
+                include_text: false,
+                include_tree: Some(true),
+                window_id: Some(window_id.to_owned()),
+            })
+            .await?;
+        let path = state
+            .ax_tree
+            .and_then(|ax| ax.focused)
+            .and_then(|line| line.target);
+        let (Some(root), Some(path)) = (state.root.as_ref(), path) else {
+            return Ok(None);
+        };
+        let node = path
+            .iter()
+            .try_fold(root, |node, index| node.children.get(*index as usize))
+            .filter(|node| {
+                node.window_id.as_deref() == Some(window_id) && is_writable_text_node(node)
+            });
+        Ok(node.map(|node| ComputerResolvedTarget {
+            target: ComputerTarget {
+                window_id: Some(window_id.to_owned()),
+                ..ComputerTarget::default()
+            }
+            .into(),
+            point: activation_point_for_node(node),
+            node: node.clone(),
+        }))
     }
 
     pub async fn type_text_at(
