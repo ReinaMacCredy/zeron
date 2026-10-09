@@ -5,7 +5,9 @@ use zeron_proto::computer::{
 
 use super::tool_input::{ToolArgs, ToolInputError};
 use crate::computer::audit_log::{ComputerAuditLayer, ComputerAuditTarget};
-use crate::computer::backend::{ComputerError, CuaErrorLayer, cua_effect_name};
+use crate::computer::backend::{
+    ComputerError, CuaErrorLayer, clamp_computer_message, cua_effect_name,
+};
 use crate::computer::setup_signal::{ComputerSetupSignal, computer_setup_tool_note};
 use crate::computer::ui_tree_targeting::{ComputerTargetCandidate, ComputerTargetError};
 
@@ -352,6 +354,7 @@ pub struct AuditOutcome {
     pub code: Option<String>,
     pub diagnostics: Option<CuaActionDiagnostics>,
     pub layer: Option<ComputerAuditLayer>,
+    pub message: Option<String>,
 }
 
 impl AuditOutcome {
@@ -361,6 +364,7 @@ impl AuditOutcome {
             code: code.map(str::to_owned),
             diagnostics: None,
             layer: None,
+            message: None,
         }
     }
 }
@@ -384,6 +388,13 @@ fn effect_from_cua(effect: zeron_proto::computer::CuaEffect) -> ComputerAuditEff
 }
 
 pub fn computer_audit_error_outcome(error: &ToolFailure) -> AuditOutcome {
+    AuditOutcome {
+        message: Some(clamp_computer_message(&error.text(), "error")),
+        ..audit_error_outcome(error)
+    }
+}
+
+fn audit_error_outcome(error: &ToolFailure) -> AuditOutcome {
     let computer = match error {
         ToolFailure::Input(_) => {
             return AuditOutcome::new(ComputerAuditEffect::Refused, Some("invalid_arguments"));
@@ -401,6 +412,7 @@ pub fn computer_audit_error_outcome(error: &ToolFailure) -> AuditOutcome {
             }),
             diagnostics: cua.diagnostics.clone(),
             layer: audit_layer(cua.layer),
+            message: None,
         };
     }
     match computer {

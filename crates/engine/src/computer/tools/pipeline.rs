@@ -158,6 +158,7 @@ impl ComputerTools {
             code: outcome.code,
             diagnostics: outcome.diagnostics,
             layer: outcome.layer,
+            message: outcome.message,
             ..ComputerAuditEntry::new(name, outcome.effect)
         };
         self.manager.record_computer_audit(&entry);

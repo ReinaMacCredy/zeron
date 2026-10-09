@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::computer::{
     CancelComputerActionParams, ComputerActionParams, ComputerCatalog, ComputerConsentApp,
-    ComputerPendingKind, ComputerPendingRequest, GetComputerCatalogParams, McpRequestId,
-    McpToolResult, list_computer_permissions,
+    ComputerPendingKind, ComputerPendingRequest, GetComputerCatalogParams, McpContent,
+    McpRequestId, McpToolResult, list_computer_permissions,
 };
 
 use super::approval_gate::COMPUTER_APPROVAL_TIMEOUT;
@@ -720,10 +720,33 @@ impl super::js_tool::JsHost for EngineJsHost {
             request_id: McpRequestId::String(format!("{}#js{n}", self.parent)),
         };
         let action = computer_action(&self.runtime, &self.sessions, params);
-        match self.handle.block_on(action) {
+        let result = match self.handle.block_on(action) {
             Ok(result) => result,
             Err(message) => McpToolResult::error(message),
+        };
+        let refused = result
+            .structured_content
+            .as_ref()
+            .and_then(|structured| structured.get("status"))
+            .and_then(Value::as_str)
+            == Some("refused");
+        if result.is_error || refused {
+            let text = result
+                .content
+                .iter()
+                .find_map(|content| match content {
+                    McpContent::Text { text } => Some(text.as_str()),
+                    McpContent::Image { .. } => None,
+                })
+                .unwrap_or_default();
+            tracing::warn!(
+                chat = %self.chat_id,
+                tool,
+                error = %crate::computer::backend::clamp_computer_message(text, "error"),
+                "computer js call failed"
+            );
         }
+        result
     }
 }
 

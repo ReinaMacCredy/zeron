@@ -703,6 +703,7 @@ impl ComputerBrowserTools {
             code: outcome.code,
             diagnostics: outcome.diagnostics,
             layer: outcome.layer,
+            message: outcome.message,
             ..ComputerAuditEntry::new(name, outcome.effect)
         };
         tools.manager().record_computer_audit(&entry);

@@ -450,6 +450,12 @@ async fn retains_uncertain_native_errors_and_their_diagnostics_in_the_audit() {
         )),
         "{rows:?}"
     );
+    assert!(
+        rows.iter().any(|row| row["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Native action failed."))),
+        "{rows:?}"
+    );
 }
 
 #[tokio::test]

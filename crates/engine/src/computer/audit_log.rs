@@ -82,6 +82,8 @@ pub struct ComputerAuditEntry {
     pub diagnostics: Option<CuaActionDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<ComputerAuditLayer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl ComputerAuditEntry {
@@ -97,6 +99,7 @@ impl ComputerAuditEntry {
             code: None,
             diagnostics: None,
             layer: None,
+            message: None,
         }
     }
 }
