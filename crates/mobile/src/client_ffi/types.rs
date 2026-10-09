@@ -838,6 +838,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
             },
             permission_mode: Default::default(),
             instructions: String::new(),
+            profile_id: None,
         })
     }
 }

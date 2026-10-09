@@ -5646,6 +5646,7 @@ impl DocHost {
                         sandbox: request.sandbox,
                         permission_mode: request.permission_mode,
                         instructions: String::new(),
+                        profile_id: None,
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");

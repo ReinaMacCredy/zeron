@@ -433,7 +433,7 @@ impl AgentProfilesPage {
             return;
         };
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = crate::agent_profiles::write(&engine, write).await;
+            let result = crate::agent_profiles::write(&engine, write, None).await;
             this.update(cx, |page, cx| {
                 match result {
                     Ok(profiles) => {

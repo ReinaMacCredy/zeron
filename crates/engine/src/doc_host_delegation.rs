@@ -51,6 +51,8 @@ pub struct DelegateTaskParams {
     #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
     pub wait: bool,
     #[serde(default)]
     pub client_request_id: Option<String>,
@@ -257,6 +259,7 @@ impl DocHost {
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: PermissionMode::Ask,
             instructions: String::new(),
+            profile_id: None,
         }
     }
 
@@ -351,6 +354,9 @@ impl DocHost {
                     config.instructions.clear();
                 }
             }
+        }
+        if let Some(config) = config.as_mut() {
+            config.profile_id = params.profile_id.clone();
         }
         if let Some(options) = &params.model_options {
             config

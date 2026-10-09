@@ -1197,6 +1197,7 @@ impl ThreadTools {
                     "permissionMode": permission_mode,
                     "modelOptions": model_options,
                     "instructions": profile.as_ref().map(|profile| profile.instructions.clone()),
+                    "profileId": profile.as_ref().map(|profile| profile.id.clone()),
                     "wait": wait,
                     "clientRequestId": args["clientRequestId"].as_str(),
                 }),

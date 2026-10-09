@@ -85,6 +85,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: Default::default(),
             instructions: String::new(),
+            profile_id: None,
         }),
         last_message_preview: None,
         last_message_at: Some(now),

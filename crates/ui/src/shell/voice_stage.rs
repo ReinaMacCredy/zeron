@@ -55,6 +55,7 @@ impl Shell {
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: Default::default(),
                 instructions: String::new(),
+                profile_id: None,
             });
         let saved = settings::current(cx);
         let device = saved.codex_voice_device.unwrap_or(device);

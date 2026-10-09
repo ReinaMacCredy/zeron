@@ -119,6 +119,7 @@ async fn steering_never_aborts_a_running_tool() {
                 sandbox: SandboxLevel::DangerFullAccess,
                 permission_mode: Default::default(),
                 instructions: String::new(),
+                profile_id: None,
             },
         )
         .unwrap();

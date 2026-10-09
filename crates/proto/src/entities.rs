@@ -172,6 +172,8 @@ pub struct ChatConfig {
     pub permission_mode: PermissionMode,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.

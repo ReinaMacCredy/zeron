@@ -106,6 +106,7 @@ impl Rig {
                     sandbox: SandboxLevel::DangerFullAccess,
                     permission_mode: Default::default(),
                     instructions: String::new(),
+                    profile_id: None,
                 },
             )
             .unwrap();

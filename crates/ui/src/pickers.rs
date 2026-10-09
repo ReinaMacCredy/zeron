@@ -150,6 +150,7 @@ pub struct DraftConfig {
     /// the unattended behavior every chat had before the chip existed).
     pub permission_mode: PermissionMode,
     pub instructions: String,
+    pub profile_id: Option<String>,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -191,6 +192,7 @@ pub struct ResolvedRunConfig {
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub permission_mode: PermissionMode,
     pub instructions: String,
+    pub profile_id: Option<String>,
 }
 
 impl ResolvedRunConfig {
@@ -204,6 +206,7 @@ impl ResolvedRunConfig {
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: self.permission_mode,
             instructions: self.instructions.clone(),
+            profile_id: self.profile_id.clone(),
         })
     }
 }
@@ -1618,6 +1621,7 @@ impl Pickers {
                 model_options: self.explicit_options(cx),
                 permission_mode: self.effective_permission_mode(cx),
                 instructions: self.effective_instructions(cx),
+                profile_id: self.effective_profile_id(cx),
             };
         }
         ResolvedRunConfig {
@@ -1631,6 +1635,7 @@ impl Pickers {
             model_options: self.explicit_options(cx),
             permission_mode: self.effective_permission_mode(cx),
             instructions: self.effective_instructions(cx),
+            profile_id: self.effective_profile_id(cx),
         }
     }
 
@@ -1642,6 +1647,16 @@ impl Pickers {
                 .map(|config| config.instructions.clone())
                 .unwrap_or_default(),
             None => self.config.instructions.clone(),
+        }
+    }
+
+    pub(super) fn effective_profile_id(&self, cx: &App) -> Option<String> {
+        match self.chat_row(cx) {
+            Some(chat) => chat
+                .config
+                .as_ref()
+                .and_then(|config| config.profile_id.clone()),
+            None => self.config.profile_id.clone(),
         }
     }
 
@@ -2843,6 +2858,7 @@ impl Pickers {
         if let Some(existing) = self.chat_row(cx).and_then(|c| c.config.as_ref()) {
             config.sandbox = existing.sandbox;
             config.instructions = existing.instructions.clone();
+            config.profile_id = existing.profile_id.clone();
         }
         change(&mut config);
         // Reasoning must stay concrete for whatever model the row now names —
@@ -4022,16 +4038,20 @@ impl Pickers {
         suffix: Option<&SharedString>,
         label_loading: bool,
         fast: bool,
+        profile: Option<&(SharedString, bool)>,
         cx: &App,
     ) -> f32 {
         const GAP: f32 = 6.0;
         let size = crate::typography::ui_rems(12.0).to_pixels(window.rem_size());
         let mut font = window.text_style().font();
         font.weight = gpui::FontWeight::MEDIUM;
-        let measure = |text: &SharedString| -> f32 {
+        let measure_weighted = |text: &SharedString, weight: gpui::FontWeight| -> f32 {
             let run = gpui::TextRun {
                 len: text.len(),
-                font: font.clone(),
+                font: gpui::Font {
+                    weight,
+                    ..font.clone()
+                },
                 color: gpui::black(),
                 background_color: None,
                 underline: None,
@@ -4045,6 +4065,7 @@ impl Pickers {
             )
             .ceil()
         };
+        let measure = |text: &SharedString| measure_weighted(text, gpui::FontWeight::MEDIUM);
         let label_width = if label_loading { 56.0 } else { measure(label) };
         let mut width = 2.0 * 6.0 + 16.0 + GAP + label_width;
         if let Some(suffix) = suffix {
@@ -4053,7 +4074,16 @@ impl Pickers {
         if fast {
             width += GAP + 13.0;
         }
-        let target = width.min(248.0);
+        if let Some((name, edited)) = profile {
+            width += measure_weighted(name, gpui::FontWeight::SEMIBOLD).min(PROFILE_NAME_MAX)
+                + GAP
+                + 1.0
+                + GAP;
+            if *edited {
+                width += 6.0 + GAP;
+            }
+        }
+        let target = width.min(chip_max_width(profile.is_some()));
         let (value, moving) = compact::ScalarTransition::sample(
             &mut self.chip_width,
             target,
@@ -4081,6 +4111,7 @@ impl Pickers {
         icon_loading: bool,
         label_loading: bool,
         suffix: Option<(SharedString, Option<gpui::Hsla>)>,
+        profile: Option<(SharedString, bool)>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -4107,7 +4138,7 @@ impl Pickers {
             .id(id.clone())
             .debug_selector(move || base.to_string())
             .h(px(32.0))
-            .max_w(px(248.0))
+            .max_w(px(chip_max_width(profile.is_some())))
             // Shrinkable under row pressure — four footer chips share one
             // line; without min_w_0 they overflowed and painted overlapped.
             .min_w_0()
@@ -4170,6 +4201,33 @@ impl Pickers {
                     )
                 },
             )
+            .when_some(profile, |el, (name, edited)| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .max_w(px(PROFILE_NAME_MAX))
+                        .truncate()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(name),
+                )
+                .when(edited, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(theme.warning),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(1.0))
+                        .h(px(12.0))
+                        .bg(crate::theme::hairline(0.18)),
+                )
+            })
             .when(label_loading, |el| {
                 // Nothing is named on screen: the label rolls in from empty.
                 rolling(format!("{id}-label"), SharedString::default(), true);
@@ -5310,6 +5368,13 @@ impl Pickers {
         );
         if self.title.is_none() {
             let profiles_view = self.model_rail == ModelRail::Profiles;
+            let applied_dot = self.applied_profile(cx).map(|(_, drift)| {
+                if drift.is_empty() {
+                    theme.accent
+                } else {
+                    theme.warning
+                }
+            });
             tabs = tabs.child(
                 div()
                     .id("model-tab-profiles")
@@ -5342,7 +5407,18 @@ impl Pickers {
                                 theme.text_muted
                             }),
                     )
-                    .when(profiles_view, |el| el.child(tab_indicator(theme.accent))),
+                    .when(profiles_view, |el| el.child(tab_indicator(theme.accent)))
+                    .when_some(applied_dot, |el, tint| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(6.0))
+                                .right(px(6.0))
+                                .size(px(5.0))
+                                .rounded_full()
+                                .bg(tint),
+                        )
+                    }),
             );
         }
         for (ix, descriptor) in descriptors.iter().enumerate() {
@@ -7094,6 +7170,12 @@ fn default_badge(theme: &Theme) -> gpui::Div {
 /// The 2px underline marking the viewed top tab: sits on the tab row's
 /// bottom hairline (the tab is 32px tall inside a 40px row, so -4px lands
 /// exactly on the border), rounded like a capsule.
+const PROFILE_NAME_MAX: f32 = 96.0;
+
+fn chip_max_width(with_profile: bool) -> f32 {
+    if with_profile { 320.0 } else { 248.0 }
+}
+
 fn tab_indicator(tint: gpui::Hsla) -> gpui::Div {
     div()
         .absolute()
@@ -7638,7 +7720,8 @@ impl Render for Pickers {
         if self.boot_switch_pending {
             self.debug_open_model_switch(window, cx);
         }
-        if self.open_kind() == Some(PickerKind::HarnessModel)
+        if (self.open_kind() == Some(PickerKind::HarnessModel)
+            || self.effective_profile_id(cx).is_some())
             && matches!(self.profiles, Loadable::Idle)
         {
             self.ensure_profiles(cx);
@@ -7780,12 +7863,19 @@ impl Render for Pickers {
                 })
             })
         });
+        let chip_profile = self
+            .title
+            .is_none()
+            .then(|| self.applied_profile(cx))
+            .flatten()
+            .map(|(profile, drift)| (SharedString::from(profile.name), !drift.is_empty()));
         let chip_width = self.model_chip_width(
             window,
             &model_label,
             chip_suffix.as_ref().map(|(text, _)| text),
             chip_label_loading,
             fast,
+            chip_profile.as_ref(),
             cx,
         );
         let model_chip = self
@@ -7797,6 +7887,7 @@ impl Render for Pickers {
                 chip_icon_loading,
                 chip_label_loading,
                 chip_suffix,
+                chip_profile,
                 &theme,
                 cx,
             )
@@ -10427,6 +10518,7 @@ mod tests {
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
+            profile_id: None,
         });
         assert_eq!(
             chat_harness_marks(&chat),
@@ -11306,6 +11398,7 @@ mod tests {
                         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                         permission_mode: Default::default(),
                         instructions: String::new(),
+                        profile_id: None,
                     }),
                     last_message_preview: None,
                     last_message_at: None,

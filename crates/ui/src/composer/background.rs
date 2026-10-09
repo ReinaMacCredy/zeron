@@ -2167,6 +2167,7 @@ mod tests {
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: Default::default(),
                 instructions: String::new(),
+                profile_id: None,
             }),
             last_message_preview: None,
             last_message_at: None,

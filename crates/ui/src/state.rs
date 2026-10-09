@@ -5565,6 +5565,7 @@ mod tests {
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
+            profile_id: None,
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -5591,6 +5592,7 @@ mod tests {
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
+                profile_id: None,
             },
         );
     }

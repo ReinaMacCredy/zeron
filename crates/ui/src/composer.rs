@@ -17662,6 +17662,7 @@ mod tests {
                             sandbox: SandboxLevel::WorkspaceWrite,
                             permission_mode: zeron_proto::PermissionMode::Full,
                             instructions: String::new(),
+                            profile_id: None,
                         }),
                         last_message_preview: None,
                         last_message_at: None,
@@ -17845,6 +17846,7 @@ mod tests {
                                 sandbox: SandboxLevel::WorkspaceWrite,
                                 permission_mode: zeron_proto::PermissionMode::Full,
                                 instructions: String::new(),
+                                profile_id: None,
                             });
                             chat.last_message_at =
                                 Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
@@ -18216,6 +18218,7 @@ mod tests {
                             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                             permission_mode: zeron_proto::PermissionMode::Full,
                             instructions: String::new(),
+                            profile_id: None,
                         })
                     };
                     let mut src = chat_row("src", None);

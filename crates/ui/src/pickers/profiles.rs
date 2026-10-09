@@ -6,6 +6,7 @@ use crate::agent_profiles::{ProfileWrite, brand_badge, mode_label, summary};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ProfilePick {
+    profile_id: String,
     harness: HarnessId,
     model: Option<String>,
     reasoning: Option<ReasoningLevel>,
@@ -17,6 +18,7 @@ pub(super) struct ProfilePick {
 impl ProfilePick {
     fn of(profile: &AgentProfile) -> Self {
         Self {
+            profile_id: profile.id.clone(),
             harness: profile.harness,
             model: profile.model.clone(),
             reasoning: profile.reasoning,
@@ -45,7 +47,95 @@ impl ProfilePick {
             config.model_options = self.model_options.clone();
         }
         config.instructions = self.instructions.clone();
+        config.profile_id = Some(self.profile_id.clone());
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Drift {
+    Harness,
+    Model,
+    Effort,
+    Mode,
+    Options,
+    Instructions,
+}
+
+fn option_drifts(profile: &AgentProfile, current: &ResolvedRunConfig) -> bool {
+    profile
+        .model_options
+        .iter()
+        .any(|(key, value)| current.model_options.get(key) != Some(value))
+}
+
+pub(super) fn profile_drift(profile: &AgentProfile, current: &ResolvedRunConfig) -> Vec<Drift> {
+    if current
+        .harness
+        .is_some_and(|harness| harness != profile.harness)
+    {
+        return vec![Drift::Harness];
+    }
+    let mut drift = Vec::new();
+    if profile
+        .model
+        .as_ref()
+        .is_some_and(|model| current.model.as_ref() != Some(model))
+    {
+        drift.push(Drift::Model);
+    }
+    if profile
+        .reasoning
+        .is_some_and(|level| current.reasoning != Some(level))
+    {
+        drift.push(Drift::Effort);
+    }
+    if profile
+        .permission_mode
+        .is_some_and(|mode| current.permission_mode != mode)
+    {
+        drift.push(Drift::Mode);
+    }
+    if option_drifts(profile, current) {
+        drift.push(Drift::Options);
+    }
+    if profile.instructions != current.instructions {
+        drift.push(Drift::Instructions);
+    }
+    drift
+}
+
+fn absorb_current(profile: &AgentProfile, current: &ResolvedRunConfig) -> AgentProfileDraft {
+    let mut draft = crate::agent_profiles::draft_of(profile);
+    let harness_moved = current
+        .harness
+        .is_some_and(|harness| harness != profile.harness);
+    if let Some(harness) = current.harness {
+        draft.harness = harness;
+    }
+    if profile.model.is_some() || harness_moved {
+        draft.model = current.model.clone();
+    }
+    if profile.reasoning.is_some() {
+        draft.reasoning = current.reasoning;
+    }
+    if profile.permission_mode.is_some() {
+        draft.permission_mode = Some(current.permission_mode);
+    }
+    draft.model_options = if harness_moved {
+        Default::default()
+    } else {
+        profile
+            .model_options
+            .keys()
+            .filter_map(|key| {
+                current
+                    .model_options
+                    .get(key)
+                    .map(|value| (key.clone(), value.clone()))
+            })
+            .collect()
+    };
+    draft
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,16 +204,116 @@ impl Pickers {
             .unwrap_or_default()
     }
 
+    fn default_rows(&self, cx: &App) -> usize {
+        let has_profiles = self.profiles.ready().is_some_and(|p| !p.is_empty());
+        usize::from(has_profiles && self.search.read(cx).text().trim().is_empty())
+    }
+
     pub(super) fn profile_rows_len(&self, cx: &App) -> usize {
-        self.visible_profiles(cx).len() + 1
+        self.default_rows(cx) + self.visible_profiles(cx).len() + 1
     }
 
     pub(super) fn activate_profile_index(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(ix) = ix.checked_sub(self.default_rows(cx)) else {
+            self.detach_profile(cx);
+            return;
+        };
         let profiles = self.visible_profiles(cx);
         match profiles.get(ix) {
             Some(profile) => self.apply_profile(profile, cx),
             None => self.save_current_as_profile(cx),
         }
+    }
+
+    pub(super) fn applied_profile(&self, cx: &App) -> Option<(AgentProfile, Vec<Drift>)> {
+        let id = self.effective_profile_id(cx)?;
+        let profile = self.profiles.ready()?.iter().find(|p| p.id == id)?.clone();
+        let drift = profile_drift(&profile, &self.resolved(cx));
+        Some((profile, drift))
+    }
+
+    fn detach_profile(&mut self, cx: &mut Context<Self>) {
+        if self.chat_id(cx).is_some() {
+            self.update_chat_config(cx, None, |config| {
+                config.profile_id = None;
+                config.instructions.clear();
+            });
+        } else {
+            self.config.profile_id = None;
+            self.config.instructions.clear();
+        }
+        self.animate_close(cx);
+        cx.notify();
+    }
+
+    fn save_current_into_profile(&mut self, profile: &AgentProfile, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let target = self.space_target(cx).map(serde_json::Value::String);
+        let write = ProfileWrite::Upsert {
+            profile_id: Some(profile.id.clone()),
+            draft: absorb_current(profile, &self.resolved(cx)),
+        };
+        self.profiles_task = Some(cx.spawn(async move |this, cx| {
+            let result = crate::agent_profiles::write(&engine, write, target).await;
+            this.update(cx, |pickers, cx| {
+                pickers.profiles = match result {
+                    Ok(profiles) => Loadable::Ready(profiles),
+                    Err(error) => Loadable::Error(error),
+                };
+                crate::agent_profiles::bump_agent_profiles(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn drift_line(
+        &self,
+        profile: &AgentProfile,
+        drift: &[Drift],
+        resolved: &ResolvedRunConfig,
+    ) -> String {
+        drift
+            .iter()
+            .map(|change| match change {
+                Drift::Harness => format!(
+                    "{} → {}",
+                    harness_display_name(profile.harness),
+                    resolved
+                        .harness
+                        .map(harness_display_name)
+                        .unwrap_or_default()
+                ),
+                Drift::Model => format!(
+                    "{} → {}",
+                    profile
+                        .model
+                        .as_deref()
+                        .map(|model| self.profile_model_label(profile.harness, model))
+                        .unwrap_or_default(),
+                    resolved
+                        .model
+                        .as_deref()
+                        .map(|model| self.profile_model_label(profile.harness, model))
+                        .unwrap_or_default()
+                ),
+                Drift::Effort => format!(
+                    "effort {} → {}",
+                    profile.reasoning.map(reasoning_label).unwrap_or_default(),
+                    resolved.reasoning.map(reasoning_label).unwrap_or_default()
+                ),
+                Drift::Mode => format!(
+                    "{} → {}",
+                    profile.permission_mode.map(mode_label).unwrap_or_default(),
+                    mode_label(resolved.permission_mode)
+                ),
+                Drift::Options => "options changed".to_string(),
+                Drift::Instructions => "instructions changed".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     fn profile_model_label(&self, harness: HarnessId, model: &str) -> String {
@@ -212,6 +402,7 @@ impl Pickers {
                 self.config.permission_mode = mode;
             }
             self.config.instructions = pick.instructions.clone();
+            self.config.profile_id = Some(pick.profile_id.clone());
             if !pick.model_options.is_empty()
                 && let Some(model) = pick
                     .model
@@ -308,7 +499,7 @@ impl Pickers {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let target = self.space_target(cx);
+        let target = self.space_target(cx).map(serde_json::Value::String);
         let Some(edit) = self.profile_edit.as_mut() else {
             return;
         };
@@ -329,25 +520,7 @@ impl Pickers {
             draft,
         };
         self.profiles_task = Some(cx.spawn(async move |this, cx| {
-            let result = match target {
-                Some(device) => engine
-                    .client()
-                    .call_as::<zeron_proto::AgentProfilesSnapshot>(
-                        methods::UPSERT_AGENT_PROFILE,
-                        match write {
-                            ProfileWrite::Upsert { profile_id, draft } => serde_json::json!({
-                                "profileId": profile_id,
-                                "profile": draft,
-                                "targetDeviceId": device,
-                            }),
-                            _ => unreachable!("quick edit only upserts"),
-                        },
-                    )
-                    .await
-                    .map(|snapshot| snapshot.profiles)
-                    .map_err(|err| err.to_string()),
-                None => crate::agent_profiles::write(&engine, write).await,
-            };
+            let result = crate::agent_profiles::write(&engine, write, target).await;
             this.update(cx, |pickers, cx| {
                 match result {
                     Ok(profiles) => {
@@ -413,17 +586,40 @@ impl Pickers {
         } else if profiles.is_empty() && !self.search.read(cx).text().trim().is_empty() {
             list = list.child(empty_list_note(&theme, "No profiles found"));
         }
+        let applied = self.applied_profile(cx);
+        let resolved = self.resolved(cx);
+        let offset = self.default_rows(cx);
+        if offset == 1 {
+            list = list.child(self.render_default_row(applied.is_none(), &theme, cx));
+        }
         for (ix, profile) in profiles.iter().enumerate() {
-            let is_active = ix == self.active;
+            let row = ix + offset;
+            let is_active = row == self.active;
+            let drift = applied
+                .as_ref()
+                .filter(|(applied, _)| applied.id == profile.id)
+                .map(|(_, drift)| drift.clone());
             let line = self.profile_summary(profile);
-            let switches = switching.is_some_and(|harness| harness != profile.harness);
+            let drift_line = drift
+                .as_ref()
+                .filter(|drift| !drift.is_empty())
+                .map(|drift| self.drift_line(profile, drift, &resolved));
+            let savable = drift
+                .as_ref()
+                .is_some_and(|drift| drift.iter().any(|change| *change != Drift::Instructions));
+            let edited = drift.as_ref().is_some_and(|drift| !drift.is_empty());
+            let switches =
+                drift.is_none() && switching.is_some_and(|harness| harness != profile.harness);
             let edit_id = profile.id.clone();
             let edit_draft = crate::agent_profiles::draft_of(profile);
+            let revert_profile = profile.clone();
+            let save_profile = profile.clone();
             let row_hover = SharedString::from(format!("profile-row-{ix}"));
             list = list.child(
                 div()
                     .id(("profile-row", ix))
                     .group(row_hover.clone())
+                    .relative()
                     .px(px(8.0))
                     .py(px(5.0))
                     .rounded(px(popover::MENU_ITEM_RADIUS))
@@ -432,15 +628,27 @@ impl Pickers {
                     .items_center()
                     .gap(px(10.0))
                     .cursor_pointer()
+                    .when(drift.is_some(), |el| {
+                        el.bg(theme.accent_wash.opacity(0.5)).child(
+                            div()
+                                .absolute()
+                                .left(px(-popover::CARD_INSET))
+                                .top(px(8.0))
+                                .bottom(px(8.0))
+                                .w(px(3.0))
+                                .rounded_r(px(2.0))
+                                .bg(theme.accent),
+                        )
+                    })
                     .when(is_active, |el| el.bg(crate::theme::ink(0.05)))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.active != ix {
-                            this.active = ix;
+                        if *hovered && this.active != row {
+                            this.active = row;
                             cx.notify();
                         }
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.activate_profile_index(ix, cx);
+                        this.activate_profile_index(row, cx);
                     }))
                     .child(brand_badge(profile.harness, 24.0, theme.text))
                     .child(
@@ -452,6 +660,7 @@ impl Pickers {
                             .gap(px(1.0))
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
@@ -464,6 +673,24 @@ impl Pickers {
                                             .text_color(theme.text)
                                             .child(SharedString::from(profile.name.clone())),
                                     )
+                                    .when_some(drift.as_ref(), |el, drift| {
+                                        let (label, tint) = if drift.is_empty() {
+                                            ("Active", theme.accent)
+                                        } else {
+                                            ("Edited", theme.warning)
+                                        };
+                                        el.child(
+                                            div()
+                                                .flex_none()
+                                                .px(px(5.0))
+                                                .rounded(px(4.0))
+                                                .bg(tint.opacity(0.16))
+                                                .text_size(crate::typography::ui_rems(10.0))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .text_color(tint)
+                                                .child(label),
+                                        )
+                                    })
                                     .when(profile.by_agent, |el| {
                                         el.child(
                                             div()
@@ -475,6 +702,36 @@ impl Pickers {
                                                 .text_color(theme.text_muted)
                                                 .child("by agent"),
                                         )
+                                    })
+                                    .when(edited, |el| {
+                                        el.child(div().flex_1())
+                                            .child(
+                                                profile_row_button(
+                                                    ("profile-revert", ix),
+                                                    "Revert",
+                                                    &theme,
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.apply_profile(&revert_profile, cx);
+                                                })),
+                                            )
+                                            .when(savable, |el| {
+                                                el.child(
+                                                    profile_row_button(
+                                                        ("profile-save", ix),
+                                                        "Save",
+                                                        &theme,
+                                                    )
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.save_current_into_profile(
+                                                            &save_profile,
+                                                            cx,
+                                                        );
+                                                    })),
+                                                )
+                                            })
                                     }),
                             )
                             .child(
@@ -483,8 +740,24 @@ impl Pickers {
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_muted)
                                     .child(SharedString::from(line)),
-                            ),
+                            )
+                            .when_some(drift_line, |el, line| {
+                                el.child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.warning)
+                                        .child(SharedString::from(line)),
+                                )
+                            }),
                     )
+                    .when(drift.as_ref().is_some_and(|drift| drift.is_empty()), |el| {
+                        el.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .flex_none()
+                                .size(px(14.0))
+                                .text_color(theme.accent),
+                        )
+                    })
                     .when(switches, |el| {
                         el.child(
                             div()
@@ -522,7 +795,7 @@ impl Pickers {
                     ),
             );
         }
-        let save_ix = profiles.len();
+        let save_ix = offset + profiles.len();
         list = list
             .when(!profiles.is_empty(), |el| {
                 el.child(
@@ -573,6 +846,78 @@ impl Pickers {
                     ),
             );
         list.into_any_element()
+    }
+
+    fn render_default_row(
+        &mut self,
+        selected: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id("profile-default")
+            .relative()
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(popover::MENU_ITEM_RADIUS))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_pointer()
+            .when(self.active == 0, |el| el.bg(crate::theme::ink(0.05)))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered && this.active != 0 {
+                    this.active = 0;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(|this, _, _, cx| this.activate_profile_index(0, cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(24.0))
+                    .rounded(px(7.0))
+                    .bg(crate::theme::ink(0.06))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::LUCIDE_CIRCLE_DASHED)
+                            .size(px(13.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("No profile"),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child("Keeps the model, drops instructions"),
+                    ),
+            )
+            .when(selected, |el| {
+                el.child(
+                    crate::icons::icon(crate::icons::CHECK)
+                        .flex_none()
+                        .size(px(14.0))
+                        .text_color(theme.accent),
+                )
+            })
+            .into_any_element()
     }
 
     fn edit_choices(
@@ -1051,6 +1396,25 @@ impl Pickers {
     }
 }
 
+fn profile_row_button(
+    id: (&'static str, usize),
+    label: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(crate::theme::hairline(0.12))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text)
+        .hover(|s| s.bg(crate::theme::ink(0.08)))
+        .child(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,6 +1461,7 @@ mod tests {
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: PermissionMode::Full,
             instructions: String::new(),
+            profile_id: None,
         };
         let mut same = profile("Same", "");
         same.harness = HarnessId::ClaudeCode;
@@ -1114,5 +1479,45 @@ mod tests {
         assert_eq!(config.model.as_deref(), Some("gpt-5.6"));
         assert!(config.model_options.is_empty());
         assert_eq!(config.reasoning, Some(ReasoningLevel::High));
+        assert_eq!(config.profile_id.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn drift_compares_only_what_the_profile_sets() {
+        let mut planner = profile("Planner", "");
+        planner.harness = HarnessId::ClaudeCode;
+        planner.reasoning = Some(ReasoningLevel::High);
+        planner.model_options = serde_json::json!({ "context": "1m" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let mut current = ResolvedRunConfig {
+            harness: Some(HarnessId::ClaudeCode),
+            model: Some("opus".into()),
+            reasoning: Some(ReasoningLevel::High),
+            model_options: serde_json::json!({ "context": "1m", "fast": "on" })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            permission_mode: PermissionMode::Full,
+            instructions: String::new(),
+            profile_id: Some("planner".into()),
+        };
+        assert!(profile_drift(&planner, &current).is_empty());
+
+        current.reasoning = Some(ReasoningLevel::Max);
+        current.model_options.remove("context");
+        assert_eq!(
+            profile_drift(&planner, &current),
+            [Drift::Effort, Drift::Options]
+        );
+        let saved = absorb_current(&planner, &current);
+        assert_eq!(saved.reasoning, Some(ReasoningLevel::Max));
+        assert!(saved.model.is_none());
+        assert!(saved.permission_mode.is_none());
+        assert!(saved.model_options.is_empty());
+
+        current.harness = Some(HarnessId::Codex);
+        assert_eq!(profile_drift(&planner, &current), [Drift::Harness]);
     }
 }

@@ -607,6 +607,7 @@ async fn chat_config_selects_the_run_harness() {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
+                profile_id: None,
             }),
             None,
         )
