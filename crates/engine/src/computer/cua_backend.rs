@@ -65,6 +65,9 @@ use super::utf8_truncation::utf16_len;
 pub const CUA_SEMANTIC_TEXT_LANE_HOLD_MS: u64 = 28_000;
 pub const CUA_SEMANTIC_TEXT_LANE_GAP_MS: u64 = 100;
 pub const CUA_HOST_CALL_TIMEOUT_MS: u64 = 35_000;
+// Until the host has answered once, the first calls also pay for starting the driver
+// (spawn, handshake, session), whose own limits add up to about 70 s.
+pub const CUA_COLD_HOST_CALL_TIMEOUT_MS: u64 = 80_000;
 pub const CLIPBOARD_NOT_RESTORABLE_CODE: &str = "clipboard_not_restorable";
 pub const CUA_SHIELD_TIMEOUT_MS: u64 = 5_000;
 pub const CUA_BROWSER_STILL_TIMEOUT_MS: u64 = 20_000;
@@ -593,6 +596,7 @@ struct CuaState {
     desktop_interruptions: Option<u64>,
     driver_native_revision: Option<u64>,
     host_platform: Option<String>,
+    host_warm: bool,
     preview_tasks: Vec<(String, CuaComputerTask)>,
     still_target: Option<StillTarget>,
     disposed: bool,
@@ -699,6 +703,7 @@ impl CuaComputerBackend {
                 desktop_interruptions: None,
                 driver_native_revision: None,
                 host_platform: None,
+                host_warm: false,
                 preview_tasks: Vec::new(),
                 still_target: None,
                 disposed: false,
@@ -909,10 +914,17 @@ impl CuaInner {
                 guard.armed = false;
                 Ok(reply)
             }
-            () = tokio::time::sleep(timeout) => Err(CuaTransportError {
-                message: "Computer request timed out; do not replay an uncertain action.".into(),
-                effect: uncertain,
-            }),
+            () = tokio::time::sleep(timeout) => {
+                self.state().host_warm = false;
+                Err(CuaTransportError {
+                    message: if mutation {
+                        "Computer request timed out; do not replay an uncertain action.".into()
+                    } else {
+                        "Computer read timed out; it changed nothing and is safe to retry once the app responds.".into()
+                    },
+                    effect: uncertain,
+                })
+            }
             () = aborted => Err(CuaTransportError {
                 message: "Computer operation cancelled. Input already dispatched may have taken effect; do not replay.".into(),
                 effect: uncertain,
@@ -983,8 +995,10 @@ impl CuaInner {
         }
         let timeout = if request.method == ComputerHostMethod::Setup {
             CUA_SETUP_TIMEOUT_MS
-        } else {
+        } else if self.state().host_warm {
             CUA_HOST_CALL_TIMEOUT_MS
+        } else {
+            CUA_COLD_HOST_CALL_TIMEOUT_MS
         };
         let call = Self::host_call(request);
         let reply = timed_computer_leg(
@@ -1035,6 +1049,9 @@ impl CuaInner {
                     state.snapshot_at = None;
                 }
             }
+        }
+        if reply.ok {
+            self.state().host_warm = true;
         }
         if !reply.ok {
             return Err(CuaActionError::new(

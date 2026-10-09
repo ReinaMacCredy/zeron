@@ -11,7 +11,7 @@ use zeron_proto::computer::{
 
 use super::*;
 use crate::computer::backend::{ComputerSettleOptions, ComputerSettleOutcome, CuaErrorLayer};
-use crate::computer::cua_backend::CUA_HOST_CALL_TIMEOUT_MS;
+use crate::computer::cua_backend::{CUA_COLD_HOST_CALL_TIMEOUT_MS, CUA_HOST_CALL_TIMEOUT_MS};
 
 struct DeadlineHost {
     setup_delay: Duration,
@@ -1133,4 +1133,32 @@ async fn keeps_movecursor_as_background_overlay_only_and_unverifiable() {
         Some(ComputerDeliveryVerification::Unverifiable)
     );
     assert_eq!(f.first_args("move_cursor"), json!({ "x": 10, "y": 20 }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn calls_before_the_host_first_answers_get_the_driver_startup_budget() {
+    let host = Arc::new(DeadlineHost {
+        setup_delay: Duration::ZERO,
+        hang_setup: AtomicBool::new(false),
+        hang_calls: AtomicBool::new(true),
+        methods: Mutex::new(Vec::new()),
+    });
+    let backend = CuaComputerBackend::new(host.clone(), CuaComputerBackendOptions::default());
+    let started = Instant::now();
+    let cold = backend.availability(true).await.unwrap();
+    assert_eq!(kind(&cold), "backend-unavailable");
+    assert!(
+        message(&cold).contains("safe to retry"),
+        "{}",
+        message(&cold)
+    );
+    assert!(started.elapsed() >= Duration::from_millis(CUA_COLD_HOST_CALL_TIMEOUT_MS));
+    host.hang_calls.store(false, Ordering::SeqCst);
+    backend.availability(true).await.unwrap();
+    host.hang_calls.store(true, Ordering::SeqCst);
+    let started = Instant::now();
+    backend.availability(true).await.unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(CUA_HOST_CALL_TIMEOUT_MS));
+    assert!(elapsed < Duration::from_millis(CUA_COLD_HOST_CALL_TIMEOUT_MS));
 }
