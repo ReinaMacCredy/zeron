@@ -374,7 +374,7 @@
 
   const appOnlyBrowsers = (apps) =>
     apps
-      .filter((a) => a.running && APP_ONLY_BROWSERS[a.bundleId])
+      .filter((a, i) => a.running && APP_ONLY_BROWSERS[a.bundleId] && apps.findIndex((b) => b.running && b.bundleId === a.bundleId) === i)
       .map((a) => ({
         id: a.bundleId,
         name: APP_ONLY_BROWSERS[a.bundleId],

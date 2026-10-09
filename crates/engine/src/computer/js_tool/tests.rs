@@ -95,7 +95,8 @@ impl JsHost for FakeHost {
             "computer_list_apps" => json_result(json!({ "apps": [
                 { "pid": 7, "name": "Calculator", "bundleId": "com.apple.calculator", "running": true },
                 { "pid": 9, "name": "Google Chrome", "bundleId": "com.google.Chrome", "running": true },
-                { "pid": 11, "name": "Helium", "bundleId": "net.imput.helium", "running": true }
+                { "pid": 11, "name": "Helium", "bundleId": "net.imput.helium", "running": true },
+                { "pid": 12, "name": "Helium", "bundleId": "net.imput.helium", "running": true }
             ] })),
             "computer_type_text" if self.type_warning => json_result(json!({
                 "action": "type_text",
