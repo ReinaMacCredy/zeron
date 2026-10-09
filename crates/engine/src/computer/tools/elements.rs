@@ -121,6 +121,21 @@ impl ElementState {
             .map(|(_, digest)| digest.clone())
     }
 
+    pub(super) fn replace_ref(
+        &mut self,
+        thread_id: &str,
+        element_ref: u64,
+        entry: ComputerActionableElementRef,
+    ) {
+        if let (Some(table), Ok(element_ref)) = (
+            self.ref_tables.get_mut(thread_id),
+            usize::try_from(element_ref),
+        ) && let Some(slot) = table.entries.get_mut(&element_ref)
+        {
+            *slot = entry;
+        }
+    }
+
     pub(super) fn lookup_ref(&self, thread_id: &str, element_ref: u64) -> RefLookup {
         let Some(table) = self.ref_tables.get(thread_id) else {
             return RefLookup::NoListing;

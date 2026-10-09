@@ -46,8 +46,9 @@ use crate::computer::screenshot_frames::{
     screenshot_delta_to_desktop, screenshot_point_to_desktop, screenshot_rect_to_desktop,
 };
 use crate::computer::ui_tree_targeting::{
-    ComputerActionableElementFilter, ComputerTargetErrorCode, actionable_elements_limited,
-    is_writable_text_node, normalize_label_spaces, resolve_computer_semantic_target,
+    ComputerActionableElementFilter, ComputerActionableElementRef, ComputerTargetErrorCode,
+    actionable_elements_limited, is_writable_text_node, normalize_label_spaces,
+    resolve_computer_semantic_target,
 };
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 
@@ -305,6 +306,59 @@ impl ComputerTools {
         |node| self.manager.native_element_identity(node)
     }
 
+    fn fresh_ref_entry(
+        &self,
+        thread_id: &str,
+        element_ref: u64,
+        entry: ComputerActionableElementRef,
+    ) -> ComputerActionableElementRef {
+        let Some(window_id) = entry.window_id.clone() else {
+            return entry;
+        };
+        let Some(root) = self.manager.latest_tree(&window_id) else {
+            return entry;
+        };
+        let listing = actionable_elements_limited(
+            &root,
+            &ComputerActionableElementFilter {
+                window_id: Some(window_id),
+                label_contains: None,
+            },
+            self.native_identity(),
+            TREE_REF_LIMIT,
+        );
+        let same: Vec<&ComputerActionableElementRef> = listing
+            .ref_index
+            .iter()
+            .filter(|candidate| candidate.role == entry.role && candidate.label == entry.label)
+            .collect();
+        let frame = |candidate: &ComputerActionableElementRef| {
+            candidate
+                .observed
+                .as_ref()
+                .map(|observed| observed.node.frame.clone())
+        };
+        let fresh = match same.as_slice() {
+            [only] => Some(*only),
+            _ => same
+                .iter()
+                .find(|candidate| {
+                    candidate.ordinal == entry.ordinal && frame(candidate) == frame(&entry)
+                })
+                .copied(),
+        };
+        match fresh.filter(|fresh| fresh.observed.is_some()) {
+            Some(fresh) => {
+                let fresh = fresh.clone();
+                self.state()
+                    .elements
+                    .replace_ref(thread_id, element_ref, fresh.clone());
+                fresh
+            }
+            None => entry,
+        }
+    }
+
     pub(super) fn resolve_target(
         &self,
         target: ScreenshotTarget,
@@ -321,7 +375,8 @@ impl ComputerTools {
                 )
                 .into());
             }
-            let entry = match self.state().elements.lookup_ref(thread_id, element_ref) {
+            let lookup = self.state().elements.lookup_ref(thread_id, element_ref);
+            let entry = match lookup {
                 RefLookup::NoListing => {
                     return Err(ToolInputError::new(
                         "No elements listing exists yet in this thread; ref targets need a computer_get_state first.",
@@ -334,7 +389,7 @@ impl ComputerTools {
                     ))
                     .into());
                 }
-                RefLookup::Found(entry) => entry,
+                RefLookup::Found(entry) => self.fresh_ref_entry(thread_id, element_ref, entry),
             };
             let quoted = |text: &str| Value::String(text.to_owned()).to_string();
             if let Some(label) = &target.label {
@@ -1002,7 +1057,13 @@ impl ComputerTools {
                 ));
             }
         }
-        let outcome = self.observed_action(name, args, context).await?;
+        let outcome = match self.observed_action(name, args, context).await {
+            Err(failure) if args_has(args, "ref") && is_stale_token_refusal(&failure) => {
+                self.refresh_ref_window(args, context).await?;
+                self.observed_action(name, args, context).await?
+            }
+            outcome => outcome?,
+        };
         let (result, observation) = match outcome {
             ObservedOutcome::Plain(result) => (result, None),
             ObservedOutcome::Observed {
@@ -1021,6 +1082,39 @@ impl ComputerTools {
             }
             _ => self.observe_after_action(args, observed, context).await,
         }
+    }
+
+    async fn refresh_ref_window(
+        &self,
+        args: &ToolArgs,
+        context: &ComputerToolContext,
+    ) -> Result<(), ToolFailure> {
+        let window_id = args
+            .get("ref")
+            .and_then(Value::as_u64)
+            .and_then(|element_ref| {
+                let lookup = self
+                    .state()
+                    .elements
+                    .lookup_ref(&context.chat_id, element_ref);
+                match lookup {
+                    RefLookup::Found(entry) => entry.window_id,
+                    _ => None,
+                }
+            });
+        let Some(window_id) = window_id else {
+            return Ok(());
+        };
+        assert_desktop_operation_active()?;
+        self.manager
+            .get_state(ComputerStateRequest {
+                include_screenshot: Some(false),
+                include_text: false,
+                include_tree: Some(true),
+                window_id: Some(window_id),
+            })
+            .await?;
+        Ok(())
     }
 
     async fn observed_action(
@@ -1591,4 +1685,13 @@ pub(super) async fn pause(duration_ms: u64) -> Result<(), DesktopOperationError>
             Ok(())
         }
     }
+}
+
+fn is_stale_token_refusal(failure: &ToolFailure) -> bool {
+    failure
+        .computer()
+        .and_then(ComputerError::cua)
+        .is_some_and(|cua| {
+            cua.code == "stale_element_token" && cua.effect == CuaEffect::NotDispatched
+        })
 }

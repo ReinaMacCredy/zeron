@@ -4952,6 +4952,15 @@ impl ComputerBackend for CuaComputerBackend {
         self.inner.node_element(node).map(|element| element.token)
     }
 
+    fn latest_tree(&self, window_id: &str) -> Option<ComputerUiNode> {
+        let state = self.inner.state();
+        state
+            .recent_trees
+            .iter()
+            .find(|(id, _)| id == window_id)
+            .map(|(_, tree)| tree.root.clone())
+    }
+
     async fn dispose(&self) {
         self.stills.detach().await;
         self.inner.dispose().await;

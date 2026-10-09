@@ -99,6 +99,7 @@ pub(crate) struct Knobs {
     pub native_revision: Option<u64>,
     pub interruptions: Option<u64>,
     pub pauses: Option<Vec<String>>,
+    pub token_generation: Option<u64>,
 }
 
 #[derive(Default)]
@@ -309,6 +310,15 @@ impl ScriptedHost {
                 wait.wait().await;
             }
             let mut knobs = self.knobs.lock().unwrap();
+            let mut elements = knobs.elements.clone();
+            if let Some(generation) = knobs.token_generation.as_mut() {
+                *generation += 1;
+                for element in &mut elements {
+                    if let Some(token) = element.get("element_token").and_then(Value::as_str) {
+                        element["element_token"] = json!(format!("{token}#{generation}"));
+                    }
+                }
+            }
             let mut result = json!({
                 "structuredContent": {
                     "pid": knobs.capture_pid,
@@ -316,7 +326,7 @@ impl ScriptedHost {
                     "window_bounds": knobs.bounds,
                     "screenshot_frame_valid": knobs.capture_frame_valid,
                     "screenshot_frame_freshness": knobs.capture_frame_freshness,
-                    "elements": knobs.elements,
+                    "elements": elements,
                 },
                 "content": [{ "type": "image", "mimeType": "image/png", "data": png_header_base64() }],
             });
@@ -327,6 +337,22 @@ impl ScriptedHost {
                 knobs.bounds["x"] = json!(-250);
             }
             return json!({ "ok": true, "result": result, "desktopEpoch": epoch });
+        }
+        let current = self.knobs.lock().unwrap().token_generation;
+        if let (Some(current), Some(token)) =
+            (current, args.get("element_token").and_then(Value::as_str))
+            && token.rsplit_once('#').map(|(_, generation)| generation)
+                != Some(&current.to_string())
+        {
+            return json!({
+                "ok": true,
+                "result": { "structuredContent": {
+                    "status": "refused",
+                    "refusal": { "code": "stale_element_token", "message": "element_token is stale" },
+                } },
+                "desktopEpoch": epoch,
+                "hostPlatform": platform,
+            });
         }
         if name == Some("set_value") {
             let mut knobs = self.knobs.lock().unwrap();
@@ -438,6 +464,7 @@ pub(crate) fn fixture_with(options: FixtureOptions) -> Fixture {
         native_revision: options.native_revision.unwrap_or(Some(34)),
         interruptions: None,
         pauses: None,
+        token_generation: None,
     }));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let cancelled = Arc::new(Mutex::new(Vec::new()));

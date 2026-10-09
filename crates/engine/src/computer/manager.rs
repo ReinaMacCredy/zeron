@@ -903,6 +903,10 @@ impl ComputerManager {
         self.backend.native_element_identity(node)
     }
 
+    pub fn latest_tree(&self, window_id: &str) -> Option<zeron_proto::computer::ComputerUiNode> {
+        self.backend.latest_tree(window_id)
+    }
+
     pub async fn interrupt_thread_input(
         &self,
         thread_id: &str,

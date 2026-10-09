@@ -975,6 +975,10 @@ pub trait ComputerBackend: Send + Sync {
         None
     }
 
+    fn latest_tree(&self, _window_id: &str) -> Option<ComputerUiNode> {
+        None
+    }
+
     async fn dispose(&self);
 }
 

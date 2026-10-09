@@ -676,6 +676,10 @@ impl ComputerBackend for Scripted {
         self.fake.native_element_identity(node)
     }
 
+    fn latest_tree(&self, window_id: &str) -> Option<ComputerUiNode> {
+        self.fake.latest_tree(window_id)
+    }
+
     async fn dispose(&self) {
         self.fake.dispose().await;
     }
