@@ -33,6 +33,7 @@ pub mod preview;
 mod rename;
 pub mod search;
 mod sections;
+mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tree;

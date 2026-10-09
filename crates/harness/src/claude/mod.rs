@@ -27,11 +27,24 @@
 //!   NEVER folded into the parent feed (a background subagent interleaves
 //!   with the parent's own stream — folding them in split contiguous text
 //!   around phantom tool calls).
+//! - A `result` that is not a turn's end: every stdin user line carries a
+//!   uuid, and the CLI reports each one's `command_lifecycle`. A result
+//!   while one of ours is still written/queued is a boundary (a `now` steer
+//!   aborting the turn, resume settling dead background tasks) — that
+//!   message's turn ends with its own result. See [`Commands`].
 //! - Steering: queued [`SteerMessage`]s are written to stdin as user lines at
 //!   any time, their attachments inlined like a first turn's; the CLI folds
-//!   them into the running turn at its own step boundary.
-//! - Interrupt: cancelling [`RunControls::interrupt`] sends the protocol-level
-//!   interrupt control request, then escalates to SIGTERM and SIGKILL.
+//!   them into the running turn at its own step boundary. A steer's changed
+//!   model/effort/options apply to the live
+//!   process first (`set_model`, `apply_flag_settings`) — never a restart.
+//! - Turn stop ([`crate::TurnControl::stop_turn`]): the `interrupt` control
+//!   request with `cancel_queued` ends the turn and the CLI keeps reading
+//!   stdin. The run opens with an `initialize` declaring
+//!   `perTaskStopAffordance`, which makes that interrupt spare background
+//!   agents (the CLI otherwise stops them all); background shells survive
+//!   either way. `background_tasks_changed` reports the live set to the host.
+//! - Interrupt: cancelling [`RunControls::interrupt`] tears the runtime down —
+//!   the interrupt control request, then SIGTERM and SIGKILL.
 
 pub mod catalog;
 mod discovery;
@@ -76,6 +89,48 @@ fn resolve_claude_executable() -> Option<PathBuf> {
     extra.push(PathBuf::from("/opt/homebrew/bin/claude"));
     extra.push(PathBuf::from("/usr/local/bin/claude"));
     crate::executable::find_on_paths("claude", extra)
+}
+
+/// The `--model` value: the 1M context window is selected via a model-id
+/// suffix (`sonnet[1m]`), exactly how the CLI itself does it.
+fn model_arg(request: &RunRequest) -> Option<String> {
+    let model = request.model.as_ref()?;
+    let one_m = request
+        .model_options
+        .get("contextWindow")
+        .and_then(Value::as_str)
+        == Some("1m");
+    Some(if one_m {
+        format!("{model}[1m]")
+    } else {
+        model.clone()
+    })
+}
+
+/// Every flag-layer setting a request launches with, for
+/// `apply_flag_settings` on a live process: `null` drops the override back
+/// to the user's own settings, exactly as a launch without the flag
+/// (verified live on 2.1.286 through `get_settings`).
+fn flag_settings(request: &RunRequest) -> Value {
+    let on = |set: bool| if set { Value::Bool(true) } else { Value::Null };
+    serde_json::json!({
+        "effortLevel": to_effort(request.reasoning, request.model.as_deref()),
+        "fastMode": on(option_is_on(&request.model_options, "fastMode")),
+        "alwaysThinkingEnabled": on(option_is_on(&request.model_options, "thinking")),
+        "ultracode": on(request.reasoning == Some(ReasoningLevel::Ultracode)),
+    })
+}
+
+/// The suffix alone can't express 200K: the catalog's long-context models
+/// are `native_1m` in the CLI, so a bare id still runs at 1M and only the
+/// env kill switch brings it down (see `catalog::context_window`).
+fn disables_1m_context(request: &RunRequest) -> bool {
+    request.model.is_some()
+        && request
+            .model_options
+            .get("contextWindow")
+            .and_then(Value::as_str)
+            == Some("200k")
 }
 
 fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
@@ -173,10 +228,11 @@ impl ClaudeHarness {
         })
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
-        let mut cmd = Command::new(exe);
-        crate::compose_child_path(&mut cmd, exe);
-        cmd.args([
+    /// The configuration arguments a run launches with — everything the
+    /// process bakes in at spawn except the session to resume. Two requests
+    /// with equal arguments (and cwd) are the same runtime.
+    fn launch_args(request: &RunRequest) -> Vec<String> {
+        let mut args: Vec<String> = [
             "--print",
             "--input-format",
             "stream-json",
@@ -197,33 +253,15 @@ impl ClaudeHarness {
             // Echo each prompt back with its transcript uuid — the anchor a
             // later rewind or fork cuts at.
             "--replay-user-messages",
-        ]);
-        // File checkpoints are only recorded for sessions that ran with this
-        // set; a chat that never had it can never restore code later.
-        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
-        // The 1M context window is selected via a model-id suffix
-        // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
-        // always-on thinking are settings overrides. The suffix alone can't
-        // express 200K: the catalog's long-context models are `native_1m` in
-        // the CLI, so a bare id still runs at 1M and only the env kill switch
-        // brings it down (see `catalog::context_window`).
-        if let Some(model) = &request.model {
-            let context_window = request
-                .model_options
-                .get("contextWindow")
-                .and_then(Value::as_str);
-            cmd.arg("--model");
-            cmd.arg(if context_window == Some("1m") {
-                format!("{model}[1m]")
-            } else {
-                model.clone()
-            });
-            if context_window == Some("200k") {
-                cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
-            }
+        ]
+        .map(str::to_owned)
+        .into();
+        if let Some(model) = model_arg(request) {
+            args.push("--model".into());
+            args.push(model);
         }
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
-            cmd.args(["--effort", effort]);
+            args.extend(["--effort".into(), effort.into()]);
         }
         // The CLI decides what asks under each mode (default asks for
         // everything but its own read-only safe list, acceptEdits also lets
@@ -239,7 +277,34 @@ impl ClaudeHarness {
             zeron_proto::PermissionMode::Ask | zeron_proto::PermissionMode::Full => "default",
             zeron_proto::PermissionMode::Auto => "auto",
         };
-        cmd.args(["--permission-mode", cli_mode]);
+        args.extend(["--permission-mode".into(), cli_mode.into()]);
+        let mut settings = serde_json::Map::new();
+        if option_is_on(&request.model_options, "fastMode") {
+            settings.insert("fastMode".into(), Value::Bool(true));
+        }
+        if option_is_on(&request.model_options, "thinking") {
+            settings.insert("alwaysThinkingEnabled".into(), Value::Bool(true));
+        }
+        if request.reasoning == Some(ReasoningLevel::Ultracode) {
+            settings.insert("ultracode".into(), Value::Bool(true));
+        }
+        if !settings.is_empty() {
+            args.push("--settings".into());
+            args.push(Value::Object(settings).to_string());
+        }
+        args
+    }
+
+    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
+        let mut cmd = Command::new(exe);
+        crate::compose_child_path(&mut cmd, exe);
+        cmd.args(Self::launch_args(request));
+        // File checkpoints are only recorded for sessions that ran with this
+        // set; a chat that never had it can never restore code later.
+        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
+        if disables_1m_context(request) {
+            cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+        }
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
             // Naming the source's id, or no id, also skips copying file checkpoints (CLI 2.1.280).
@@ -271,20 +336,6 @@ impl ClaudeHarness {
                     cmd.arg(format!("--resume-drops-turn={drop}"));
                 }
             }
-        }
-        let mut settings = serde_json::Map::new();
-        if option_is_on(&request.model_options, "fastMode") {
-            settings.insert("fastMode".into(), Value::Bool(true));
-        }
-        if option_is_on(&request.model_options, "thinking") {
-            settings.insert("alwaysThinkingEnabled".into(), Value::Bool(true));
-        }
-        if request.reasoning == Some(ReasoningLevel::Ultracode) {
-            settings.insert("ultracode".into(), Value::Bool(true));
-        }
-        if !settings.is_empty() {
-            cmd.arg("--settings");
-            cmd.arg(Value::Object(settings).to_string());
         }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -446,9 +497,6 @@ impl Harness for ClaudeHarness {
     fn supports_steering(&self) -> bool {
         true
     }
-    fn live_reasoning(&self) -> bool {
-        true
-    }
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::StepBoundary
     }
@@ -482,6 +530,29 @@ impl Harness for ClaudeHarness {
 
     fn compaction(&self) -> Compaction {
         Compaction::SlashText("/compact".into())
+    }
+    /// The `interrupt` control request ends the turn and the CLI keeps
+    /// reading stdin; background agents and shells run on.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    /// Same launch arguments and cwd. The CLI ignores the sandbox level, and
+    /// option spellings that launch the same flags are the same runtime.
+    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        self.reconfigures_in_place(live, next) && Self::launch_args(live) == Self::launch_args(next)
+    }
+    /// Model, context window, effort, fast mode, thinking and ultracode all
+    /// change on the live process (`set_model`, `apply_flag_settings`). Only
+    /// the directory, the permission mode, the computer grant, a fork or
+    /// branch cut and the 200K env switch it launched with need a new one.
+    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.cwd == next.cwd
+            && live.auto_approve == next.auto_approve
+            && live.permission_mode == next.permission_mode
+            && live.computer_control == next.computer_control
+            && (next.forked_at.is_none() || next.forked_at == live.forked_at)
+            && (next.branch.is_none() || next.branch == live.branch)
+            && disables_1m_context(live) == disables_1m_context(next)
     }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
@@ -663,6 +734,11 @@ impl ClaudeHarness {
 
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<StdinMsg>();
         tokio::spawn(stdin_writer(stdin, stdin_rx));
+        if !title_only {
+            let _ = stdin_tx.send(StdinMsg::Line(wire::initialize_request_line(
+                "zeron_initialize",
+            )));
+        }
 
         // The initial prompt as the first stdin user line (streaming-input
         // mode). Ultrathink rides every user message — steers included.
@@ -676,11 +752,13 @@ impl ClaudeHarness {
         } else {
             self.skill_names(&request.prompt).await
         };
-        let first = wire::user_message_line_with_images(
+        let first_command = uuid::Uuid::new_v4().to_string();
+        let first = wire::prompt_line(
             &apply_ultrathink(
                 request.reasoning,
                 &crate::skill_mentions_as_slash(&request.prompt, &skills),
             ),
+            &first_command,
             &images,
         );
         let _ = stdin_tx.send(StdinMsg::Line(first));
@@ -689,15 +767,13 @@ impl ClaudeHarness {
         tokio::spawn(run_session(Session {
             normalizer,
             title_only,
-            permission_mode: request.permission_mode,
-            computer_control: request.computer_control,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
+            first_command,
             stdin_tx,
             event_tx,
             controls,
-            reasoning: request.reasoning,
-            model: request.model.clone(),
+            config: request,
             skills,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -818,15 +894,16 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 struct Session {
     normalizer: Normalizer,
     title_only: bool,
-    permission_mode: zeron_proto::PermissionMode,
-    computer_control: bool,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
+    /// The uuid the opening prompt was written with.
+    first_command: String,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
-    reasoning: Option<ReasoningLevel>,
-    model: Option<String>,
+    /// The configuration the process runs with now: its launch request, then
+    /// whatever a steer's `config` applied in place.
+    config: RunRequest,
     /// Skill names the `$name` rewrite recognizes, for steers too.
     skills: Vec<String>,
     interrupt_grace: Duration,
@@ -841,15 +918,13 @@ async fn run_session(session: Session) {
     let Session {
         normalizer: mut norm,
         title_only,
-        permission_mode,
-        computer_control,
         mut child,
         mut stdout_lines,
+        first_command,
         stdin_tx,
         event_tx,
         controls,
-        mut reasoning,
-        model,
+        mut config,
         skills,
         interrupt_grace,
         kill_grace,
@@ -861,6 +936,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        turn,
         stop_tasks,
         ..
     } = controls;
@@ -869,6 +945,7 @@ async fn run_session(session: Session) {
     let mut stop_seq: u64 = 0;
 
     let mut pending_steers = std::collections::VecDeque::new();
+    let mut reconfigures = 0u64;
     // Top-level tool calls in flight: a steer must not abort them (see
     // `wire::steer_message_line`).
     let mut open_tools = std::collections::HashSet::new();
@@ -876,15 +953,42 @@ async fn run_session(session: Session) {
     let mut interrupted = false;
     let mut interrupt_sent = false;
     let mut any_done = false;
-    // A turn end held back while steers wait for their replay. Rapid `now`
-    // steers each interrupt the turn the previous one started, and the CLI
-    // replays only the last (verified on 2.1.280; the earlier texts still
-    // reach the model). If nothing follows the held result, the steers were
-    // absorbed: release them and the turn end instead of spinning forever.
-    const HELD_DONE_SETTLE: Duration = Duration::from_secs(5);
-    let mut held_done: Option<(AgentEvent, tokio::time::Instant)> = None;
+    // A turn stop in flight (`TurnControl::stop_turn`): its request id, and
+    // once the CLI has answered, how long a turn-ending `result` may still
+    // take. The CLI answers a stop between turns without any result — the
+    // deadline settles that shape so the host never waits on it.
+    const STOP_SETTLE: Duration = Duration::from_secs(3);
+    let mut stops_sent = 0u64;
+    let mut stopping: Option<String> = None;
+    let mut stop_settle_at: Option<tokio::time::Instant> = None;
+    // A turn end held for steers when the stop came: that turn's end, sent
+    // as stopped once the stop settles — never before. Released early, the
+    // host started the replacement prompt while the stopped turn could still
+    // report, and that late result settled the replacement.
+    let mut stopped_end: Option<AgentEvent> = None;
+    // When the stopped turn's one Done went out, and whether anything has
+    // happened since — a message of ours written, or new output streamed. A
+    // result in that window with neither can only be the stopped turn
+    // reporting late, and is dropped. Anything else is reconciled like any
+    // result (held for unconfirmed messages, settled by their fallback):
+    // dropping on time alone lost a quick replacement's own end.
+    let mut stop_done_at: Option<tokio::time::Instant> = None;
+    let mut active_since_stop = false;
+    let mut commands = Commands::default();
+    commands.written(first_command);
+    // A `result` that is a steer boundary rather than the turn's end (see
+    // [`Commands`]). It is superseded — dropped — once the waiting message
+    // starts its own turn, which ends with its own result; it is released
+    // as the turn's end if that message is cancelled before it starts.
+    let mut held_done: Option<AgentEvent> = None;
+    // Last stdout activity, for the held result's settle fallback.
+    let mut last_frame_at = tokio::time::Instant::now();
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    // The runtime's process tree when its teardown began (see
+    // [`crate::shutdown_agent`]).
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut torn_down: Vec<i32> = Vec::new();
 
     'main: loop {
         tokio::select! {
@@ -895,10 +999,8 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     // The CLI is still producing: whatever it is doing is not
-                    // the quiet end the held turn end waits for.
-                    if let Some((_, deadline)) = held_done.as_mut() {
-                        *deadline = tokio::time::Instant::now() + HELD_DONE_SETTLE;
-                    }
+                    // the quiet end a held turn end's fallback waits for.
+                    last_frame_at = tokio::time::Instant::now();
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
                         Err(e) => {
@@ -906,6 +1008,17 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    if let Frame::ControlResponse(response) = &frame {
+                        if stopping.as_deref() == Some(response.response.request_id.as_str()) {
+                            stop_settle_at = Some(tokio::time::Instant::now() + STOP_SETTLE);
+                        }
+                        continue;
+                    }
+                    if let Frame::System(system) = &frame
+                        && system.subtype == "background_tasks_changed"
+                    {
+                        turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                    }
                     if let Frame::ControlRequest(req) = frame {
                         if title_only {
                             let line = control_response_line(&req.request_id, serde_json::json!({
@@ -915,35 +1028,78 @@ async fn run_session(session: Session) {
                         } else {
                             handle_control_request(
                                 req,
-                                permission_mode,
-                                computer_control,
+                                config.permission_mode,
+                                config.computer_control,
                                 &request_input,
                                 &stdin_tx,
                             );
                         }
                         continue;
                     }
-                    // Only the CLI's replay confirms that a prompt joined its
-                    // conversation. Writing stdin must not split ongoing text.
-                    if let Frame::User(ref user) = frame {
-                        // A replay confirms its steer and every earlier one:
-                        // superseded steers are never replayed themselves.
-                        if user.parent_tool_use_id.is_none()
-                            && let Some(at) = user
-                                .uuid
-                                .as_ref()
-                                .and_then(|id| pending_steers.iter().position(|p| p == id))
-                        {
-                            for _ in 0..=at {
-                                pending_steers.pop_front();
-                                let (prev, next) = norm.rotate_for_steer();
-                                if event_tx.send(Ok(AgentEvent::Steered {
-                                    assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
-                                })).await.is_err() { break 'main; }
-                            }
+                    // Only the CLI confirms that a prompt joined its
+                    // conversation — its lifecycle or its replay, whichever
+                    // comes first. Writing stdin must not split ongoing text.
+                    // A confirmation covers its steer and every earlier one:
+                    // superseded steers are never replayed themselves. A
+                    // message a turn took up (started, or replayed) also
+                    // supersedes a result held for it: that result was only
+                    // the boundary, and the message's turn ends with its own.
+                    let (confirmed, taken_up) = match &frame {
+                        Frame::CommandLifecycle(cmd) => {
+                            let started = commands.lifecycle(&cmd.command_uuid, &cmd.state);
+                            let confirmed = started || Commands::is_terminal(&cmd.state);
+                            (confirmed.then(|| cmd.command_uuid.clone()), started)
+                        }
+                        Frame::User(user) if user.parent_tool_use_id.is_none() => {
+                            let replayed = user.uuid.clone().filter(|id| pending_steers.contains(id));
+                            let taken_up = replayed.is_some();
+                            (replayed, taken_up)
+                        }
+                        _ => (None, false),
+                    };
+                    if taken_up {
+                        held_done = None;
+                        active_since_stop = true;
+                    }
+                    if let Some(at) = confirmed
+                        .and_then(|id| pending_steers.iter().position(|p| *p == id))
+                    {
+                        for _ in 0..=at {
+                            pending_steers.pop_front();
+                            let (prev, next) = norm.rotate_for_steer();
+                            if event_tx.send(Ok(AgentEvent::Steered {
+                                assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                            })).await.is_err() { break 'main; }
                         }
                     }
-                    for ev in norm.normalize(frame, interrupted) {
+                    // Every waiting message was cancelled before it started:
+                    // the held result was the turn's real end after all.
+                    if matches!(frame, Frame::CommandLifecycle(_))
+                        && !commands.waiting()
+                        && let Some(done) = held_done.take()
+                    {
+                        if event_tx.send(Ok(done)).await.is_err() {
+                            break 'main;
+                        }
+                        any_done = true;
+                    }
+                    // The stopped turn reporting late: a result with nothing
+                    // since the stop's Done. Judged on the frame, before it
+                    // expands — its own Usage is not new activity — and
+                    // dropped whole, usage included.
+                    if matches!(frame, Frame::Result(_))
+                        && !interrupted
+                        && stopping.is_none()
+                        && !active_since_stop
+                        && stop_done_at.is_some_and(|at| at.elapsed() < STOP_SETTLE)
+                    {
+                        tracing::debug!(
+                            target: "zeron_harness::claude",
+                            "late result of a stopped turn dropped"
+                        );
+                        continue;
+                    }
+                    for ev in norm.normalize(frame, interrupted || stopping.is_some()) {
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
                                 open_tools.insert(id.clone());
@@ -956,15 +1112,41 @@ async fn run_session(session: Session) {
                         }
                         let is_done = matches!(ev, AgentEvent::Done { .. });
                         // A `now` steer ends the turn it interrupts with a
-                        // result frame; the steer continues the run, so that
+                        // result frame, and a message queued behind a turn
+                        // that just ended starts another: either way that
                         // result is a steer boundary, not the end of the turn.
-                        if is_done && !interrupted && !pending_steers.is_empty() {
-                            held_done =
-                                Some((ev, tokio::time::Instant::now() + HELD_DONE_SETTLE));
+                        let boundary = if commands.reported {
+                            commands.waiting()
+                        } else {
+                            !pending_steers.is_empty()
+                        };
+                        // New content is a new turn's: its result is its own.
+                        if stop_done_at.is_some()
+                            && match &ev {
+                                AgentEvent::TextDelta { text }
+                                | AgentEvent::ReasoningDelta { text } => !text.is_empty(),
+                                AgentEvent::ToolCall { .. }
+                                | AgentEvent::ToolResult { .. }
+                                | AgentEvent::InputRequested { .. }
+                                | AgentEvent::Subagent { .. } => true,
+                                _ => false,
+                            }
+                        {
+                            active_since_stop = true;
+                        }
+                        if is_done && !interrupted && stopping.is_none() && boundary {
+                            held_done = Some(ev);
                             continue;
                         }
                         if is_done {
                             held_done = None;
+                            // The stopped turn has ended; the runtime lives on.
+                            if stopping.take().is_some() {
+                                stopped_end = None;
+                                stop_done_at = Some(tokio::time::Instant::now());
+                                active_since_stop = false;
+                            }
+                            stop_settle_at = None;
                         }
                         if event_tx.send(Ok(ev)).await.is_err() {
                             break 'main; // consumer gone — reap below
@@ -1002,31 +1184,42 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
-                    if let Some(level) = msg.reasoning.filter(|level| Some(*level) != reasoning) {
-                        stop_seq += 1;
-                        let line = wire::effort_request_line(
-                            &format!("zeron-effort-{stop_seq}"),
-                            to_effort(Some(level), model.as_deref()),
-                            level == ReasoningLevel::Ultracode,
-                        );
-                        let _ = stdin_tx.send(StdinMsg::Line(line));
-                        reasoning = Some(level);
+                    // A message of ours now owns whatever result comes next.
+                    active_since_stop = true;
+                    // A changed configuration applies before the prompt, on
+                    // the same stdin the CLI reads in order.
+                    if let Some(next) = msg.config {
+                        reconfigures += 1;
+                        if model_arg(&next) != model_arg(&config) {
+                            let line = wire::set_model_request_line(
+                                &format!("zeron_model_{reconfigures}"),
+                                model_arg(&next).as_deref(),
+                            );
+                            if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
+                        }
+                        if flag_settings(&next) != flag_settings(&config) {
+                            let line = wire::apply_flag_settings_line(
+                                &format!("zeron_settings_{reconfigures}"),
+                                flag_settings(&next),
+                            );
+                            if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
+                        }
+                        config = *next;
                     }
-                    let images = load_image_blocks(&msg.attachments).await;
                     let id = uuid::Uuid::new_v4().to_string();
-                    let line = wire::steer_message_line(
+                    let images = load_image_blocks(&msg.attachments).await;
+                    let line = wire::steer_message_line_with_images(
                         &apply_ultrathink(
-                            reasoning,
+                            config.reasoning,
                             &crate::skill_mentions_as_slash(&msg.prompt, &skills),
                         ),
-                        &images,
                         &id,
                         open_tools.is_empty(),
+                        &images,
                     );
-                    pending_steers.push_back(id);
-                    if stdin_tx.send(StdinMsg::Line(line)).is_err() {
-                        break 'main;
-                    }
+                    pending_steers.push_back(id.clone());
+                    commands.written(id);
+                    if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
                 }
                 None => {
                     // Mailbox closed: end the input so the run can finish
@@ -1036,9 +1229,62 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // End the in-flight turn, not the session: the CLI stays up, so
+            // its background agents and shells keep running. Steers written
+            // before the stop are cancelled with it (`cancel_queued`) — a
+            // stopped turn must not continue into them.
+            _ = turn.stop_requested(), if !interrupted => {
+                stops_sent += 1;
+                let id = format!("zeron_stop_{stops_sent}");
+                pending_steers.clear();
+                commands.cancel_waiting();
+                stopping = Some(id.clone());
+                stop_settle_at = None;
+                stop_done_at = None;
+                if stdin_tx.send(StdinMsg::Line(wire::stop_turn_request_line(&id))).is_err() {
+                    break 'main;
+                }
+                // A turn end held for steer replays is that turn's real end:
+                // its steers were just cancelled, so it ends stopped — once
+                // the stop settles. A turn the CLI had already begun for
+                // those steers reports first, and that report is the end.
+                if let Some(mut done) = held_done.take() {
+                    if let AgentEvent::Done { status, .. } = &mut done {
+                        *status = DoneStatus::Interrupted;
+                    }
+                    stopped_end = Some(done);
+                }
+            },
+
+            // The CLI answered the stop and no turn ended: it was between
+            // turns. Settle the stop so the host sees the turn over.
+            _ = tokio::time::sleep_until(stop_settle_at.unwrap_or_else(tokio::time::Instant::now)),
+                if stop_settle_at.is_some() => {
+                stop_settle_at = None;
+                if stopping.take().is_some() {
+                    let done = stopped_end.take().unwrap_or(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: norm.session_id.clone(),
+                    });
+                    if event_tx.send(Ok(done)).await.is_err() {
+                        break 'main;
+                    }
+                    any_done = true;
+                    stop_done_at = Some(tokio::time::Instant::now());
+                    active_since_stop = false;
+                }
+            },
+
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
+                // The runtime is going: so is everything it started.
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    torn_down = crate::process::descendants(pid).await;
+                }
                 let _ = stdin_tx.send(StdinMsg::Line(wire::interrupt_request_line("int_1")));
                 // Escalate if the CLI doesn't wind down within the grace
                 // periods: SIGTERM (kills bash trees, runs SessionEnd hooks),
@@ -1054,16 +1300,17 @@ async fn run_session(session: Session) {
             },
 
             _ = tokio::time::sleep_until(
-                held_done.as_ref().map_or_else(tokio::time::Instant::now, |(_, d)| *d)
-            ), if held_done.is_some() => {
+                last_frame_at + commands.held_settle().unwrap_or_default()
+            ), if held_done.is_some() && commands.held_settle().is_some() => {
                 // The steers were absorbed into the turn that just ended.
+                commands.cancel_waiting();
                 while pending_steers.pop_front().is_some() {
                     let (prev, next) = norm.rotate_for_steer();
                     if event_tx.send(Ok(AgentEvent::Steered {
                         assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                     })).await.is_err() { break 'main; }
                 }
-                let (done, _) = held_done.take().expect("guarded by if");
+                let done = held_done.take().expect("guarded by if");
                 if event_tx.send(Ok(done)).await.is_err() {
                     break 'main;
                 }
@@ -1075,7 +1322,7 @@ async fn run_session(session: Session) {
     }
 
     // A turn end still held when the CLI exited is the run's real end.
-    if let Some((done, _)) = held_done.take()
+    if let Some(done) = held_done.take()
         && !event_tx.is_closed()
         && event_tx.send(Ok(done)).await.is_ok()
     {
@@ -1111,9 +1358,98 @@ async fn run_session(session: Session) {
         }
     }
 
-    shutdown_child(&mut child, kill_grace).await;
+    crate::shutdown_agent(&mut child, torn_down, kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
+    }
+}
+
+/// How far the CLI has taken each stdin user message we wrote, by the uuid
+/// it was written with. A `result` frame ends the TURN only when no message
+/// is still waiting to be taken up. A waiting one makes the result a steer
+/// boundary — a `now` steer aborting the turn it interrupts, or a message
+/// queued behind a turn that just finished — and that message's own turn
+/// ends with its own result. Deciding this from the CLI's own lifecycle
+/// rather than from quiet time: a held result released by a quiet timer
+/// marked the steered turn done mid-way through any long tool call.
+#[derive(Default)]
+struct Commands {
+    /// Uuid → how far it got. Ended commands are dropped.
+    open: std::collections::HashMap<String, CommandState>,
+    /// The CLI reports `command_lifecycle`. Older CLIs never do: their only
+    /// confirmation is the replay, and the settle fallback covers the rest.
+    reported: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CommandState {
+    /// On stdin; the CLI has not acknowledged it yet.
+    Written,
+    /// The CLI read it and will start or cancel it.
+    Queued,
+    /// A turn took it up.
+    Started,
+}
+
+impl Commands {
+    /// Without lifecycle reports, how long a held result waits in silence
+    /// for the replay that supersedes it.
+    const UNREPORTED_SETTLE: Duration = Duration::from_secs(5);
+    /// A lifecycle-reporting CLI acknowledges a message as soon as it reads
+    /// it. A hold resting only on unacknowledged messages is a safety net
+    /// against a message the CLI never reports, not a timing guess.
+    const UNACKNOWLEDGED_SETTLE: Duration = Duration::from_secs(30);
+
+    fn written(&mut self, id: String) {
+        self.open.insert(id, CommandState::Written);
+    }
+
+    fn is_terminal(state: &str) -> bool {
+        matches!(state, "completed" | "cancelled" | "canceled" | "failed")
+    }
+
+    /// Apply one `command_lifecycle` frame. True when a turn took the
+    /// command up (`started`).
+    fn lifecycle(&mut self, id: &str, state: &str) -> bool {
+        self.reported = true;
+        if Self::is_terminal(state) {
+            self.open.remove(id);
+            return false;
+        }
+        let next = match state {
+            "started" => CommandState::Started,
+            "queued" => CommandState::Queued,
+            _ => return false,
+        };
+        if let Some(current) = self.open.get_mut(id)
+            && *current != CommandState::Started
+        {
+            *current = next;
+        }
+        next == CommandState::Started
+    }
+
+    /// A message is written or queued but no turn has taken it up.
+    fn waiting(&self) -> bool {
+        self.open.values().any(|s| *s != CommandState::Started)
+    }
+
+    /// A stop's `cancel_queued` drops every message not yet taken up.
+    fn cancel_waiting(&mut self) {
+        self.open.retain(|_, s| *s == CommandState::Started);
+    }
+
+    /// The quiet time after which a held result is released as the turn's
+    /// end; `None` = only the CLI's own lifecycle settles it.
+    fn held_settle(&self) -> Option<Duration> {
+        if !self.reported {
+            Some(Self::UNREPORTED_SETTLE)
+        } else if self.open.values().any(|s| *s == CommandState::Queued) {
+            // A queued message always starts or is cancelled.
+            None
+        } else {
+            Some(Self::UNACKNOWLEDGED_SETTLE)
+        }
     }
 }
 

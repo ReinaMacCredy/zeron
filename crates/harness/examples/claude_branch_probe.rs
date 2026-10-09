@@ -31,6 +31,7 @@ async fn run(harness: &ClaudeHarness, request: RunRequest) -> Outcome {
                 interrupt: CancellationToken::new(),
                 tool_server: None,
                 stop_tasks: None,
+                turn: Default::default(),
             },
         )
         .await

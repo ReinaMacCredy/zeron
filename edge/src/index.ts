@@ -37,6 +37,7 @@
  *   POST /chat2/:chatId/reset
  */
 import { authenticate } from "./auth";
+import { chatRoute } from "./chat-route";
 import { handleAuthRoute } from "./auth-routes";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { SessionRoom } from "./session-room";
@@ -204,39 +205,8 @@ export default {
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
     //    /stats, /reset. ──────────────────────────────────────────────────────
-    if (parts[0] === "chat2" && parts[1] && ID_RE.test(parts[1]) && parts[2]) {
-      const room = `chat2/${parts[1]}`;
-      if (parts[2] === "ws" && parts.length === 3) {
-        if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-          return json({ error: "expected websocket" }, 426);
-        }
-        return forward(
-          env.CHAT_ROOMS,
-          room,
-          request,
-          auth.userId,
-          "/ws",
-          `?chatId=${parts[1]}${deviceParam(url)}`
-        );
-      }
-      const routes: Record<string, string[]> = {
-        checkpoint: ["GET", "POST"],
-        // Pull/push over plain HTTPS (the airplane-wifi transport): GET
-        // /rows?after= collapses connect→hello→state→rowsReq→backfill into
-        // one round trip; POST /rows is the batchId-deduped push twin.
-        rows: ["GET", "POST"],
-        tail: ["GET", "PUT"],
-        diff: ["GET", "PUT"],
-        stats: ["GET"],
-        reset: ["POST"]
-      };
-      if (parts.length === 3 && routes[parts[2]]?.includes(request.method)) {
-        // Query carries through (`seqCovered` on POST /checkpoint), as do
-        // headers (`x-chat2-frontier`, `range`).
-        return forward(env.CHAT_ROOMS, room, request, auth.userId, `/${parts[2]}`, url.search);
-      }
-      return json({ error: "not found" }, 404);
-    }
+    const chatResponse = chatRoute(request, env, auth.userId);
+    if (chatResponse) return chatResponse;
 
     // ── workspace rooms (ARCHITECTURE §2.2/§6.1): same SessionRoom DO class;
     //    the caller's WorkOS org claim (`org_id`) must equal the URL's orgId,

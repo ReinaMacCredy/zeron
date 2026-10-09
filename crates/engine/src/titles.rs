@@ -337,6 +337,7 @@ pub(crate) async fn collect_text(
         interrupt: interrupt.clone(),
         tool_server: None,
         stop_tasks: None,
+        turn: Default::default(),
     };
     let mut stream = harness
         .run_one_shot(request, controls, instructions)

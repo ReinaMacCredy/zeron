@@ -323,8 +323,10 @@ async fn rich_selections_survive_fresh_warm_steer_and_attachment_delivery_for_ev
             .dispatch(CHAT, id, req.clone(), None)
             .await
             .unwrap();
+        // Images ride the live runtime's mailbox: replacing the runtime to
+        // inline them killed its background work.
         let Delivery::Steer(text, attachments) = receive(&mut rx).await else {
-            panic!("attachments ride the live run's mailbox")
+            panic!("an attachment must not replace the live runtime")
         };
         assert_eq!(text, expected(&attached, &readable, id), "{id:?}");
         assert_eq!(attachments, req.attachments);

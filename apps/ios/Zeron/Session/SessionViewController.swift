@@ -654,6 +654,9 @@ final class StatusPill: UIControl {
             }
             render()
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in render() }
+        case .sending:
+            grid.kind = .trailer
+            label.text = "Sending to host…"
         case .offline:
             grid.kind = .dot(StatusTone.idle)
             label.text = "Offline — sends are saved"

@@ -631,7 +631,7 @@ pub struct LoadedAttachmentImage {
 /// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded, with
 /// the same stuck-offset guard as zeron's `readAttachmentImage`). Returns the
 /// file's name, MIME type and bytes.
-async fn read_attachment_bytes(
+pub(crate) async fn read_attachment_bytes(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     target_device_id: Option<&str>,
@@ -680,7 +680,11 @@ async fn read_attachment_bytes(
     if !done {
         return None;
     }
-    let bytes = BASE64.decode(b64.as_bytes()).ok()?;
+    // Callers await this on the UI thread; decode the (up to 24 MiB) payload
+    // off it.
+    let bytes = executor
+        .spawn(async move { BASE64.decode(b64.as_bytes()).ok() })
+        .await?;
     Some((name, mime, bytes))
 }
 

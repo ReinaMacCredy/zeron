@@ -139,6 +139,7 @@ fn controls(
         interrupt: token.clone(),
         tool_server: None,
         stop_tasks: None,
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -370,7 +371,7 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
             prompt: "redirect please".into(),
             message_id: None,
             attachments: Vec::new(),
-            reasoning: None,
+            config: None,
         })
         .await
         .expect("steer queued");
@@ -407,6 +408,148 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
     );
 }
 
+/// An accepted steer joins the turn when its userMessage item lands, after
+/// the reply streaming ahead of it — `Steered` must split there, not at the
+/// `turn/steer` response (which moved the old reply's tail below the steer).
+#[tokio::test]
+async fn a_steer_splits_the_reply_where_its_message_joins_the_turn() {
+    let (controls, steer, _token) = controls("Yes");
+    steer
+        .send(SteerMessage::text("redirect please"))
+        .await
+        .expect("steer queued");
+    let events = run_to_end(&harness(), request("scenario:steer-item"), controls).await;
+    let at = |pred: &dyn Fn(&AgentEvent) -> bool| {
+        events
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("missing event: {events:?}"))
+    };
+    let still_first =
+        at(&|e| matches!(e, AgentEvent::TextDelta { text } if text == "-still-first"));
+    let steered = at(&|e| matches!(e, AgentEvent::Steered { .. }));
+    let reply = at(&|e| matches!(e, AgentEvent::TextDelta { text } if text == "steered"));
+    assert!(still_first < steered && steered < reply, "{events:?}");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+/// Only the turn in flight settles: a stale or duplicate `turn/completed`
+/// marked the running turn done mid-way (sound, notification, park).
+#[tokio::test]
+async fn a_stale_turn_completion_never_settles_the_running_turn() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:stale-completion"), controls).await;
+    let dones: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, AgentEvent::Done { .. }))
+        .collect();
+    assert_eq!(dones.len(), 1, "{events:?}");
+    let after = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "after"))
+        .expect("after");
+    assert!(dones[0].0 > after, "{events:?}");
+}
+
+/// A stop issued before the app-server announces the turn waits for
+/// `turn/started`: an earlier `turn/interrupt` is rejected, the turn runs to
+/// its end, and the host's fallback tore the whole runtime down.
+#[tokio::test]
+async fn a_stop_before_the_turn_is_announced_still_interrupts_it() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness()
+        .run(request("scenario:stop-before-announce"), controls)
+        .await
+        .expect("run starts");
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            match event.expect("event") {
+                AgentEvent::TextDelta { text } if text == "working" => turn.stop_turn(),
+                AgentEvent::Done { status, .. } => return status,
+                _ => {}
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("stopped turn settles");
+    assert_eq!(status, DoneStatus::Interrupted);
+}
+
+/// A command still running after its turn (a dev server) holds the parked
+/// runtime against the idle reaper; an interrupted turn's killed foreground
+/// command — which never gets an `item/completed` — does not.
+#[tokio::test]
+async fn open_commands_report_background_work_and_killed_ones_do_not() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness()
+        .run(request("scenario:background-commands"), controls)
+        .await
+        .expect("run starts");
+    async fn until_done(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+        mut on: impl FnMut(&AgentEvent),
+    ) -> DoneStatus {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                let event = event.expect("event");
+                on(&event);
+                if let AgentEvent::Done { status, .. } = event {
+                    return status;
+                }
+            }
+            panic!("stream ended without Done");
+        })
+        .await
+        .expect("turn ends")
+    }
+    assert_eq!(until_done(&mut stream, |_| {}).await, DoneStatus::Completed);
+    assert!(turn.background_live(), "the dev server outlives its turn");
+
+    steer
+        .send(SteerMessage::text("run the tests"))
+        .await
+        .unwrap();
+    let stop = turn.clone();
+    let status = until_done(&mut stream, |e| {
+        if matches!(e, AgentEvent::TextDelta { text } if text == "running") {
+            stop.stop_turn();
+        }
+    })
+    .await;
+    assert_eq!(status, DoneStatus::Interrupted);
+    // The killed foreground command's process is gone once the grace passes.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(turn.background_live(), "the dev server still runs");
+
+    steer
+        .send(SteerMessage::text("stop the server"))
+        .await
+        .unwrap();
+    assert_eq!(until_done(&mut stream, |_| {}).await, DoneStatus::Completed);
+    assert!(!turn.background_live(), "nothing left running");
+}
+
 #[tokio::test]
 async fn rejected_steer_falls_back_to_a_follow_up_turn() {
     let (controls, steer, _token) = controls("Yes");
@@ -423,7 +566,7 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
             ),
             message_id: None,
             attachments: Vec::new(),
-            reasoning: None,
+            config: None,
         })
         .await
         .expect("steer queued");
@@ -519,6 +662,7 @@ async fn approvals_round_trip_as_input_requests() {
         interrupt: token.clone(),
         tool_server: None,
         stop_tasks: None,
+        turn: Default::default(),
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
@@ -1123,7 +1267,7 @@ async fn live_subagent_spawn_and_followup_keep_one_transcript() {
                 prompt: "Reuse the SAME existing subagent for one more task: reply exactly child-second. Use followup_task if available, otherwise send_input. Do not spawn a new agent. Wait for it to finish, then reply exactly parent-second. Do not inspect or change files.".into(),
                 message_id: None,
                 attachments: Vec::new(),
-                reasoning: None,
+                config: None,
             }).await.unwrap();
         }
         if turn == 2 {
@@ -1713,7 +1857,7 @@ async fn native_command_during_a_turn_waits_for_its_boundary() {
                             prompt: "/review".into(),
                             message_id: None,
                             attachments: Vec::new(),
-                            reasoning: None,
+                            config: None,
                         })
                         .await
                         .unwrap();
@@ -1750,7 +1894,7 @@ async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
             prompt: harness_prompt(&format!("Also {}", followup.link()), HarnessId::Codex),
             message_id: Some("skill-steer".into()),
             attachments: Vec::new(),
-            reasoning: None,
+            config: None,
         })
         .await
         .unwrap();
@@ -1801,7 +1945,7 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
                                 prompt: prompt.into(),
                                 message_id: None,
                                 attachments: Vec::new(),
-                                reasoning: None,
+                                config: None,
                             })
                             .await
                             .unwrap();
@@ -1831,6 +1975,131 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
             "done"
         ]
     );
+}
+
+#[tokio::test]
+async fn a_model_change_sent_mid_turn_takes_effect_in_its_own_turn() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(request("scenario:reconfigure"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        let working = event
+            == AgentEvent::TextDelta {
+                text: "working".into(),
+            };
+        events.push(event);
+        if working {
+            break;
+        }
+    }
+    let mut model_b = request("");
+    model_b.model = Some("model-b".into());
+    model_b.reasoning = Some(ReasoningLevel::Low);
+    for (text, config) in [
+        ("to-b", Some(model_b)),
+        ("back-to-a", Some(request(""))),
+        ("plain", None),
+    ] {
+        steer
+            .send(SteerMessage {
+                config: config.map(Box::new),
+                ..SteerMessage::text(text)
+            })
+            .await
+            .unwrap();
+    }
+    let mut completed = 0;
+    while completed < 4 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if let AgentEvent::Done { status, error, .. } = &event {
+            assert_eq!(*status, DoneStatus::Completed, "{error:?}");
+            completed += 1;
+        }
+        events.push(event);
+    }
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["working", "to-b", "back-to-a", "plain"]);
+}
+
+#[tokio::test]
+async fn a_stopped_turn_keeps_the_app_server_for_the_next_prompt() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert!(harness().stops_turn_in_place());
+    let mut stream = harness()
+        .run(request("scenario:stop-in-place"), controls)
+        .await
+        .expect("run starts");
+    async fn next_event(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) -> Option<AgentEvent> {
+        tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .map(|r| r.expect("stream event"))
+    }
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::TextDelta { text }) if text == "working" => break,
+            Some(_) => {}
+            None => panic!("stream ended before the turn streamed"),
+        }
+    }
+    turn.stop_turn();
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::Done { status, .. }) => {
+                assert_eq!(status, DoneStatus::Interrupted);
+                break;
+            }
+            Some(_) => {}
+            None => panic!("a stopped turn must not end the app-server's stream"),
+        }
+    }
+    steer.send(SteerMessage::text("carry on")).await.unwrap();
+    let mut resumed = Vec::new();
+    loop {
+        match next_event(&mut stream).await {
+            Some(done @ AgentEvent::Done { .. }) => {
+                resumed.push(done);
+                break;
+            }
+            Some(event) => resumed.push(event),
+            None => panic!("stream ended before the next turn finished"),
+        }
+    }
+    assert!(resumed.contains(&AgentEvent::TextDelta {
+        text: "resumed".into()
+    }));
+    assert!(matches!(
+        resumed.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    drop(steer);
+    assert!(next_event(&mut stream).await.is_none());
 }
 
 #[tokio::test]
@@ -1881,12 +2150,7 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
     assert!(!calls.contains("thread/realtime/start"));
     assert!(calls.contains("mcp_servers"));
     steer
-        .send(SteerMessage {
-            prompt: "text remains usable".into(),
-            message_id: None,
-            attachments: Vec::new(),
-            reasoning: None,
-        })
+        .send(SteerMessage::text("text remains usable"))
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {

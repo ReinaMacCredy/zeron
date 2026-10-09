@@ -78,6 +78,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         interrupt: token.clone(),
         tool_server: None,
         stop_tasks: None,
+        turn: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -274,6 +275,162 @@ async fn config_options_apply_requested_model_and_effort() {
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
+/// A model switch reaches the live session: between turns before the
+/// message's prompt, and — sent mid-turn — only once the turn has ended,
+/// still ahead of its own prompt. No new agent either way.
+#[tokio::test]
+async fn a_model_switch_is_selected_on_the_live_session() {
+    let (controls, steer, _token) = controls();
+    let opening = request("scenario:reconfigure");
+    let mut fast = opening.clone();
+    fast.model = Some("grok-4-fast".into());
+    assert!(harness().reconfigures_in_place(&opening, &fast));
+    let mut stream = harness()
+        .run(opening.clone(), controls)
+        .await
+        .expect("run starts");
+    let mut texts = Vec::new();
+    let mut started = 0;
+    let mut dones = 0;
+    while dones < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        match event {
+            AgentEvent::SessionStarted { .. } => started += 1,
+            AgentEvent::TextDelta { text } => {
+                if text == "on fast" {
+                    // Mid-turn: back to the opening model.
+                    steer
+                        .send(SteerMessage {
+                            config: Some(Box::new(opening.clone())),
+                            ..SteerMessage::text("back")
+                        })
+                        .await
+                        .unwrap();
+                }
+                texts.push(text);
+            }
+            AgentEvent::Done { status, error, .. } => {
+                assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                dones += 1;
+                if dones == 1 {
+                    steer
+                        .send(SteerMessage {
+                            config: Some(Box::new(fast.clone())),
+                            ..SteerMessage::text("go fast")
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(started, 1);
+    assert_eq!(texts, ["turn1", "on fast", "back on 4.5"]);
+}
+
+/// Tearing the runtime down ends everything the agent started — a command
+/// it ran in its own session included (live, Devin: it outlived quitting
+/// the app).
+#[cfg(unix)]
+#[tokio::test]
+async fn teardown_ends_a_command_the_agent_detached() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("detached.pid");
+    let (controls, _steer, token) = controls();
+    let mut stream = harness()
+        .run(
+            request(&format!("scenario:detached {}", pidfile.display())),
+            controls,
+        )
+        .await
+        .expect("run starts");
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if matches!(event, AgentEvent::Done { .. }) {
+            break;
+        }
+    }
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only probes for existence.
+    let alive = || unsafe { libc::kill(pid, 0) } == 0;
+    assert!(alive(), "the detached command runs");
+    token.cancel();
+    while tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("teardown in time")
+        .is_some()
+    {}
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while alive() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!alive(), "the detached command outlived the runtime");
+}
+
+/// "Send now" while a steer's request is still in flight: the stop cancels
+/// that steer with the turn. Its late promptRequired answer must not queue
+/// it again, or the cancelled message runs after all.
+#[tokio::test]
+async fn a_turn_stop_cancels_a_steer_still_in_flight() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls();
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness()
+        .run(request("scenario:stop-steer"), controls)
+        .await
+        .expect("run starts");
+    macro_rules! next {
+        () => {
+            tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("event in time")
+                .expect("stream open")
+                .expect("stream event")
+        };
+    }
+    loop {
+        if matches!(next!(), AgentEvent::TextDelta { text } if text == "working") {
+            break;
+        }
+    }
+    steer
+        .send(SteerMessage::text("cancelled steer"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    turn.stop_turn();
+    loop {
+        if let AgentEvent::Done { status, .. } = next!() {
+            assert_eq!(status, DoneStatus::Interrupted);
+            break;
+        }
+    }
+    steer.send(SteerMessage::text("after")).await.unwrap();
+    let mut texts = Vec::new();
+    loop {
+        match next!() {
+            AgentEvent::TextDelta { text } => texts.push(text),
+            AgentEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(texts, ["fresh"], "the cancelled steer ran after the stop");
+}
+
 #[tokio::test]
 async fn resumed_first_class_model_is_switched_before_prompt() {
     let (controls, _steer, _token) = controls();
@@ -357,7 +514,7 @@ async fn steering_extension_injects_mid_turn() {
                         prompt: "redirect please".into(),
                         message_id: None,
                         attachments: Vec::new(),
-                        reasoning: None,
+                        config: None,
                     })
                     .await
                     .expect("steer sent");
@@ -405,7 +562,7 @@ async fn steer_racing_the_turn_end_never_emits_steered_after_done() {
                         prompt: "redirect please".into(),
                         message_id: None,
                         attachments: Vec::new(),
-                        reasoning: None,
+                        config: None,
                     })
                     .await
                     .expect("steer sent");
@@ -458,7 +615,7 @@ async fn rejected_steer_queues_and_delivers_at_the_turn_boundary() {
                         prompt: "redirect please".into(),
                         message_id: None,
                         attachments: Vec::new(),
-                        reasoning: None,
+                        config: None,
                     })
                     .await
                     .expect("steer sent");
@@ -2129,7 +2286,7 @@ async fn acp_boundary_steer(scenario: &str, trigger_on_done: bool) {
                         prompt: "second".into(),
                         message_id: None,
                         attachments: Vec::new(),
-                        reasoning: None,
+                        config: None,
                     })
                     .await
                     .unwrap();
@@ -2343,4 +2500,69 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
             format!("Use the skill {} inspect tests", invocation.prompt_text())
         );
     }
+}
+
+#[tokio::test]
+async fn a_stopped_turn_keeps_the_agent_for_the_next_prompt() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls();
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert!(harness().stops_turn_in_place());
+    let mut stream = harness()
+        .run(request("scenario:stop-in-place"), controls)
+        .await
+        .expect("run starts");
+    async fn next_event(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) -> Option<AgentEvent> {
+        tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .map(|r| r.expect("stream event"))
+    }
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::TextDelta { text }) if text == "working" => break,
+            Some(_) => {}
+            None => panic!("stream ended before the turn streamed"),
+        }
+    }
+    turn.stop_turn();
+    loop {
+        match next_event(&mut stream).await {
+            Some(AgentEvent::Done { status, .. }) => {
+                assert_eq!(status, DoneStatus::Interrupted);
+                break;
+            }
+            Some(_) => {}
+            None => panic!("a stopped turn must not end the agent's stream"),
+        }
+    }
+    // Sent right after the stop: our own turn's tail is not an unowned
+    // turn, so no second `session/cancel` precedes this prompt.
+    steer.send(SteerMessage::text("carry on")).await.unwrap();
+    let mut resumed = Vec::new();
+    loop {
+        match next_event(&mut stream).await {
+            Some(done @ AgentEvent::Done { .. }) => {
+                resumed.push(done);
+                break;
+            }
+            Some(event) => resumed.push(event),
+            None => panic!("stream ended before the next turn finished"),
+        }
+    }
+    assert!(resumed.contains(&AgentEvent::TextDelta {
+        text: "resumed".into()
+    }));
+    assert!(matches!(
+        resumed.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    drop(steer);
+    assert!(next_event(&mut stream).await.is_none());
 }

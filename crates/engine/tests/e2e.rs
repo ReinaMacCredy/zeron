@@ -3105,8 +3105,8 @@ async fn a_reasoning_change_steers_a_harness_that_sets_effort_in_place() {
         fn supports_steering(&self) -> bool {
             true
         }
-        fn live_reasoning(&self) -> bool {
-            true
+        fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+            live.cwd == next.cwd
         }
         fn steering_mode(&self) -> SteeringMode {
             SteeringMode::StepBoundary
@@ -3126,7 +3126,7 @@ async fn a_reasoning_change_steers_a_harness_that_sets_effort_in_place() {
             let seen = self.seen.clone();
             tokio::spawn(async move {
                 while let Some(steer) = controls.steering.recv().await {
-                    let _ = seen.send(steer.reasoning);
+                    let _ = seen.send(steer.config.and_then(|config| config.reasoning));
                 }
             });
             Ok(futures::stream::unfold(rx, |mut rx| async move {
@@ -3170,9 +3170,9 @@ async fn a_reasoning_change_steers_a_harness_that_sets_effort_in_place() {
     )
     .await;
 
-    for (id, level) in [
-        ("low", ReasoningLevel::Low),
-        ("low-again", ReasoningLevel::Low),
+    for (id, level, adopted) in [
+        ("low", ReasoningLevel::Low, Some(ReasoningLevel::Low)),
+        ("low-again", ReasoningLevel::Low, None),
     ] {
         queue_as_viewer(
             handle.doc(),
@@ -3185,7 +3185,7 @@ async fn a_reasoning_change_steers_a_harness_that_sets_effort_in_place() {
         let steered = tokio::time::timeout(Duration::from_secs(10), seen.recv())
             .await
             .expect("the prompt reaches the live run's mailbox");
-        assert_eq!(steered, Some(Some(level)));
+        assert_eq!(steered, Some(adopted));
     }
     assert!(!tx.is_closed(), "the live run keeps its process");
     core.shutdown().await;
@@ -4159,7 +4159,9 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         })
         .collect();
     assert_eq!(images.len(), 1);
-    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir()));
+    // Materialization canonicalizes the uploads dir; macOS temp dirs sit
+    // behind the /var -> /private/var symlink.
+    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir().canonicalize().unwrap()));
     let serialized = serde_json::to_string(&journal.replay(CHAT, 0).unwrap()).unwrap();
     assert!(!serialized.contains(source.to_str().unwrap()));
     assert!(!serialized.contains("BASE64_SENTINEL"));
@@ -4328,4 +4330,78 @@ async fn start_failure_lands_in_the_transcript() {
         [MessagePart::Error { message, .. }] if message.contains("server never booted")
     ));
     core.sessions.shutdown().await;
+}
+
+/// The session row carries how many subagents are streaming, so sidebars on
+/// every device can badge a chat they have not opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_row_counts_running_subagents_until_the_run_ends() {
+    fn spawn(id: &str) -> AgentEvent {
+        AgentEvent::ToolCall {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: "Agent: probe".into(),
+                input: None,
+            },
+        }
+    }
+    fn chatter(parent: &str) -> AgentEvent {
+        AgentEvent::Subagent {
+            parent_tool_use_id: parent.into(),
+            event: Box::new(AgentEvent::TextDelta {
+                text: "working".into(),
+            }),
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                spawn("sub-1"),
+                spawn("sub-2"),
+                chatter("sub-1"),
+                chatter("sub-2"),
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "sub-1".into(),
+                    event: Box::new(done(DoneStatus::Completed)),
+                },
+            ],
+            step_delay: Duration::from_millis(400),
+            hang_until_interrupt: true,
+        }),
+    );
+    let running = || {
+        core.sessions
+            .session_status(CHAT)
+            .map(|s| s.running_subagents)
+    };
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "subagents-run",
+        SessionCommandPayload::Run {
+            request: run_request("fan out"),
+            message_id: "subagents-user".into(),
+        },
+    );
+
+    wait_for(|| running() == Some(2), "both subagents counted").await;
+    wait_for(|| running() == Some(1), "one subagent settled").await;
+
+    queue_as_viewer(
+        handle.doc(),
+        "subagents-interrupt",
+        SessionCommandPayload::Interrupt {},
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "run to end",
+    )
+    .await;
+    assert_eq!(
+        running(),
+        Some(0),
+        "an ended run leaves no subagents counted"
+    );
 }

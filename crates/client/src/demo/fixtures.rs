@@ -364,8 +364,8 @@ pub(crate) struct Seeded {
     pub change_requests: Vec<CheckoutChangeRequestStatus>,
 }
 
-/// Write the whole dataset into the replica (as local writes; the demo
-/// server settles them).
+/// Write the whole dataset into the replica (as local writes, which the
+/// local-only demo replica folds straight into its rows).
 pub(crate) fn seed(
     doc: &mut RegistryDoc,
     fixture: DemoFixture,
@@ -455,6 +455,7 @@ pub(crate) fn seed(
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
                 last_completed_turn: None,
+                running_subagents: 0,
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,

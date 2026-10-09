@@ -79,7 +79,7 @@ fn main() {
             ),
             "get_available_models" => response(
                 &v,
-                json!({"models":[{"id":"mock","provider":"mock","name":"Mock","reasoning":true,"contextWindow":128000}]}),
+                json!({"models":[{"id":"mock","provider":"mock","name":"Mock","reasoning":true,"contextWindow":128000},{"id":"mock-2","provider":"mock","name":"Mock 2","reasoning":true,"contextWindow":128000}]}),
             ),
             "get_available_thinking_levels" => {
                 response(&v, json!({"levels":["off","low","medium","high"]}))
@@ -106,6 +106,9 @@ fn main() {
                 let mut text = v["message"].as_str().unwrap_or("").to_owned();
                 if text == "env" {
                     text = format!("env:{}", std::env::var_os("CLAUDECODE").is_some());
+                }
+                if text == "which-model" {
+                    text = format!("{model}/{thinking}");
                 }
                 if text == "reject" {
                     emit(

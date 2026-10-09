@@ -1045,6 +1045,7 @@ mod tests {
             background_tasks: Vec::new(),
             started_at: None,
             updated_at: Utc::now(),
+            running_subagents: 0,
         }
     }
 

@@ -1273,6 +1273,7 @@ mod drag_regressions {
                     status: zeron_proto::SessionStatus::Working,
                     started_at: None,
                     updated_at: chrono::Utc::now(),
+                    running_subagents: 0,
                 });
             });
             std::mem::forget(dir);

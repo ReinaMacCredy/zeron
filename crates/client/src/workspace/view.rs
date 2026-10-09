@@ -32,9 +32,9 @@ pub const PROJECT_COLOR_COUNT: u32 = 8;
 /// monogram tone: 32-bit FNV-1a of the project's path (`"home"` without a
 /// project), so a project has the same color on every device.
 pub fn project_color_index(space_path: &str) -> u32 {
-    let hash = space_path
-        .bytes()
-        .fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hash = space_path.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
     hash % PROJECT_COLOR_COUNT
 }
 
@@ -80,9 +80,8 @@ pub struct SessionRow {
     pub branch: Option<String>,
     pub cwd: Option<String>,
     pub indicator: ChatIndicator,
-    /// The host-reported status alone (45s staleness-gated) — `indicator`
-    /// minus the "a send of mine is in flight" override. What stop/busy
-    /// logic keys off (a send parked for an offline host is not a turn).
+    /// Host-reported status (45s staleness-gated). Stop/busy logic keys off
+    /// this; an outgoing send is not evidence of a running turn.
     pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
@@ -430,21 +429,13 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let session = rc.sessions.get(chat.id.as_str()).copied();
     let send_state = cx.send_states.get(&chat.id).copied();
     let host_indicator = display_status(chat, session, cx.now);
-    let mut indicator = host_indicator;
-    let mut working_since_ms = match indicator {
+    let indicator = host_indicator;
+    let working_since_ms = match indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
             .map(|t| t.timestamp_millis()),
         _ => None,
     };
-    // A send in flight reads as Working (desktop `display_status_for`).
-    if matches!(send_state, Some(SendState::Sending | SendState::Queued))
-        && indicator != ChatIndicator::Working
-        && indicator != ChatIndicator::AwaitingInput
-    {
-        indicator = ChatIndicator::Working;
-        working_since_ms = None;
-    }
     let project = chat
         .space_id
         .as_deref()

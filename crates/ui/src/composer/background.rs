@@ -1910,6 +1910,7 @@ mod tests {
             background_tasks: tasks,
             started_at: None,
             updated_at: chrono::Utc::now(),
+            running_subagents: 0,
         }
     }
 

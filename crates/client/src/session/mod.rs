@@ -346,6 +346,7 @@ impl SessionCore {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
                 device_id: client.config.device_id.clone(),
+                host_device_id: chat.device_id.clone(),
                 store: live.store.clone(),
                 on_applied,
                 on_status,
@@ -384,7 +385,20 @@ impl SessionCore {
     ) -> Result<R> {
         let result = {
             let _gate = lock(&self.write_gate);
-            f(&self.doc)?
+            let client = self.client()?;
+            if let Some(live) = client.live() {
+                // A new chat's registry row must survive alongside its outbox:
+                // recovery needs its host and room generation before any UI opens it.
+                live.persist_registry(&client)?;
+            }
+            let result = f(&self.doc)?;
+            if let Some(live) = client.live() {
+                live.store
+                    .schedule_sync_job(&self.chat_id, crate::live::delivery::JOB)
+                    .map_err(|err| ClientError::Storage(err.to_string()))?;
+                live.delivery_wake.notify_one();
+            }
+            result
         };
         self.refresh();
         Ok(result)
@@ -452,9 +466,8 @@ impl SessionCore {
                 .entries()
                 .last()
                 .is_some_and(|e| e.is_streaming());
-            let sending = st.pending.iter().any(|p| p.state == SendState::Sending);
             let live = LiveFlags {
-                working: indicator_working || streaming || sending,
+                working: indicator_working || streaming,
                 working_since_ms,
             };
             let live_changed = previous.working != live.working

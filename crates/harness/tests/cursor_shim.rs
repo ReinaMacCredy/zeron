@@ -778,3 +778,63 @@ async fn steer_during_text_preempts_the_run_and_continues_immediately() {
     assert_eq!(prompts.lines().count(), 2, "{prompts}");
     assert!(prompts.lines().last().unwrap().contains("preempt-me"));
 }
+
+/// A model switch runs from its own message's send on the live agent: the
+/// messages sent before it never ride the new model, and those after it do.
+#[tokio::test]
+async fn a_model_switch_names_its_model_from_its_own_send_on() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    let (mut child, mut stdin, mut lines) = fixture.start("first", false).await;
+    while frame(&mut lines).await["ev"] != "turn" {}
+    stdin
+        .write_all(
+            concat!(
+                "{\"op\":\"steer\",\"prompt\":\"plain-before\"}\n",
+                "{\"op\":\"steer\",\"prompt\":\"on-two\",\"reconfigure\":true,\"model\":\"m-2\",\"modelOptions\":{}}\n",
+                "{\"op\":\"steer\",\"prompt\":\"after\"}\n",
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut steered = 0;
+    loop {
+        let frame = frame(&mut lines).await;
+        if frame["ev"] == "steered" {
+            steered += 1;
+        }
+        if frame["ev"] == "turn" && steered == 3 {
+            break;
+        }
+    }
+    finish(&mut child, stdin).await;
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let dir = std::path::Path::new(store.trim());
+    let prompts = std::fs::read_to_string(dir.join("prompts.ndjson")).unwrap();
+    let models = std::fs::read_to_string(dir.join("models.ndjson")).unwrap_or_default();
+    let named: Vec<serde_json::Value> = models
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(named.iter().all(|send| send["model"] == "m-2"), "{models}");
+    assert!(
+        named
+            .iter()
+            .any(|send| send["prompt"].as_str().unwrap().contains("on-two")),
+        "the switching message ran on its model: {models}"
+    );
+    assert!(
+        named
+            .iter()
+            .all(|send| !send["prompt"].as_str().unwrap().contains("plain-before")),
+        "an earlier message rode the new model: {models}"
+    );
+    assert!(
+        prompts
+            .lines()
+            .any(|p| p.contains("plain-before") && !p.contains("on-two")),
+        "an earlier message was merged into the switch: {prompts}"
+    );
+}

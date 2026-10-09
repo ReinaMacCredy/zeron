@@ -32,6 +32,14 @@ impl Child {
     }
 
     pub(crate) async fn shutdown(&mut self, grace: std::time::Duration) {
+        // Everything the agent started, taken while it is still attached:
+        // a command the agent ran in its own session (Devin does) is not in
+        // the agent's process group and would outlive the runtime.
+        #[cfg(unix)]
+        let tree = match (self.group, self.inner.id()) {
+            (Some(_), Some(pid)) => crate::process::descendants(pid).await,
+            _ => Vec::new(),
+        };
         #[cfg(unix)]
         if let Some(group) = self.group.take() {
             crate::send_signal(&group, crate::Signal::Term);
@@ -52,6 +60,8 @@ impl Child {
             }
         }
         crate::shutdown_child(&mut self.inner, grace).await;
+        #[cfg(unix)]
+        crate::process::terminate_tree(&tree, grace).await;
     }
 
     pub(crate) fn request_group_shutdown(&self) {

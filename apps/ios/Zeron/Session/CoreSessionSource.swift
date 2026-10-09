@@ -78,6 +78,8 @@ final class CoreSessionSource: SessionSource {
             next.banner = .notDelivered
         } else if c.sendState == .queued {
             next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
+        } else if c.sendState == .sending {
+            next.banner = .sending
         } else if app?.connectivity?.state == .offline {
             next.banner = .offline
         } else if !c.room.connected, let retry = c.room.retryAtMs {
@@ -111,6 +113,7 @@ final class CoreSessionSource: SessionSource {
         do {
             if mode == .interrupt, chrome.running { try handle.interrupt() }
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
+            app?.noteDeliveryActivity()
             sendFailure = nil
             return true
         } catch {

@@ -35,6 +35,7 @@ async fn main() {
         interrupt: CancellationToken::new(),
         tool_server: None,
         stop_tasks: None,
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
