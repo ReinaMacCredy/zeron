@@ -843,6 +843,18 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
     }
 }
 
+impl ChatConfig {
+    pub(crate) fn over(self, existing: Option<zc::ChatConfig>) -> CoreResult<zc::ChatConfig> {
+        let mut config: zc::ChatConfig = self.try_into()?;
+        if let Some(existing) = existing {
+            config.permission_mode = existing.permission_mode;
+            config.instructions = existing.instructions;
+            config.profile_id = existing.profile_id;
+        }
+        Ok(config)
+    }
+}
+
 /// Where a new session runs.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum SessionTarget {
@@ -1094,4 +1106,30 @@ pub struct PushPrefs {
     pub done: bool,
     pub input: bool,
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mobile_config_write_keeps_what_the_ffi_does_not_carry() {
+        let existing = zc::ChatConfig {
+            harness: zeron_proto::HarnessId::ClaudeCode,
+            model: Some("opus".into()),
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Ask,
+            instructions: "Plan only.".into(),
+            profile_id: Some("planner".into()),
+        };
+        let mut edit = ChatConfig::from(&existing);
+        edit.reasoning = Some("high".into());
+        let written = edit.over(Some(existing)).unwrap();
+        assert_eq!(written.reasoning, Some(zeron_proto::ReasoningLevel::High));
+        assert_eq!(written.permission_mode, zeron_proto::PermissionMode::Ask);
+        assert_eq!(written.instructions, "Plan only.");
+        assert_eq!(written.profile_id.as_deref(), Some("planner"));
+    }
 }

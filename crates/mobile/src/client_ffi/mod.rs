@@ -236,7 +236,7 @@ impl CoreClient {
     }
 
     pub fn set_session_config(&self, chat_id: String, config: ChatConfig) -> CoreResult<()> {
-        let config: zc::ChatConfig = config.try_into()?;
+        let config = config.over(self.client.session_config(&chat_id))?;
         Ok(self.client.set_session_config(&chat_id, &config)?)
     }
 
