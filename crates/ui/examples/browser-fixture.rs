@@ -67,6 +67,31 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// The Linux frame loop can be idle while the fixture's async task changes
+// theme/page state. Present the current scene before reading native pixels.
+async fn capture_frame(
+    window: gpui::WindowHandle<shell::Shell>,
+    directory: &std::path::Path,
+    name: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::wait_for_visible_window(cx).await?;
+        gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| {
+            w.refresh();
+            let arena = w.draw(cx);
+            w.present_if_needed();
+            arena.clear();
+        })?;
+        // Let the nested compositor present the submitted native frame.
+        pause(cx, 50).await;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (window, cx);
+    capture(directory, name)
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_blur(
     directory: &std::path::Path,
@@ -222,7 +247,7 @@ fn main() -> anyhow::Result<()> {
                 });
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
-                capture(&output, "browser-empty-dark")?;
+                capture_frame(window, &output, "browser-empty-dark", cx).await?;
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
@@ -232,7 +257,7 @@ fn main() -> anyhow::Result<()> {
                         pause(cx, 50).await;
                     }
                     pause(cx, 500).await;
-                    capture(&output, "browser-preview-dark")?;
+                    capture_frame(window, &output, "browser-preview-dark", cx).await?;
                     // Real DOM click, native navigation and history.
                     first.read_with(cx, |b, _| b.fixture_eval("document.getElementById('details').click()"));
                     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -302,7 +327,7 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_visible()), "toolbar tooltip did not paint on the overlay plane");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused() && !b.fixture_overlay_at((left+100.) as f64,(top+100.) as f64)), "tooltip stole native focus or page hit testing");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_visibility_changes() == before), "tooltip hid the page");
-                    capture(&output, "browser-tooltip-dark")?;
+                    capture_frame(window, &output, "browser-tooltip-dark", cx).await?;
                     // Also dwell on the tab itself: its URL tooltip is the
                     // original reported flicker case, distinct from toolbar hover.
                     for _ in 0..2 {
@@ -326,7 +351,7 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_native_visible()), "menu froze or hid the live page");
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_at((left+100.) as f64,(top+150.) as f64)), "menu failed to intercept outside clicks above the browser");
                     std::fs::write(output.join("backdrop-layers.txt"),first.read_with(cx,|b,_|b.fixture_backdrop_layers()))?;
-                    capture(&output, "browser-menu-dark")?;
+                    capture_frame(window, &output, "browser-menu-dark", cx).await?;
                     first.read_with(cx, |b,_| b.fixture_eval("document.addEventListener('click', () => { document.title = 'Unexpected page click'; })"));
                     pause(cx, 100).await;
                     first.read_with(cx, |b,_| b.fixture_click((left+100.) as f64,(top+150.) as f64));
@@ -343,7 +368,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    capture(&output, "browser-menu-dark")?;
+                    capture_frame(window, &output, "browser-menu-dark", cx).await?;
                     window.update(cx, |shell, _, cx| shell.fixture_browser_menu(false, cx))?;
                 }
                 pause(cx, 500).await;
@@ -409,7 +434,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         anyhow::ensure!(std::time::Instant::now()<deadline,"viewport measurement timed out");pause(cx,50).await;
                     }
-                    capture(&output,"browser-resize-dark")?;
+                    capture_frame(window, &output, "browser-resize-dark", cx).await?;
                     eprintln!("Browser fixture: resize drag and CSS viewport passed");
                     // Left sidebar does not occlude the browser at any point.
                     for _ in 0..4 {
@@ -440,24 +465,24 @@ fn main() -> anyhow::Result<()> {
                     pause(cx,350).await;
                     first.read_with(cx,|b,_|b.fixture_eval("document.title='Fieldnotes'"));
                     eprintln!("Browser fixture: right sidebar transitions passed");
-                    capture(&output,"browser-blur-baseline-dark")?;
+                    capture_frame(window, &output, "browser-blur-baseline-dark", cx).await?;
                     window.update(cx,|s,_,cx|s.fixture_browser_menu(true,cx))?;
                     pause(cx,1000).await;
                     let regions=first.read_with(cx,|b,_|b.fixture_backdrops());
                     anyhow::ensure!(!regions.is_empty(),"menu has no native browser backdrop");
                     std::fs::write(output.join("blur-regions.json"),serde_json::to_string(&regions)?)?;
-                    capture(&output,"browser-blur-dark")?;
+                    capture_frame(window, &output, "browser-blur-dark", cx).await?;
                     cx.update(|cx|appearance::set_mode(appearance::AppearanceMode::Light,cx));
                     pause(cx,700).await;
-                    capture(&output,"browser-blur-light")?;
+                    capture_frame(window, &output, "browser-blur-light", cx).await?;
                     first.read_with(cx,|b,_|b.fixture_eval("document.getElementById('browser-blur-grid').style.background='#263d35'"));
                     pause(cx,500).await;
-                    capture(&output,"browser-blur-solid-light")?;
+                    capture_frame(window, &output, "browser-blur-solid-light", cx).await?;
                     let window_width=gpui::AnyWindowHandle::from(window).update(cx,|_,w,_|f32::from(w.viewport_size().width))?;
                     cx.update(|cx|appearance::set_surface(zeron_theme::SurfacePreference::Opaque,cx));
                     pause(cx,500).await;
                     anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_backdrops().is_empty()),"opaque appearance retained native blur");
-                    capture(&output,"browser-menu-opaque")?;
+                    capture_frame(window, &output, "browser-menu-opaque", cx).await?;
                     cx.update(|cx| {appearance::set_mode(appearance::AppearanceMode::Dark,cx);appearance::set_surface(zeron_theme::SurfacePreference::Frosted,cx);});
                     window.update(cx,|s,_,cx|s.fixture_browser_menu(false,cx))?;
                     pause(cx,500).await;
@@ -481,7 +506,7 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, _, cx| shell.fixture_expand_browser(cx))?;
                 cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                 pause(cx, 600).await;
-                capture(&output, "browser-light")?;
+                capture_frame(window, &output, "browser-light", cx).await?;
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     anyhow::ensure!(first.read_with(cx, |b, _| b.fixture_native_visible()), "page not restored after overlays/takeover");
@@ -496,7 +521,7 @@ fn main() -> anyhow::Result<()> {
                     while !first.read_with(cx, |b, _| b.page.error.is_some()) {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "load failure was not reported: {:?}", first.read_with(cx, |b, _| b.page.clone())); pause(cx, 50).await;
                     }
-                    pause(cx, 300).await; capture(&output, "browser-error-light")?;
+                    pause(cx, 300).await; capture_frame(window, &output, "browser-error-light", cx).await?;
                 }
                 // Reject arbitrary schemes while preserving the existing page.
                 let before = first.read_with(cx, |b, _| b.page.url.clone());

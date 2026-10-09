@@ -228,6 +228,14 @@ impl Process {
         self.child.shutdown(grace).await;
     }
 }
+/// Whether `request` picks a thinking level (an effort, or thinking off).
+fn thinking_selected(request: &RunRequest) -> bool {
+    request.reasoning.is_some()
+        || request
+            .model_options
+            .get("pi_thinking")
+            .is_some_and(|v| v == "off")
+}
 fn response_data(frame: Value) -> Result<Value, HarnessError> {
     if frame["success"] == true {
         Ok(frame["data"].clone())
@@ -264,6 +272,14 @@ impl Harness for PiHarness {
     }
     fn deterministic_turn_end(&self) -> bool {
         true
+    }
+    /// `set_model` and `set_thinking_level` change the live process. Clearing
+    /// either back to the default cannot be expressed that way.
+    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        let model = |r: &RunRequest| r.model.as_deref().filter(|m| *m != "default").is_some();
+        live.cwd == next.cwd
+            && (model(next) || !model(live))
+            && (thinking_selected(next) || !thinking_selected(live))
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(self.model_catalog(false).await?.models)
@@ -521,7 +537,34 @@ impl Runner {
                 .query(json!({"type":"set_steering_mode","mode":"all"}), backlog)
                 .await?;
         }
-        if let Some(model) = self.request.model.as_deref().filter(|s| *s != "default") {
+        let request = self.request.clone();
+        self.configure(&request, backlog).await?;
+        let commands = self
+            .process
+            .query(json!({"type":"get_commands"}), backlog)
+            .await?;
+        self.extension_commands = commands["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| c["source"] == "extension")
+            .map(|c| string(c, "name").to_owned())
+            .collect();
+        self.emit(AgentEvent::AvailableCommands {
+            commands: catalog::commands(&commands),
+        })
+        .await?;
+        self.process
+            .query(json!({"type":"get_state"}), backlog)
+            .await
+    }
+    /// Select `request`'s model and thinking level on the live process.
+    async fn configure(
+        &mut self,
+        request: &RunRequest,
+        backlog: &mut Vec<Value>,
+    ) -> Result<(), HarnessError> {
+        if let Some(model) = request.model.as_deref().filter(|s| *s != "default") {
             let models = self
                 .process
                 .query(json!({"type":"get_available_models"}), backlog)
@@ -547,27 +590,20 @@ impl Runner {
                 )
                 .await?;
         }
-        if self.request.reasoning.is_some()
-            || self
-                .request
-                .model_options
-                .get("pi_thinking")
-                .is_some_and(|v| v == "off")
-        {
+        if thinking_selected(request) {
             let supported = self
                 .process
                 .query(json!({"type":"get_available_thinking_levels"}), backlog)
                 .await?;
             let levels = supported["levels"].as_array().cloned().unwrap_or_default();
-            let desired = if self
-                .request
+            let desired = if request
                 .model_options
                 .get("pi_thinking")
                 .is_some_and(|v| v == "off")
             {
                 "off".to_string()
             } else {
-                serde_json::to_value(self.request.reasoning)
+                serde_json::to_value(request.reasoning)
                     .unwrap()
                     .as_str()
                     .unwrap_or("medium")
@@ -592,24 +628,7 @@ impl Runner {
                 )
                 .await?;
         }
-        let commands = self
-            .process
-            .query(json!({"type":"get_commands"}), backlog)
-            .await?;
-        self.extension_commands = commands["commands"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|c| c["source"] == "extension")
-            .map(|c| string(c, "name").to_owned())
-            .collect();
-        self.emit(AgentEvent::AvailableCommands {
-            commands: catalog::commands(&commands),
-        })
-        .await?;
-        self.process
-            .query(json!({"type":"get_state"}), backlog)
-            .await
+        Ok(())
     }
     async fn run(
         &mut self,
@@ -675,6 +694,18 @@ impl Runner {
                             }))
                 }) {
                     if let Some(steer) = self.queued.pop_front() {
+                        // A changed model or thinking level applies on the
+                        // live process before the message it was sent with.
+                        if let Some(next) = &steer.config {
+                            let mut backlog = vec![];
+                            self.configure(next, &mut backlog).await?;
+                            self.request.model = next.model.clone();
+                            self.request.reasoning = next.reasoning;
+                            self.request.model_options = next.model_options.clone();
+                            for frame in backlog {
+                                self.frame(frame).await?;
+                            }
+                        }
                         if !self.active {
                             self.norm.reset();
                         }
@@ -682,7 +713,8 @@ impl Runner {
                         self.active = true;
                         // Atomic Pi operation: queue at a step boundary if busy, start if idle.
                         // A separate get_state + steer pair would strand an input on the idle race.
-                        self.submit(steer.prompt.clone(), json!([]), true)?;
+                        let images = load_images(&steer.attachments).await;
+                        self.submit(steer.prompt.clone(), images, true)?;
                         self.deliveries.push_back(Delivery {
                             epoch: self.epoch,
                             queued: false,

@@ -10401,7 +10401,9 @@ impl Composer {
         self.prune_drafts(cx);
         {
             let state = self.state.read(cx);
-            let now = chrono::Utc::now();
+            // AppState also notifies at clock-only transitions, so a run that
+            // goes stale drops its interrupt at the cutoff.
+            let now = crate::state::clock_now();
             retain_live_interrupts(&mut self.interrupting, |chat_id| {
                 matches!(
                     state.indicator_for(chat_id, now),
@@ -15249,6 +15251,51 @@ mod tests {
         // written its frame into the channel by the time the executor parks.
         cx.run_until_parked();
         assert!(server_in.try_recv().is_err());
+    }
+
+    /// A run that goes stale purely by the clock (no state frame) drops its
+    /// pending interrupt at the staleness cutoff, not at some later
+    /// unrelated state change.
+    #[gpui::test]
+    fn interrupt_drops_when_its_run_goes_stale_by_clock_alone(cx: &mut gpui::TestAppContext) {
+        use chrono::TimeDelta;
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let clock = crate::state::TestClock::start(now);
+        let updated = now - TimeDelta::seconds(10);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new();
+            state.sessions = vec![zeron_proto::Session {
+                last_completed_turn: None,
+                held_by_subagents: false,
+                compacting: false,
+                background_tasks: Vec::new(),
+                chat_id: "c".into(),
+                device_id: "remote".into(),
+                status: zeron_proto::SessionStatus::Working,
+                started_at: Some(updated),
+                updated_at: updated,
+                running_subagents: 0,
+            }];
+            state.selected_chat = Some("c".into());
+            state.watch_clock_transitions(cx);
+            state
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, _| {
+            assert!(begin_interrupt(&mut composer.interrupting, "c"));
+        });
+        let cutoff = updated + TimeDelta::milliseconds(crate::state::SESSION_STALE_MS + 1);
+        let before = cutoff - TimeDelta::milliseconds(1);
+        clock.set(before);
+        cx.executor()
+            .advance_clock((before - now).to_std().unwrap());
+        assert!(composer.read_with(cx, |composer, _| composer.is_interrupting("c")));
+        clock.set(cutoff);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        assert!(!composer.read_with(cx, |composer, _| composer.is_interrupting("c")));
     }
 
     #[gpui::test]

@@ -27,6 +27,7 @@ pub mod computer;
 pub mod device_hub;
 pub mod diff_sync;
 pub mod doc_host;
+mod fs_watch;
 pub mod harness_updates;
 mod home_widgets;
 mod html_render;
@@ -60,7 +61,7 @@ pub use agent_profiles::AgentProfilesStore;
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};
 pub use diff_sync::{
-    CheckoutDiffSync, DiffFileTextPair, DiffSidecar, DiffSnapshot, TurnSnapshot,
+    CheckoutDiffSync, DiffFileTextPair, DiffSidecar, DiffSnapshot, TreeSnapshot, TurnSnapshot,
     capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff,
     discard_working_tree, merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
@@ -258,6 +259,7 @@ impl EngineCore {
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
+                local_only: matches!(profile.scope(), WorkspaceScope::Local),
             },
         )?;
         doc_host.set_workspace(workspace.clone());

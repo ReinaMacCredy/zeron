@@ -357,9 +357,15 @@ pub struct EdgeChatTransport {
     edge: EdgeConfig,
     chat_id: String,
     device_id: String,
+    host_device: Option<String>,
 }
 
 impl EdgeChatTransport {
+    pub fn with_host_device(mut self, host: Option<String>) -> Self {
+        self.host_device = host;
+        self
+    }
+
     pub fn with_priority(mut self, priority: zeron_sync::budget::Priority) -> Self {
         self.priority = priority;
         self
@@ -377,6 +383,7 @@ impl EdgeChatTransport {
             edge,
             chat_id: chat_id.into(),
             device_id: device_id.into(),
+            host_device: None,
         }
     }
 
@@ -430,14 +437,19 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
         let edge = self.edge.clone();
         let url = self.rows_url();
         let device = self.device_id.clone();
+        let host = self.host_device.clone();
         Box::pin(async move {
             let _permit = zeron_sync::budget::shared().http(priority).await?;
             let bearer = edge.bearer().await.map_err(SyncError::from)?;
-            let res = http
+            let mut request = http
                 .post(&url)
                 .query(&[("batchId", batch_id), ("device", device)])
                 .bearer_auth(&bearer)
-                .body(bytes)
+                .body(bytes);
+            if let Some(host) = host {
+                request = request.query(&[("hostDevice", host)]);
+            }
+            let res = request
                 .send()
                 .await
                 .map_err(|e| SyncError::WebSocket(describe_http_error(e)))?;

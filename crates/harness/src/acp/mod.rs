@@ -24,6 +24,8 @@
 //!   others queue steers and deliver them as the next `session/prompt` at the
 //!   turn boundary. The session stays parked between turns while the
 //!   steering mailbox lives.
+//! - Turn stop ([`crate::TurnControl::stop_turn`]): `session/cancel` settles
+//!   the prompt `cancelled`; the agent and its session take the next prompt.
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
@@ -1248,7 +1250,7 @@ pub struct AcpHarness {
     /// Retain successful catalogs per credential/binary context through outages.
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
-    devin_models: devin_models::Catalog,
+    devin_models: std::sync::Arc<devin_models::Catalog>,
     load_session: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
 }
 
@@ -1276,7 +1278,7 @@ impl AcpHarness {
             commands: tokio::sync::OnceCell::new(),
             models_cache: crate::catalog::Catalog::default(),
             workspace_commands: crate::skills::CommandDiscovery::default(),
-            devin_models: devin_models::Catalog::default(),
+            devin_models: Default::default(),
             load_session: std::sync::Arc::default(),
         }
     }
@@ -2158,6 +2160,35 @@ impl Harness for AcpHarness {
         // quiet watchdog must not park a still-pending model request either.
         true
     }
+    /// `session/cancel` settles the prompt `cancelled`; the agent process
+    /// and its session take the next `session/prompt`.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    /// The session's model, effort and model options are selected over the
+    /// protocol (`session/set_model`, `session/set_config_option`), so a
+    /// change applies between turns without a new agent. Clearing one back
+    /// to the agent's default cannot be expressed that way. The permission
+    /// mode and the computer grant are fixed when the session starts.
+    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.cwd == next.cwd
+            && live.permission_mode == next.permission_mode
+            && live.computer_control == next.computer_control
+            && (next.model.is_some() || live.model.is_none())
+            && (next.reasoning.is_some() || live.reasoning.is_none())
+            && live
+                .model_options
+                .keys()
+                .all(|key| next.model_options.contains_key(key))
+    }
+    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.model == next.model
+            && live.reasoning == next.reasoning
+            && crate::same_model_options(&live.model_options, &next.model_options)
+            && live.cwd == next.cwd
+            && live.permission_mode == next.permission_mode
+            && live.computer_control == next.computer_control
+    }
 
     fn supports_steering(&self) -> bool {
         true
@@ -2382,18 +2413,19 @@ impl Harness for AcpHarness {
             .into_iter()
             .map(|command| command.name)
             .collect();
-        let devin_selection = match request.model.as_deref() {
-            Some(model) if self.spec.id == HarnessId::Devin => {
-                let (exe, _) = self.resolve_program(false).await?;
-                let selection = self
-                    .devin_models
-                    .selection(
-                        &exe,
-                        self.model_discovery_timeout,
-                        model,
-                        &request.model_options,
-                    )
-                    .await;
+        let devin_catalog = if self.spec.id == HarnessId::Devin {
+            let (exe, _) = self.resolve_program(false).await?;
+            Some(DevinCatalog {
+                catalog: self.devin_models.clone(),
+                exe,
+                timeout: self.model_discovery_timeout,
+            })
+        } else {
+            None
+        };
+        let devin_selection = match (request.model.as_deref(), &devin_catalog) {
+            (Some(model), Some(devin)) => {
+                let selection = devin.selection(model, &request.model_options).await;
                 if selection.is_none() && model == devin_models::FUSION {
                     let chosen = |key: &str| {
                         request
@@ -2429,6 +2461,7 @@ impl Harness for AcpHarness {
             prompt_complete_extension: self.spec.prompt_complete_extension,
             preempt_steers: self.spec.steering_mode == SteeringMode::StepBoundary,
             devin_selection,
+            devin_catalog,
             resend_unstarted: self.spec.drops_unstarted_cancelled_prompt,
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint,
@@ -2476,6 +2509,8 @@ struct Session {
     preempt_steers: bool,
     /// Devin: the requested model's catalog group (see `devin_models`).
     devin_selection: Option<devin_models::Selection>,
+    /// Devin: the catalog a later model switch selects its group from.
+    devin_catalog: Option<DevinCatalog>,
     /// See `AcpAgentSpec::drops_unstarted_cancelled_prompt`.
     resend_unstarted: bool,
     prompt_stall: Option<Duration>,
@@ -2499,6 +2534,33 @@ fn load_session_supported(init: &Value) -> bool {
         .and_then(|capabilities| capabilities.get("loadSession"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Devin's model catalog, for selecting a model's group on the live session.
+struct DevinCatalog {
+    catalog: std::sync::Arc<devin_models::Catalog>,
+    exe: PathBuf,
+    timeout: Duration,
+}
+
+impl DevinCatalog {
+    async fn selection(
+        &self,
+        model: &str,
+        options: &serde_json::Map<String, Value>,
+    ) -> Option<devin_models::Selection> {
+        self.catalog
+            .selection(&self.exe, self.timeout, model, options)
+            .await
+    }
+}
+
+/// How a session selects a run's model, effort and model options.
+#[derive(Clone, Copy)]
+struct ConfigRules {
+    harness: HarnessId,
+    effort_in_model_id: bool,
+    effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
 }
 
 fn initialize_params(harness: HarnessId) -> Value {
@@ -3580,6 +3642,174 @@ fn steering_call_future(
 
 /// The per-run event loop: one task multiplexing agent messages, the pending
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
+/// Select `request`'s model, effort and model options on the session —
+/// at its start, and again when a later message changes them. Returns the
+/// session's options as they stand afterwards, which the next switch
+/// compares against.
+async fn select_session_config(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    rules: ConfigRules,
+    session_id: &str,
+    mut session_response: Value,
+    request: &RunRequest,
+    devin_selection: Option<devin_models::Selection>,
+) -> Result<Value, HarnessError> {
+    // Devin selects one advertised member of the requested model's group;
+    // effort and speed baked into a saved id apply unless the run chose
+    // its own.
+    let mut request = request.clone();
+    if rules.harness == HarnessId::Devin
+        && let Some(model) = request.model.clone()
+    {
+        let selection = devin_selection.unwrap_or_default();
+        let advertised = devin_models::wait_for_model(
+            client,
+            incoming,
+            session_id,
+            &mut session_response,
+            &model,
+            &selection.members,
+        )
+        .await?;
+        request.model = Some(advertised);
+        if request.reasoning.is_none() {
+            request.reasoning = selection.effort;
+        }
+        if selection.fast && !request.model_options.contains_key("speed") {
+            request
+                .model_options
+                .insert("speed".into(), Value::String("fast".into()));
+        }
+    }
+    // ACP has had two model-selection surfaces. Newer config-option agents
+    // use category=model below; Grok Build currently advertises only the
+    // first-class `models` state and requires `session/set_model`. Other
+    // ACP clients follow the same split. Unlike the best-effort auxiliary options,
+    // an explicit model switch is strict: prompting with a different
+    // model than the picker shows is worse than surfacing the RPC error.
+    let requested_model: Option<String> = match request.model.as_deref() {
+        Some(model) if rules.effort_in_model_id => Some(effort_variant_id(
+            &session_response,
+            model,
+            request.reasoning,
+        )),
+        model => model.map(str::to_owned),
+    };
+    if rules.harness == HarnessId::Antigravity {
+        validate_config_model_selection(
+            &session_response,
+            requested_model.as_deref(),
+            &request.model_options,
+        )?;
+    }
+    if let Some(model) = first_class_model_change(&session_response, requested_model.as_deref())? {
+        request_draining(
+            client,
+            incoming,
+            "session/set_model",
+            json!({
+                "sessionId": session_id,
+                "modelId": model,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            HarnessError::Protocol(format!("agent rejected model switch to {model}: {error}"))
+        })?;
+        // The next switch compares against the model now current.
+        if let Some(models) = session_response.get_mut("models") {
+            models["currentModelId"] = Value::String(model);
+        }
+    }
+    // Apply the run's model + effort + model options through the
+    // session's advertised config options. Best-effort for effort and
+    // traits: a rejected auxiliary set is logged and the agent default
+    // runs.
+    let efforts = (rules.effort_values)(request.reasoning, request.model.as_deref());
+    let mut options_snapshot = session_response;
+    let mut sets = config_option_sets(
+        &options_snapshot,
+        requested_model.as_deref(),
+        &efforts,
+        &request.model_options,
+        request.permission_mode,
+    );
+    // Devin's effort and speed choices depend on the selected model:
+    // switch the model first, then choose them from what it offers.
+    let deferred = rules.harness == HarnessId::Devin
+        && sets
+            .iter()
+            .any(|(id, _)| is_model_config_option(&options_snapshot, id));
+    if deferred {
+        sets.retain(|(id, _)| is_model_config_option(&options_snapshot, id));
+    }
+    let mut pass = 0;
+    loop {
+        for (config_id, payload) in std::mem::take(&mut sets) {
+            let mut params = serde_json::Map::new();
+            params.insert("sessionId".into(), session_id.into());
+            params.insert("configId".into(), config_id.clone().into());
+            if let Some(payload) = payload.as_object() {
+                for (k, v) in payload {
+                    params.insert(k.clone(), v.clone());
+                }
+            }
+            match request_draining(
+                client,
+                incoming,
+                "session/set_config_option",
+                Value::Object(params),
+            )
+            .await
+            {
+                Ok(response) => {
+                    if let Some(options) = response.get("configOptions") {
+                        options_snapshot["configOptions"] = options.clone();
+                    } else if let Some(value) = payload.get("value")
+                        && let Some(option) = options_snapshot["configOptions"]
+                            .as_array_mut()
+                            .and_then(|options| {
+                                options.iter_mut().find(|o| o["id"] == config_id.as_str())
+                            })
+                    {
+                        // The next switch compares against the value now set.
+                        option["currentValue"] = value.clone();
+                    }
+                }
+                Err(e) => {
+                    if matches!(rules.harness, HarnessId::Antigravity | HarnessId::Devin)
+                        && requested_model.is_some()
+                        && is_model_config_option(&options_snapshot, &config_id)
+                    {
+                        return Err(HarnessError::Protocol(format!(
+                            "agent rejected requested model {}: {e}",
+                            requested_model.as_deref().unwrap_or_default()
+                        )));
+                    }
+                    tracing::debug!(
+                        target: "zeron_harness::acp",
+                        "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
+                    );
+                }
+            }
+        }
+        pass += 1;
+        if !deferred || pass > 1 {
+            break;
+        }
+        sets = config_option_sets(
+            &options_snapshot,
+            requested_model.as_deref(),
+            &efforts,
+            &request.model_options,
+            request.permission_mode,
+        );
+        sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
+    }
+    Ok(options_snapshot)
+}
+
 async fn run_session(session: Session) {
     let Session {
         // Locals drop in reverse binding order: reap the child before cleanup.
@@ -3589,13 +3819,14 @@ async fn run_session(session: Session) {
         mut incoming,
         event_tx,
         controls,
-        request,
+        mut request,
         skills,
         harness,
         agent_name,
         prompt_complete_extension,
         preempt_steers,
         devin_selection,
+        devin_catalog,
         resend_unstarted,
         prompt_stall,
         stall_hint,
@@ -3617,10 +3848,16 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        turn: turn_control,
         tool_server,
         ..
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    let rules = ConfigRules {
+        harness,
+        effort_in_model_id,
+        effort_values,
+    };
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -3652,7 +3889,7 @@ async fn run_session(session: Session) {
             })
             .collect();
         let session_params = json!({ "cwd": request.cwd, "mcpServers": mcp_servers });
-        let (session_id, mut session_response) = if let Some(resume) = &request.resume {
+        let (session_id, session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
             match request_draining(&client, &mut incoming, "session/load", load).await {
@@ -3708,161 +3945,31 @@ async fn run_session(session: Session) {
                 "session/new returned no sessionId".into(),
             ));
         }
-        // Devin selects one advertised member of the requested model's group;
-        // effort and speed baked into a saved id apply unless the run chose
-        // its own.
-        let mut request = request.clone();
-        if harness == HarnessId::Devin
-            && let Some(model) = request.model.clone()
-        {
-            let selection = devin_selection.clone().unwrap_or_default();
-            let advertised = devin_models::wait_for_model(
-                &client,
-                &mut incoming,
-                &session_id,
-                &mut session_response,
-                &model,
-                &selection.members,
-            )
-            .await?;
-            request.model = Some(advertised);
-            if request.reasoning.is_none() {
-                request.reasoning = selection.effort;
-            }
-            if selection.fast && !request.model_options.contains_key("speed") {
-                request
-                    .model_options
-                    .insert("speed".into(), Value::String("fast".into()));
-            }
-        }
-        // ACP has had two model-selection surfaces. Newer config-option agents
-        // use category=model below; Grok Build currently advertises only the
-        // first-class `models` state and requires `session/set_model`. Other
-        // ACP clients follow the same split. Unlike the best-effort auxiliary options,
-        // an explicit model switch is strict: prompting with a different
-        // model than the picker shows is worse than surfacing the RPC error.
-        let requested_model: Option<String> = match request.model.as_deref() {
-            Some(model) if effort_in_model_id => Some(effort_variant_id(
-                &session_response,
-                model,
-                request.reasoning,
-            )),
-            model => model.map(str::to_owned),
-        };
-        if harness == HarnessId::Antigravity {
-            validate_config_model_selection(
-                &session_response,
-                requested_model.as_deref(),
-                &request.model_options,
-            )?;
-        }
-        if let Some(model) =
-            first_class_model_change(&session_response, requested_model.as_deref())?
-        {
-            request_draining(
-                &client,
-                &mut incoming,
-                "session/set_model",
-                json!({
-                    "sessionId": session_id,
-                    "modelId": model,
-                }),
-            )
-            .await
-            .map_err(|error| {
-                HarnessError::Protocol(format!("agent rejected model switch to {model}: {error}"))
-            })?;
-        }
-        // Apply the run's model + effort + model options through the
-        // session's advertised config options. Best-effort for effort and
-        // traits: a rejected auxiliary set is logged and the agent default
-        // runs.
-        let efforts = effort_values(request.reasoning, request.model.as_deref());
         let session_commands = scan_available_commands(&session_response);
         let init_commands = if session_commands.is_empty() {
             init_commands
         } else {
             session_commands
         };
-        let mut options_snapshot = session_response;
-        let mut sets = config_option_sets(
-            &options_snapshot,
-            requested_model.as_deref(),
-            &efforts,
-            &request.model_options,
-            request.permission_mode,
-        );
-        // Devin's effort and speed choices depend on the selected model:
-        // switch the model first, then choose them from what it offers.
-        let deferred = harness == HarnessId::Devin
-            && sets
-                .iter()
-                .any(|(id, _)| is_model_config_option(&options_snapshot, id));
-        if deferred {
-            sets.retain(|(id, _)| is_model_config_option(&options_snapshot, id));
-        }
-        let mut pass = 0;
-        loop {
-            for (config_id, payload) in std::mem::take(&mut sets) {
-                let mut params = serde_json::Map::new();
-                params.insert("sessionId".into(), session_id.clone().into());
-                params.insert("configId".into(), config_id.clone().into());
-                if let Some(payload) = payload.as_object() {
-                    for (k, v) in payload {
-                        params.insert(k.clone(), v.clone());
-                    }
-                }
-                match request_draining(
-                    &client,
-                    &mut incoming,
-                    "session/set_config_option",
-                    Value::Object(params),
-                )
-                .await
-                {
-                    Ok(response) => {
-                        if let Some(options) = response.get("configOptions") {
-                            options_snapshot["configOptions"] = options.clone();
-                        }
-                    }
-                    Err(e) => {
-                        if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
-                            && requested_model.is_some()
-                            && is_model_config_option(&options_snapshot, &config_id)
-                        {
-                            return Err(HarnessError::Protocol(format!(
-                                "agent rejected requested model {}: {e}",
-                                requested_model.as_deref().unwrap_or_default()
-                            )));
-                        }
-                        tracing::debug!(
-                            target: "zeron_harness::acp",
-                            "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
-                        );
-                    }
-                }
-            }
-            pass += 1;
-            if !deferred || pass > 1 {
-                break;
-            }
-            sets = config_option_sets(
-                &options_snapshot,
-                requested_model.as_deref(),
-                &efforts,
-                &request.model_options,
-                request.permission_mode,
-            );
-            sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
-        }
-        Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
+        let session_options = select_session_config(
+            &client,
+            &mut incoming,
+            rules,
+            &session_id,
+            session_response,
+            &request,
+            devin_selection.clone(),
+        )
+        .await?;
+        Ok::<(String, bool, Vec<SlashCommand>, Value), HarnessError>((
             session_id,
             steer_ext,
             init_commands,
+            session_options,
         ))
     };
     let setup = unless_sign_in_prompted(setup, &sign_in_prompted, agent_name);
-    let (session_id, steer_ext, init_commands) = tokio::select! {
+    let (session_id, steer_ext, init_commands, mut session_options) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -4033,6 +4140,9 @@ async fn run_session(session: Session) {
     let mut progress_seq: u64 = 0;
     let mut interrupted = false;
     let mut interrupt_sent = false;
+    // A turn stop (`TurnControl::stop_turn`) in flight: `session/cancel`
+    // ends the prompt and the session stays up for the next one.
+    let mut stopping = false;
     let mut done_current = false;
     let mut done_after_interrupt = false;
     let mut escalation_target = None;
@@ -4070,6 +4180,32 @@ async fn run_session(session: Session) {
     const BUSY_RECENT: Duration = Duration::from_secs(3);
     const CANCEL_FLUSH: Duration = Duration::from_secs(2);
     let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
+    // When our last prompt settled. Only traffic arriving past it (and past
+    // the settled turn's own trailing frames) is an unowned turn: counting
+    // the tail of our own turn as "busy" cancelled an idle session for every
+    // prompt sent within BUSY_RECENT of the last one — and an idle-session
+    // cancel is not harmless (Hermes 0.20 fails the next prompt with an
+    // internal error).
+    const OWN_TAIL: Duration = Duration::from_millis(500);
+    let mut prompt_settled_at: Option<tokio::time::Instant> = None;
+    // Messages that change the model, effort or options: the session takes a
+    // change only between turns, so one sent mid-turn waits here — and the
+    // messages after it in the mailbox wait behind it — until the session is
+    // quiet. `released` hands the next one to the steering branch.
+    let mut deferred: VecDeque<crate::SteerMessage> = VecDeque::new();
+    let mut released: Option<crate::SteerMessage> = None;
+    macro_rules! quiet {
+        () => {
+            turn.is_none()
+                && cancel_flush_deadline.is_none()
+                && queued_steers.is_empty()
+                && steering_call.is_none()
+                && steer_backlog.is_empty()
+                && open_tools.is_empty()
+                && !(last_update_at.elapsed() < BUSY_RECENT
+                    && prompt_settled_at.is_none_or(|settled| last_update_at > settled + OWN_TAIL))
+        };
+    }
 
     let mut child_exit = None;
     let mut exit_drain_deadline = None;
@@ -4103,6 +4239,10 @@ async fn run_session(session: Session) {
                 if res.is_err() && client.is_closed() {
                     break 'main;
                 }
+                prompt_settled_at = Some(tokio::time::Instant::now());
+                // The settled prompt's tool calls are over with it; a tool
+                // still reported open would read as an unowned turn.
+                open_tools.clear();
                 starve_deadline = None;
                 prompt_stall_deadline = None;
                 if let Some(id) = current_prompt_id.take() {
@@ -4137,7 +4277,7 @@ async fn run_session(session: Session) {
                             .to_owned(),
                         Ok(Err(_)) | Err(_) => "promptRequired".to_owned(),
                     };
-                    if interrupted {
+                    if interrupted || stopping {
                         // Winding down; abandoned like any queued steer.
                     } else if outcome != "promptRequired" {
                         let (prev, next) = rotate(&mut assistant_message_id);
@@ -4221,13 +4361,15 @@ async fn run_session(session: Session) {
                 }
                 // A steer preempted this turn: the session lives on and the
                 // steers continue it below, so there is no turn end to report.
+                let stopped = std::mem::take(&mut stopping);
                 let preempted = std::mem::take(&mut preempt_sent)
                     && !interrupted
+                    && !stopped
                     && res.is_ok()
                     && !queued_steers.is_empty();
                 preempt_pending = false;
                 if !preempted {
-                    let (status, mut error) = stop_outcome(&res, interrupted);
+                    let (status, mut error) = stop_outcome(&res, interrupted || stopped);
                     if !interrupted
                         && auth_method.is_some()
                         && res.as_ref().is_err_and(is_auth_required)
@@ -4251,7 +4393,7 @@ async fn run_session(session: Session) {
                     {
                         break 'main;
                     }
-                    if interrupted || res.is_err() {
+                    if interrupted || (res.is_err() && !stopped) {
                         break 'main;
                     }
                 }
@@ -4480,9 +4622,9 @@ async fn run_session(session: Session) {
                         "promptRequired".to_owned()
                     }
                 };
-                if interrupted {
-                    // The run is winding down; the steer is abandoned like
-                    // any queued steer at interrupt.
+                if interrupted || stopping {
+                    // The run is winding down, or its turn stopping: the
+                    // steer is abandoned like any queued steer.
                 } else if outcome != "promptRequired" {
                     // Injected into a live turn → a Steered boundary. But if
                     // the turn ended while the call was in flight, the
@@ -4694,7 +4836,11 @@ async fn run_session(session: Session) {
                 if !send(
                     &event_tx,
                     AgentEvent::Done {
-                        status: DoneStatus::Completed,
+                        status: if std::mem::take(&mut stopping) {
+                            DoneStatus::Interrupted
+                        } else {
+                            DoneStatus::Completed
+                        },
                         result: None,
                         error: None,
                         session_id: Some(session_id.clone()),
@@ -4739,8 +4885,70 @@ async fn run_session(session: Session) {
                 }
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
+            _ = tokio::time::sleep(Duration::from_millis(100)),
+                if released.is_none() && !deferred.is_empty() && !interrupted && quiet!() =>
+            {
+                released = deferred.pop_front();
+            },
+
+            steer = async {
+                match released.take() {
+                    Some(msg) => Some(msg),
+                    None => steering.recv().await,
+                }
+            }, if (released.is_some() || (steering_open && deferred.is_empty())) && !interrupted => match steer {
                 Some(msg) => {
+                    if msg.config.is_some() && !quiet!() {
+                        deferred.push_back(msg);
+                        continue 'main;
+                    }
+                    if let Some(next) = msg.config.as_deref() {
+                        let selection = match (&devin_catalog, next.model.as_deref()) {
+                            (Some(devin), Some(model)) => {
+                                devin.selection(model, &next.model_options).await
+                            }
+                            _ => None,
+                        };
+                        match select_session_config(
+                            &client,
+                            &mut incoming,
+                            rules,
+                            &session_id,
+                            session_options.clone(),
+                            next,
+                            selection,
+                        )
+                        .await
+                        {
+                            Ok(options) => {
+                                session_options = options;
+                                request.model = next.model.clone();
+                                request.reasoning = next.reasoning;
+                                request.model_options = next.model_options.clone();
+                            }
+                            Err(e) => {
+                                // The message cannot run as it was sent.
+                                let (prev, next) = rotate(&mut assistant_message_id);
+                                let message = e.to_string();
+                                done_current = true;
+                                if !send(&event_tx, AgentEvent::Steered {
+                                    assistant_message_id: Some(prev),
+                                    next_assistant_message_id: Some(next),
+                                }).await
+                                    || !send(&event_tx, AgentEvent::Error { message: message.clone() }).await
+                                    || !send(&event_tx, AgentEvent::Done {
+                                        status: DoneStatus::Errored,
+                                        result: None,
+                                        error: Some(message),
+                                        session_id: Some(session_id.clone()),
+                                    }).await
+                                {
+                                    break 'main;
+                                }
+                                continue 'main;
+                            }
+                        }
+                    }
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(
@@ -4753,7 +4961,9 @@ async fn run_session(session: Session) {
                         queued_steers.push_back(text);
                     } else if turn.is_none()
                         && (!open_tools.is_empty()
-                            || last_update_at.elapsed() < BUSY_RECENT)
+                            || (last_update_at.elapsed() < BUSY_RECENT
+                                && prompt_settled_at
+                                    .is_none_or(|settled| last_update_at > settled + OWN_TAIL)))
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
                         // cancel it rather than prompt into the starve.
@@ -4830,6 +5040,40 @@ async fn run_session(session: Session) {
                 None => {
                     steering_open = false;
                     if turn.is_none() && queued_steers.is_empty() {
+                        break 'main;
+                    }
+                }
+            },
+
+            // End the prompt in flight, not the agent: `session/cancel`
+            // settles it `cancelled` and the session takes the next prompt
+            // (background work the agent holds keeps running). Steers still
+            // waiting for this turn's end go with it.
+            _ = turn_control.stop_requested(), if !interrupted => {
+                queued_steers.clear();
+                steer_backlog.clear();
+                // A steer still in flight goes with the turn too: its answer
+                // (promptRequired, once the turn is cancelled) would queue it
+                // again and run the cancelled message after all.
+                steering_call = None;
+                deferred.clear();
+                released = None;
+                preempt_pending = false;
+                if turn.is_some() {
+                    stopping = true;
+                    if !preempt_sent {
+                        client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
+                    }
+                } else {
+                    // Between turns: nothing to cancel. Settle the stop so the
+                    // host sees the turn over.
+                    done_current = true;
+                    if !send(&event_tx, AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.clone()),
+                    }).await {
                         break 'main;
                     }
                 }

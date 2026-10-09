@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
         interrupt: CancellationToken::new(),
         tool_server: None,
         stop_tasks: None,
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,

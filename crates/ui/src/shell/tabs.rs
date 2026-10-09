@@ -1512,6 +1512,13 @@ impl Shell {
         let available_titlebar_width =
             (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
 
+        let running_subagents = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat
+                .as_deref()
+                .map_or(0, |chat| state.running_subagents_for(chat, Utc::now()))
+        };
         let trailing: Option<gpui::AnyElement> = {
             let mut controls = div()
                 .id("right-titlebar-controls")
@@ -1612,6 +1619,15 @@ impl Shell {
                                     .aria_label(files_panel_label)
                                     .when(self.files_panel_open(cx), |button| {
                                         button.bg(crate::theme::wash(0.09))
+                                    })
+                                    // Running subagents live in this panel: mark the
+                                    // button so they are findable while it is closed.
+                                    .when(running_subagents > 0, |button| {
+                                        crate::running_pill::mark_files_button(
+                                            button,
+                                            running_subagents,
+                                            &theme,
+                                        )
                                     }),
                                 )
                             })
@@ -1908,6 +1924,7 @@ mod strip_regressions {
             status: zeron_proto::SessionStatus::Working,
             started_at: None,
             updated_at: Utc::now(),
+            running_subagents: 0,
         }
     }
 

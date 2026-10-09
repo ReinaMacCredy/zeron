@@ -1366,7 +1366,7 @@ async fn turn_diff_captures_only_changes_since_snapshot() {
     // Pre-turn state: a tracked edit and an untracked file already exist.
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\npre-turn\n").expect("edit a.txt");
     std::fs::write(repo_dir.join("pre.txt"), "before the turn\n").expect("pre.txt");
-    let turn_tree = snapshot_tree(&repo_dir).await.expect("snapshot");
+    let turn_tree = snapshot_tree(&repos, &repo_dir).await.expect("snapshot");
 
     // Nothing changed yet: the turn diff is empty (pre-existing untracked
     // files must NOT reappear as new).

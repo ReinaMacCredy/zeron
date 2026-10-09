@@ -1557,8 +1557,8 @@ impl EngineRpc {
                 let chat_ids = deleted.chat_ids;
                 tokio::spawn(async move {
                     for chat_id in chat_ids {
-                        if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
+                        if let Err(err) = sessions.terminate(&chat_id).await {
+                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace teardown skipped");
                         }
                         doc_host.purge_chat(&chat_id);
                         crate::html_render::remove_chat_pages(&uploads, &chat_id);
@@ -2836,19 +2836,27 @@ impl RpcService for EngineRpc {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let p: ChatParams = parse_params(params)?;
-                if opening_tail {
-                    return Ok(RpcReply::Stream(
-                        opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?,
-                    ));
-                }
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                Ok(RpcReply::Stream(doc_messages_stream(
-                    handle.watch_messages(),
-                    handle.doc_arc(),
-                )))
+                // An open transcript keeps its chat's checkout diff live (and
+                // discardable) even when the chat is archived; the guard lives
+                // exactly as long as the stream.
+                let interest = self.diff_sync.retain_chat(&p.chat_id);
+                let stream = if opening_tail {
+                    opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?
+                } else {
+                    let handle = self
+                        .doc_host
+                        .open(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    doc_messages_stream(handle.watch_messages(), handle.doc_arc())
+                };
+                Ok(RpcReply::Stream(
+                    stream
+                        .map(move |frame| {
+                            let _held = &interest;
+                            frame
+                        })
+                        .boxed(),
+                ))
             }
             methods::WATCH_QUEUE => {
                 let p: ChatParams = parse_params(params)?;
@@ -3658,7 +3666,7 @@ impl RpcService for EngineRpc {
 
                     let snapshot = self
                         .diff_sync
-                        .discard_working_tree(&identity.id, &p.expected_checksum)
+                        .discard_working_tree(&identity, &p.expected_checksum)
                         .await
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                     RpcReply::value(&serde_json::json!({
@@ -3682,6 +3690,9 @@ impl RpcService for EngineRpc {
                         return Err(RpcError::Failed("checkoutId does not match cwd".into()));
                     }
                     let root = identity.root.as_path();
+                    // A turn's base tree lives in the snapshot's own object
+                    // store, so the snapshot rides along with its sha.
+                    let mut turn_snapshot = None;
                     let (snapshot, base, target) = match p.mode.as_str() {
                         "branch" => {
                             let base_ref = p
@@ -3736,7 +3747,9 @@ impl RpcService for EngineRpc {
                             ))
                             .await
                             .map_err(|error| RpcError::Failed(error.to_string()))?;
-                            (snapshot, turn.tree, None)
+                            let base = turn.tree.tree().to_string();
+                            turn_snapshot = Some(turn.tree);
+                            (snapshot, base, None)
                         }
                         _ => {
                             let base = Box::pin(crate::diff_sync::working_diff_base(root))
@@ -3772,6 +3785,7 @@ impl RpcService for EngineRpc {
                     let pair = Box::pin(crate::diff_sync::read_diff_file_text_at(
                         root,
                         &base,
+                        turn_snapshot.as_ref(),
                         target.as_deref(),
                         file,
                     ))
@@ -3786,14 +3800,17 @@ impl RpcService for EngineRpc {
                             ))
                             .await
                         }
-                        "turn" => {
-                            Box::pin(crate::diff_sync::capture_turn_diff(
-                                &self.repos,
-                                root,
-                                &base,
-                            ))
-                            .await
-                        }
+                        "turn" => match turn_snapshot.as_ref() {
+                            Some(turn) => {
+                                Box::pin(crate::diff_sync::capture_turn_diff(
+                                    &self.repos,
+                                    root,
+                                    turn,
+                                ))
+                                .await
+                            }
+                            None => Err(crate::EngineError::Other("no turn recorded".into())),
+                        },
                         "commit" => {
                             let sha = p
                                 .commit_sha
@@ -4702,10 +4719,13 @@ impl RpcService for EngineRpc {
                     .filter_map(|chat| chat.cwd)
                     .map(std::path::PathBuf::from)
                     .collect();
-                let chunk = self
-                    .uploads
-                    .read_chunk(&p.path, p.offset, &roots)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let uploads = self.uploads.clone();
+                let chunk = tokio::task::spawn_blocking(move || {
+                    uploads.read_chunk(&p.path, p.offset, &roots)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chunk)
             }
             methods::FETCH_TOOL_BLOB => {

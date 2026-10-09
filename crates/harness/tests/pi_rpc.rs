@@ -41,6 +41,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
                 let _ = tx.send(vec![]);
                 rx
             }),
+            turn: Default::default(),
         },
         tx,
         token,
@@ -215,6 +216,8 @@ async fn steers_confirm_on_consumption_and_interrupt_is_terminal_once() {
     tx.send(SteerMessage {
         prompt: "redirect".into(),
         message_id: Some("user-id".into()),
+        attachments: Vec::new(),
+        config: None,
     })
     .await
     .unwrap();
@@ -263,6 +266,8 @@ async fn idle_mailbox_starts_another_turn_without_restarting_process() {
                         tx.send(SteerMessage {
                             prompt: "second".into(),
                             message_id: None,
+                            attachments: Vec::new(),
+                            config: None,
                         })
                         .await
                         .unwrap();
@@ -510,6 +515,8 @@ async fn steering_burst_reaches_one_model_step_and_confirms_each_message_on_cons
             tx.send(SteerMessage {
                 prompt: prompt.clone(),
                 message_id: Some(format!("user-{i}")),
+                attachments: Vec::new(),
+                config: None,
             })
             .await
             .unwrap();
@@ -589,6 +596,8 @@ async fn handled_input_between_steers_keeps_its_own_delivery_receipt() {
             tx.send(SteerMessage {
                 prompt: prompt.into(),
                 message_id: None,
+                attachments: Vec::new(),
+                config: None,
             })
             .await
             .unwrap();
@@ -727,6 +736,8 @@ async fn late_extension_notifications_do_not_reopen_completed_turns() {
     tx.send(SteerMessage {
         prompt: "next".into(),
         message_id: None,
+        attachments: Vec::new(),
+        config: None,
     })
     .await
     .unwrap();
@@ -748,4 +759,50 @@ async fn late_extension_notifications_do_not_reopen_completed_turns() {
             .count(),
         1
     );
+}
+
+/// A model or thinking switch reaches the live process before the message
+/// it was sent with: no new process, no lost session.
+#[tokio::test]
+async fn a_model_switch_applies_to_the_live_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, tx, _) = controls();
+    let mut opening = request(dir.path(), "which-model");
+    opening.model = Some("mock/mock".into());
+    let mut switched = opening.clone();
+    switched.model = Some("mock/mock-2".into());
+    switched.reasoning = Some(zeron_proto::ReasoningLevel::High);
+    let driver = harness().with_session_store(dir.path().join("index"));
+    assert!(driver.reconfigures_in_place(&opening, &switched));
+    let mut stream = driver.run(opening, c).await.unwrap();
+    let mut text = String::new();
+    let mut dones = 0;
+    let mut started = 0;
+    while dones < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        match event {
+            AgentEvent::SessionStarted { .. } => started += 1,
+            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::Done { .. } => {
+                dones += 1;
+                text.push('|');
+                if dones == 1 {
+                    tx.send(SteerMessage {
+                        config: Some(Box::new(switched.clone())),
+                        ..SteerMessage::text("which-model")
+                    })
+                    .await
+                    .unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(started, 1);
+    assert!(text.contains("reply:mock/medium|"), "{text}");
+    assert!(text.contains("reply:mock-2/high|"), "{text}");
 }

@@ -255,6 +255,16 @@ impl Harness for CursorHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// The shim's `stop` cancels the turn's SDK run; the agent (and the
+    /// shim holding it) take the next prompt.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    /// Each SDK send names its model, so a change runs from the next turn on
+    /// the same agent; no model is Cursor's `auto`.
+    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.cwd == next.cwd
+    }
 
     /// Keep a successful catalog during transient outages. A cold failure
     /// is an error, never a fabricated two-model success.
@@ -524,6 +534,7 @@ async fn run_session(session: Session) {
         request_input: _request_input,
         mut steering,
         interrupt,
+        turn,
         ..
     } = controls;
 
@@ -532,6 +543,9 @@ async fn run_session(session: Session) {
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
+    // A turn stop (`TurnControl::stop_turn`) in flight: the shim cancels the
+    // run; the agent stays up for the next prompt.
+    let mut stopping = false;
     let mut any_done = false;
     let mut done_after_interrupt = false;
     // A turn is settled and the session is parked awaiting the next prompt.
@@ -559,6 +573,24 @@ async fn run_session(session: Session) {
                         tokio::time::sleep(kill_grace).await;
                         send_signal(&pid, Signal::Kill);
                     }));
+                }
+            },
+
+            // Cancel this turn's SDK run, not the agent: the shim answers
+            // with a cancelled turn and takes the next prompt. Steers still
+            // undelivered go with the stopped turn.
+            _ = turn.stop_requested(), if !interrupted => {
+                if parked {
+                    if !send(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: session_id.clone(),
+                    }).await { break 'main; }
+                } else {
+                    stopping = true;
+                    pending_steers = 0;
+                    let _ = stdin_tx.send(json!({ "op": "stop" }).to_string());
                 }
             },
 
@@ -617,7 +649,7 @@ async fn run_session(session: Session) {
                                     error = ?frame.get("error").or_else(|| frame.get("message")),
                                     "Cursor SDK run failed");
                             }
-                            for ev in map_shim_frame(&frame, interrupted) {
+                            for ev in map_shim_frame(&frame, interrupted || stopping) {
                                 let is_done = matches!(ev, AgentEvent::Done { .. });
                                 let failed = matches!(ev, AgentEvent::Done { status: DoneStatus::Errored, .. });
                                 // Stamp the session id onto Dones the mapper
@@ -632,6 +664,7 @@ async fn run_session(session: Session) {
                                 }
                                 if is_done {
                                     any_done = true;
+                                    stopping = false;
                                     if interrupted {
                                         done_after_interrupt = true;
                                         break 'main;
@@ -658,7 +691,14 @@ async fn run_session(session: Session) {
                     pending_steers += 1;
                     parked = false;
                     any_done = false;
-                    let _ = stdin_tx.send(json!({ "op": "steer", "prompt": msg.prompt }).to_string());
+                    let mut line = json!({ "op": "steer", "prompt": msg.prompt });
+                    // A changed model runs from this message's own turn.
+                    if let Some(next) = msg.config {
+                        line["reconfigure"] = Value::Bool(true);
+                        line["model"] = json!(next.model);
+                        line["modelOptions"] = Value::Object(next.model_options);
+                    }
+                    let _ = stdin_tx.send(line.to_string());
                 }
                 None => {
                     steering_open = false;
@@ -702,6 +742,13 @@ async fn run_session(session: Session) {
         }
     }
 
+    // The SDK runs tools in the shim's process: snapshot them before it
+    // goes, so none outlives the runtime (see [`crate::shutdown_agent`]).
+    #[cfg(unix)]
+    let tree = match child.id() {
+        Some(pid) => crate::process::descendants(pid).await,
+        None => Vec::new(),
+    };
     drop(stdin_tx);
     // EOF asks the shim to cancel/close the SDK and settle its durable state.
     // Signals remain the bounded fallback when the SDK cannot shut down.
@@ -711,6 +758,8 @@ async fn run_session(session: Session) {
     ) {
         shutdown_child(&mut child, kill_grace).await;
     }
+    #[cfg(unix)]
+    crate::process::terminate_tree(&tree, kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
     }

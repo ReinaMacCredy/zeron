@@ -13,6 +13,7 @@
 //! short — the legacy client's one-shot chat join left chats dark until a
 //! relaunch.
 
+pub(crate) mod delivery;
 pub(crate) mod escort;
 pub(crate) mod relay;
 pub(crate) mod room;
@@ -194,10 +195,12 @@ pub(crate) struct LiveBackend {
     registry_retry_at: AtomicI64,
     registry_failure: Mutex<Option<String>>,
     registry_save: Arc<Notify>,
+    registry_save_gate: Mutex<()>,
     registry_dirty: Arc<AtomicBool>,
     last_liveness_probe: AtomicI64,
     pub(crate) relay: relay::Relay,
     pub(crate) escorts: escort::Escorts,
+    pub(crate) delivery_wake: Arc<Notify>,
     cancel: CancellationToken,
 }
 
@@ -226,12 +229,14 @@ impl LiveBackend {
         Self {
             relay: relay::Relay::new(inner, &edge, bearer),
             escorts: escort::Escorts::new(&inner.config.data_dir),
+            delivery_wake: Arc::new(Notify::new()),
             edge,
             store,
             registry: Mutex::new(None),
             registry_retry_at: AtomicI64::new(0),
             registry_failure: Mutex::new(None),
             registry_save: Arc::new(Notify::new()),
+            registry_save_gate: Mutex::new(()),
             registry_dirty: Arc::new(AtomicBool::new(false)),
             last_liveness_probe: AtomicI64::new(0),
             cancel: inner.cancel.child_token(),
@@ -248,6 +253,7 @@ impl LiveBackend {
         self.spawn_registry(inner);
         self.spawn_registry_saver(inner);
         self.escorts.respawn(inner);
+        delivery::start(inner, self.delivery_wake.clone(), self.cancel.clone());
     }
 
     pub(crate) fn stop(&self) {
@@ -357,15 +363,20 @@ impl LiveBackend {
             return;
         }
         let Some(inner) = inner else { return };
-        let bytes = inner.workspace.mutate(|doc| doc.to_bytes());
-        match bytes {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot(REGISTRY_DOC_ID, &bytes) {
-                    tracing::warn!(error = %err, "registry snapshot save failed");
-                }
-            }
-            Err(err) => tracing::warn!(error = %err, "registry export failed"),
+        if let Err(err) = self.persist_registry(inner) {
+            self.registry_dirty.store(true, Ordering::Release);
+            tracing::warn!(error = %err, "registry snapshot save failed");
         }
+    }
+
+    /// Serialize export and save, so a debounced older export cannot overwrite
+    /// a new chat row persisted before its first command.
+    pub(crate) fn persist_registry(&self, inner: &ClientInner) -> Result<()> {
+        let _gate = lock(&self.registry_save_gate);
+        let bytes = inner.workspace.mutate(|doc| doc.to_bytes())?;
+        self.store
+            .save_snapshot(REGISTRY_DOC_ID, &bytes)
+            .map_err(|err| ClientError::Storage(err.to_string()))
     }
 
     /// Persist the registry now (backgrounding).

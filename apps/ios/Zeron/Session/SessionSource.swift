@@ -6,6 +6,7 @@ struct SessionChrome: Equatable {
     enum Banner: Equatable {
         case none
         case working(since: Date?, word: String)
+        case sending
         case offline
         case reconnecting(in: Int)
         case notDelivered

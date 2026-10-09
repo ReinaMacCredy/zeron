@@ -285,7 +285,7 @@ impl TurnWire {
                     prompt: "second".into(),
                     message_id: None,
                     attachments: Vec::new(),
-                    reasoning: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -324,6 +324,7 @@ impl TurnWire {
                 interrupt: interrupt.clone(),
                 tool_server: None,
                 stop_tasks: None,
+                turn: Default::default(),
             },
             request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),
@@ -467,7 +468,7 @@ async fn completed_turn_keeps_mailbox_alive_for_the_next_queued_request() {
             prompt: "after completion".into(),
             message_id: Some("second".into()),
             attachments: Vec::new(),
-            reasoning: None,
+            config: None,
         })
         .await
         .unwrap();

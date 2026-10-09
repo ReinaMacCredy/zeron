@@ -18,6 +18,8 @@ export class JsonlLocalAgentStore {
       return fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter(p=>!isUncheckpointed(p)):[];
     };
     this.logPrompt=(prompt)=>fs.appendFileSync(path.join(dir,'prompts.ndjson'),JSON.stringify(prompt)+'\n');
+    // Sends that named a model (a model switch on the live agent).
+    this.logModel=(prompt,model)=>fs.appendFileSync(path.join(dir,'models.ndjson'),JSON.stringify({prompt,model})+'\n');
     this.agents={
       get:async()=>read().agent,
       create:async({agent})=>{const data=read();data.agent=agent;write(data);return agent;},
@@ -35,8 +37,9 @@ const checkpoint={schemaVersion:1,rootBlobId:'retained-conversation-history'};
 function instance(store) {
   return {
     agentId:'agent-fixture',model:{id:'composer-2.5'},close(){},
-    async send(prompt,{onDelta}) {
+    async send(prompt,{onDelta,model}) {
       store.logPrompt(prompt);
+      if(model) store.logModel(prompt,model.id);
       const doc=await store.agents.get({});
       if(doc.activeRunId) throw new Error('Agent already has active run');
       const runId='run-'+Date.now();

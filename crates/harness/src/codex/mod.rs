@@ -31,13 +31,21 @@
 //!   become tagged [`AgentEvent::Subagent`] events; unrelated child bookkeeping is
 //!   consumed so it can never settle the parent turn, and unknown methods
 //!   fall through to the parent path (fail open, never silent loss).
-//! - Steering: `turn/steer { expectedTurnId }` into the live turn; a rejected
-//!   steer (the turn-completed race) is queued and delivered as the next
-//!   `turn/start` on the same thread. The session is persistent across turns
-//!   while the steering mailbox lives.
-//! - Interrupt: cancelling [`RunControls::interrupt`] sends `turn/interrupt`,
-//!   escalating to SIGTERM → SIGKILL if the child is unresponsive; the stream
-//!   always ends with `Done { status: Interrupted }`.
+//! - Steering: `turn/steer { expectedTurnId, clientUserMessageId }` into the
+//!   live turn, confirmed when its userMessage item (carrying that id) joins
+//!   the turn; a rejected steer (the turn-completed race) is queued and
+//!   delivered as the next `turn/start` on the same thread. The session is
+//!   persistent across turns while the steering mailbox lives; a steer's
+//!   changed model/effort/tier rides the next `turn/start`.
+//! - Only the turn in flight settles: a stale or duplicate completion is
+//!   ignored. Commands still running past their turn report as background
+//!   work, so the host never reaps the app-server from under them.
+//! - Turn stop ([`crate::TurnControl::stop_turn`]): `turn/interrupt` ends the
+//!   turn `Interrupted`; the app-server and its threads (child agents
+//!   included) stay up for the next `turn/start`.
+//! - Interrupt: cancelling [`RunControls::interrupt`] tears the runtime down —
+//!   `turn/interrupt`, escalating to SIGTERM → SIGKILL if the child is
+//!   unresponsive; the stream always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
 mod normalize;
@@ -343,6 +351,16 @@ impl CodexHarness {
     }
 }
 
+/// The `serviceTier` a request runs with; "default" (Standard) is omitted.
+fn service_tier(request: &RunRequest) -> Option<String> {
+    request
+        .model_options
+        .get("serviceTier")
+        .and_then(Value::as_str)
+        .filter(|t| *t != "default")
+        .map(str::to_owned)
+}
+
 fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
     Some(match value {
         "minimal" => ReasoningLevel::Minimal,
@@ -610,6 +628,36 @@ impl Harness for CodexHarness {
 
     fn compaction(&self) -> Compaction {
         Compaction::Native
+    }
+    /// `turn/interrupt` ends the turn; the app-server and its thread — child
+    /// agent threads included — stay up for the next `turn/start`.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    /// What the app-server launch and its turns read: the sandbox and
+    /// approvals follow the permission mode, and `serviceTier` is the only
+    /// model option used.
+    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        self.reconfigures_in_place(live, next)
+            && live.model == next.model
+            && to_effort(live.reasoning) == to_effort(next.reasoning)
+            && service_tier(live) == service_tier(next)
+    }
+    /// `turn/start` carries model, effort and service tier, and each sticks
+    /// for later turns — so a change applies from the next turn without a
+    /// new app-server. Clearing one back to the default cannot be expressed
+    /// that way (an omitted parameter keeps the previous value). The
+    /// permission mode, the computer grant and a branch cut are fixed when
+    /// the thread starts.
+    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.cwd == next.cwd
+            && live.auto_approve == next.auto_approve
+            && live.permission_mode == next.permission_mode
+            && live.computer_control == next.computer_control
+            && (next.branch.is_none() || next.branch == live.branch)
+            && (next.model.is_some() || live.model.is_none())
+            && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
+            && (service_tier(next).is_some() || service_tier(live).is_none())
     }
 
     /// The signed-in account's visible `model/list` is authoritative. A
@@ -907,6 +955,11 @@ struct Session {
 #[derive(Default)]
 struct TurnRouter {
     active: Option<String>,
+    /// The app-server announced `active` (`turn/started`). Until then it may
+    /// not have registered the turn: `turn/interrupt` answers "no active
+    /// turn to interrupt" (live, 0.159.3, an interrupt right after the
+    /// `turn/start` response) and the turn would run to its end.
+    announced: bool,
     completed: VecDeque<String>,
 }
 
@@ -927,6 +980,7 @@ impl TurnRouter {
             self.remember_completed(prev);
         }
         self.active = Some(id);
+        self.announced = true;
     }
 
     fn note_completed(&mut self, id: &str) {
@@ -936,13 +990,28 @@ impl TurnRouter {
         self.remember_completed(id.to_owned());
         if self.active.as_deref() == Some(id) {
             self.active = None;
+            self.announced = false;
         }
     }
 
     /// Adopt a turn id from a `turn/start` RESPONSE (the notification is
-    /// allowed to beat it).
+    /// allowed to beat it). A turn already running keeps its id: a follow-up
+    /// `turn/start` folds into it and answers with that same id anyway, and
+    /// an announced turn is authoritative.
     fn adopt_started(&mut self, id: String) {
-        self.active = (!id.is_empty() && !self.is_completed(&id)).then_some(id);
+        if self.active.is_some() || id.is_empty() || self.is_completed(&id) {
+            return;
+        }
+        self.active = Some(id);
+        self.announced = false;
+    }
+
+    /// Whether a `turn/completed` (or failed/aborted) for `id` ends the turn
+    /// in flight. A completion for a turn already settled, or for another
+    /// turn while ours runs, is stale: settling on it marked the running
+    /// turn done mid-way.
+    fn settles(&self, id: &str) -> bool {
+        id.is_empty() || (!self.is_completed(id) && self.active.as_deref().is_none_or(|a| a == id))
     }
 
     fn remember_completed(&mut self, id: String) {
@@ -1178,6 +1247,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        turn,
         tool_server,
         ..
     } = controls;
@@ -1196,22 +1266,14 @@ async fn run_session(session: Session) {
     } else {
         approval_policy(request.permission_mode)
     };
-    let effort = to_effort(request.reasoning);
-    // Service tier rides thread-start and every turn (mirrors the Codex IDE
-    // client). "default" means Standard — omit it entirely.
-    let service_tier = request
-        .model_options
-        .get("serviceTier")
-        .and_then(Value::as_str)
-        .filter(|t| *t != "default")
-        .map(str::to_owned);
+    let start_tier = service_tier(&request);
 
     let start_params = thread_params(
         &request,
         tool_server.as_ref(),
         one_shot,
         approval_policy,
-        service_tier.as_deref(),
+        start_tier.as_deref(),
     );
 
     // ---- handshake + thread + first turn (interruptible) ------------------
@@ -1333,7 +1395,11 @@ async fn run_session(session: Session) {
         }
     };
 
-    let turn_params = |text: &str| -> Value {
+    // Model, effort and service tier ride every `turn/start` (each sticks
+    // for later turns): a steer's in-place `config` takes effect from the
+    // next turn the runtime starts.
+    let mut live = request.clone();
+    let turn_params = |live: &RunRequest, text: &str| -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(thread_id.clone()));
         p.insert("input".into(), prompt_input(text));
@@ -1351,14 +1417,14 @@ async fn run_session(session: Session) {
         // nothing renders and the UI's 45s staleness gate flips Working off
         // (user report: "not streaming, doesn't say it's working").
         p.insert("summary".into(), "auto".into());
-        if let Some(model) = &request.model {
+        if let Some(model) = &live.model {
             p.insert("model".into(), Value::String(model.clone()));
         }
-        if let Some(effort) = effort {
+        if let Some(effort) = to_effort(live.reasoning) {
             p.insert("effort".into(), effort.into());
         }
-        if let Some(tier) = &service_tier {
-            p.insert("serviceTier".into(), Value::String(tier.clone()));
+        if let Some(tier) = service_tier(live) {
+            p.insert("serviceTier".into(), Value::String(tier));
         }
         Value::Object(p)
     };
@@ -1392,7 +1458,7 @@ async fn run_session(session: Session) {
         )
     });
     if !idle {
-        match start_turn(&client, turn_params(&request.prompt)).await {
+        match start_turn(&client, turn_params(&live, &request.prompt)).await {
             Ok(id) => {
                 // The turn id is the unit `thread/fork` cuts at.
                 if !id.is_empty()
@@ -1435,10 +1501,34 @@ async fn run_session(session: Session) {
     let mut turn_usage = UsageTally::default();
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
-    let mut queued_steers: VecDeque<String> = VecDeque::new();
+    // Each carries the configuration it was sent with, adopted when its own
+    // `turn/start` goes out.
+    let mut queued_steers: VecDeque<(String, Option<Box<RunRequest>>)> = VecDeque::new();
+    // Steers the app-server accepted into the running turn, by the
+    // `clientUserMessageId` they were sent with. Each is confirmed
+    // (`Steered`) when its userMessage item joins the turn — not when
+    // `turn/steer` returns, which split the reply still streaming ahead of
+    // it into the steer's segment.
+    let mut accepted_steers: VecDeque<String> = VecDeque::new();
+    // A turn stop waiting for the app-server to announce the turn.
+    let mut stop_when_announced = false;
+    // Commands the parent thread started and the app-server has not reported
+    // finished, with their process id and the turn that started them. One
+    // still open after its turn is background work (a dev server, a
+    // watcher): its `item/completed` arrives when the process exits, turns
+    // later (live, 0.159.3). The host's idle reaper must not retire the
+    // app-server — and the process with it — while it runs.
+    let mut open_commands: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    // An interrupted turn's foreground command is killed WITHOUT an
+    // `item/completed`: once its process has had a moment to go, drop the
+    // turn's commands whose process is gone (background ones live on).
+    let mut prune_at: Option<(tokio::time::Instant, String)> = None;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
+    // A turn stop (`TurnControl::stop_turn`) in flight: the turn's end reads
+    // as Interrupted and the app-server stays up for the next turn.
+    let mut stopping = false;
     // A Done has been emitted for the turn currently/last in flight.
     let mut done_current = idle;
     let mut current_native = command_request(&request.prompt, &thread_id)
@@ -1447,6 +1537,10 @@ async fn run_session(session: Session) {
         .is_some();
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    // The runtime's process tree when its teardown began (see
+    // [`crate::shutdown_agent`]).
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut torn_down: Vec<i32> = Vec::new();
 
     'main: loop {
         tokio::select! {
@@ -1478,16 +1572,26 @@ async fn run_session(session: Session) {
                 }
                 match method.as_str() {
                     "turn/started" => {
-                        let id=turn_id(&params);
+                        let id = turn_id(&params);
                         // Native voice handoffs start a turn without going through turn/start.
                         // Publish the boundary before its text/tool deltas reach the parked engine.
                         if done_current && !id.is_empty() && !router.is_completed(&id) {
-                            done_current=false;
-                            let (prev,next)=rotate(&mut assistant_message_id);
-                            if !send(&event_tx,AgentEvent::Steered{assistant_message_id:Some(prev),next_assistant_message_id:Some(next)}).await {break 'main;}
+                            done_current = false;
+                            let (prev, next) = rotate(&mut assistant_message_id);
+                            if !send(&event_tx, AgentEvent::Steered {
+                                assistant_message_id: Some(prev),
+                                next_assistant_message_id: Some(next),
+                            }).await {
+                                break 'main;
+                            }
                         }
                         router.note_started(id);
-                    },
+                        if std::mem::take(&mut stop_when_announced)
+                            && let Some(active) = router.active.clone()
+                        {
+                            send_turn_interrupt(&client, &thread_id, active);
+                        }
+                    }
 
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));
@@ -1516,6 +1620,35 @@ async fn run_session(session: Session) {
                             Phase::Completed
                         };
                         let item = params.get("item").unwrap_or(&Value::Null);
+                        if matches!(item_type(item), "commandExecution" | "command_execution") {
+                            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                            let changed = if phase == Phase::Started {
+                                let pid = item.get("processId").and_then(Value::as_str).map(str::to_owned);
+                                open_commands.insert(id.to_owned(), (pid, router.active.clone())).is_none()
+                            } else {
+                                open_commands.remove(id).is_some()
+                            };
+                            if changed {
+                                turn.set_background(open_commands.len());
+                            }
+                        }
+                        if matches!(item_type(item), "userMessage" | "user_message")
+                            && let Some(at) = item
+                                .get("clientId")
+                                .and_then(Value::as_str)
+                                .and_then(|id| accepted_steers.iter().position(|s| s == id))
+                        {
+                            for _ in 0..=at {
+                                accepted_steers.pop_front();
+                                let (prev, next) = rotate(&mut assistant_message_id);
+                                if !send(&event_tx, AgentEvent::Steered {
+                                    assistant_message_id: Some(prev),
+                                    next_assistant_message_id: Some(next),
+                                }).await {
+                                    break 'main;
+                                }
+                            }
+                        }
                         if phase == Phase::Completed {
                             let output = match item_type(item) {
                                 "exitedReviewMode" => item.get("review").and_then(Value::as_str),
@@ -1594,7 +1727,28 @@ async fn run_session(session: Session) {
 
                     "turn/completed" => {
                         let id = turn_id(&params);
+                        if !router.settles(&id) {
+                            tracing::debug!(
+                                target: "zeron_harness::codex",
+                                turn = %id,
+                                "stale turn/completed ignored (not the turn in flight)"
+                            );
+                            router.note_completed(&id);
+                            continue 'main;
+                        }
                         router.note_completed(&id);
+                        stop_when_announced = false;
+                        // Accepted steers whose item never surfaced still
+                        // joined this turn: confirm them before its end.
+                        while accepted_steers.pop_front().is_some() {
+                            let (prev, next) = rotate(&mut assistant_message_id);
+                            if !send(&event_tx, AgentEvent::Steered {
+                                assistant_message_id: Some(prev),
+                                next_assistant_message_id: Some(next),
+                            }).await {
+                                break 'main;
+                            }
+                        }
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
                         streamed_text.clear();
@@ -1610,13 +1764,19 @@ async fn run_session(session: Session) {
                                 == Some("failed"))
                             .then(|| "Codex turn failed".to_owned())
                         });
-                        let status = if interrupted {
+                        let status = if interrupted || stopping {
                             DoneStatus::Interrupted
                         } else if error.is_some() {
                             DoneStatus::Errored
                         } else {
                             DoneStatus::Completed
                         };
+                        if status == DoneStatus::Interrupted
+                            || params.pointer("/turn/status").and_then(Value::as_str) == Some("interrupted")
+                        {
+                            prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
+                        }
+                        stopping = false;
                         done_current = true;
                         if !send(
                             &event_tx,
@@ -1639,11 +1799,14 @@ async fn run_session(session: Session) {
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
                         current_native = false;
-                        if let Some(text) = queued_steers.pop_front() {
+                        if let Some((text, config)) = queued_steers.pop_front() {
+                            if let Some(next) = config {
+                                live = *next;
+                            }
                             current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                             if !steer_as_new_turn(
                                 &client,
-                                turn_params(&text),
+                                turn_params(&live, &text),
                                 &mut router,
                                 &event_tx,
                                 &mut assistant_message_id,
@@ -1659,13 +1822,32 @@ async fn run_session(session: Session) {
                     }
 
                     "turn/failed" => {
-                        router.note_completed(&turn_id(&params));
+                        let id = turn_id(&params);
+                        if !router.settles(&id) {
+                            router.note_completed(&id);
+                            continue 'main;
+                        }
+                        router.note_completed(&id);
+                        stop_when_announced = false;
+                        accepted_steers.clear();
                         for ev in turn_usage.take() {
                             if !send(&event_tx, ev).await {
                                 break 'main;
                             }
                         }
                         done_current = true;
+                        if std::mem::take(&mut stopping) && !interrupted {
+                            // The stopped turn's end: the thread lives on.
+                            if !send(&event_tx, AgentEvent::Done {
+                                status: DoneStatus::Interrupted,
+                                result: None,
+                                error: None,
+                                session_id: Some(thread_id.clone()),
+                            }).await {
+                                break 'main;
+                            }
+                            continue 'main;
+                        }
                         if interrupted {
                             done_after_interrupt = true;
                         }
@@ -1690,8 +1872,27 @@ async fn run_session(session: Session) {
                     }
 
                     "turn/aborted" => {
-                        router.note_completed(&turn_id(&params));
+                        let id = turn_id(&params);
+                        if !router.settles(&id) {
+                            router.note_completed(&id);
+                            continue 'main;
+                        }
+                        router.note_completed(&id);
+                        stop_when_announced = false;
+                        accepted_steers.clear();
                         done_current = true;
+                        prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
+                        if std::mem::take(&mut stopping) && !interrupted {
+                            if !send(&event_tx, AgentEvent::Done {
+                                status: DoneStatus::Interrupted,
+                                result: None,
+                                error: None,
+                                session_id: Some(thread_id.clone()),
+                            }).await {
+                                break 'main;
+                            }
+                            continue 'main;
+                        }
                         if interrupted {
                             done_after_interrupt = true;
                         }
@@ -1754,34 +1955,34 @@ async fn run_session(session: Session) {
                 Some(msg) => {
                     let text = msg.prompt;
                     // Native operations run at a turn boundary, never as text
-                    // injected into an already running model turn. Later messages
-                    // must stay behind queued commands: Steered acknowledgments
-                    // retire the engine's accepted-message ledger in FIFO order.
-                    if !done_current && (!queued_steers.is_empty() || current_native || !matches!(command_request(&text, &thread_id), Ok(None))) {
-                        queued_steers.push_back(text);
+                    // injected into an already running model turn. So does a
+                    // changed configuration: `turn/steer` carries no model,
+                    // effort or tier, and only a `turn/start` applies them.
+                    // Later messages must stay behind queued ones: Steered
+                    // acknowledgments retire the engine's accepted-message
+                    // ledger in FIFO order.
+                    if !done_current
+                        && (!queued_steers.is_empty()
+                            || current_native
+                            || msg.config.is_some()
+                            || !matches!(command_request(&text, &thread_id), Ok(None)))
+                    {
+                        queued_steers.push_back((text, msg.config));
                         continue 'main;
                     }
+                    if let Some(next) = msg.config {
+                        live = *next;
+                    }
                     if let Some(expected) = router.active.clone() {
+                        let client_id = new_message_id();
                         let steer_params = json!({
                             "threadId": thread_id,
                             "expectedTurnId": expected,
+                            "clientUserMessageId": client_id,
                             "input": prompt_input(&text),
                         });
                         match client.request("turn/steer", steer_params).await {
-                            Ok(_) => {
-                                let (prev, next) = rotate(&mut assistant_message_id);
-                                if !send(
-                                    &event_tx,
-                                    AgentEvent::Steered {
-                                        assistant_message_id: Some(prev),
-                                        next_assistant_message_id: Some(next),
-                                    },
-                                )
-                                .await
-                                {
-                                    break 'main;
-                                }
-                            }
+                            Ok(_) => accepted_steers.push_back(client_id),
                             // A failed `turn/steer` does NOT mean the text is
                             // bad: most commonly the active turn finished
                             // between the UI send and this request. Queue it
@@ -1796,11 +1997,11 @@ async fn run_session(session: Session) {
                                 if router.active.as_deref() == Some(expected.as_str())
                                     && !router.is_completed(&expected)
                                 {
-                                    queued_steers.push_back(text);
+                                    queued_steers.push_back((text, None));
                                 } else {
                                     current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                                     if !steer_as_new_turn(
-                                        &client, turn_params(&text), &mut router, &event_tx,
+                                        &client, turn_params(&live, &text), &mut router, &event_tx,
                                         &mut assistant_message_id, &mut done_current,
                                     ).await { break 'main; }
                                 }
@@ -1809,7 +2010,7 @@ async fn run_session(session: Session) {
                     } else {
                         current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                         if !steer_as_new_turn(
-                            &client, turn_params(&text), &mut router, &event_tx,
+                            &client, turn_params(&live, &text), &mut router, &event_tx,
                             &mut assistant_message_id, &mut done_current,
                         ).await { break 'main; }
                     }
@@ -1825,9 +2026,44 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // End the in-flight turn, not the app-server: its threads (child
+            // agents included) keep running. Steers still waiting for this
+            // turn's end go with it — a stopped turn never continues.
+            _ = turn.stop_requested(), if !interrupted => {
+                queued_steers.clear();
+                match router.active.clone() {
+                    Some(active) if !done_current => {
+                        stopping = true;
+                        if router.announced {
+                            send_turn_interrupt(&client, &thread_id, active);
+                        } else {
+                            stop_when_announced = true;
+                        }
+                    }
+                    // Between turns: nothing to interrupt. Settle the stop so
+                    // the host sees the turn over.
+                    _ => {
+                        done_current = true;
+                        if !send(&event_tx, AgentEvent::Done {
+                            status: DoneStatus::Interrupted,
+                            result: None,
+                            error: None,
+                            session_id: Some(thread_id.clone()),
+                        }).await {
+                            break 'main;
+                        }
+                    }
+                }
+            },
+
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
+                // The runtime is going: so is everything it started.
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    torn_down = crate::process::descendants(pid).await;
+                }
                 if let Some(turn) = router.active.clone() {
                     let client = client.clone();
                     let thread = thread_id.clone();
@@ -1857,6 +2093,17 @@ async fn run_session(session: Session) {
                     // bookkeeping below still guarantees Done { Interrupted }.
                     break 'main;
                 }
+            },
+
+            _ = tokio::time::sleep_until(
+                prune_at.as_ref().map_or_else(tokio::time::Instant::now, |(at, _)| *at)
+            ), if prune_at.is_some() => {
+                let (_, stopped) = prune_at.take().expect("guarded by if");
+                open_commands.retain(|_, (pid, started_in)| {
+                    started_in.as_deref() != Some(stopped.as_str())
+                        || pid.as_deref().is_some_and(process_alive)
+                });
+                turn.set_background(open_commands.len());
             },
 
             _ = event_tx.closed() => break 'main,
@@ -1895,7 +2142,7 @@ async fn run_session(session: Session) {
         }
     }
 
-    shutdown_child(&mut child, kill_grace).await;
+    crate::shutdown_agent(&mut child, torn_down, kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
     }
@@ -2164,6 +2411,44 @@ async fn compact_session(session: CompactSession) {
     }
 
     shutdown_child(&mut child, kill_grace).await;
+}
+
+/// How long an interrupted turn's commands get to exit before a process
+/// still running counts as background work.
+const COMMAND_EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// Whether a process the app-server reported is still running.
+fn process_alive(pid: &str) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only probes for existence; nothing is delivered.
+        pid.parse::<i32>()
+            .is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        // Unknown: count it gone, which leaves the idle reaper as it was.
+        let _ = pid;
+        false
+    }
+}
+
+/// Ask the app-server to end `turn` (fire-and-forget: its end arrives as the
+/// turn's own completion notification).
+fn send_turn_interrupt(client: &RpcClient, thread_id: &str, turn: String) {
+    let client = client.clone();
+    let thread = thread_id.to_owned();
+    tokio::spawn(async move {
+        if let Err(e) = client
+            .request(
+                "turn/interrupt",
+                json!({ "threadId": thread, "turnId": turn }),
+            )
+            .await
+        {
+            tracing::warn!(target: "zeron_harness::codex", "turn/interrupt failed: {e}");
+        }
+    });
 }
 
 /// Deliver a steer as a fresh `turn/start` on the same thread (the fallback

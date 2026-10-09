@@ -211,6 +211,8 @@ final class AppModel {
 
     @MainActor func signOutLocally() {
         voice.stop()
+        endDeliveryBackgroundTask()
+        lastDeliveryActivity = .distantPast
         client?.shutdown()
         client = nil
         Credentials.clearStored()
@@ -232,8 +234,38 @@ final class AppModel {
         newSessionImages = []
     }
 
-    func didEnterBackground() { client?.onBackground() }
+    private var lastDeliveryActivity = Date.distantPast
+
+    func noteDeliveryActivity() { lastDeliveryActivity = Date() }
+
+    private var deliveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var deliveryBackgroundDeadline: DispatchWorkItem?
+
+    private func endDeliveryBackgroundTask() {
+        deliveryBackgroundDeadline?.cancel()
+        deliveryBackgroundDeadline = nil
+        guard deliveryBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(deliveryBackgroundTask)
+        deliveryBackgroundTask = .invalid
+    }
+
+    func didEnterBackground() {
+        // Give the already-durable room outbox and host wake time to reach
+        // the edge when the user leaves immediately after tapping Send.
+        endDeliveryBackgroundTask()
+        if client != nil, !isDemo,
+           Date().timeIntervalSince(lastDeliveryActivity) < 120 || rows.values.contains(where: { $0.sendState == .sending || $0.sendState == .queued }) {
+            deliveryBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Finish message delivery") { [weak self] in
+                self?.endDeliveryBackgroundTask()
+            }
+            let deadline = DispatchWorkItem { [weak self] in self?.endDeliveryBackgroundTask() }
+            deliveryBackgroundDeadline = deadline
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: deadline)
+        }
+        client?.onBackground()
+    }
     func willEnterForeground() {
+        endDeliveryBackgroundTask()
         client?.onForeground()
         refreshWorkspace()
     }
@@ -553,6 +585,7 @@ final class AppModel {
             let project = rawProjects.first { $0.id == draft.projectId }
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
+            noteDeliveryActivity()
             refreshWorkspace()
             return chatId
         } catch {

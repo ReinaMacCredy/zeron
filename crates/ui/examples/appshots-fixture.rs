@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
             &device,
             &path,
             shot.screenshot.name.clone().into(),
-            shot.screenshot.image.clone(),
+            shot.screenshot.image().cloned().expect("screenshot is an image"),
         );
         paths.push(path);
         shots.push(shot);

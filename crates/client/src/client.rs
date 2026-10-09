@@ -146,11 +146,11 @@ impl ClientInner {
         }
     }
 
-    /// After any local registry write: settle (demo) / push (live), re-derive.
+    /// After any local registry write: push (live), re-derive. Demo's
+    /// local-only replica already holds the write.
     pub(crate) fn after_registry_write(self: &Arc<Self>) {
-        match self.backend() {
-            Backend::Demo(demo) => demo.settle_registry(&self.workspace),
-            Backend::Live(live) => live.registry_written(),
+        if let Backend::Live(live) = self.backend() {
+            live.registry_written();
         }
         self.recompute_workspace();
     }
@@ -236,46 +236,23 @@ impl ClientInner {
         live.relay.reconcile_watches(self, targets);
     }
 
-    /// Best-effort durable wake for the chat's host (`POST /device/{id}/nudge`).
-    /// Waits (briefly) for our own pending registry writes — e.g. a fresh
-    /// chat's CreateChat row — to reach the edge first, so the host never
-    /// wakes for a chat it can't see yet.
-    pub(crate) fn nudge_host(self: &Arc<Self>, host: &str, chat_id: &str) {
+    /// Durable wake: retry until the edge accepts it, including after relaunch.
+    pub(crate) fn nudge_host(self: &Arc<Self>, chat_id: &str) {
         let Some(live) = self.live() else { return };
-        let url = crate::live::urls::nudge(&live.edge, host);
-        let inner = Arc::downgrade(self);
-        let chat_id = chat_id.to_owned();
-        crate::runtime::shared().spawn(async move {
-            for _ in 0..50 {
-                let Some(inner) = inner.upgrade() else { return };
-                if inner.workspace.mutate(|doc| doc.pending_len()) == 0 {
-                    break;
-                }
-                drop(inner);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            let Some(inner) = inner.upgrade() else { return };
-            let Ok(token) = inner.tokens.bearer().await else {
-                return;
-            };
-            drop(inner);
-            for attempt in 0..3u64 {
-                let sent = crate::auth::http()
-                    .post(&url)
-                    .bearer_auth(&token)
-                    .json(&serde_json::json!({ "chatId": chat_id }))
-                    .timeout(Duration::from_secs(10))
-                    .send()
-                    .await;
-                match sent {
-                    // 503 nudge_queue_full is retryable.
-                    Ok(response) if response.status().as_u16() == 503 => {
-                        tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
-                    }
-                    _ => return,
-                }
-            }
-        });
+        if let Err(err) = live
+            .store
+            .schedule_sync_job(chat_id, crate::live::delivery::JOB)
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "host wake persistence failed");
+        }
+        live.delivery_wake.notify_one();
+    }
+
+    pub(crate) fn resume_delivery(self: &Arc<Self>, chat_id: &str) -> Result<SessionHandle> {
+        Client {
+            inner: self.clone(),
+        }
+        .open_session(chat_id)
     }
 
     pub(crate) fn registry_write<R>(
@@ -467,9 +444,8 @@ impl ClientInner {
                 if has_attachments {
                     live.escorts.respawn_chat(self, &core.chat_id);
                 }
-                if let Some(host) = self.workspace.chat(&core.chat_id).map(|c| c.device_id) {
-                    self.nudge_host(&host, &core.chat_id);
-                }
+                // SessionCore::write already persisted the wake receipt.
+                live.delivery_wake.notify_one();
             }
         }
     }
@@ -586,7 +562,12 @@ impl Client {
         // Live: restore the registry replica + open the docs store first, so
         // the very first snapshot renders the cached workspace (instant).
         let (registry, store) = if credentials.is_demo() {
-            (RegistryDoc::new(config.device_id.clone()), None)
+            // Demo has no edge: nothing would ever ack a queued write, so the
+            // replica folds writes straight into its rows (as the engine does
+            // for edge-less profiles).
+            let mut registry = RegistryDoc::new(config.device_id.clone());
+            registry.set_local_only(true);
+            (registry, None)
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
@@ -1078,6 +1059,18 @@ impl Client {
         core.ensure_room(&self.inner);
         core.touch();
         core.refresh();
+        // Upgrade recovery: older clients could persist an ACKed command
+        // without its wake. Opening that chat must re-arm host discovery.
+        if let Some(live) = self.inner.live()
+            && core.send_state().is_some()
+            && live
+                .store
+                .sync_job_version(chat_id, crate::live::delivery::JOB)
+                .ok()
+                == Some(None)
+        {
+            self.inner.nudge_host(chat_id);
+        }
         if let Some(demo) = self.inner.demo() {
             demo.session_opened(&core);
         }
@@ -1197,7 +1190,9 @@ impl Client {
         environment: &str,
         prefs: PushPrefs,
     ) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1217,14 +1212,19 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push registration http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push registration http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
 
     /// Stop notifications to this device (sign-out, turned off).
     pub async fn unregister_push_target(&self) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1238,7 +1238,10 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push removal http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push removal http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
@@ -1520,4 +1523,44 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_replica_is_local_only_and_never_queues() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ClientConfig::new("https://edge.invalid", dir.path());
+        config.device_id = "ios-test".into();
+        let client = Client::new(
+            config,
+            Credentials::Demo(Default::default()),
+            Arc::new(crate::events::NullListener),
+        )
+        .unwrap();
+        let chat_id = client
+            .inner
+            .workspace
+            .mutate(|doc| doc.read_chats())
+            .unwrap()
+            .into_iter()
+            .find(|c| c.is_top_level())
+            .expect("seeded chat")
+            .id;
+        for i in 0..20 {
+            client
+                .rename_session(&chat_id, &format!("title {i}"))
+                .unwrap();
+        }
+        let (pending, title) = client.inner.workspace.mutate(|doc| {
+            (
+                doc.pending_len(),
+                doc.chat(&chat_id).unwrap().unwrap().title,
+            )
+        });
+        assert_eq!(pending, 0);
+        assert_eq!(title.as_deref(), Some("title 19"));
+    }
 }

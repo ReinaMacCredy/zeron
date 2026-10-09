@@ -460,6 +460,11 @@ pub struct Session {
     pub background_tasks: Vec<BackgroundTask>,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    /// Subagents of this chat streaming right now. Rides the session row (and
+    /// its staleness window) so every device's sidebar can badge a chat it
+    /// has not opened; read it through `view::running_subagents`.
+    #[serde(default)]
+    pub running_subagents: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

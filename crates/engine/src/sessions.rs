@@ -29,7 +29,9 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
+use zeron_harness::{
+    CancellationToken, Harness, HarnessError, RunControls, SteerMessage, TurnControl,
+};
 use zeron_proto::tools::ToolGroup;
 use zeron_proto::{
     AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, PermissionMode, RunRequest,
@@ -88,48 +90,55 @@ struct HarnessSessionRef {
     cwd: String,
 }
 
-/// Configuration baked into a live harness runtime. The steering mailbox only
-/// carries prompt text, so routing a request whose model/effort/sandbox changed
-/// would silently run it with the old process configuration. Such requests
+/// The configuration a live harness runtime launched with. The steering
+/// mailbox carries only the prompt (and its images), so a request whose
+/// launch settings differ would silently run with the old process's — it
 /// must replace the runtime and resume its harness-native session instead.
-#[derive(Debug, Clone, PartialEq)]
+/// The driver decides what "differ" means ([`Harness::same_runtime`]): a
+/// replacement kills the runtime's background work, so a setting the
+/// launch never reads, or the same value spelled differently by another
+/// client, must never force one.
+#[derive(Clone)]
 struct RuntimeConfig {
     harness_id: HarnessId,
-    model: Option<String>,
-    reasoning: Option<zeron_proto::ReasoningLevel>,
-    model_options: serde_json::Map<String, serde_json::Value>,
-    cwd: String,
-    sandbox: zeron_proto::SandboxLevel,
-    auto_approve: bool,
-    permission_mode: zeron_proto::PermissionMode,
-    worktree: Option<zeron_proto::WorktreeSpec>,
-    computer_control: bool,
+    request: RunRequest,
+    harness: Arc<dyn Harness>,
 }
 
 impl RuntimeConfig {
-    fn from_request(harness_id: HarnessId, request: &RunRequest) -> Self {
+    fn new(harness_id: HarnessId, request: &RunRequest, harness: Arc<dyn Harness>) -> Self {
         Self {
             harness_id,
-            model: request.model.clone(),
-            reasoning: request.reasoning,
-            model_options: request.model_options.clone(),
-            cwd: request.cwd.clone(),
-            sandbox: request.sandbox,
-            auto_approve: request.auto_approve,
-            permission_mode: request.permission_mode,
-            worktree: request.worktree.clone(),
-            computer_control: request.computer_control,
+            request: request.clone(),
+            harness,
         }
     }
 
-    /// Attachments ride the steer mailbox (inlined by drivers that can,
-    /// path refs in the text otherwise), so they never force a new run.
-    fn can_route(&self, harness_id: HarnessId, request: &RunRequest, live_reasoning: bool) -> bool {
-        let mut wanted = Self::from_request(harness_id, request);
-        if live_reasoning && self.reasoning.is_some() && wanted.reasoning.is_some() {
-            wanted.reasoning = self.reasoning;
+    fn can_route(&self, harness_id: HarnessId, request: &RunRequest) -> bool {
+        self.harness_id == harness_id
+            && self.same_launch(request)
+            && self.harness.same_runtime(&self.request, request)
+    }
+
+    /// How `request` reaches this runtime: `Some(false)` as is, `Some(true)`
+    /// with its configuration adopted in place first
+    /// ([`Harness::reconfigures_in_place`]), `None` only by replacing it.
+    fn route(&self, harness_id: HarnessId, request: &RunRequest) -> Option<bool> {
+        if self.can_route(harness_id, request) {
+            Some(false)
+        } else if self.harness_id == harness_id
+            && self.same_launch(request)
+            && self.harness.reconfigures_in_place(&self.request, request)
+        {
+            Some(true)
+        } else {
+            None
         }
-        self == &wanted
+    }
+
+    fn same_launch(&self, request: &RunRequest) -> bool {
+        self.request.permission_mode == request.permission_mode
+            && self.request.computer_control == request.computer_control
     }
 }
 
@@ -186,6 +195,13 @@ struct RunHandle {
     steer_tx: mpsc::Sender<SteerMessage>,
     /// Harness-level cancellation (protocol interrupt + child teardown).
     interrupt_token: CancellationToken,
+    /// Turn-level stop + the runtime's background-work report. Used for
+    /// stopping a turn when the driver [`Harness::stops_turn_in_place`].
+    turn: TurnControl,
+    stops_turn_in_place: bool,
+    /// The harness stream is open. Before that there is no runtime to keep:
+    /// a stop tears the pending start down instead.
+    started: Arc<std::sync::atomic::AtomicBool>,
     /// Engine-level cancel: arms the run task's grace deadline so a harness that
     /// ignores its token can never strand the run.
     cancel: watch::Sender<bool>,
@@ -208,6 +224,11 @@ struct RunHandle {
     delegate_binds: Arc<Mutex<Vec<(String, String)>>>,
     /// Published pages awaiting their tool part, keyed by the agent's html.
     html_binds: Arc<Mutex<Vec<(String, zeron_proto::html_render::HtmlRenderRef)>>>,
+    /// The user stopped this runtime: it is being torn down and takes no
+    /// more prompts. Flipped under the ledger lock, so every accepted steer
+    /// is unambiguously before the stop (cancelled with it) or after it
+    /// (re-dispatched to a fresh runtime — never lost).
+    retiring: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,7 +382,12 @@ struct RunSetup {
 }
 
 impl RunSetup {
-    fn new(harness_id: HarnessId, request: &RunRequest, mode: RunMode) -> Self {
+    fn new(
+        harness_id: HarnessId,
+        harness: Arc<dyn Harness>,
+        request: &RunRequest,
+        mode: RunMode,
+    ) -> Self {
         let (steerable, accepts_input, capacity) = match mode {
             RunMode::Turn { steerable } => (steerable, true, 32),
             RunMode::Compaction => (false, false, 1),
@@ -373,6 +399,7 @@ impl RunSetup {
         let pending = pending_inputs.clone();
         let events = engine_tx.clone();
         let interrupt_token = CancellationToken::new();
+        let turn = TurnControl::default();
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let voice = (harness_id == HarnessId::Codex && accepts_input)
             .then(zeron_harness::codex::realtime::channel);
@@ -414,6 +441,7 @@ impl RunSetup {
             interrupt: interrupt_token.clone(),
             tool_server: None,
             stop_tasks: Some(stop_rx),
+            turn: turn.clone(),
         };
         Self {
             handle: RunHandle {
@@ -421,9 +449,12 @@ impl RunSetup {
                 voice_active: Arc::new(VoiceActivity::default()),
                 run_id: new_id(),
                 steerable,
-                runtime_config: RuntimeConfig::from_request(harness_id, request),
+                stops_turn_in_place: steerable && harness.stops_turn_in_place(),
+                runtime_config: RuntimeConfig::new(harness_id, request, harness),
                 steer_tx,
                 interrupt_token,
+                turn,
+                started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 cancel: cancel_tx,
                 engine_tx,
                 pending_inputs,
@@ -433,6 +464,7 @@ impl RunSetup {
                 stop_tx,
                 delegate_binds: Arc::new(Mutex::new(Vec::new())),
                 html_binds: Arc::new(Mutex::new(Vec::new())),
+                retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             controls,
             engine_rx,
@@ -452,11 +484,23 @@ struct RoutedSteer {
     /// is recorded only when the runtime confirms consuming it (`Steered`).
     /// An orphan re-dispatches the bare prompt, still owing the history.
     fork_history: bool,
+    /// Accepted after the user's Stop began tearing the runtime down: the
+    /// Stop did not cancel it, so the message still runs.
+    after_stop: bool,
+    /// The run configuration it was sent with, images included: an orphan
+    /// re-dispatches exactly this, not whatever the chat's latest request
+    /// became. `None` when the chat had no recorded request.
+    request: Option<Box<RunRequest>>,
 }
 
 struct Inner {
     voice: crate::voice::VoiceManager,
     device_id: String,
+    /// The engine is shutting down: dying runs re-dispatch nothing.
+    shutting_down: std::sync::atomic::AtomicBool,
+    /// Per chat: messages a Stop cancelled while they were still on their
+    /// way (see [`SessionsEngine::cancel_sent_messages`]).
+    cancelled_sends: Mutex<HashMap<String, std::collections::HashSet<String>>>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// The IPC port this engine actually bound, once it has; `zeron mcp`
@@ -664,6 +708,8 @@ impl SessionsEngine {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
+                shutting_down: std::sync::atomic::AtomicBool::new(false),
+                cancelled_sends: Mutex::new(HashMap::new()),
                 journal,
                 registry,
                 tool_server_port: Mutex::new(None),
@@ -833,6 +879,14 @@ impl SessionsEngine {
             .is_some_and(is_active)
     }
 
+    /// Whether the chat's live runtime reports background work (subagents,
+    /// background shells) still running — parked or not.
+    pub fn holds_background_work(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|h| h.turn.background_live())
+    }
+
     /// Any run currently working or blocked on input — the auto-updater's
     /// "don't restart from under a session" gate. Background subagents count:
     /// a restart would kill them with the child.
@@ -852,7 +906,8 @@ impl SessionsEngine {
     /// but a mailbox delivery writes the user message now — above the reply
     /// still streaming for the message before it. Such prompts belong in the
     /// visible queue. `request` = a Run that may differ from the live config
-    /// (a different config restarts the runtime instead, which is no hold).
+    /// (one the runtime adopts in place still lands in its mailbox; any other
+    /// config restarts the runtime instead, which is no hold).
     pub fn defers_to_turn_end(
         &self,
         chat_id: &str,
@@ -865,14 +920,7 @@ impl SessionsEngine {
             (
                 h.runtime_config.harness_id,
                 h.steerable
-                    && request.is_none_or(|(id, r)| {
-                        let live_reasoning = self
-                            .inner
-                            .registry
-                            .resolve(id)
-                            .is_ok_and(|harness| harness.live_reasoning());
-                        h.runtime_config.can_route(id, r, live_reasoning)
-                    }),
+                    && request.is_none_or(|(id, r)| h.runtime_config.route(id, r).is_some()),
             )
         });
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
@@ -891,7 +939,7 @@ impl SessionsEngine {
     pub fn live_run_steerable(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
-            .is_some_and(|h| h.steerable)
+            .is_some_and(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// The last request dispatched for a chat (steer→new-turn fallback).
@@ -1104,7 +1152,7 @@ impl SessionsEngine {
         let mut turn_computer = request.computer_control;
         let live_computer = lock(&self.inner.runs)
             .get(chat_id)
-            .map(|h| h.runtime_config.computer_control);
+            .map(|h| h.runtime_config.request.computer_control);
         if let Some(live) = live_computer
             && live != request.computer_control
             && self
@@ -1119,25 +1167,22 @@ impl SessionsEngine {
             turn_computer = false;
             request.computer_control = live;
         }
-        let live_reasoning = self
-            .inner
-            .registry
-            .resolve(harness_id)
-            .is_ok_and(|harness| harness.live_reasoning());
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
-                h.steerable,
-                h.runtime_config
-                    .can_route(harness_id, &request, live_reasoning),
+                h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
+                h.runtime_config.route(harness_id, &request),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
+                h.retiring.clone(),
             )
         });
-        if let Some((run_id, steerable, same_runtime, steer_tx, ledger, history_sent)) = routed {
+        if let Some((run_id, steerable, route, steer_tx, ledger, history_sent, retiring)) = routed {
             if idle {
-                return if same_runtime && harness_id == HarnessId::Codex {
+                // No prompt rides an idle start, so nothing could carry an
+                // in-place reconfiguration: only the runtime as is will do.
+                return if route == Some(false) && harness_id == HarnessId::Codex {
                     Ok(run_id)
                 } else {
                     Err(EngineError::Other("incompatible live runtime".into()))
@@ -1145,6 +1190,8 @@ impl SessionsEngine {
             }
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
+            let same_runtime = route.is_some();
+            let reconfigure = route == Some(true);
             let accepted = if steerable && same_runtime {
                 bootstrap =
                     self.warm_fork_history(chat_id, harness_id, &request.prompt, &history_sent);
@@ -1169,8 +1216,12 @@ impl SessionsEngine {
                         }
                     },
                     message_id: Some(user_id.clone()),
+                    // Images ride the mailbox too: replacing the runtime just
+                    // to inline them killed its background work.
                     attachments: request.attachments.clone(),
-                    reasoning: request.reasoning,
+                    // A changed model/effort/option the live process adopts
+                    // in place: replacing it killed its background work.
+                    config: reconfigure.then(|| Box::new(request.clone())),
                 };
                 if let Ok(permit) = steer_tx.reserve().await {
                     // Commit the reserved slot atomically with the update
@@ -1186,6 +1237,8 @@ impl SessionsEngine {
                                 attachments: request.attachments.clone(),
                                 computer_control: turn_computer,
                                 fork_history: bootstrap.is_some(),
+                                after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
+                                request: Some(Box::new(request.clone())),
                             });
                             permit.send(message);
                         })
@@ -1197,11 +1250,17 @@ impl SessionsEngine {
                 false
             };
             if accepted {
-                if let Some(live) = lock(&self.inner.runs)
-                    .get_mut(chat_id)
-                    .filter(|h| h.run_id == run_id)
-                {
-                    live.runtime_config.reasoning = request.reasoning;
+                if reconfigure {
+                    // The runtime runs this configuration from now on: later
+                    // sends compare against it, and a re-dispatch of an
+                    // orphaned steer starts from it.
+                    if let Some(h) = lock(&self.inner.runs)
+                        .get_mut(chat_id)
+                        .filter(|h| h.run_id == run_id)
+                    {
+                        h.runtime_config.request = request.clone();
+                    }
+                    lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
                 }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
@@ -1237,17 +1296,27 @@ impl SessionsEngine {
                 message_id = Some(user_id);
             }
             if !same_runtime {
-                tracing::debug!(
+                tracing::info!(
                     chat = %chat_id,
                     "restarting live harness to apply changed run configuration"
                 );
             }
             // Mailbox closed (runtime mid-teardown / non-steering harness) or
-            // the routed run died with the message reclaimed, or configuration
-            // changed beyond what the text-only mailbox can carry: replace it.
-            self.interrupt(chat_id).await?;
+            // the routed run died with the message reclaimed, or the launch
+            // configuration changed: replace the runtime.
+            self.terminate(chat_id).await?;
         }
 
+        // A Stop sent after this message cancelled it while it was on its
+        // way: never start the stopped work again in a fresh runtime.
+        if let Some(id) = &message_id
+            && lock(&self.inner.cancelled_sends)
+                .get_mut(chat_id)
+                .is_some_and(|ids| ids.remove(id))
+        {
+            tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
+            return Ok(String::new());
+        }
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -1277,6 +1346,7 @@ impl SessionsEngine {
             cancel_rx,
         } = RunSetup::new(
             harness_id,
+            harness.clone(),
             &request,
             RunMode::Turn {
                 steerable: harness.supports_steering(),
@@ -1289,6 +1359,8 @@ impl SessionsEngine {
         let fork_history_sent = run.fork_history_sent.clone();
         let run_id = run.run_id.clone();
         let voice_active = run.voice_active.clone();
+        let turn = run.turn.clone();
+        let started = run.started.clone();
         lock(&self.inner.runs).insert(chat_id.to_string(), run);
         self.set_status(
             chat_id,
@@ -1333,7 +1405,9 @@ impl SessionsEngine {
                 computer: run_computer,
                 turn_computer,
                 fork_history_sent,
+                started,
             },
+            turn,
         ));
         Ok(run_id)
     }
@@ -1458,9 +1532,10 @@ impl SessionsEngine {
         self.ensure_sidechat_active(chat_id)?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
-            .filter(|h| h.steerable)
+            .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
             .filter(|h| {
-                computer_control.is_none_or(|flag| flag == h.runtime_config.computer_control)
+                computer_control
+                    .is_none_or(|flag| flag == h.runtime_config.request.computer_control)
             })
             .map(|h| {
                 (
@@ -1468,11 +1543,13 @@ impl SessionsEngine {
                     h.runtime_config.harness_id,
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
-                    h.runtime_config.computer_control,
+                    h.runtime_config.request.computer_control,
                     h.fork_history_sent.clone(),
+                    h.retiring.clone(),
                 )
             });
-        let Some((run_id, harness_id, steer_tx, ledger, run_computer, history_sent)) = target
+        let Some((run_id, harness_id, steer_tx, ledger, run_computer, history_sent, retiring)) =
+            target
         else {
             return Ok(SteerOutcome::NotSteerable);
         };
@@ -1482,6 +1559,13 @@ impl SessionsEngine {
         let turn_computer = computer_control.unwrap_or(run_computer);
         let bootstrap = self.warm_fork_history(chat_id, harness_id, prompt, &history_sent);
         let delivered = bootstrap.as_deref().unwrap_or(prompt);
+        // A steer runs on the configuration live now; record it with the
+        // message so a re-dispatch keeps it.
+        let sent_with = self.last_request(chat_id).map(|mut request| {
+            request.prompt = prompt.to_string();
+            request.attachments = Vec::new();
+            Box::new(request)
+        });
         let message = SteerMessage {
             // Held-queue release and queued sends reach the harness through
             // here without ever entering `dispatch`, so a sidechat's wrap has
@@ -1499,7 +1583,7 @@ impl SessionsEngine {
             },
             message_id: Some(user_id.clone()),
             attachments: attachments.to_vec(),
-            reasoning: None,
+            config: None,
         };
         // Saturation is backpressure, not a dead runtime. Waiting for room
         // preserves the live process and every accepted message in a burst.
@@ -1518,6 +1602,8 @@ impl SessionsEngine {
                 attachments: attachments.to_vec(),
                 computer_control: turn_computer,
                 fork_history: bootstrap.is_some(),
+                after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
+                request: sent_with,
             });
             permit.send(message);
         });
@@ -1556,10 +1642,75 @@ impl SessionsEngine {
         Ok(SteerOutcome::Accepted)
     }
 
-    /// Interrupt the live run, if any. The run settles with a synthetic
-    /// `Done{interrupted}` and its streaming entry stamped `aborted`; this waits
-    /// (bounded) for that settlement so callers observe a consistent doc.
+    /// A Stop acting now cancels these messages, sent before it but still
+    /// on their way: one that reaches dispatch after the runtime went down
+    /// is dropped rather than run in a fresh runtime.
+    pub fn cancel_sent_messages(&self, chat_id: &str, message_ids: Vec<String>) {
+        if message_ids.is_empty() {
+            return;
+        }
+        lock(&self.inner.cancelled_sends)
+            .entry(chat_id.to_string())
+            .or_default()
+            .extend(message_ids);
+    }
+
+    /// The user's Stop: a hard boundary. The in-flight turn ends `aborted`
+    /// and the runtime goes with it — background subagents, background
+    /// shells, everything the agent runs. The next message resumes the
+    /// conversation in a fresh process. (Sending, steering and switching
+    /// models never come here: they keep the runtime and its work.)
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
+        self.terminate(chat_id).await
+    }
+
+    /// End the in-flight turn so another prompt can take its place ("send
+    /// now"), keeping the runtime and its background work. Its streaming
+    /// entry is stamped `aborted`; this waits (bounded) for that settlement
+    /// so callers observe a consistent doc. Returns whether there was a turn
+    /// (or runtime) to stop.
+    ///
+    /// A driver that [`Harness::stops_turn_in_place`] ends only the turn: the
+    /// runtime parks with its background work — subagents, background shells
+    /// — still running, and the next prompt routes into it. Drivers without
+    /// that, runs whose harness has not started yet, and stops that do not
+    /// settle fall back to [`Self::terminate`].
+    pub async fn stop_turn(&self, chat_id: &str) -> Result<bool, EngineError> {
+        const STOP_SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
+        let target = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| {
+                h.stops_turn_in_place && h.started.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .map(|h| (h.run_id.clone(), h.turn.clone(), h.pending_inputs.clone()));
+        let Some((run_id, turn, pending)) = target else {
+            return self.terminate(chat_id).await;
+        };
+        if !self.turn_in_flight(chat_id) {
+            return Ok(false); // parked between turns: nothing to stop
+        }
+        // Unpark questions first: the stopped turn can never be answered.
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        for tx in parked {
+            let _ = tx.send(Vec::new());
+        }
+        turn.stop_turn();
+        let deadline = tokio::time::Instant::now() + STOP_SETTLE;
+        while tokio::time::Instant::now() < deadline {
+            if !self.is_live(chat_id, &run_id) || !self.turn_in_flight(chat_id) {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tracing::warn!(chat = %chat_id, "turn stop did not settle; tearing the runtime down");
+        self.terminate(chat_id).await
+    }
+
+    /// Tear the chat's live runtime down (protocol interrupt, then the
+    /// child). The run settles with a synthetic `Done{interrupted}` and its
+    /// streaming entry stamped `aborted`; this waits (bounded) for that
+    /// settlement. Background work the runtime held dies with it.
+    pub async fn terminate(&self, chat_id: &str) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs).get(chat_id).map(|h| {
             h.computer.revoked.store(true, Ordering::Release);
             (
@@ -1567,11 +1718,19 @@ impl SessionsEngine {
                 h.interrupt_token.clone(),
                 h.cancel.clone(),
                 h.pending_inputs.clone(),
+                h.routed_steers.clone(),
+                h.retiring.clone(),
             )
         });
-        let Some((run_id, token, cancel, pending)) = target else {
+        let Some((run_id, token, cancel, pending, ledger, retiring)) = target else {
             return Ok(false);
         };
+        // From here the runtime takes no prompt: a send now starts a fresh
+        // runtime, and one that raced into this mailbox is re-dispatched.
+        {
+            let _order = lock(&ledger);
+            retiring.store(true, std::sync::atomic::Ordering::Release);
+        }
         // Publish cancellation BEFORE waking the harness. Otherwise a fast
         // EOF after token.cancel() can beat this watch notification and be
         // classified as an error instead of an interrupted turn.
@@ -1666,7 +1825,7 @@ impl SessionsEngine {
             controls,
             engine_rx: _engine_rx,
             mut cancel_rx,
-        } = RunSetup::new(harness_id, &request, RunMode::Compaction);
+        } = RunSetup::new(harness_id, harness.clone(), &request, RunMode::Compaction);
         let interrupt_token = run.interrupt_token.clone();
         let _cancel_on_drop = interrupt_token.clone().drop_guard();
         {
@@ -2107,8 +2266,8 @@ impl SessionsEngine {
         Some(ComputerRun {
             run_id: run.run_id.clone(),
             turn_id: turn.as_ref().map(|turn| turn.id.clone()),
-            permission_mode: run.runtime_config.permission_mode,
-            run_computer_control: run.runtime_config.computer_control,
+            permission_mode: run.runtime_config.request.permission_mode,
+            run_computer_control: run.runtime_config.request.computer_control,
             turn_computer_control: turn.as_ref().is_some_and(|turn| turn.computer_control),
             turn_desktop_revoked: turn.as_ref().is_some_and(|turn| turn.desktop_revoked),
             turn_stopped_apps: turn.map(|turn| turn.stopped_apps).unwrap_or_default(),
@@ -2176,7 +2335,7 @@ impl SessionsEngine {
             .ok_or_else(|| "The turn that made this call has ended.".to_owned())?;
         match run.computer.turn() {
             Some(turn) if turn_id.is_none_or(|id| id == turn.id) => {
-                Ok(Some(run.runtime_config.permission_mode))
+                Ok(Some(run.runtime_config.request.permission_mode))
             }
             _ => Err("The turn that made this call has ended.".into()),
         }
@@ -2232,7 +2391,7 @@ impl SessionsEngine {
     pub fn live_computer_control(&self, chat_id: &str) -> Option<bool> {
         lock(&self.inner.runs)
             .get(chat_id)
-            .map(|h| h.runtime_config.computer_control)
+            .map(|h| h.runtime_config.request.computer_control)
     }
 
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
@@ -2279,6 +2438,10 @@ impl SessionsEngine {
                     })
             });
             let attempts = self.inner.journal.resume_attempts(&chat_id);
+            // Fresh: the crashed reply's streaming entry is recent — or no
+            // reply entry reached disk at all (the doc saves on a debounce,
+            // and a kill moments into the turn leaves the user's message as
+            // the transcript's last word), and that message is recent.
             let fresh = handle
                 .doc()
                 .read_entries()
@@ -2288,6 +2451,7 @@ impl SessionsEngine {
                         .iter()
                         .rev()
                         .find(|e| e.status == Some(MessageStatus::Streaming))
+                        .or_else(|| entries.last().filter(|e| e.role == MessageRole::User))
                         .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
                 })
                 .unwrap_or(false);
@@ -2400,10 +2564,13 @@ impl SessionsEngine {
 
     /// Graceful shutdown: interrupt every live run so streaming entries settle.
     pub async fn shutdown(&self) {
+        self.inner
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
         self.inner.voice.retire();
         let chats: Vec<String> = lock(&self.inner.runs).keys().cloned().collect();
         for chat_id in chats {
-            if let Err(err) = self.interrupt(&chat_id).await {
+            if let Err(err) = self.terminate(&chat_id).await {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
@@ -2850,6 +3017,33 @@ impl Inner {
         self.set_status_with_completion(chat_id, status, fresh_start, None, false);
     }
 
+    /// Publish how many subagents of `chat_id` are streaming. A change is
+    /// mirrored like any status transition (it doubles as a heartbeat); an
+    /// unchanged count is a no-op, and a chat without a status row has
+    /// nothing to badge yet.
+    fn set_running_subagents(&self, chat_id: &str, running: usize) {
+        let running = u32::try_from(running).unwrap_or(u32::MAX);
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.running_subagents == running {
+                return;
+            }
+            entry.running_subagents = running;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
         lock(&self.runs)
             .get(chat_id)
@@ -2884,6 +3078,7 @@ impl Inner {
                     background_tasks: Vec::new(),
                     started_at: None,
                     updated_at: now,
+                    running_subagents: 0,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2987,6 +3182,14 @@ impl Inner {
         lock(&self.doc_host).clone()
     }
 
+    /// A message the user already sent follows the turn that is ending
+    /// (see [`crate::doc_host::ChatDocHandle::continues_with_sent_message`]).
+    fn continues_with_sent_message(&self, chat_id: &str) -> bool {
+        self.doc_host()
+            .and_then(|host| host.open(chat_id).ok())
+            .is_some_and(|handle| handle.continues_with_sent_message())
+    }
+
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
@@ -3042,7 +3245,17 @@ impl Inner {
     /// never rides `--resume`. An empty stored id is the explicit tombstone —
     /// no resume, no falling through to staler sources.
     fn resume_for(&self, chat_id: &str, cwd: &str) -> Option<String> {
-        let cwd_ok = |session_cwd: &str| session_cwd.is_empty() || session_cwd == cwd;
+        // The same directory, however it is spelled: an agent reports where
+        // it runs with symlinks resolved (`/private/var/…` for `/var/…` on
+        // macOS), and until a turn's Done restores the request's spelling a
+        // mid-turn crash leaves that one stored — a string compare then
+        // started the resumed run in a fresh session, its history gone.
+        let cwd_ok = |session_cwd: &str| {
+            session_cwd.is_empty()
+                || session_cwd == cwd
+                || std::fs::canonicalize(session_cwd)
+                    .is_ok_and(|a| std::fs::canonicalize(cwd).is_ok_and(|b| a == b))
+        };
         if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
             return (!known.session_id.is_empty() && cwd_ok(&known.cwd))
                 .then_some(known.session_id);
@@ -3198,36 +3411,55 @@ impl Inner {
     /// The last harness session id named anywhere in the chat's journal, with
     /// the cwd of the `SessionStarted` that governs it. `Done.session_id`
     /// inherits the cwd of the most recent `SessionStarted` (same run).
+    ///
+    /// Walks the journal newest-first and stops at the answer, so boot recovery
+    /// doesn't load whole multi-MB journals: the newest non-empty id wins, and a
+    /// `Done` id takes the cwd of the nearest earlier `SessionStarted` (any id).
     fn journal_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
-        let events = match self.journal.replay(chat_id, 0) {
+        let warn = |err: crate::run_journal::JournalError| {
+            tracing::warn!(chat = %chat_id, error = %err, "journal scan for harness session failed");
+        };
+        let events = match self.journal.events_rev(chat_id) {
             Ok(events) => events,
             Err(err) => {
-                tracing::warn!(chat = %chat_id, error = %err, "journal scan for harness session failed");
+                warn(err);
                 return None;
             }
         };
-        let mut current_cwd = String::new();
-        let mut found: Option<(String, String)> = None;
-        for (_, event) in events {
+        // A `Done` id seen first, still waiting for its run's `SessionStarted` cwd.
+        let mut done_id: Option<String> = None;
+        for item in events {
+            let (seq, event) = match item {
+                Ok(item) => item,
+                Err(err) => {
+                    warn(err);
+                    return None;
+                }
+            };
+            if seq == 0 {
+                continue; // `replay(_, 0)` (the old full scan) never yielded seq 0
+            }
             match event {
                 AgentEvent::SessionStarted {
                     session_id, cwd, ..
                 } => {
-                    current_cwd = cwd;
+                    if let Some(id) = done_id {
+                        return Some((id, cwd));
+                    }
                     if !session_id.is_empty() {
-                        found = Some((session_id, current_cwd.clone()));
+                        return Some((session_id, cwd));
                     }
                 }
                 AgentEvent::Done {
                     session_id: Some(session_id),
                     ..
-                } if !session_id.is_empty() => {
-                    found = Some((session_id, current_cwd.clone()));
+                } if done_id.is_none() && !session_id.is_empty() => {
+                    done_id = Some(session_id);
                 }
                 _ => {}
             }
         }
-        found
+        done_id.map(|id| (id, String::new()))
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) -> bool {
@@ -3823,6 +4055,8 @@ struct RunResumeState {
     computer: Arc<RunComputer>,
     turn_computer: bool,
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the harness stream is open (see [`RunHandle::started`]).
+    started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn cursor_unstarted_history(
@@ -3924,6 +4158,7 @@ async fn drive_run(
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
+    turn: TurnControl,
 ) {
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
@@ -4061,7 +4296,12 @@ async fn drive_run(
         Err(error) => Err(error),
     };
     let mut stream = match started {
-        Ok(stream) => stream,
+        Ok(stream) => {
+            resume_state
+                .started
+                .store(true, std::sync::atomic::Ordering::Release);
+            stream
+        }
         Err(err) => {
             let message = err.to_string();
             tracing::warn!(chat = %chat_id, harness = ?harness_id, error = %message, "run failed to start");
@@ -4184,7 +4424,16 @@ async fn drive_run(
     let subagent_silence = session_idle * 8;
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
+    // A parked runtime whose agent reports background work (see
+    // `TurnControl::background_live`) is not idle: reaping it killed that
+    // work. The reaper re-checks a full idle window later instead.
+    let mut reap_deferred_until: Option<tokio::time::Instant> = None;
+    // The reaper last deferred for background work. Its end is not idleness
+    // either: the agent reports the drained set a moment before the turn the
+    // completion wakes, and reaping in that gap lost the wake (issue #831).
+    let mut held_for_background = false;
     let steerable = harness.supports_steering();
+    let stops_turn_in_place = steerable && harness.stops_turn_in_place();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
     // that loses a turn's Done — the adapter never settles `session/prompt`
     // even though the agent finished — strands Working forever: the live
@@ -4298,7 +4547,13 @@ async fn drive_run(
                 // already durable, so retire the parked process cleanly and let
                 // the queued exclusive lease proceed.
                 _ = tokio::time::sleep_until(tokio::time::Instant::now()),
-                    if idle_since.is_some() && !resume_state.voice_active.live() && inner.registry.update_pending(harness_id) =>
+                    if idle_since.is_some()
+                        && !resume_state.voice_active.live()
+                        && inner.registry.update_pending(harness_id)
+                        && !background_busy
+                        && !turn.background_live()
+                        && (live_subagents.is_empty()
+                            || last_subagent_activity.is_none_or(|at| at.elapsed() >= subagent_silence)) =>
                 {
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -4316,15 +4571,33 @@ async fn drive_run(
                 // the window counts from its last activity, and stretches to
                 // `subagent_silence` while its sink is open.
                 _ = tokio::time::sleep_until(
-                    idle_since
-                        .map(|at| {
-                            at.max(last_subagent_activity.unwrap_or(at))
-                                + if live_subagents.is_empty() { session_idle } else { subagent_silence }
-                        })
-                        .unwrap_or_else(tokio::time::Instant::now)
+                    {
+                        let window = if live_subagents.is_empty() { session_idle } else { subagent_silence };
+                        let base = idle_since
+                            .map(|at| at.max(last_subagent_activity.unwrap_or(at)) + window);
+                        match (base, reap_deferred_until) {
+                            (Some(base), Some(deferred)) => base.max(deferred),
+                            (base, deferred) => base.or(deferred).unwrap_or_else(tokio::time::Instant::now),
+                        }
+                    }
                 ), if idle_since.is_some() && !background_busy && !resume_state.voice_active.live() => {
                     // A call that began after this wait was armed holds it off.
                     if resume_state.voice_active.live() {
+                        continue;
+                    }
+                    // The driver's own report of background work (Claude's
+                    // background agents and shells) is authoritative — it
+                    // lists every task the process still runs — so it holds
+                    // the runtime for as long as that work lives.
+                    if turn.background_live() {
+                        tracing::info!(chat = %chat_id, "idle reaper deferred: the agent reports background work");
+                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        held_for_background = true;
+                        continue;
+                    }
+                    if std::mem::take(&mut held_for_background) {
+                        // The work just ended: a full idle window from here.
+                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
                         continue;
                     }
                     tracing::info!(
@@ -4432,7 +4705,8 @@ async fn drive_run(
                     // completion notice, but never notify for an empty boundary
                     // or while an accepted steer still awaits delivery.
                     let completed_turn = ((!folded.is_empty() || writer.is_some())
-                        && !inner.has_pending_steers(&chat_id, &run_id))
+                        && !inner.has_pending_steers(&chat_id, &run_id)
+                        && !inner.continues_with_sent_message(&chat_id))
                         .then(|| entry_id.clone());
                     if !folded.is_empty() || writer.is_some() {
                         if let Err(err) = finish_segment(
@@ -4454,6 +4728,7 @@ async fn drive_run(
                     segment_started = now_ms();
                     record_session_stats(doc_ref, &chat_id, pricing, resumed_from.as_deref(), clock.settle(std::time::Instant::now()));
                     idle_since = Some(tokio::time::Instant::now());
+                    reap_deferred_until = None;
                     self_continued_turn = false;
                     inner.set_status_with_completion(
                         &chat_id,
@@ -4494,6 +4769,12 @@ async fn drive_run(
         {
             inner.publish(&chat_id, &event);
             last_subagent_activity = Some(tokio::time::Instant::now());
+            // Background subagents can outlive the turn and be the only
+            // traffic for minutes: keep the row (and its count) inside the
+            // UI's staleness window while any is live.
+            if !subagents.is_empty() {
+                inner.touch_session(&chat_id);
+            }
             let is_steer = matches!(
                 sub_event.as_ref(),
                 AgentEvent::UserMessage { .. } | AgentEvent::Steered { .. }
@@ -4574,6 +4855,7 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
+                    inner.set_running_subagents(&chat_id, subagents.len());
                     if !chip_streaming {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
@@ -4653,6 +4935,7 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
+                    inner.set_running_subagents(&chat_id, subagents.len());
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
@@ -5200,19 +5483,37 @@ async fn drive_run(
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
             }
+            // A turn stopped in place: the runtime lives on, parked like a
+            // completed turn. Steers it had accepted but not yet delivered
+            // were cancelled with the turn (never delivered, never
+            // confirmed) — drop them, or they would hold the parked session
+            // Working forever.
+            let stopped_in_place =
+                *status == DoneStatus::Interrupted && stops_turn_in_place && !interrupted;
+            if stopped_in_place
+                && let Some(ledger) = lock(&inner.runs)
+                    .get(&chat_id)
+                    .filter(|h| h.run_id == run_id)
+                    .map(|h| h.routed_steers.clone())
+            {
+                lock(&ledger).clear();
+            }
             // An accepted steer awaiting its boundary owns the continuation:
             // the previous Done is an internal handoff, not a completion ping.
-            // Ordinary queued rows are not in this ledger and still notify.
+            // So does a message the user already sent that is still on its
+            // way (see `continues_with_sent_message`); rows the user queued
+            // themselves still notify.
             let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
             let completed_turn = (*status == DoneStatus::Completed
                 && !interrupted
                 && turn_was_active
-                && !pending_steer)
-                .then(|| entry_id.clone());
+                && !pending_steer
+                && !inner.continues_with_sent_message(&chat_id))
+            .then(|| entry_id.clone());
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
-            if *status == DoneStatus::Completed
+            if (*status == DoneStatus::Completed || stopped_in_place)
                 && steerable
                 && !interrupted
                 && !inner.registry.update_pending(harness_id)
@@ -5224,6 +5525,7 @@ async fn drive_run(
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
+                reap_deferred_until = None;
                 self_continued_turn = false;
                 // Accepted steers still own this runtime. Publishing Idle
                 // here lets the ordinary queue overtake that continuation.
@@ -5280,6 +5582,7 @@ async fn drive_run(
             );
         }
     }
+    inner.set_running_subagents(&chat_id, 0);
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
@@ -5292,7 +5595,19 @@ async fn drive_run(
     inner.remove_run(&chat_id, &run_id);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn, false);
     inner.computer_turn_ended(&chat_id, run_computer.end_turn());
-    if !interrupted && !orphans.is_empty() {
+    // A Stop cancels the messages it found waiting; one accepted after it
+    // began is still the user's next message and must run.
+    let orphans: Vec<RoutedSteer> = if inner
+        .shutting_down
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        Vec::new()
+    } else if interrupted {
+        orphans.into_iter().filter(|s| s.after_stop).collect()
+    } else {
+        orphans
+    };
+    if !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
         // Steered boundary (idle-reaper race, a mid-turn error discarding
         // queued boundary steers, a parked child death). Their user entries
@@ -5305,7 +5620,11 @@ async fn drive_run(
         let chat = chat_id.clone();
         tokio::spawn(async move {
             for steer in orphans {
-                let Some(mut request) = engine.last_request(&chat) else {
+                let Some(mut request) = steer
+                    .request
+                    .map(|request| *request)
+                    .or_else(|| engine.last_request(&chat))
+                else {
                     tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
                     break;
                 };
@@ -5849,6 +6168,148 @@ mod tests {
         assert!(!journal.contains("secret"));
     }
 
+    /// The backwards journal scan must answer exactly what the old full forward
+    /// replay did: newest non-empty id, cwd from the governing `SessionStarted`.
+    #[tokio::test]
+    async fn journal_harness_session_matches_forward_scan() {
+        fn started(id: &str, cwd: &str) -> AgentEvent {
+            AgentEvent::SessionStarted {
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                model: "m".into(),
+                tools: Vec::new(),
+                cwd: cwd.into(),
+                session_id: id.into(),
+                assistant_message_id: "a".into(),
+            }
+        }
+        fn done(id: Option<&str>) -> AgentEvent {
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: id.map(Into::into),
+            }
+        }
+        fn text() -> AgentEvent {
+            AgentEvent::TextDelta { text: "t".into() }
+        }
+        /// The pre-change implementation, verbatim, over a forward replay.
+        fn forward(events: Vec<(u64, AgentEvent)>) -> Option<(String, String)> {
+            let mut current_cwd = String::new();
+            let mut found: Option<(String, String)> = None;
+            for (_, event) in events {
+                match event {
+                    AgentEvent::SessionStarted {
+                        session_id, cwd, ..
+                    } => {
+                        current_cwd = cwd;
+                        if !session_id.is_empty() {
+                            found = Some((session_id, current_cwd.clone()));
+                        }
+                    }
+                    AgentEvent::Done {
+                        session_id: Some(session_id),
+                        ..
+                    } if !session_id.is_empty() => {
+                        found = Some((session_id, current_cwd.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            found
+        }
+
+        /// (chat id, journaled events, expected `(session id, cwd)`).
+        type Case = (
+            &'static str,
+            Vec<AgentEvent>,
+            Option<(&'static str, &'static str)>,
+        );
+        let cases: Vec<Case> = vec![
+            ("empty", vec![], None),
+            ("no-ids", vec![text(), done(None), done(Some(""))], None),
+            (
+                "started-only",
+                vec![started("s1", "/a"), text()],
+                Some(("s1", "/a")),
+            ),
+            (
+                "done-inherits-run-cwd",
+                vec![started("s1", "/a"), text(), done(Some("s2"))],
+                Some(("s2", "/a")),
+            ),
+            (
+                "done-before-any-started",
+                vec![text(), done(Some("s1"))],
+                Some(("s1", "")),
+            ),
+            (
+                "empty-started-sets-cwd-for-later-done",
+                vec![started("s1", "/a"), started("", "/b"), done(Some("s2"))],
+                Some(("s2", "/b")),
+            ),
+            (
+                "later-empty-started-does-not-override",
+                vec![
+                    started("s1", "/a"),
+                    done(Some("s2")),
+                    started("", "/b"),
+                    text(),
+                ],
+                Some(("s2", "/a")),
+            ),
+            (
+                "newest-run-wins",
+                vec![
+                    started("s1", "/a"),
+                    done(Some("s1")),
+                    started("s3", "/c"),
+                    text(),
+                ],
+                Some(("s3", "/c")),
+            ),
+            (
+                "empty-done-ids-ignored",
+                vec![started("s1", "/a"), done(Some("")), done(None)],
+                Some(("s1", "/a")),
+            ),
+            (
+                "only-empty-started-then-done-from-older-run",
+                vec![
+                    started("s1", "/a"),
+                    done(Some("s9")),
+                    started("", "/b"),
+                    done(None),
+                ],
+                Some(("s9", "/a")),
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        for (chat, events, want) in cases {
+            for event in &events {
+                sessions.inner.journal.append(chat, event).unwrap();
+            }
+            let want = want.map(|(id, cwd)| (id.to_string(), cwd.to_string()));
+            let replayed = sessions.inner.journal.replay(chat, 0).unwrap();
+            assert_eq!(forward(replayed), want, "{chat}: reference");
+            assert_eq!(sessions.inner.journal_harness_session(chat), want, "{chat}");
+        }
+        // Torn tail: the last complete SessionStarted still governs.
+        let path = dir.path().join("journals").join("started-only.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        std::io::Write::write_all(&mut f, b"{\"seq\":3,\"event\":{\"type\":\"done\"").unwrap();
+        assert_eq!(
+            sessions.inner.journal_harness_session("started-only"),
+            Some(("s1".into(), "/a".into()))
+        );
+    }
+
     fn request() -> RunRequest {
         RunRequest {
             mcp: None,
@@ -6031,29 +6492,88 @@ mod tests {
     #[test]
     fn live_routing_requires_the_same_runtime_configuration() {
         let initial = request();
-        let config = RuntimeConfig::from_request(HarnessId::Grok, &initial);
+        let config = RuntimeConfig::new(
+            HarnessId::Grok,
+            &initial,
+            Arc::new(zeron_harness::AcpHarness::grok()),
+        );
 
         let mut follow_up = initial.clone();
         follow_up.prompt = "second".into();
         follow_up.resume = Some("session-1".into());
-        assert!(config.can_route(HarnessId::Grok, &follow_up, false));
+        assert!(config.can_route(HarnessId::Grok, &follow_up));
+        assert!(!config.can_route(HarnessId::Devin, &follow_up));
+
+        // Images ride the mailbox: they never force a replacement runtime.
+        follow_up.attachments.push("/tmp/image.png".into());
+        assert!(config.can_route(HarnessId::Grok, &follow_up));
+
+        // Another client's spelling of the same option value is the same runtime.
+        let mut spelled = initial.clone();
+        spelled
+            .model_options
+            .insert("fastMode".into(), serde_json::json!(true));
+        let config = RuntimeConfig::new(
+            HarnessId::Grok,
+            &spelled,
+            Arc::new(zeron_harness::AcpHarness::grok()),
+        );
+        follow_up
+            .model_options
+            .insert("fastMode".into(), serde_json::json!("true"));
+        assert!(config.can_route(HarnessId::Grok, &follow_up));
+
+        let mut launch = follow_up.clone();
+        launch.permission_mode = PermissionMode::Ask;
+        assert_eq!(config.route(HarnessId::Grok, &launch), None);
+        launch.permission_mode = follow_up.permission_mode;
+        launch.computer_control = !follow_up.computer_control;
+        assert_eq!(config.route(HarnessId::Grok, &launch), None);
 
         follow_up.model = Some("grok-4.5".into());
-        assert!(!config.can_route(HarnessId::Grok, &follow_up, true));
+        assert!(!config.can_route(HarnessId::Grok, &follow_up));
         follow_up.model = initial.model.clone();
 
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
-        assert!(!config.can_route(HarnessId::Grok, &follow_up, false));
-        assert!(
-            config.can_route(HarnessId::Grok, &follow_up, true),
+        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+    }
+
+    #[test]
+    fn claude_routing_compares_what_the_cli_launches_with() {
+        let claude = || -> Arc<dyn Harness> { Arc::new(zeron_harness::ClaudeHarness::new()) };
+        let mut initial = request();
+        initial.model = Some("claude-opus-5-5".into());
+        initial
+            .model_options
+            .insert("fastMode".into(), serde_json::json!(false));
+        let config = RuntimeConfig::new(HarnessId::ClaudeCode, &initial, claude());
+
+        // The CLI never reads the sandbox level; an option that launches no
+        // flag in either spelling is the same runtime.
+        let mut follow_up = initial.clone();
+        follow_up.sandbox = SandboxLevel::DangerFullAccess;
+        follow_up.model_options.clear();
+        follow_up.worktree = None;
+        assert!(config.can_route(HarnessId::ClaudeCode, &follow_up));
+
+        let mut effort = follow_up.clone();
+        effort.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
+        assert_eq!(
+            config.route(HarnessId::ClaudeCode, &effort),
+            Some(true),
             "a harness that changes effort in place keeps its run"
         );
-        follow_up.reasoning = None;
-        assert!(!config.can_route(HarnessId::Grok, &follow_up, true));
-        follow_up.reasoning = initial.reasoning;
+        effort.permission_mode = PermissionMode::Ask;
+        assert_eq!(config.route(HarnessId::ClaudeCode, &effort), None);
 
-        follow_up.attachments.push("/tmp/image.png".into());
-        assert!(config.can_route(HarnessId::Grok, &follow_up, false));
+        follow_up
+            .model_options
+            .insert("fastMode".into(), serde_json::json!("true"));
+        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
+        follow_up.model_options.clear();
+
+        follow_up.cwd = "/elsewhere".into();
+        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
     }
 
     #[test]

@@ -96,6 +96,7 @@ async fn main() {
                 interrupt: interrupt.clone(),
                 tool_server: None,
                 stop_tasks: None,
+                turn: Default::default(),
             },
         )
         .await

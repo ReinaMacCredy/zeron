@@ -10,7 +10,9 @@ voice-experimental = [] # Compatibility flag; native subscription voice uses Cod
 project-palette-fixture = []
 compact-picker-fixture = ["gpui_platform/test-support"]
 
-browser-fixture = []
+# Native captures explicitly present the freshly drawn scene, including when
+# a nested Wayland compositor has stopped requesting idle frames.
+browser-fixture = ["gpui/bench"]
 windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
@@ -33,6 +35,10 @@ required-features = ["windows-render-fixture"]
 
 [[example]]
 name = "appshots-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -147,4 +153,11 @@ mimalloc.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Embedded browser: WebView2 in visual-hosting mode, composited by the zui
+# overlay plane. Same windows 0.61 as gpui_windows, so COM types interoperate.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectComposition", "Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-core = "0.61"
+raw-window-handle = "0.6"
+reqwest.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

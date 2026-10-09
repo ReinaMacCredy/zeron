@@ -206,6 +206,51 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:detached*)
+  # A command the agent starts in its own session (Devin does): not in the
+  # agent's process group, so a group kill alone leaves it running.
+  pidfile=$(printf '%s' "$promptline" | sed 's/.*scenario:detached \([^ "]*\).*/\1/')
+  python3 -c "import os,time; os.setsid(); open('$pidfile','w').write(str(os.getpid())); time.sleep(60)" &
+  while [ ! -s "$pidfile" ]; do sleep 0.05; done
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"started"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  cat >/dev/null
+  ;;
+
+*scenario:reconfigure*)
+  # Model switches: one sent between turns, one sent mid-turn. Each set must
+  # reach the session before the prompt it was sent with.
+  next_turn() { # reads 0..n sets then the prompt; leaves them in SETS / pid
+    SETS=""
+    read -r promptline || exit 1
+    while has "$promptline" '"method":"session/set_config_option"'; do
+      emit "{\"id\":$(rid "$promptline"),\"result\":{}}"
+      SETS="$SETS $promptline"
+      read -r promptline || exit 1
+    done
+    has "$promptline" '"method":"session/prompt"' || exit 1
+    pid=$(rid "$promptline")
+  }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"turn1"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  next_turn
+  if has "$SETS" '"value":"grok-4-fast"'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"on fast"}}'
+  else
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"switch missing"}}'
+  fi
+  sleep 0.5
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  next_turn
+  if has "$SETS" '"value":"grok-4.5"'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"back on 4.5"}}'
+  else
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"switch missing"}}'
+  fi
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  cat >/dev/null
+  ;;
+
 *scenario:happy*)
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello"}}'
   update '{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking"}}'
@@ -292,6 +337,32 @@ case "$promptline" in
     emit "{\"id\":$sid,\"error\":{\"code\":-32600,\"message\":\"bad steer\"}}"
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
   fi
+  ;;
+
+*scenario:stop-steer*)
+  # "Send now" with a steer still in flight: the steering request is
+  # unanswered when the turn stop's session/cancel arrives, and answers
+  # promptRequired before the cancelled prompt settles. The cancelled steer
+  # must never run.
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
+  read -r steerline || exit 1
+  has "$steerline" '"method":"_session/steering"' || exit 1
+  sid=$(rid "$steerline")
+  read -r cancel || exit 1
+  has "$cancel" '"method":"session/cancel"' || exit 1
+  emit "{\"id\":$sid,\"result\":{\"outcome\":\"promptRequired\"}}"
+  sleep 0.2
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+  read -r next || exit 1
+  has "$next" '"method":"session/prompt"' || exit 1
+  nid=$(rid "$next")
+  if has "$next" 'cancelled steer'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"REPLAYED"}}'
+  else
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fresh"}}'
+  fi
+  emit "{\"id\":$nid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  cat >/dev/null
   ;;
 
 *scenario:steer-race*)
@@ -434,6 +505,20 @@ case "$promptline" in
   else
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
   fi
+  ;;
+
+*scenario:stop-in-place*)
+  # A turn stop: session/cancel settles the prompt `cancelled`; the agent
+  # and its session take the next session/prompt.
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
+  read -r intline || exit 1
+  has "$intline" '"method":"session/cancel"' || exit 8
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+  read -r nextline || exit 1
+  has "$nextline" '"method":"session/prompt"' || exit 9
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed"}}'
+  emit "{\"id\":$(rid "$nextline"),\"result\":{\"stopReason\":\"end_turn\"}}"
+  cat >/dev/null
   ;;
 
 *scenario:wedge*)
