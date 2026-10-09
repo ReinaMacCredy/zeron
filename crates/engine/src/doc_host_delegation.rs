@@ -2,7 +2,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use zeron_proto::{
     Chat, ChatConfig, Delegation, DelegationDelivery, DelegationStatus, DelegationWake,
-    PermissionMode, ReasoningLevel, Session, SessionStatus,
+    PermissionMode, ReasoningLevel, Session, SessionStatus, UserInputQuestion,
 };
 
 use super::*;
@@ -14,6 +14,7 @@ The `zeron` MCP server runs child agents on any installed harness and model. Tre
 
 - A delegated task is child work owned by this chat. Call `orchestrator_capabilities` for the harnesses and models available, from the same catalog as the composer; a native subagent tool's model list is not the full list. When it lists agent profiles, pick the one whose `whenToUse` fits the task and pass its id as `profile`. Prefer native subagent tools for same-harness work only when they support the chosen model. Use `delegate_task` with that harness and model when native tools cannot, including for same-harness work, for a different harness, or when the user asks for a Zeron child task. Keep each returned `taskId` and use `task_status` or `task_cancel` with it. Its `childThreadId` is backing storage for the child; do not replace delegation with `create_thread`.
 - An async child's completion wakes this chat with a message naming its taskId, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers, then read the result with `task_status`. Use mode `wait` only when this turn needs the result before it can continue.
+- A child that blocks on a question or a tool approval wakes this chat the same way, as does any thread this chat watches with `watch_threads`. Answer with `respond_to_input` when the answer follows from the task or an earlier decision (a tool approval needs this chat at Full access); anything irreversible or that only the person can decide goes to them with `ask_user`.
 - `create_thread` opens an ordinary top-level chat. Use it only when the user asks for separate/new threads or conversations, never merely because they said \"subagent\" or asked for parallel delegated work.
 
 Tool names may carry a harness prefix such as `mcp__zeron__delegate_task`; the semantics are the same. Use a stable `clientRequestId` when retrying `delegate_task`.";
@@ -104,6 +105,56 @@ pub(super) fn wake_text(task_ids: &[String]) -> String {
             many.join(", ")
         ),
     }
+}
+
+const WAKE_QUESTION_CHARS: usize = 1_500;
+
+fn input_wake_text(
+    asker: &Chat,
+    task: bool,
+    request_id: &str,
+    questions: &[UserInputQuestion],
+) -> String {
+    let title = asker.title.as_deref().unwrap_or("Untitled");
+    let who = if task {
+        format!(
+            "Delegated task {} (\"{}\")",
+            asker.id,
+            clip(title, TITLE_CHARS)
+        )
+    } else {
+        format!(
+            "Watched thread {} (\"{}\")",
+            asker.id,
+            clip(title, TITLE_CHARS)
+        )
+    };
+    let mut text = format!("{who} is waiting for input, requestId {request_id}:\n");
+    for question in questions {
+        let what = if question.approval {
+            "tool approval"
+        } else {
+            "question"
+        };
+        text.push_str(&format!(
+            "- {what} {}: {}",
+            question.id,
+            clip(&question.question, WAKE_QUESTION_CHARS)
+        ));
+        if !question.options.is_empty() {
+            let options: Vec<String> = question
+                .options
+                .iter()
+                .map(|option| format!("\"{option}\""))
+                .collect();
+            text.push_str(&format!(" Options: {}", options.join(" | ")));
+        }
+        text.push('\n');
+    }
+    text.push_str(
+        "Answer with respond_to_input (threadId, requestId, answers) when the answer follows from the task or an earlier decision; a tool approval needs this chat at Full access. Otherwise ask the person with ask_user, or leave it to them. They see the same question and may answer first, in which case respond_to_input reports nothing pending.",
+    );
+    text
 }
 
 fn status_name(status: DelegationStatus) -> &'static str {
@@ -793,14 +844,130 @@ impl DocHost {
             self.save_snapshot(&handle);
             row.id
         };
+        self.deliver_wake(&handle, &row_id).await
+    }
+
+    async fn deliver_wake(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        row_id: &str,
+    ) -> Result<(), EngineError> {
         if handle.queue_paused.load(Ordering::Acquire) {
-            return self.wake_paused_owner(&handle, &row_id).await;
+            return self.wake_paused_owner(handle, row_id).await;
         }
-        match self.steer_queued_now(owner, &row_id).await {
+        match self.steer_queued_now(&handle.chat_id, row_id).await {
             Ok(true) => {}
-            Ok(false) | Err(_) => self.drain_queue(&handle).await,
+            Ok(false) | Err(_) => self.drain_queue(handle).await,
         }
         Ok(())
+    }
+
+    pub(crate) fn offer_input_wakes(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        questions: &[UserInputQuestion],
+    ) {
+        let Some(asker) = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+        else {
+            return;
+        };
+        let owner = asker
+            .delegation
+            .as_ref()
+            .filter(|d| d.is_running())
+            .map(|d| d.delegated_by_chat_id.clone());
+        let mut targets: Vec<String> = owner.iter().cloned().collect();
+        for watcher in self
+            .thread_watches()
+            .map(|watches| watches.watchers_of(chat_id))
+            .unwrap_or_default()
+        {
+            if !targets.contains(&watcher) {
+                targets.push(watcher);
+            }
+        }
+        targets.retain(|target| target != chat_id);
+        if targets.is_empty() {
+            return;
+        }
+        let host = self.clone();
+        let request_id = request_id.to_string();
+        let questions = questions.to_vec();
+        self.spawn_worker(async move {
+            for target in targets {
+                let live = host
+                    .workspace()
+                    .and_then(|workspace| workspace.chat(&target).ok().flatten())
+                    .is_some_and(|chat| !chat.archived && chat.device_id == asker.device_id);
+                if !live {
+                    continue;
+                }
+                let task = owner.as_deref() == Some(target.as_str());
+                let text = input_wake_text(&asker, task, &request_id, &questions);
+                if let Err(err) = host
+                    .queue_input_wake(&target, &asker.id, &request_id, text)
+                    .await {
+                    tracing::warn!(chat = %target, from = %asker.id, error = %err, "input wake failed");
+                }
+            }
+        });
+    }
+
+    async fn queue_input_wake(
+        &self,
+        target: &str,
+        from: &str,
+        request_id: &str,
+        text: String,
+    ) -> Result<(), EngineError> {
+        let handle = self.open(target)?;
+        let row_id = {
+            let _drain = handle.drain_lock.lock().await;
+            let row = QueuedMessage {
+                issued_at: now_ms(),
+                computer_generation: Some(handle.doc.computer_generation()),
+                from_chat_id: Some(from.to_string()),
+                input_request: Some(request_id.to_string()),
+                ..QueuedMessage::new(new_id(), text, self.inner.config.device_id.clone())
+            };
+            let slot = handle.steer_slot(&row.id)?;
+            handle.doc.insert_queued(slot, &row)?;
+            handle.publish_queue();
+            self.save_snapshot(&handle);
+            row.id
+        };
+        self.deliver_wake(&handle, &row_id).await
+    }
+
+    pub fn set_thread_watches_for(
+        &self,
+        watcher: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<Vec<String>, EngineError> {
+        let watches = self
+            .thread_watches()
+            .ok_or_else(|| EngineError::Other("thread watches not wired".into()))?;
+        let chats = self.workspace_or_fail()?.read_chats()?;
+        let device = chats
+            .iter()
+            .find(|chat| chat.id == watcher)
+            .map(|chat| chat.device_id.clone())
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {watcher}")))?;
+        let live = |id: &str| {
+            chats
+                .iter()
+                .any(|chat| chat.id == id && !chat.archived && chat.device_id == device)
+        };
+        if let Some(id) = add.iter().find(|id| *id == watcher || !live(id)) {
+            return Err(EngineError::Other(format!(
+                "cannot watch {id}: it must be another live thread on this device"
+            )));
+        }
+        watches.change(watcher, add, remove, live)
     }
 
     /// A Stop paused the owner's queue for the person's own rows; a wake from

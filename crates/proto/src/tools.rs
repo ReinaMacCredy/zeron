@@ -69,6 +69,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "wait_threads",
                 "Wait until listed threads stop working or an inbox message arrives.",
             ),
+            tool(
+                "watch_threads",
+                "Be woken whenever listed threads block on a question or a tool approval.",
+            ),
             tool("set_thread_title", "Rename a thread on this device."),
             tool(
                 "set_thread_archived",
@@ -303,7 +307,7 @@ mod tests {
         let mut settings = ToolSettings::default();
         settings.set_tool("interrupt_thread", false);
         settings.set_group(ToolGroup::Threads, false);
-        assert_eq!(settings.disabled(&[]).len(), 9);
+        assert_eq!(settings.disabled(&[]).len(), 10);
         settings.set_group(ToolGroup::Threads, true);
         assert_eq!(settings.disabled(&[]), BTreeSet::from(["interrupt_thread"]));
     }

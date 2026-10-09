@@ -738,6 +738,8 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approval: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1021,6 +1023,7 @@ mod tests {
         let kind: UserInputKind = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(&kind).unwrap(), wire);
         let question = UserInputQuestion {
+            approval: false,
             id: "foreground".into(),
             header: "Computer".into(),
             question: "Ghostty needs to come to the front to type.".into(),

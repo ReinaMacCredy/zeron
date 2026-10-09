@@ -92,6 +92,9 @@ pub mod methods {
     /// target, a working target finishes its own turn first. Self-send and
     /// cross-project sends are refused. `{chatId, fromChatId, text}` → `{id}`.
     pub const SEND_THREAD_MESSAGE: &str = "SendThreadMessage";
+    /// Change the threads `chatId`'s agent is woken for when they block on
+    /// input. `{chatId, add?, remove?}` → `{watching: [chatId]}`.
+    pub const SET_THREAD_WATCHES: &str = "SetThreadWatches";
     // Delegated child tasks (d67-d70), IPC-only like the thread tools.
     /// `DelegateTaskParams` → `TaskView`. Failures read `"<code>: <message>"`.
     pub const DELEGATE_TASK: &str = "DelegateTask";

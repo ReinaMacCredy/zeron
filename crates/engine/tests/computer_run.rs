@@ -197,6 +197,7 @@ impl Harness for ComputerHarness {
 
 fn plain_question(id: &str) -> UserInputQuestion {
     UserInputQuestion {
+        approval: false,
         id: id.into(),
         header: "Question".into(),
         question: format!("{id}?"),
@@ -943,6 +944,7 @@ async fn auto_and_full_raise_no_card_and_never_disclose_in_the_transcript() {
 async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn() {
     let rig = rig();
     let consent = UserInputQuestion {
+        approval: false,
         id: "consent".into(),
         header: "Computer".into(),
         question: "Allow Computer for this task?".into(),
@@ -958,6 +960,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         multiline: false,
     };
     let visible = UserInputQuestion {
+        approval: false,
         id: "q1".into(),
         header: "Foreground".into(),
         question: "Can I bring Safari to the front?".into(),
@@ -1468,6 +1471,7 @@ fn push_open_question(rig: &Rig, request_id: &str) {
                 id: request_id.into(),
                 request_id: request_id.into(),
                 questions: vec![UserInputQuestion {
+                    approval: false,
                     id: "q1".into(),
                     header: "Foreground".into(),
                     question: "Can I bring Safari to the front?".into(),

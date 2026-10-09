@@ -674,6 +674,7 @@ fn consent_part(request_id: &str) -> MessagePart {
         id: request_id.into(),
         request_id: request_id.into(),
         questions: vec![zeron_proto::UserInputQuestion {
+            approval: false,
             id: "consent".into(),
             header: "Computer".into(),
             question: "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.".into(),

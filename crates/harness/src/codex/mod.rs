@@ -2646,6 +2646,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
             let question = UserInputQuestion {
+                approval: false,
                 id: new_message_id(),
                 header: {
                     let h = field(["header", "title", "label"]);
@@ -2724,6 +2725,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         )
     };
     UserInputQuestion {
+        approval: true,
         id: new_message_id(),
         header,
         question,

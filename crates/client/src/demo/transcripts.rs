@@ -369,6 +369,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     request_id: "req-1".into(),
                     questions: vec![
                         UserInputQuestion {
+                            approval: false,
                             id: "q1".into(),
                             header: "Catalog source".into(),
                             question:
@@ -385,6 +386,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                             kind: None,
                         },
                         UserInputQuestion {
+                            approval: false,
                             id: "q2".into(),
                             header: "Harnesses".into(),
                             question: "Which harnesses should the picker offer on phones?".into(),
@@ -637,6 +639,7 @@ fn consent(
         id: id.into(),
         request_id: id.into(),
         questions: vec![UserInputQuestion {
+            approval: false,
             id: "consent".into(),
             header: "Computer".into(),
             question: question.into(),
@@ -960,6 +963,7 @@ pub(crate) fn asking() -> Vec<Step> {
     vec![
         Step::Text("Before I continue I need one decision:".into()),
         Step::Question(vec![UserInputQuestion {
+            approval: false,
             id: "q1".into(),
             header: "Scope".into(),
             question: "Should the fix cover Android too?".into(),

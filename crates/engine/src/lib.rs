@@ -46,6 +46,7 @@ pub mod sessions;
 pub mod source_control;
 pub mod spaces;
 pub mod terminals;
+pub mod thread_watches;
 pub mod titles;
 mod token_rate;
 mod transcript_history;
@@ -280,6 +281,7 @@ impl EngineCore {
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
+        doc_host.set_thread_watches(thread_watches::ThreadWatches::open(profile.store_root())?);
         let agent_profiles = AgentProfilesStore::open(profile.store_root())?;
         let previews = zeron_preview::PreviewService::new(
             profile.store_root().join("previews.json"),

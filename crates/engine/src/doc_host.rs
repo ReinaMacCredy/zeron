@@ -260,6 +260,7 @@ struct DocHostInner {
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
+    thread_watches: OnceLock<crate::thread_watches::ThreadWatches>,
     /// Cancels every worker spawned through `spawn_worker` — the loops'
     /// own exit conditions (weak handle death, closed channels) don't cover
     /// runtime replacement, where Edge-capable tasks must stop doing
@@ -1106,6 +1107,7 @@ impl DocHost {
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
+                thread_watches: OnceLock::new(),
                 shutdown: CancellationToken::new(),
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
@@ -1270,6 +1272,14 @@ impl DocHost {
     /// Run commands carrying a [`zeron_proto::WorktreeSpec`].
     pub fn set_repos(&self, repos: crate::repos::Repos) {
         let _ = self.inner.repos.set(repos);
+    }
+
+    pub fn set_thread_watches(&self, watches: crate::thread_watches::ThreadWatches) {
+        let _ = self.inner.thread_watches.set(watches);
+    }
+
+    pub(crate) fn thread_watches(&self) -> Option<&crate::thread_watches::ThreadWatches> {
+        self.inner.thread_watches.get()
     }
 
     pub fn set_project_action_runtime(
@@ -3643,6 +3653,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            input_request: None,
         })?;
         handle.publish_queue();
         // Same reasoning as a command: the user is acting in this chat again.
@@ -3696,6 +3707,7 @@ impl DocHost {
             from_chat_id: Some(from_chat_id.to_string()),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            input_request: None,
         })?;
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
@@ -4621,6 +4633,11 @@ impl DocHost {
             queued_message_prompt(&item.text, &attachments)
         };
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
+        if let (Some(from), Some(request_id)) = (&item.from_chat_id, &item.input_request)
+            && !sessions.awaits_input(from, request_id)
+        {
+            return Ok(());
+        }
         if let Some(from) = &item.from_chat_id {
             // The entry keeps the raw text with its provenance; only what the
             // harness sees carries the framing. Written first so the
@@ -4631,11 +4648,13 @@ impl DocHost {
                 item.issued_at.min(now_ms()),
                 Some(from),
             )?;
-            let title = self
-                .workspace()
-                .and_then(|ws| ws.chat(from).ok().flatten())
-                .and_then(|chat| chat.title);
-            prompt = thread_message_prompt(from, title.as_deref(), &prompt);
+            if item.input_request.is_none() {
+                let title = self
+                    .workspace()
+                    .and_then(|ws| ws.chat(from).ok().flatten())
+                    .and_then(|chat| chat.title);
+                prompt = thread_message_prompt(from, title.as_deref(), &prompt);
+            }
         }
         if !item.delegated_tasks.is_empty() {
             if self.wake_owner_gone(chat_id, &item.delegated_tasks) {
@@ -6061,6 +6080,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation,
             delegated_tasks: Vec::new(),
+            input_request: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
             return Ok(()); // a redelivered command: already held
@@ -6231,6 +6251,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation,
             delegated_tasks: Vec::new(),
+            input_request: None,
         })?;
         handle.publish_queue();
         Ok(())

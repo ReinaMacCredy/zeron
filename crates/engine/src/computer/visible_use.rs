@@ -901,6 +901,7 @@ mod tests {
             id: request_id.into(),
             request_id: request_id.into(),
             questions: vec![UserInputQuestion {
+                approval: false,
                 id: "q1".into(),
                 header: "Q".into(),
                 question: question.into(),

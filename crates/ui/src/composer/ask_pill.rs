@@ -678,6 +678,7 @@ mod tests {
                 id: "input".into(),
                 request_id: request_id.into(),
                 questions: vec![UserInputQuestion {
+                    approval: false,
                     id: "side".into(),
                     header: "Conflict".into(),
                     question: "Which side wins?".into(),

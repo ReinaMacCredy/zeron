@@ -3355,6 +3355,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 zeron_proto::PermissionMode::Ask => false,
             };
             let question = UserInputQuestion {
+                approval: true,
                 id: format!("permission:{id}"),
                 header: match kind {
                     Some(kind) => format!("Allow {kind}?"),
@@ -3941,6 +3942,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion {
+                        approval: false,
                         id: format!("q{ix}"),
                         header: q
                             .get("header")

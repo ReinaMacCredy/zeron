@@ -161,6 +161,18 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "watch_threads",
+            "description": "Have Zeron wake this chat whenever one of these threads blocks on a question or a tool approval, even after this turn ends. The wake names the thread, its requestId and the questions: answer with respond_to_input when the answer follows from your task, otherwise ask the person. This chat's delegated tasks wake it this way without being listed. `add` and `remove` take thread ids on this device; returns the threads this chat watches now.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "add": { "type": "array", "items": { "type": "string" } },
+                    "remove": { "type": "array", "items": { "type": "string" } }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "set_thread_title",
             "description": "Rename a thread on this device, in any project (this chat included).",
             "inputSchema": {
@@ -196,7 +208,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "respond_to_input",
-            "description": "Answer the question or permission request another thread is blocked on (read_thread's `pendingInput`). `requestId` defaults to its current one. Each answer names a question id and the chosen option labels, or free text for an open question. Computer-use consent is the person's to give and is refused. Never this chat itself. Counts against this turn's send budget.",
+            "description": "Answer the question or permission request another thread is blocked on (read_thread's `pendingInput`). `requestId` defaults to its current one. Each answer names a question id and the chosen option labels, or free text for an open question. A tool approval (`approval: true`) can only be answered while this chat runs at Full access; otherwise ask the person. Computer-use consent is the person's to give and is refused. Never this chat itself. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -578,6 +590,7 @@ impl ThreadTools {
             "create_thread" => self.create_thread(args).await,
             "send_message_to_thread" => self.send_message_to_thread(args).await,
             "wait_threads" => self.wait_threads(args).await,
+            "watch_threads" => self.watch_threads(args).await,
             "set_thread_title" => self.set_thread_title(args).await,
             "set_thread_archived" => self.set_thread_archived(args).await,
             "interrupt_thread" => self.interrupt_thread(args).await,
@@ -1246,6 +1259,18 @@ impl ThreadTools {
             if view["workState"] == "result_available" {
                 return Ok(view);
             }
+            if view["status"] == "waiting" {
+                self.call_engine(
+                    methods::TASK_WAKE_ALWAYS,
+                    json!({ "chatId": self.chat_id, "taskId": task_id }),
+                )
+                .await?;
+                let mut view = view;
+                view["note"] = json!(
+                    "The child is blocked on input. Its question reaches this chat as a message; answer or escalate it. The result wakes this chat when it is ready."
+                );
+                return Ok(view);
+            }
             tokio::select! {
                 item = chats.recv(), if watching => watching = item.is_some(),
                 _ = tokio::time::sleep_until(deadline) => {
@@ -1331,7 +1356,10 @@ impl ThreadTools {
             .ok()
             .filter(|answers: &Vec<UserInputAnswer>| !answers.is_empty())
             .ok_or("answers must be a nonempty list of {questionId, labels}")?;
-        self.peer(thread_id).await?;
+        let (caller, peers) = self.peers().await?;
+        if !peers.iter().any(|chat| chat.id == thread_id) {
+            return Err(format!("no thread {thread_id} on this device"));
+        }
         let request_id = args["requestId"].as_str();
         let entries = self.entries_of(thread_id).await?;
         let pending = pending_input(&entries, request_id).ok_or_else(|| match request_id {
@@ -1342,6 +1370,16 @@ impl ThreadTools {
         if questions.iter().any(|q| !q["kind"].is_null()) {
             return Err(
                 "that is a computer-use consent or foreground request; only the person can answer it"
+                    .into(),
+            );
+        }
+        let caller_mode = caller
+            .config
+            .as_ref()
+            .map_or(PermissionMode::Ask, |config| config.permission_mode);
+        if questions.iter().any(|q| q["approval"] == true) && caller_mode != PermissionMode::Full {
+            return Err(
+                "that is a tool approval and this chat does not run at Full access, so it cannot grant it; ask the person instead (ask_user), or leave it to them"
                     .into(),
             );
         }
@@ -1372,6 +1410,40 @@ impl ThreadTools {
             "requestId": request_id,
             "commandId": queued["commandId"],
         }))
+    }
+
+    pub async fn watch_threads(&self, args: &Value) -> Result<Value, String> {
+        let ids = |key: &str| -> Result<Vec<String>, String> {
+            match &args[key] {
+                Value::Null => Ok(Vec::new()),
+                Value::Array(ids) => ids
+                    .iter()
+                    .map(|id| {
+                        id.as_str()
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                            .ok_or_else(|| format!("{key} must contain nonempty strings"))
+                    })
+                    .collect(),
+                _ => Err(format!("{key} must be an array")),
+            }
+        };
+        let (add, remove) = (ids("add")?, ids("remove")?);
+        if add.iter().any(|id| *id == self.chat_id) {
+            return Err("a thread cannot watch itself".into());
+        }
+        let (_, peers) = self.peers().await?;
+        if let Some(id) = add
+            .iter()
+            .find(|id| !peers.iter().any(|chat| chat.id == **id))
+        {
+            return Err(format!("no thread {id} on this device"));
+        }
+        self.call_engine(
+            methods::SET_THREAD_WATCHES,
+            json!({ "chatId": self.chat_id, "add": add, "remove": remove }),
+        )
+        .await
     }
 
     // Like device_screenshot: only the image block carries the PNG.
@@ -2351,12 +2423,13 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 26] = [
+    const THREAD_TOOLS: [&str; 27] = [
         "list_threads",
         "read_thread",
         "create_thread",
         "send_message_to_thread",
         "wait_threads",
+        "watch_threads",
         "set_thread_title",
         "set_thread_archived",
         "interrupt_thread",
@@ -2511,6 +2584,7 @@ mod tests {
                 }
                 methods::CREATE_THREAD
                 | methods::SEND_THREAD_MESSAGE
+                | methods::SET_THREAD_WATCHES
                 | methods::TAKE_THREAD_MESSAGES
                 | methods::QUEUE_COMMAND
                 | methods::MUTATE => {
@@ -2521,6 +2595,7 @@ mod tests {
                     Ok(RpcReply::Value(match method {
                         methods::CREATE_THREAD => json!({ "chatId": "new-1" }),
                         methods::SEND_THREAD_MESSAGE => json!({ "id": "q-1" }),
+                        methods::SET_THREAD_WATCHES => json!({ "watching": params["add"] }),
                         methods::QUEUE_COMMAND => json!({ "commandId": "cmd-1" }),
                         methods::TAKE_THREAD_MESSAGES => json!({
                             "messages": [{ "id": "q-9", "fromChatId": "b", "text": "done, 4 tests" }]
@@ -2546,10 +2621,20 @@ mod tests {
                         .push((method.to_string(), params.clone()));
                     let task_id = match method {
                         methods::DELEGATE_TASK if params["task"] == "slow" => "slow",
+                        methods::DELEGATE_TASK if params["task"] == "asks" => "asks",
                         methods::DELEGATE_TASK => "t-1",
                         _ => params["taskId"].as_str().unwrap_or_default(),
                     };
-                    let done = method == methods::TASK_STATUS && task_id != "slow" && reads >= 1;
+                    let done = method == methods::TASK_STATUS
+                        && !matches!(task_id, "slow" | "asks")
+                        && reads >= 1;
+                    let status = if done {
+                        "completed"
+                    } else if task_id == "asks" {
+                        "waiting"
+                    } else {
+                        "running"
+                    };
                     Ok(RpcReply::Value(match method {
                         methods::TASK_CANCEL => {
                             json!({ "taskId": task_id, "status": "cancel_requested" })
@@ -2561,7 +2646,7 @@ mod tests {
                         _ => json!({
                             "taskId": task_id,
                             "childThreadId": task_id,
-                            "status": if done { "completed" } else { "running" },
+                            "status": status,
                             "workState": if done { "result_available" } else { "working" },
                             "hasPendingChildRuns": false,
                             "summary": done.then_some("all 4 tests pass"),
@@ -4003,6 +4088,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wait_returns_when_the_child_blocks_on_input() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .delegate_task(&json!({ "task": "asks", "mode": "wait", "timeoutMs": 60_000 }))
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "waiting");
+        assert_eq!(out["waitTimedOut"], false);
+        assert!(out["note"].as_str().unwrap().contains("blocked on input"));
+        assert_eq!(logged(&rig.calls, methods::TASK_WAKE_ALWAYS).len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_delegation_to_an_unoffered_model_fails_before_the_engine() {
         let rig = rig(fixture());
         let err = rig
@@ -4974,6 +5073,67 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_tool_approval_needs_the_caller_at_full_access() {
+        let answers = json!([{ "questionId": "q1", "labels": ["Yes"] }]);
+        let asked = |caller_mode: Option<&str>| {
+            let mut fake = fixture();
+            let mut part = input_part("req-1", false, None);
+            part["questions"][0]["approval"] = json!(true);
+            fake.entries.push(entry("m6", "assistant", vec![part]));
+            if let Some(mode) = caller_mode {
+                fake.chats[0]["config"] = json!({
+                    "harness": "claude-code", "sandbox": "workspace-write", "permissionMode": mode
+                });
+            }
+            rig(fake)
+        };
+        for mode in [None, Some("ask"), Some("auto")] {
+            let rig = asked(mode);
+            let err = rig
+                .tools
+                .respond_to_input(&json!({ "threadId": "b", "answers": answers }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("Full access"), "{mode:?}: {err}");
+            assert!(queued_commands(&rig.calls).is_empty());
+            assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 0);
+        }
+        let rig = asked(Some("full"));
+        rig.tools
+            .respond_to_input(&json!({ "threadId": "b", "answers": answers }))
+            .await
+            .unwrap();
+        assert_eq!(queued_commands(&rig.calls).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watch_threads_hands_the_engine_peers_on_this_device_only() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .watch_threads(&json!({ "add": ["b"], "remove": ["c"] }))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "watching": ["b"] }));
+        assert_eq!(
+            logged(&rig.calls, methods::SET_THREAD_WATCHES),
+            vec![json!({ "chatId": "a", "add": ["b"], "remove": ["c"] })]
+        );
+        for (args, expected) in [
+            (json!({ "add": ["a"] }), "a thread cannot watch itself"),
+            (json!({ "add": ["far"] }), "no thread far on this device"),
+            (json!({ "add": "b" }), "add must be an array"),
+            (
+                json!({ "remove": [""] }),
+                "remove must contain nonempty strings",
+            ),
+        ] {
+            assert_eq!(rig.tools.watch_threads(&args).await.unwrap_err(), expected);
+        }
+        assert_eq!(logged(&rig.calls, methods::SET_THREAD_WATCHES).len(), 1);
     }
 
     #[tokio::test]

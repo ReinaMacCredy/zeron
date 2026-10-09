@@ -148,6 +148,7 @@ fn main() -> anyhow::Result<()> {
             delivery_gate: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            input_request: None,
         },
         zeron_doc::QueuedMessage {
             id: "queued-text".into(),
@@ -161,6 +162,7 @@ fn main() -> anyhow::Result<()> {
             delivery_gate: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            input_request: None,
         },
     ];
     let failure = Arc::new(std::sync::Mutex::new(None));

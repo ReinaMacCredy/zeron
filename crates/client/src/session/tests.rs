@@ -36,6 +36,7 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
 
 fn question(id: &str, consent: bool) -> UserInputQuestion {
     UserInputQuestion {
+        approval: false,
         id: id.into(),
         header: "H".into(),
         question: "Q".into(),
