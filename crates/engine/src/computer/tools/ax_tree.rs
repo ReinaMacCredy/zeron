@@ -77,6 +77,9 @@ pub(super) fn build_tree(
             ancestors.pop();
         }
         let element_ref = ref_of(line);
+        if element_ref.is_none() && is_capture_chrome(line) {
+            continue;
+        }
         let spoken = spoken_name(line);
         if element_ref.is_none()
             && matches!(line.role.as_str(), "AXImage" | "AXStaticText")
@@ -441,6 +444,18 @@ fn describe_line(line: &ComputerAxLine) -> String {
     }
 }
 
+// While a window is captured (our own screenshots and the live preview), macOS
+// swaps its title-bar buttons for a "Window sharing" menu button and back, so
+// both would flicker in every diff. Neither carries a ref the agent could use.
+fn is_capture_chrome(line: &ComputerAxLine) -> bool {
+    line.depth == 1
+        && match line.role.as_str() {
+            "AXButton" => present(&line.title).is_none(),
+            "AXMenuButton" => present(&line.title).as_deref() == Some("Window sharing"),
+            _ => false,
+        }
+}
+
 fn spoken_name(line: &ComputerAxLine) -> String {
     [&line.title, &line.description, &line.value]
         .into_iter()
@@ -659,6 +674,37 @@ mod tests {
                 "text Value: 5.990.000đ"
             ]
         );
+    }
+
+    #[test]
+    fn title_bar_buttons_and_the_capture_indicator_stay_out_of_the_tree() {
+        let titled = |depth: u32, role: &str, title: Option<&str>| ComputerAxLine {
+            title: title.map(str::to_owned),
+            ..line(depth, role)
+        };
+        let ax = ComputerAxTree {
+            url: None,
+            lines: vec![
+                titled(0, "AXWindow", Some("Build PC")),
+                titled(1, "AXButton", None),
+                titled(1, "AXMenuButton", Some("Window sharing")),
+                titled(1, "AXButton", Some("New Tab")),
+                titled(2, "AXButton", None),
+            ],
+            focused: None,
+            selected_text: None,
+            truncated: false,
+        };
+        let refs = ComputerActionableElements {
+            items: Vec::new(),
+            ref_index: Vec::new(),
+            complete: true,
+            source_incomplete: false,
+            omitted: 0,
+        };
+        let tree = build_tree(None, "cua:1:2", Some(&ax), None, &refs).unwrap();
+        let texts: Vec<&str> = tree.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, ["window Build PC", "button New Tab", "button"]);
     }
 
     #[test]

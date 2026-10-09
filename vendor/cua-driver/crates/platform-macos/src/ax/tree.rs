@@ -289,11 +289,32 @@ pub fn walk_tree_bounded(
             let decision = decide_window_scope(&candidates, wid, || {
                 crate::windows::resolve_window_owner(pid, wid)
             });
-            let walk = decision
+            let walk: Vec<AXUIElementRef> = decision
                 .walk
                 .iter()
                 .map(|&index| top_level[index])
                 .collect();
+            // A sheet can be both a top-level child and a child of the matched
+            // window; walking it twice lists every dialog control twice.
+            let window_children: Vec<AXUIElementRef> = walk
+                .iter()
+                .filter(|&&element| {
+                    copy_string_attr(element, "AXRole").as_deref() == Some("AXWindow")
+                })
+                .flat_map(|&window| copy_children(window))
+                .collect();
+            let walk = walk
+                .into_iter()
+                .filter(|&element| {
+                    copy_string_attr(element, "AXRole").as_deref() == Some("AXWindow")
+                        || !window_children
+                            .iter()
+                            .any(|&child| CFEqual(child as CFTypeRef, element as CFTypeRef) != 0)
+                })
+                .collect();
+            for child in window_children {
+                CFRelease(child as CFTypeRef);
+            }
             window_scope = Some(decision.scope);
             walk
         } else {

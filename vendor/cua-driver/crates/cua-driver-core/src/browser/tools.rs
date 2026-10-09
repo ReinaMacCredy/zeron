@@ -404,7 +404,9 @@ impl Tool for GetBrowserStateTool {
             if full_page && !include_screenshot {
                 return ToolResult::error("full_page requires include_screenshot=true");
             }
-            if include_screenshot && args.get("screenshot_only").and_then(Value::as_bool) == Some(true) {
+            if include_screenshot
+                && args.get("screenshot_only").and_then(Value::as_bool) == Some(true)
+            {
                 return match self
                     .engine
                     .capture_tab_screenshot(&session, &target_id, &tab_id, full_page)
@@ -1805,11 +1807,7 @@ async fn dom_event_enter(
         )
         .await
         .ok()
-        .and_then(|resolved| {
-            resolved["object"]["objectId"]
-                .as_str()
-                .map(str::to_owned)
-        });
+        .and_then(|resolved| resolved["object"]["objectId"].as_str().map(str::to_owned));
     let Some(object_id) = object_id else {
         return BrowserRefusal::new(
             BrowserRefusalCode::BrowserRefStale,
