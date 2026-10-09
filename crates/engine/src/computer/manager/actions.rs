@@ -836,7 +836,8 @@ impl ComputerManager {
                 && button == ComputerClickButton::Left
                 && count == 1
                 && modifiers.is_empty()
-                && self.backend.supports_action(semantic, "AXPress")
+                && (self.backend.supports_action(semantic, "AXPress")
+                    || is_pressable_role(&semantic.node.role))
             {
                 assert_desktop_operation_active()?;
                 let native = if self.agent_dialect() == ComputerAgentDialect::Macos {
@@ -1495,4 +1496,20 @@ impl ComputerManager {
         )
         .await
     }
+}
+
+fn is_pressable_role(role: &str) -> bool {
+    let bare = role.strip_prefix("AX").unwrap_or(role).to_ascii_lowercase();
+    matches!(
+        bare.as_str(),
+        "button"
+            | "push button"
+            | "link"
+            | "popupbutton"
+            | "pop up button"
+            | "menubutton"
+            | "checkbox"
+            | "radiobutton"
+            | "menuitem"
+    )
 }

@@ -69,20 +69,30 @@ pub(super) fn build_tree(
         return None;
     }
     let mut lines = Vec::with_capacity(source.len());
-    let mut ancestors: Vec<(usize, String)> = Vec::new();
+    let mut ancestors: Vec<(usize, String, String)> = Vec::new();
     let mut ordinals: HashMap<String, usize> = HashMap::new();
     for line in &source {
         let depth = line.depth as usize;
-        while ancestors.last().is_some_and(|(at, _)| *at >= depth) {
+        while ancestors.last().is_some_and(|(at, _, _)| *at >= depth) {
             ancestors.pop();
         }
         let element_ref = ref_of(line);
+        let spoken = spoken_name(line);
+        if element_ref.is_none()
+            && matches!(line.role.as_str(), "AXImage" | "AXStaticText")
+            && !spoken.is_empty()
+            && ancestors
+                .last()
+                .is_some_and(|(_, _, parent)| *parent == spoken)
+        {
+            continue;
+        }
         let identity = match element_ref {
             Some(element_ref) => format!("#{element_ref}"),
             None => {
                 let parent = ancestors
                     .last()
-                    .map_or("", |(_, identity)| identity.as_str());
+                    .map_or("", |(_, identity, _)| identity.as_str());
                 let name = [&line.title, &line.description, &line.identifier]
                     .into_iter()
                     .find_map(|text| text.as_deref().filter(|text| !text.is_empty()))
@@ -93,7 +103,7 @@ pub(super) fn build_tree(
                 format!("{key}~{ordinal}")
             }
         };
-        ancestors.push((depth, identity.clone()));
+        ancestors.push((depth, identity.clone(), spoken));
         lines.push(TreeLine {
             depth,
             element_ref,
@@ -375,8 +385,20 @@ fn describe_line(line: &ComputerAxLine) -> String {
     }
     match line.expanded {
         Some(true) => flags.push("expanded"),
-        Some(false) => flags.push("collapsed"),
-        None => {}
+        Some(false)
+            if matches!(
+                line.role.as_str(),
+                "AXDisclosureTriangle"
+                    | "AXRow"
+                    | "AXOutline"
+                    | "AXComboBox"
+                    | "AXPopUpButton"
+                    | "AXMenuButton"
+            ) =>
+        {
+            flags.push("collapsed")
+        }
+        _ => {}
     }
     if !flags.is_empty() {
         head.push_str(&format!(" ({})", flags.join(", ")));
@@ -417,6 +439,13 @@ fn describe_line(line: &ComputerAxLine) -> String {
         (false, true) => format!("{head}, {}", attributes.join(", ")),
         (false, false) => format!("{head} {}", attributes.join(", ")),
     }
+}
+
+fn spoken_name(line: &ComputerAxLine) -> String {
+    [&line.title, &line.description, &line.value]
+        .into_iter()
+        .find_map(|text| present(text))
+        .unwrap_or_default()
 }
 
 fn present(text: &Option<String>) -> Option<String> {
@@ -533,6 +562,26 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_is_shown_only_where_a_role_can_expand() {
+        let closed = |role: &str| ComputerAxLine {
+            title: Some("Chọn CPU".into()),
+            expanded: Some(false),
+            ..line(1, role)
+        };
+        assert_eq!(describe_line(&closed("AXButton")), "button Chọn CPU");
+        assert_eq!(describe_line(&closed("AXStaticText")), "text Chọn CPU");
+        assert_eq!(
+            describe_line(&closed("AXDisclosureTriangle")),
+            "disclosure triangle (collapsed) Chọn CPU"
+        );
+        let open = ComputerAxLine {
+            expanded: Some(true),
+            ..closed("AXButton")
+        };
+        assert_eq!(describe_line(&open), "button (expanded) Chọn CPU");
+    }
+
+    #[test]
     fn an_inserted_row_does_not_mark_the_unchanged_rows_below_it_as_changed() {
         let row = |text: &str| TreeLine {
             depth: 2,
@@ -565,6 +614,51 @@ mod tests {
         assert!(!diff.contains("5.535"), "{diff}");
         assert!(!diff.contains("Value: 42"), "{diff}");
         assert!(!diff.contains("\nRemoved"), "{diff}");
+    }
+
+    #[test]
+    fn a_card_link_drops_the_image_and_text_that_repeat_its_name() {
+        let named =
+            |depth: u32, role: &str, title: Option<&str>, value: Option<&str>| ComputerAxLine {
+                title: title.map(str::to_owned),
+                value: value.map(str::to_owned),
+                ..line(depth, role)
+            };
+        let ax = ComputerAxTree {
+            url: None,
+            lines: vec![
+                named(0, "AXWebArea", Some("Build PC"), None),
+                named(1, "AXLink", Some("Ryzen 7 5700X3D"), None),
+                ComputerAxLine {
+                    description: Some("Ryzen 7 5700X3D".into()),
+                    ..line(2, "AXImage")
+                },
+                named(1, "AXLink", Some("Ryzen 7 5700X3D"), None),
+                named(2, "AXStaticText", None, Some("Ryzen 7 5700X3D")),
+                named(1, "AXStaticText", None, Some("5.990.000đ")),
+            ],
+            focused: None,
+            selected_text: None,
+            truncated: false,
+        };
+        let refs = ComputerActionableElements {
+            items: Vec::new(),
+            ref_index: Vec::new(),
+            complete: true,
+            source_incomplete: false,
+            omitted: 0,
+        };
+        let tree = build_tree(None, "cua:1:2", Some(&ax), None, &refs).unwrap();
+        let texts: Vec<&str> = tree.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "HTML content Build PC",
+                "link Ryzen 7 5700X3D",
+                "link Ryzen 7 5700X3D",
+                "text Value: 5.990.000đ"
+            ]
+        );
     }
 
     #[test]

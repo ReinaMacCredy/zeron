@@ -7,8 +7,8 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use zeron_proto::computer::{
-    ComputerLaunchAppResult, ComputerPoint, ComputerScreenshot, ComputerTarget, CuaEffect,
-    McpContent, McpToolResult,
+    ComputerActionResult, ComputerDeliveryVerification, ComputerLaunchAppResult, ComputerPoint,
+    ComputerScreenshot, ComputerTarget, CuaEffect, McpContent, McpToolResult,
 };
 
 use super::args::{
@@ -50,6 +50,8 @@ use crate::computer::ui_tree_targeting::{
     normalize_label_spaces, resolve_computer_semantic_target,
 };
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
+
+pub(crate) const COMPUTER_TEXT_NOT_APPLIED_CODE: &str = "computer_text_not_applied";
 use crate::computer::wait_for_control::{
     ComputerControlReadiness, ComputerControlReadinessStatus, ComputerTargetLookup,
     wait_for_control,
@@ -1051,13 +1053,19 @@ impl ComputerTools {
             "computer_type_text" => {
                 let target = self.read_target(args, context)?;
                 let text = read_required_text(args)?;
-                plain(&if target.target.label.is_some() || target.target.role.is_some() {
+                let result = if target.target.label.is_some() || target.target.role.is_some() {
                     manager.type_text_at(thread, &text, target).await?
                 } else {
                     manager
                         .type_text(thread, &text, target.target.window_id.as_deref())
                         .await?
-                })
+                };
+                let warning = self.typed_text_readback(&text, &result).await?;
+                let mut map = to_map(&result);
+                if let Some(warning) = warning {
+                    map.insert("warning".into(), json!(warning));
+                }
+                ObservedOutcome::Plain(map)
             }
             "computer_press_key" => {
                 let key = read_key_or_chord(args)?;
@@ -1275,6 +1283,56 @@ impl ComputerTools {
             result,
             observation: outcome.observation,
         })
+    }
+
+    async fn typed_text_readback(
+        &self,
+        text: &str,
+        result: &ComputerActionResult,
+    ) -> Result<Option<String>, ComputerError> {
+        let confirmed = result
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.verified == ComputerDeliveryVerification::Confirmed);
+        let typed = text.trim();
+        let Some(window_id) = result.window_id.clone().filter(|_| !confirmed && !typed.is_empty())
+        else {
+            return Ok(None);
+        };
+        assert_desktop_operation_active()?;
+        let state = self
+            .manager
+            .get_state(ComputerStateRequest {
+                include_screenshot: Some(false),
+                include_text: false,
+                include_tree: Some(true),
+                window_id: Some(window_id),
+            })
+            .await?;
+        let Some(focused) = state.ax_tree.and_then(|ax| ax.focused).filter(|line| {
+            matches!(
+                line.role.as_str(),
+                "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
+            )
+        }) else {
+            return Ok(None);
+        };
+        let value = focused.value.unwrap_or_default();
+        if value.contains(typed) {
+            return Ok(None);
+        }
+        if value.trim().is_empty() {
+            return Err(CuaActionError::new(
+                "The text did not reach the focused text field: it is still empty after typing. Nothing landed, so there is nothing to undo. Click the field (or use setValue on its index) and read the state before typing again; do not press Return on the empty field.",
+                CuaEffect::DispatchedUnknown,
+            )
+            .code(COMPUTER_TEXT_NOT_APPLIED_CODE)
+            .into());
+        }
+        Ok(Some(format!(
+            "The focused text field does not show the typed text; its value is {}. Read the state before typing again.",
+            serde_json::to_string(&value).unwrap_or_default()
+        )))
     }
 
     pub(super) async fn with_action_element_changes(

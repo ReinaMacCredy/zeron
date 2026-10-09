@@ -69,7 +69,8 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 ## Browsers
 
 - Browser ids:
-  - `"com.google.Chrome"` (or `"Chrome"`), Edge and Brave are the user's running, signed-in profile. Attaching asks the user once.
+  - `"com.google.Chrome"` (or `"Chrome"`), Edge and Chromium are the user's running, signed-in profile. Attaching asks the user once.
+  - Other Chromium browsers (Helium, Dia, Arc, Brave, Vivaldi, Opera) are listed under `appOnlyBrowsers` in `cua.getState()`: drive their windows as apps.
   - `"isolated"` is a separate headless browser without the user's cookies. Never swap one for the other silently.
 - `cua.createBrowserTab("Chrome", url)` opens a background tab in the user's browser.
 - Tabs you open close when the turn ends:
@@ -89,6 +90,9 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 - Coordinates are pixels in the latest `getScreenshot()` of that app.
 - `pressKey` uses xdotool-style names: `"Return"`, `"Tab"`, `"super+c"`, `"Up"`.
 - `performSecondaryAction` takes only an action listed for that element in the state.
+- `(expanded)` and `(collapsed)` show whether a menu, row or disclosure is open. Click such an element like any button.
+- A page alert or another dialog appears in the state of the window it covers, with a `Dialog open over this window` line. Press its buttons by element number. Keys wait until it closes. Close every dialog your actions opened.
+- `typeText` writes into the focused field and throws if that field is still empty afterwards. Click the field first, then check its value in the next state.
 - `getAXState()` and `getScreenshot()` already wait for the UI to settle, so do not add sleeps.
 
 ## When the user takes over

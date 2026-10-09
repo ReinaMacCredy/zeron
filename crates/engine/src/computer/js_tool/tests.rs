@@ -12,6 +12,9 @@ struct FakeHost {
     calls: Mutex<Vec<(String, Value)>>,
     refuse: Option<(&'static str, &'static str)>,
     refuse_browser: Option<&'static str>,
+    dialog: bool,
+    type_warning: bool,
+    native_error: Option<&'static str>,
     delay: Duration,
 }
 
@@ -72,6 +75,16 @@ impl JsHost for FakeHost {
                 json!({ "error": { "code": "computer_input_paused", "message": message } }),
             );
         }
+        if self.native_error == Some(tool) {
+            return McpToolResult::error(
+                json!({
+                    "error": "same_pid_keyboard_ambiguity",
+                    "message": "Background input refused.",
+                    "toolGuidance": "Computer routing reminder: use computer_get_state."
+                })
+                .to_string(),
+            );
+        }
         if self.refuse_browser == Some(tool) {
             return structured_result(json!({ "status": "refused", "refusal": {
                 "code": "browser_origin_refused",
@@ -81,8 +94,13 @@ impl JsHost for FakeHost {
         match tool {
             "computer_list_apps" => json_result(json!({ "apps": [
                 { "pid": 7, "name": "Calculator", "bundleId": "com.apple.calculator", "running": true },
-                { "pid": 9, "name": "Google Chrome", "bundleId": "com.google.Chrome", "running": true }
+                { "pid": 9, "name": "Google Chrome", "bundleId": "com.google.Chrome", "running": true },
+                { "pid": 11, "name": "Helium", "bundleId": "net.imput.helium", "running": true }
             ] })),
+            "computer_type_text" if self.type_warning => json_result(json!({
+                "action": "type_text",
+                "warning": "The focused text field does not show the typed text; its value is \"x\"."
+            })),
             "computer_browser_prepare" if arguments_has(&self.calls, "strategy") => {
                 if self.args(tool).last().unwrap()["window_id"].is_u64() {
                     structured_result(
@@ -118,14 +136,21 @@ impl JsHost for FakeHost {
             "computer_browser_navigate" => {
                 json_result(json!({ "target_id": "bt-1", "tab_id": "tab-new", "opened_tab": true }))
             }
-            "computer_list_windows" => json_result(json!({ "windows": [
-                { "id": "cua:9:3", "title": "Mail", "appName": "Google Chrome", "pid": 9, "visible": true,
-                  "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 2 },
-                { "id": "cua:7:1", "title": "", "appName": "Calculator", "pid": 7, "visible": false,
-                  "bounds": { "x": 0, "y": 0, "width": 1512, "height": 33 }, "stackingIndex": 1 },
-                { "id": "cua:7:2", "title": "Calculator", "appName": "Calculator", "pid": 7, "visible": true,
-                  "bounds": { "x": 10, "y": 10, "width": 230, "height": 408 }, "stackingIndex": 5 }
-            ] })),
+            "computer_list_windows" => {
+                let mut windows = vec![
+                    json!({ "id": "cua:9:3", "title": "Mail", "appName": "Google Chrome", "pid": 9, "visible": true,
+                      "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 2 }),
+                    json!({ "id": "cua:7:1", "title": "", "appName": "Calculator", "pid": 7, "visible": false,
+                      "bounds": { "x": 0, "y": 0, "width": 1512, "height": 33 }, "stackingIndex": 1 }),
+                    json!({ "id": "cua:7:2", "title": "Calculator", "appName": "Calculator", "pid": 7, "visible": true,
+                      "bounds": { "x": 10, "y": 10, "width": 230, "height": 408 }, "stackingIndex": 5 }),
+                ];
+                if self.dialog {
+                    windows.push(json!({ "id": "cua:7:9", "title": "ttgshop.vn says", "appName": "Calculator", "pid": 7,
+                      "visible": true, "bounds": { "x": 40, "y": 40, "width": 150, "height": 100 }, "stackingIndex": 9 }));
+                }
+                json_result(json!({ "windows": windows }))
+            }
             "computer_get_state" => json_result(
                 json!({ "tree": "Window: \"Calculator\", App: Calculator.\n7 text Value: 42" }),
             ),
@@ -192,6 +217,7 @@ async fn every_cua_action_is_one_typed_tool_call_bound_to_the_visible_window() {
             "computer_list_apps",
             "computer_list_windows",
             "computer_get_state",
+            "computer_list_windows",
             "computer_click",
             "computer_type_text",
             "computer_press_key"
@@ -449,4 +475,81 @@ async fn set_timeout_resolves_an_awaited_pause_like_node() {
         "{}",
         texts(&outcome)
     );
+}
+
+#[tokio::test]
+async fn a_dialog_over_the_bound_window_is_named_in_its_state() {
+    let host = Arc::new(FakeHost {
+        dialog: true,
+        ..FakeHost::default()
+    });
+    let outcome = exec("js-dialog", &host, "await cua.getApp(\"Calculator\");").await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert!(
+        texts(&outcome)
+            .contains("Dialog open over this window: \"ttgshop.vn says\" (window cua:7:9)"),
+        "{}",
+        texts(&outcome)
+    );
+    let plain = exec(
+        "js-dialog-none",
+        &Arc::new(FakeHost::default()),
+        "await cua.getApp(\"Calculator\");",
+    )
+    .await;
+    assert!(!texts(&plain).contains("Dialog open over this window: \""));
+}
+
+#[tokio::test]
+async fn a_type_text_readback_warning_reaches_the_script_output() {
+    let host = Arc::new(FakeHost {
+        type_warning: true,
+        ..FakeHost::default()
+    });
+    let outcome = exec(
+        "js-warn",
+        &host,
+        "var c = await cua.getApp(\"Calculator\"); await c.typeText(\"5600X3D\");",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert!(texts(&outcome).contains("Warning: The focused text field does not show"));
+}
+
+#[tokio::test]
+async fn running_chromium_browsers_without_page_access_are_explained_in_the_state() {
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-browsers",
+        &host,
+        "var s = await cua.getState({ emit: false }); nodeRepl.write(JSON.stringify([s.browsers.map(b => b.id), s.appOnlyBrowsers.map(b => b.name)])); try { await cua.createBrowserTab(\"Helium\", \"https://example.com\"); } catch (e) { nodeRepl.write(e.message); }",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    let text = texts(&outcome);
+    assert!(
+        text.contains(r#"[["com.google.Chrome"],["Helium"]]"#),
+        "{text}"
+    );
+    assert!(text.contains("Helium is Chromium-based"), "{text}");
+}
+
+#[tokio::test]
+async fn a_native_error_throws_its_code_and_message_without_typed_tool_guidance() {
+    let host = Arc::new(FakeHost {
+        native_error: Some("computer_type_text"),
+        ..FakeHost::default()
+    });
+    let outcome = exec(
+        "js-native-error",
+        &host,
+        "var c = await cua.getApp(\"Calculator\"); await c.typeText(\"x\");",
+    )
+    .await;
+    let error = outcome.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("same_pid_keyboard_ambiguity: Background input refused."),
+        "{error}"
+    );
+    assert!(!error.contains("Computer routing reminder"), "{error}");
 }

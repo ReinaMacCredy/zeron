@@ -16,7 +16,14 @@
   };
 
   const errorMessage = (result, data) => {
-    if (result.isError) return textOf(result) || "The computer call failed.";
+    if (result.isError) {
+      const text = textOf(result);
+      const failure = parse(text);
+      if (failure && typeof failure.message === "string") {
+        return typeof failure.error === "string" ? `${failure.error}: ${failure.message}` : failure.message;
+      }
+      return text || "The computer call failed.";
+    }
     if (!data || typeof data !== "object") return null;
     if (data.error && typeof data.error === "object") {
       return data.error.message || data.error.code || "The computer call failed.";
@@ -165,12 +172,36 @@
     );
   };
 
+  const inside = (inner, outer) =>
+    inner &&
+    outer &&
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width &&
+    inner.y + inner.height <= outer.y + outer.height;
+
   class App {
     constructor(window, appName) {
       this.windowId = window.id;
+      this.pid = window.pid;
       this.appName = appName;
       this.title = window.title || "";
       this.screenshotId = null;
+    }
+
+    dialogNote() {
+      const windows = call("computer_list_windows", { app: this.appName }).data.windows || [];
+      const own = windows.find((w) => w.id === this.windowId);
+      if (!own) return "";
+      const dialogs = visibleWindows(windows).filter(
+        (w) => w.id !== this.windowId && w.pid === own.pid && (w.title || "").trim() && inside(w.bounds, own.bounds),
+      );
+      return dialogs
+        .map(
+          (w) =>
+            `\nDialog open over this window: "${w.title}" (window ${w.id}). Its buttons and text are in this state; press them by element number, e.g. click(<OK index>). Keyboard input to this app waits until it closes. Close any dialog your actions opened before you finish.`,
+        )
+        .join("");
     }
 
     getAXState(options) {
@@ -179,7 +210,7 @@
       if (opts.disableDiffing) args.full = true;
       const { data } = call("computer_get_state", args);
       action("get_state", this.appName);
-      const state = renderState(data, this);
+      const state = renderState(data, this) + this.dialogNote();
       if (opts.emit !== false) write(state);
       return state;
     }
@@ -300,12 +331,13 @@
     }
 
     typeText(text) {
-      call("computer_type_text", {
+      const { data } = call("computer_type_text", {
         window_id: this.windowId,
         text: String(text),
         include_screenshot: false,
       });
       action("type_text", this.appName, text);
+      if (data && data.warning) write("Warning: " + data.warning);
     }
   }
 
@@ -323,13 +355,32 @@
   const BROWSER_BUNDLES = {
     "com.google.Chrome": "Chrome",
     "com.microsoft.edgemac": "Edge",
+    "org.chromium.Chromium": "Chromium",
+  };
+
+  const APP_ONLY_BROWSERS = {
     "com.brave.Browser": "Brave",
+    "net.imput.helium": "Helium",
+    "company.thebrowser.dia": "Dia",
+    "company.thebrowser.Browser": "Arc",
+    "com.vivaldi.Vivaldi": "Vivaldi",
+    "com.operasoftware.Opera": "Opera",
   };
 
   const runningBrowsers = () =>
     (call("computer_list_apps").data.apps || [])
       .filter((a) => a.running && BROWSER_BUNDLES[a.bundleId])
       .map((a) => ({ id: a.bundleId, name: BROWSER_BUNDLES[a.bundleId], pid: a.pid, appName: a.name }));
+
+  const appOnlyBrowsers = (apps) =>
+    apps
+      .filter((a) => a.running && APP_ONLY_BROWSERS[a.bundleId])
+      .map((a) => ({
+        id: a.bundleId,
+        name: APP_ONLY_BROWSERS[a.bundleId],
+        pageTool: false,
+        reason: `${APP_ONLY_BROWSERS[a.bundleId]} is Chromium-based, but Zeron can only turn on page access for Chrome, Edge and Chromium. Drive it as an app with cua.getApp({ windowId }), or open the page in Chrome or the isolated browser.`,
+      }));
 
   class Browser {
     constructor(info) {
@@ -385,7 +436,13 @@
     const found = runningBrowsers().find(
       (b) => b.id.toLowerCase() === wanted || b.name.toLowerCase() === wanted || b.appName.toLowerCase() === wanted,
     );
-    if (!found) throw new Error(`Browser "${id}" is not running. Use cua.listBrowsers() to see what is available.`);
+    if (!found) {
+      const other = appOnlyBrowsers(call("computer_list_apps").data.apps || []).find(
+        (b) => b.id.toLowerCase() === wanted || b.name.toLowerCase() === wanted,
+      );
+      if (other) throw new Error(other.reason);
+      throw new Error(`Browser "${id}" is not running. Use cua.listBrowsers() to see what is available.`);
+    }
     return new Browser(found);
   };
 
@@ -489,6 +546,8 @@
       }
       const browsers = runningBrowsers().map((b) => ({ id: b.id, name: b.name, type: "existing_profile" }));
       const state = { apps, browsers };
+      const others = appOnlyBrowsers(call("computer_list_apps").data.apps || []);
+      if (others.length) state.appOnlyBrowsers = others;
       if (!options || options.emit !== false) write(state);
       return state;
     },

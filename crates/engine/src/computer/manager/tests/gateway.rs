@@ -395,3 +395,31 @@ async fn refuses_a_native_retained_ref_without_a_semantic_click_instead_of_using
     assert!(f.named("click").is_empty());
     manager.dispose().await;
 }
+
+#[tokio::test]
+async fn presses_a_web_button_that_advertises_no_actions_instead_of_refusing_its_ref() {
+    let f = native(37);
+    f.set_elements(vec![json!({
+        "role": "AXButton",
+        "label": "Chọn CPU",
+        "frame": { "x": -290, "y": 30, "width": 120, "height": 20 },
+        "element_token": "web-button",
+        "in_web_content": true,
+    })]);
+    let manager = gateway_manager(&f);
+    let button = bind(&observe(&f).await, 0);
+    drive(&manager, || {
+        manager.click(
+            Some(THREAD),
+            button.clone(),
+            &[],
+            ComputerClickGesture::default(),
+        )
+    })
+    .await
+    .unwrap();
+    let clicks = f.named("click");
+    assert_eq!(clicks.len(), 1);
+    assert_eq!(f.last_args("click")["element_token"], json!("web-button"));
+    manager.dispose().await;
+}

@@ -267,10 +267,7 @@ impl ReplState {
             globals.set(
                 "__zeron_emit_text",
                 Function::new(ctx.clone(), move |text: String| {
-                    text_shared
-                        .lock_sink()
-                        .content
-                        .push(McpContent::Text { text });
+                    push_text(&mut text_shared.lock_sink().content, text);
                 })?,
             )?;
             let image_shared = shared.clone();
@@ -408,9 +405,18 @@ fn write_completion<'js>(ctx: &Ctx<'js>, shared: &Shared, value: JsValue<'js>) {
         let repeated =
             matches!(sink.content.last(), Some(McpContent::Text { text: last }) if *last == text);
         if !repeated {
-            sink.content.push(McpContent::Text { text });
+            push_text(&mut sink.content, text);
         }
     }
+}
+
+fn push_text(content: &mut Vec<McpContent>, text: String) {
+    if let Some(McpContent::Text { text: last }) = content.last_mut()
+        && !last.ends_with('\n')
+    {
+        last.push('\n');
+    }
+    content.push(McpContent::Text { text });
 }
 
 fn format_error(message: &str) -> String {

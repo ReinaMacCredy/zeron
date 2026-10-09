@@ -72,8 +72,9 @@ async fn preserves_status_refusals_and_gives_a_semantic_recovery_route_for_keybo
     assert_eq!(effect(&failure), Some(CuaEffect::NotDispatched));
     assert_eq!(code(&failure), Some("same_pid_keyboard_ambiguity"));
     let message = failure.to_string();
-    assert!(message.contains("computer_type_text with an observed ref"));
+    assert!(message.contains("close it by pressing its button by element"));
     assert!(message.contains("do not send keydown/keyup"));
+    assert!(!message.contains("delivery_mode"), "{message}");
     assert_eq!(f.named("press_key").len(), 1);
 }
 

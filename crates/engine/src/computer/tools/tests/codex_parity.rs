@@ -493,3 +493,33 @@ async fn pastes_markdown_rendered_to_html_beside_its_source() {
     );
     h.dispose().await;
 }
+
+#[tokio::test]
+async fn typing_that_leaves_the_focused_field_empty_is_reported_as_an_error() {
+    let h = calculator_harness();
+    let field = |value: &str| ComputerAxTree {
+        url: None,
+        lines: Vec::new(),
+        focused: Some(ComputerAxLine {
+            depth: 1,
+            role: "AXTextField".into(),
+            value: Some(value.into()),
+            settable: true,
+            ..ComputerAxLine::default()
+        }),
+        selected_text: None,
+        truncated: false,
+    };
+    let args = json!({ "window_id": CALC, "text": "5600X3D" });
+    h.backend.fake.set_ax_tree(Some(field("")));
+    let empty = h.call("computer_type_text", args.clone()).await;
+    assert!(empty.is_error, "{empty:?}");
+    assert!(
+        format!("{empty:?}").contains("computer_text_not_applied"),
+        "{empty:?}"
+    );
+    h.backend.fake.set_ax_tree(Some(field("5600X3D")));
+    let landed = h.call("computer_type_text", args).await;
+    assert!(!landed.is_error, "{landed:?}");
+    h.dispose().await;
+}

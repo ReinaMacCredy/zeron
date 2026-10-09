@@ -307,7 +307,7 @@ impl ComputerManager {
         if observed_computer_target_node(target).is_some() {
             return Err(ComputerTargetError::new(
                 ComputerTargetErrorCode::Refused,
-                "This observed element does not support the requested exact pointer action. Use an advertised semantic action or explicitly target a current screenshot; no coordinate fallback was sent.",
+                "This element advertises no press action, and its recorded position may be stale, so no click was sent. Use one of its listed Secondary Actions (performSecondaryAction(index, name)), or click [x, y] read from a fresh getScreenshot().",
                 Vec::new(),
             )
             .into());

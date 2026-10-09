@@ -1122,7 +1122,7 @@ impl CuaInner {
             native_code.clone()
         };
         if code == "same_pid_keyboard_ambiguity" {
-            message.push_str(" Inspect computer_get_state for this exact window_id, then use computer_type_text with an observed ref (or label and role), or computer_set_value to replace the field. These semantic writes do not send keydown/keyup events. Do not retry physical keys in the background. If background input cannot reach this window safely, retry this call with delivery_mode:\"foreground\"; Zeron will ask the user to allow it (only the user's click or their own request authorizes foreground). If the user declines (foreground_declined), continue in the background or tell the user what is left.");
+            message.push_str(" Another window of this app, often a dialog such as a page alert, can receive the keys. Read the state: if a dialog is open, close it by pressing its button by element (click(index), or computer_click with its ref), then retry. To write text, set the field by element (setValue(index, text), computer_set_value, or computer_type_text with an observed ref). These semantic writes do not send keydown/keyup events. Do not retry physical keys in the background.");
         }
         if refused
             && ["stale_element_token", "stale_geometry", "stale_target"].contains(&code.as_str())
@@ -2620,7 +2620,7 @@ impl CuaInner {
         if right && self.is_darwin() && desktop_delivery_mode() != ComputerDeliveryMode::Foreground
         {
             return Err(CuaActionError::new(
-                "A background right-click was not sent. Its context menu opens in a separate window that window screenshots, the window list and background element actions never see or address, so the menu could stay open unseen and absorb the next click. Use computer_invoke_menu for a menu-bar command, or, only when the user's task asks to see the screen, retry with delivery_mode \"foreground\".",
+                "A background right-click was not sent. Its context menu opens in a separate window that window screenshots, the window list and background element actions never see or address, so the menu could stay open unseen and absorb the next click. Use computer_invoke_menu for a menu-bar command, or the element's Show menu action (performSecondaryAction(index, \"Show menu\")) when its state lists one.",
                 CuaEffect::NotDispatched,
             )
             .code("context_menu_unobservable")
