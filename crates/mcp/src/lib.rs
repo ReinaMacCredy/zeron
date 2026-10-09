@@ -82,7 +82,7 @@ pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. An awaiting_input row carries the question it is blocked on as `pendingInput` (answer it with respond_to_input); status is a snapshot, so a thread that keeps asking permission can read idle a moment later. `createdByChatId` names the chat whose agent opened it with create_thread; `delegatedByChatId` and `delegationStatus` name the chat that owns it as a delegate_task child and how that task stands. `parentId` keeps only threads opened or delegated by that thread (\"self\" for this chat), `spaceId` only one project's threads. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Every row is a real sidebar chat the human can open.",
+            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. An awaiting_input row carries the question it is blocked on as `pendingInput` (answer it with respond_to_input); status is a snapshot, so a thread that keeps asking permission can read idle a moment later. `createdByChatId` names the chat whose agent opened it with create_thread; `delegatedByChatId` and `delegationStatus` name the chat that owns it as a delegate_task child and how that task stands. `parentId` keeps only threads opened or delegated by that thread (\"self\" for this chat), `spaceId` only one project's threads. Results are newest first by updatedAt, default 50 and max 200 per page; pass nextCursor as cursor for the next page. A thread that gets a new message while you page moves ahead of the cursor and is not repeated; list again from the start to see it. Archived threads are left out unless `includeArchived` is true. Every row is a real sidebar chat the human can open.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -440,7 +440,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "task_status",
-            "description": "Read a Zeron-owned delegated task created by this chat. workState distinguishes working, waiting_for_children, and result_available; a finished turn with live nested work is not a finished task. summary is the final task result, including the error on failure, and stays stable once published. hasPendingChildRuns reports a later turn the child is running. Reading a finished result acknowledges its automatic wake.",
+            "description": "Read a Zeron-owned delegated task. A task another chat on this device delegated (its taskId is the child thread id, as list_threads names it) is read without touching that chat's wake, and the view adds `ownerChatId`. workState distinguishes working, waiting_for_children, and result_available; a finished turn with live nested work is not a finished task. summary is the final task result, including the error on failure, and stays stable once published. hasPendingChildRuns reports a later turn the child is running. Reading a finished result of this chat's own task acknowledges its automatic wake.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "taskId": { "type": "string" } },
@@ -700,26 +700,31 @@ impl ThreadTools {
             Some(Value::String(value)) => Ok(Some(value.as_str())),
             _ => Err(format!("{key} must be a string")),
         };
-        let cursor = optional("cursor")?;
+        let cursor = optional("cursor")?
+            .map(|cursor| {
+                cursor
+                    .split_once('|')
+                    .and_then(|(at, id)| {
+                        let at = DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&Utc);
+                        Some((std::cmp::Reverse(at), id))
+                    })
+                    .ok_or("cursor is not a nextCursor from list_threads")
+            })
+            .transpose()?;
         let parent = optional("parentId")?.map(|id| match id {
             "self" => self.chat_id.as_str(),
             id => id,
         });
         let space = optional("spaceId")?;
         let (_, mut peers) = self.peers().await?;
-        peers.sort_by(|a, b| a.id.cmp(&b.id));
-        if let Some(cursor) = cursor
-            && !peers.iter().any(|chat| chat.id == cursor)
-        {
-            return Err("cursor thread is no longer on this device; restart listing".into());
-        }
+        peers.sort_by(|a, b| list_key(a).cmp(&list_key(b)));
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let now = Utc::now();
         let page: Vec<_> = peers
             .iter()
             .filter(|chat| {
                 (include_archived || !chat.archived)
-                    && cursor.is_none_or(|cursor| chat.id.as_str() > cursor)
+                    && cursor.is_none_or(|cursor| list_key(chat) > cursor)
                     && parent.is_none_or(|parent| {
                         chat.created_by_chat_id.as_deref() == Some(parent)
                             || chat
@@ -732,7 +737,14 @@ impl ThreadTools {
             })
             .take(limit + 1)
             .collect();
-        let next_cursor = (page.len() > limit).then(|| page[limit - 1].id.clone());
+        let next_cursor = (page.len() > limit).then(|| {
+            let last = page[limit - 1];
+            format!(
+                "{}|{}",
+                updated_at(last).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                last.id
+            )
+        });
         let mut threads = Vec::new();
         for chat in page.into_iter().take(limit) {
             threads.push(self.row_of(chat, &sessions, now).await?);
@@ -767,7 +779,7 @@ impl ThreadTools {
             "createdByChatId": chat.created_by_chat_id,
             "delegatedByChatId": chat.delegation.as_ref().map(|d| &d.delegated_by_chat_id),
             "delegationStatus": chat.delegation.as_ref().map(|d| d.status),
-            "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
+            "updatedAt": stamp(updated_at(chat)),
             "isThisChat": chat.id == self.chat_id,
             "entryCount": summary["entryCount"],
             "lastRole": summary["lastRole"],
@@ -1263,7 +1275,25 @@ impl ThreadTools {
 
     pub async fn task_status(&self, args: &Value) -> Result<Value, String> {
         let task_id = Self::task_id(args)?;
-        self.read_task(task_id).await
+        let owner = self
+            .peer(task_id)
+            .await
+            .ok()
+            .and_then(|chat| chat.delegation)
+            .map(|d| d.delegated_by_chat_id)
+            .filter(|owner| *owner != self.chat_id);
+        let Some(owner) = owner else {
+            return self.read_task(task_id).await;
+        };
+        let mut view = self
+            .call_engine(
+                methods::TASK_STATUS,
+                json!({ "chatId": owner, "taskId": task_id, "acknowledge": false }),
+            )
+            .await?;
+        view["waitTimedOut"] = json!(false);
+        view["ownerChatId"] = json!(owner);
+        Ok(view)
     }
 
     pub async fn task_cancel(&self, args: &Value) -> Result<Value, String> {
@@ -2090,6 +2120,14 @@ fn status_of(sessions: &[Session], chat_id: &str, now: DateTime<Utc>) -> &'stati
     }
 }
 
+fn updated_at(chat: &Chat) -> DateTime<Utc> {
+    chat.last_message_at.unwrap_or(chat.created_at)
+}
+
+fn list_key(chat: &Chat) -> (std::cmp::Reverse<DateTime<Utc>>, &str) {
+    (std::cmp::Reverse(updated_at(chat)), chat.id.as_str())
+}
+
 fn stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -2810,7 +2848,7 @@ mod tests {
             .unwrap();
         assert_eq!(first["threads"].as_array().unwrap().len(), 1);
         assert_eq!(first["threads"][0]["id"], "b");
-        assert_eq!(first["nextCursor"], "b");
+        assert!(first["nextCursor"].as_str().unwrap().ends_with("|b"));
         let second = rig
             .tools
             .list_threads(&json!({"status": "working", "limit": 1, "cursor": first["nextCursor"]}))
@@ -2976,6 +3014,65 @@ mod tests {
                 ("e", false),
                 ("new-1", false)
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_pages_newest_first_and_breaks_ties_by_id() {
+        let mut fake = fixture();
+        fake.chats[4]["lastMessageAt"] = json!("2026-09-18T12:00:00.5Z");
+        fake.chats[2]["lastMessageAt"] = json!("2026-09-18T11:00:00Z");
+        fake.chats[6]["lastMessageAt"] = json!("2026-09-18T11:00:00Z");
+        let rig = rig(fake);
+        let mut ids = Vec::new();
+        let mut cursor = Value::Null;
+        loop {
+            let mut args = json!({ "limit": 2 });
+            if !cursor.is_null() {
+                args["cursor"] = cursor;
+            }
+            let out = rig.tools.list_threads(&args).await.unwrap();
+            for row in out["threads"].as_array().unwrap() {
+                ids.push(row["id"].as_str().unwrap().to_string());
+            }
+            cursor = out["nextCursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+        }
+        assert_eq!(ids, ["e", "c", "new-1", "a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn task_status_reads_another_chats_child_without_acknowledging_its_wake() {
+        let mut fake = fixture();
+        for (id, owner) in [("kid", "a"), ("theirs", "c")] {
+            let mut child = chat(id, Some("s1"), false, None);
+            child["delegation"] = json!({
+                "delegatedByChatId": owner, "depth": 1, "anchor": "m1", "wake": "always",
+                "status": "running", "startedAt": "2026-09-18T10:00:00Z"
+            });
+            fake.chats.push(child);
+        }
+        let rig = rig(fake);
+        let theirs = rig
+            .tools
+            .task_status(&json!({ "taskId": "theirs" }))
+            .await
+            .unwrap();
+        assert_eq!(theirs["ownerChatId"], "c");
+        rig.tools
+            .task_status(&json!({ "taskId": "kid" }))
+            .await
+            .unwrap();
+        let reads = logged(&rig.calls, methods::TASK_STATUS);
+        assert_eq!(
+            (&reads[0]["chatId"], &reads[0]["acknowledge"]),
+            (&json!("c"), &json!(false))
+        );
+        assert_eq!(
+            (&reads[1]["chatId"], &reads[1]["acknowledge"]),
+            (&json!("a"), &json!(true))
         );
     }
 
