@@ -35,6 +35,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const WATCH_RETRY: Duration = Duration::from_secs(2);
 const PANEL_WIDTH: f32 = 360.0;
 const SUBJECT_LIMIT: usize = 72;
+const MESSAGE_MIN_HEIGHT: f32 = 44.0;
+const TRAY_MAX_HEIGHT: f32 = 220.0;
 const DIFF_LINE_LIMIT: usize = 400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +184,10 @@ pub struct GitTab {
     _history_events: Subscription,
     compact: bool,
     toolbar_lead: Vec<AnyElement>,
+    composer_open: bool,
+    tray_open: bool,
+    focus_message: bool,
+    focus: FocusHandle,
 }
 
 fn workspace_target(space: &GitSpace, checkout_path: Option<&str>) -> WorkspaceTarget {
@@ -327,6 +333,22 @@ fn checkout_target(commit: &GitHistoryCommit, tree: &WorkingTree) -> Option<(Str
     }
 }
 
+fn clean_status(tree: &WorkingTree) -> String {
+    let mut parts = vec![
+        "Working tree clean".to_string(),
+        tree.branch
+            .clone()
+            .unwrap_or_else(|| "detached HEAD".into()),
+    ];
+    if tree.ahead > 0 {
+        parts.push(format!("{} ahead", tree.ahead));
+    }
+    if tree.behind > 0 {
+        parts.push(format!("{} behind", tree.behind));
+    }
+    parts.join(" · ")
+}
+
 fn subject_chars(message: &str) -> usize {
     message.lines().next().unwrap_or_default().chars().count()
 }
@@ -458,7 +480,11 @@ impl GitTab {
                 tab.select_commit((!again).then(|| commit.clone()), cx);
             }
             GitHistoryEvent::OpenRefBadge(_) => {}
-            GitHistoryEvent::SelectWorkingTree => tab.select_commit(None, cx),
+            GitHistoryEvent::SelectWorkingTree => {
+                tab.select_commit(None, cx);
+                tab.tray_open = true;
+                tab.open_composer(cx);
+            }
             GitHistoryEvent::FetchSucceeded => tab.load(cx),
         });
         let poll_task = cx.spawn(async move |this, cx| {
@@ -549,6 +575,10 @@ impl GitTab {
             _history_events: history_events,
             compact: false,
             toolbar_lead: Vec::new(),
+            composer_open: false,
+            tray_open: false,
+            focus_message: false,
+            focus: cx.focus_handle(),
         }
     }
 
@@ -990,7 +1020,42 @@ impl GitTab {
             self.close_branch_form(cx);
             return true;
         }
-        false
+        self.fold_composer(window, cx)
+    }
+
+    pub(super) fn open_composer(&mut self, cx: &mut Context<Self>) {
+        self.composer_open = true;
+        self.focus_message = true;
+        cx.notify();
+    }
+
+    pub(super) fn fold_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.composer_open {
+            return false;
+        }
+        self.composer_open = false;
+        self.commit_menu = false;
+        self.stash_menu = false;
+        if self.message.focus_handle(cx).contains_focused(window, cx)
+            || self.write_focus.contains_focused(window, cx)
+        {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+        true
+    }
+
+    pub(super) fn has_draft(&self, cx: &App) -> bool {
+        !self.message.read(cx).text().trim().is_empty()
+    }
+
+    fn composer_idle(&self, cx: &App) -> bool {
+        !self.has_draft(cx)
+            && !self.writing()
+            && !self.commit_menu
+            && !self.stash_menu
+            && self.confirm.is_none()
+            && !self.model_picker.read(cx).is_open()
     }
 
     fn confirm_discard(&mut self, cx: &mut Context<Self>) {
@@ -1337,6 +1402,8 @@ impl GitTab {
                     .filter(|detail| detail.commit.sha == sha)
                     .map(|detail| detail.commit.subject.clone());
                 self.select_commit(None, cx);
+                self.tray_open = true;
+                self.open_composer(cx);
                 if let Some(subject) = subject
                     && self.message.read(cx).text().trim().is_empty()
                 {
@@ -2140,13 +2207,6 @@ impl GitTab {
             } else {
                 self.render_file_row(id, index, file, staged, writes, section_pending, theme, cx)
             });
-            if let Some(open) = self
-                .expanded
-                .as_ref()
-                .filter(|open| open.staged == staged && open.path == file.path)
-            {
-                rows.push(render_diff(open, theme));
-            }
         }
         div()
             .id(id)
@@ -2231,25 +2291,32 @@ impl GitTab {
             div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
-                .role(gpui::Role::Button)
+                .role(gpui::Role::CheckBox)
                 .aria_label(SharedString::from(format!("{label} {}", file.path)))
                 .tooltip(text_tooltip(label))
-                .size(px(20.0))
+                .size(px(14.0))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(px(14.0))
-                .text_color(theme.text_muted)
-                .child(if staged { "−" } else { "+" })
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(if staged {
+                    theme.accent_strong
+                } else {
+                    theme.hairline(0.2)
+                })
+                .when(staged, |el| {
+                    el.bg(theme.accent_strong).child(
+                        icon(icons::LUCIDE_CHECK)
+                            .size(px(10.0))
+                            .text_color(theme.on_accent),
+                    )
+                })
                 .map(|el| {
                     if enabled {
-                        el.opacity(0.0)
-                            .group_hover(group.clone(), |style| style.opacity(1.0))
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(theme.text).bg(theme.ink(0.08)))
+                        el.cursor_pointer()
+                            .hover(|style| style.border_color(theme.accent_strong))
                             .on_click(cx.listener(move |tab, _, _, cx| {
                                 cx.stop_propagation();
                                 tab.run_action(
@@ -2262,9 +2329,7 @@ impl GitTab {
                                 );
                             }))
                     } else {
-                        el.opacity(0.0)
-                            .group_hover(group.clone(), |style| style.opacity(0.3))
-                            .on_click(|_, _, cx| cx.stop_propagation())
+                        el.opacity(0.45).on_click(|_, _, cx| cx.stop_propagation())
                     }
                 })
         });
@@ -2350,6 +2415,7 @@ impl GitTab {
                         tab.toggle_diff(staged, path.clone(), cx);
                     }))
             })
+            .children(toggle)
             .child(
                 div()
                     .w(px(12.0))
@@ -2401,7 +2467,6 @@ impl GitTab {
             .when(staged && writes.is_some(), |el| {
                 el.child(div().size(px(20.0)).flex_none())
             })
-            .children(toggle)
             .into_any_element()
     }
 
@@ -2465,120 +2530,280 @@ impl GitTab {
             .into_any_element()
     }
 
-    fn render_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_composer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let tree = self.tree.as_ref();
         let policy = busy_policy(cx);
         let writes = self.source_control(cx).then_some(policy);
         let commits = writes.filter(|_| self.commits_supported(cx));
-        let checkout = self.space.as_ref().and_then(|space| {
-            checkout_options(self.state.read(cx), space)
-                .into_iter()
-                .find(|option| option.path.as_deref() == self.checkout_path.as_deref())
-        });
-        let mut detail = Vec::new();
-        if let Some(branch) = tree.and_then(|tree| tree.branch.clone()) {
-            detail.push(branch);
-        } else if tree.is_some() {
-            detail.push("detached HEAD".into());
-        }
-        if let Some(option) = &checkout {
-            detail.push(if option.path.is_none() {
-                "main checkout".into()
-            } else {
-                "agent worktree".into()
-            });
-        }
         let staged = tree.map(staged_files).unwrap_or_default();
         let changes = tree.map(changed_files).unwrap_or_default();
-        let body: AnyElement = match (tree, &self.error) {
-            (None, Some(error)) => div()
-                .p(px(12.0))
-                .text_size(px(12.0))
-                .text_color(theme.danger)
-                .child(error.clone())
-                .into_any_element(),
-            (None, None) => div()
-                .p(px(12.0))
+        let dirty = tree.is_some_and(|tree| !tree.files.is_empty());
+        let mut notes: Vec<AnyElement> = Vec::new();
+        if tree.is_some_and(|tree| tree.agent_active) {
+            notes.push(render_agent_banner(policy, theme));
+        }
+        if let Some(sha) = tree.and_then(|tree| tree.cherry_pick_head.as_deref()) {
+            notes.push(self.render_pick_banner(sha, policy, theme, cx));
+        }
+        if let Some(note) = self.stash_note.clone() {
+            notes.push(
+                div()
+                    .id("git-stash-note")
+                    .debug_selector(|| "git-stash-note".into())
+                    .px(px(2.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.warning)
+                    .child(note)
+                    .into_any_element(),
+            );
+        }
+        let errors = [self.error.clone(), self.action_error.clone()];
+        notes.extend(
+            errors
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(index, error)| {
+                    let selector = format!("git-error-{index}");
+                    div()
+                        .id(SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .px(px(2.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.danger)
+                        .child(error)
+                        .into_any_element()
+                }),
+        );
+        let chip = |id: &'static str, label: String, color: gpui::Hsla| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(gpui::Role::Button)
+                .aria_expanded(self.tray_open)
+                .flex_none()
+                .h(px(crate::composer::PR_CHIP_HEIGHT))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .bg(theme.ink(if self.tray_open { 0.1 } else { 0.06 }))
+                .text_size(px(11.0))
+                .text_color(color)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.ink(0.1)))
+                .child(SharedString::from(label))
+                .on_click(cx.listener(|tab, _, _, cx| {
+                    tab.tray_open = !tab.tray_open;
+                    cx.notify();
+                }))
+        };
+        let status: AnyElement = match tree {
+            None => div()
+                .px(px(2.0))
                 .text_size(px(12.0))
                 .text_color(theme.text_muted)
-                .child("Reading the working tree…")
+                .child(if self.error.is_some() {
+                    "Could not read the working tree."
+                } else {
+                    "Reading the working tree…"
+                })
                 .into_any_element(),
-            (Some(tree), _) => div()
+            Some(tree) if !dirty => div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .id("git-clean-status")
+                        .debug_selector(|| "git-clean-status".into())
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .px(px(2.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(clean_status(tree))),
+                )
+                .children(commits.map(|policy| self.render_stash_button(tree, policy, theme, cx)))
+                .into_any_element(),
+            Some(_) => div()
+                .flex()
+                .flex_wrap()
+                .gap(px(5.0))
+                .child(chip(
+                    "git-chip-staged",
+                    format!("{} staged", staged.len()),
+                    theme.success,
+                ))
+                .child(chip(
+                    "git-chip-changed",
+                    format!("{} changed", changes.len()),
+                    theme.warning,
+                ))
+                .child(chip(
+                    "git-chip-files",
+                    if self.tray_open {
+                        "▾ hide files".into()
+                    } else {
+                        "▸ files".into()
+                    },
+                    theme.text.opacity(0.8),
+                ))
+                .into_any_element(),
+        };
+        let tray = tree.filter(|_| dirty && self.tray_open).map(|tree| {
+            let checkout = self.space.as_ref().and_then(|space| {
+                checkout_options(self.state.read(cx), space)
+                    .into_iter()
+                    .find(|option| option.path.as_deref() == self.checkout_path.as_deref())
+            });
+            let mut detail = vec![
+                tree.branch
+                    .clone()
+                    .unwrap_or_else(|| "detached HEAD".into()),
+            ];
+            if let Some(option) = &checkout {
+                detail.push(if option.path.is_none() {
+                    "main checkout".into()
+                } else {
+                    "agent worktree".into()
+                });
+            }
+            let stash = commits.map(|policy| self.render_stash_button(tree, policy, theme, cx));
+            div()
+                .id("git-tray")
+                .debug_selector(|| "git-tray".into())
                 .flex()
                 .flex_col()
-                .pb(px(8.0))
+                .mx(px(-6.0))
+                .pb(px(6.0))
+                .border_b_1()
+                .border_color(theme.hairline(0.07))
+                .child(
+                    div()
+                        .h(px(30.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("Working tree"),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(detail.join(" · "))),
+                        )
+                        .children(stash),
+                )
                 .when(tree.truncated, |el| {
                     el.child(
                         div()
-                            .mx(px(12.0))
-                            .mt(px(8.0))
+                            .px(px(8.0))
                             .text_size(px(12.0))
                             .text_color(theme.warning)
                             .child("Partial snapshot: only the first files are listed."),
                     )
                 })
-                .when_some(self.stash_note.clone(), |el, note| {
-                    el.child(
-                        div()
-                            .id("git-stash-note")
-                            .debug_selector(|| "git-stash-note".into())
-                            .mx(px(12.0))
-                            .mt(px(8.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.warning)
-                            .child(note),
-                    )
-                })
-                .children(
-                    [self.error.clone(), self.action_error.clone()]
-                        .into_iter()
-                        .flatten()
-                        .enumerate()
-                        .map(|(index, error)| {
-                            let selector = format!("git-error-{index}");
-                            div()
-                                .id(SharedString::from(selector.clone()))
-                                .debug_selector(move || selector.clone())
-                                .mx(px(12.0))
-                                .mt(px(8.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.danger)
-                                .child(error)
-                        }),
+                .child(
+                    div()
+                        .id("git-working-tree-files")
+                        .max_h(px(TRAY_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .child(self.render_section(
+                            "git-staged",
+                            "Staged",
+                            &staged,
+                            true,
+                            "No staged files",
+                            writes,
+                            theme,
+                            cx,
+                        ))
+                        .child(self.render_section(
+                            "git-changes",
+                            "Changes",
+                            &changes,
+                            false,
+                            "No changes",
+                            writes,
+                            theme,
+                            cx,
+                        )),
                 )
-                .child(self.render_section(
-                    "git-staged",
-                    "Staged",
-                    &staged,
-                    true,
-                    "No staged files",
-                    writes,
-                    theme,
-                    cx,
-                ))
-                .child(self.render_section(
-                    "git-changes",
-                    "Changes",
-                    &changes,
-                    false,
-                    "No changes",
-                    writes,
-                    theme,
-                    cx,
-                ))
-                .into_any_element(),
-        };
+        });
+        let surface = div()
+            .id("git-composer")
+            .debug_selector(|| "git-composer".into())
+            .rounded(px(crate::composer::COMPOSER_RADIUS))
+            .border_1()
+            .border_color(theme.composer_surface_border())
+            .bg(theme.composer_surface_bg())
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|tab, _, window, cx| {
+                    if !tab.writing() && !tab.model_picker.read(cx).is_open() {
+                        window.focus(&tab.message.focus_handle(cx), cx);
+                        window.prevent_default();
+                    }
+                }),
+            )
+            .px(px(14.0))
+            .pt(px(10.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(tray)
+            .children(notes)
+            .child(status)
+            .child(self.render_commit_box(staged.len(), commits, theme, cx));
         div()
-            .id("pull-requests-git-panel")
+            .id("git-composer-dock")
             .flex_none()
-            .map(|el| {
-                if self.compact {
-                    el.w_full().h(gpui::relative(0.5)).border_b_1()
-                } else {
-                    el.w(px(PANEL_WIDTH)).h_full().border_l_1()
-                }
-            })
-            .border_color(theme.hairline(0.07))
+            .w_full()
+            .pt(px(8.0))
+            .child(
+                crate::settings::widgets::page_column().pt_0().pb_0().child(
+                    div()
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|tab, _, window, cx| {
+                            if tab.composer_idle(cx) {
+                                tab.fold_composer(window, cx);
+                            }
+                        }))
+                        .child(crate::dock_orb::rise(
+                            "git-composer-rise",
+                            crate::frost::frosted(
+                                crate::composer::COMPOSER_RADIUS,
+                                crate::frost::MENU_BLUR,
+                                surface,
+                            ),
+                        )),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_file_diff(
+        &self,
+        open: &Expanded,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id("git-diff-view")
+            .debug_selector(|| "git-diff-view".into())
+            .size_full()
             .flex()
             .flex_col()
             .child(
@@ -2592,42 +2817,41 @@ impl GitTab {
                     .border_b_1()
                     .border_color(theme.hairline(0.07))
                     .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("Working tree"),
+                        back_to_history("git-diff-back", theme).on_click(cx.listener(
+                            |tab, _, _, cx| {
+                                tab.expanded = None;
+                                tab.diff_task = None;
+                                cx.notify();
+                            },
+                        )),
                     )
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .truncate()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(open.path.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(detail.join(" · "))),
-                    )
-                    .children(
-                        commits.zip(tree).map(|(policy, tree)| {
-                            self.render_stash_button(tree, policy, theme, cx)
-                        }),
+                            .child(if open.staged { "Staged" } else { "Unstaged" }),
                     ),
-            )
-            .when(tree.is_some_and(|tree| tree.agent_active), |el| {
-                el.child(render_agent_banner(policy, theme))
-            })
-            .children(
-                tree.and_then(|tree| tree.cherry_pick_head.as_deref())
-                    .map(|sha| self.render_pick_banner(sha, policy, theme, cx)),
             )
             .child(
                 div()
-                    .id("git-working-tree-files")
+                    .id("git-diff-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(body),
+                    .pt(px(8.0))
+                    .child(render_diff(open, theme)),
             )
-            .child(self.render_commit_box(staged.len(), commits, theme, cx))
             .into_any_element()
     }
 
@@ -3005,10 +3229,9 @@ impl GitTab {
             div()
                 .id("git-write-preview")
                 .debug_selector(|| "git-write-preview".into())
-                .min_h(px(64.0))
+                .min_h(px(MESSAGE_MIN_HEIGHT))
                 .max_h(px(160.0))
-                .px(px(10.0))
-                .pt(px(8.0))
+                .px(px(2.0))
                 .text_size(px(13.0))
                 .text_color(theme.text_muted)
                 .flex()
@@ -3034,10 +3257,9 @@ impl GitTab {
                 .into_any_element()
         } else {
             div()
-                .min_h(px(64.0))
+                .min_h(px(MESSAGE_MIN_HEIGHT))
                 .max_h(px(160.0))
-                .px(px(10.0))
-                .pt(px(8.0))
+                .px(px(2.0))
                 .text_size(px(13.0))
                 .child(self.message.clone())
                 .into_any_element()
@@ -3103,20 +3325,75 @@ impl GitTab {
                 None,
             )
         });
-        let fill = if main_enabled {
-            theme.accent_strong
-        } else {
-            theme.accent_strong.opacity(0.35)
+        let commit_tip = format!("{label}  ⌘↵");
+        let commit_button = div()
+            .id("git-commit-button")
+            .debug_selector(|| "git-commit-button".into())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(label))
+            .tooltip(text_tooltip(commit_tip))
+            .size(px(28.0))
+            .flex_none()
+            .rounded_full()
+            .bg(theme.text)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                icon(icons::LUCIDE_GIT_COMMIT_HORIZONTAL)
+                    .size(px(16.0))
+                    .text_color(theme.bg),
+            )
+            .map(|el| {
+                if main_enabled {
+                    el.cursor_pointer()
+                        .hover(|style| style.opacity(0.85))
+                        .on_click(cx.listener(|tab, _, _, cx| tab.commit(CommitKind::Staged, cx)))
+                } else {
+                    el.opacity(0.35)
+                }
+            });
+        let more_button = div()
+            .id("git-commit-more")
+            .debug_selector(|| "git-commit-more".into())
+            .role(gpui::Role::Button)
+            .aria_label("More commit options")
+            .relative()
+            .size(px(24.0))
+            .flex_none()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(self.commit_menu, |el| el.bg(theme.ink(0.06)))
+            .child(
+                icon(icons::LUCIDE_CHEVRON_DOWN)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .when(writes.is_some() && !committing, |el| {
+                el.cursor_pointer()
+                    .hover(|style| style.bg(theme.ink(0.06)))
+                    .on_click(cx.listener(|tab, _, _, cx| {
+                        tab.commit_menu = !tab.commit_menu;
+                        cx.notify();
+                    }))
+            })
+            .children(menu);
+        let note = |id: &'static str, color: gpui::Hsla, text: SharedString| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .px(px(2.0))
+                .text_size(px(11.0))
+                .text_color(color)
+                .child(text)
         };
         div()
             .id("git-commit-box")
-            .flex_none()
-            .p(px(12.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .border_t_1()
-            .border_color(theme.hairline(0.07))
+            .gap(px(6.0))
             .when(committing, |el| el.opacity(0.6))
             .child(
                 div()
@@ -3124,12 +3401,6 @@ impl GitTab {
                     .debug_selector(|| "git-commit-message".into())
                     .role(gpui::Role::TextInput)
                     .aria_label("Commit message")
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.hairline(0.12))
-                    .bg(theme.ink(0.02))
-                    .flex()
-                    .flex_col()
                     .when(writing, |el| el.track_focus(&self.write_focus))
                     .capture_action(cx.listener(|tab, _: &crate::composer::Submit, window, cx| {
                         cx.stop_propagation();
@@ -3151,173 +3422,74 @@ impl GitTab {
                             window.focus(&tab.message.focus_handle(cx), cx);
                         }
                     }))
-                    .child(message_body)
+                    .child(message_body),
+            )
+            .child(
+                div()
+                    .h(px(30.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(write_button)
+                    .child(model_chip)
+                    .child(settings_button)
+                    .child(div().flex_1())
                     .child(
                         div()
-                            .h(px(30.0))
-                            .px(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(write_button)
-                            .child(model_chip)
-                            .child(settings_button)
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .id("git-commit-count")
-                                    .debug_selector(|| "git-commit-count".into())
-                                    .font_family(theme.font_mono.clone())
-                                    .text_size(px(11.0))
-                                    .text_color(if subject > SUBJECT_LIMIT {
-                                        theme.warning
-                                    } else {
-                                        theme.text_muted
-                                    })
-                                    .child(SharedString::from(format!(
-                                        "{subject}/{SUBJECT_LIMIT}"
-                                    ))),
-                            ),
-                    ),
+                            .id("git-commit-count")
+                            .debug_selector(|| "git-commit-count".into())
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(11.0))
+                            .text_color(if subject > SUBJECT_LIMIT {
+                                theme.warning
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(SharedString::from(format!("{subject}/{SUBJECT_LIMIT}"))),
+                    )
+                    .child(more_button)
+                    .child(commit_button),
             )
             .when(self.model_override.is_some(), |el| {
-                el.child(
-                    div()
-                        .id("git-write-model-override")
-                        .debug_selector(|| "git-write-model-override".into())
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child("The model picked above is for this commit only."),
-                )
+                el.child(note(
+                    "git-write-model-override",
+                    theme.text_muted,
+                    "The model picked above is for this commit only.".into(),
+                ))
             })
             .when_some(self.written.as_ref().filter(|_| !writing), |el, written| {
-                el.child(
-                    div()
-                        .id("git-write-note")
-                        .debug_selector(|| "git-write-note".into())
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "Written by {} · {} from your instruction and the staged diff. Edit it before you commit.",
-                            crate::composer::harness_display_name(written.harness),
-                            written.model
-                        ))),
-                )
+                el.child(note(
+                    "git-write-note",
+                    theme.text_muted,
+                    format!(
+                        "Written by {} · {} from your instruction and the staged diff. Edit it before you commit.",
+                        crate::composer::harness_display_name(written.harness),
+                        written.model
+                    )
+                    .into(),
+                ))
             })
             .when_some(self.write_error.clone(), |el, error| {
-                el.child(
-                    div()
-                        .id("git-write-error")
-                        .debug_selector(|| "git-write-error".into())
-                        .text_size(px(11.0))
-                        .text_color(theme.danger)
-                        .child(SharedString::from(format!(
-                            "Could not write a message: {}. Pick another model or write it yourself.",
-                            error.trim_end_matches('.')
-                        ))),
-                )
+                el.child(note(
+                    "git-write-error",
+                    theme.danger,
+                    format!(
+                        "Could not write a message: {}. Pick another model or write it yourself.",
+                        error.trim_end_matches('.')
+                    )
+                    .into(),
+                ))
             })
-            .map(|el| {
-                let Some(commit) = self.last_commit.as_ref() else {
-                    return el;
-                };
+            .when_some(self.last_commit.as_ref(), |el, commit| {
                 let short = short_sha(&commit.sha);
                 let text = match &commit.branch {
                     Some(branch) => format!("Committed {short} to {branch}"),
                     None => format!("Committed {short}"),
                 };
-                el.child(
-                    div()
-                        .id("git-last-commit")
-                        .debug_selector(|| "git-last-commit".into())
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .truncate()
-                        .child(SharedString::from(text)),
-                )
+                el.child(note("git-last-commit", theme.text_muted, text.into()).truncate())
             })
-            .child(
-                div()
-                    .h(px(32.0))
-                    .rounded(px(8.0))
-                    .bg(fill)
-                    .flex()
-                    .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if main_enabled {
-                        theme.on_accent
-                    } else {
-                        theme.on_accent.opacity(0.55)
-                    })
-                    .child(
-                        div()
-                            .id("git-commit-button")
-                            .debug_selector(|| "git-commit-button".into())
-                            .role(gpui::Role::Button)
-                            .aria_label(SharedString::from(label.clone()))
-                            .flex_1()
-                            .h_full()
-                            .rounded_l(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(8.0))
-                            .child(
-                                icon(icons::LUCIDE_CHECK)
-                                    .size(px(14.0))
-                                    .text_color(theme.on_accent),
-                            )
-                            .child(SharedString::from(label))
-                            .child(
-                                div()
-                                    .px(px(4.0))
-                                    .rounded(px(4.0))
-                                    .bg(theme.on_accent.opacity(0.12))
-                                    .font_family(theme.font_mono.clone())
-                                    .text_size(px(10.0))
-                                    .child("⌘↵"),
-                            )
-                            .when(main_enabled, |el| {
-                                el.cursor_pointer()
-                                    .hover(|style| style.bg(theme.on_accent.opacity(0.08)))
-                                    .on_click(cx.listener(|tab, _, _, cx| {
-                                        tab.commit(CommitKind::Staged, cx)
-                                    }))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("git-commit-more")
-                            .debug_selector(|| "git-commit-more".into())
-                            .role(gpui::Role::Button)
-                            .aria_label("More commit options")
-                            .relative()
-                            .w(px(32.0))
-                            .h_full()
-                            .rounded_r(px(8.0))
-                            .border_l_1()
-                            .border_color(theme.on_accent.opacity(0.18))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icon(icons::LUCIDE_CHEVRON_DOWN)
-                                    .size(px(14.0))
-                                    .text_color(theme.on_accent),
-                            )
-                            .when(writes.is_some() && !committing, |el| {
-                                el.cursor_pointer()
-                                    .hover(|style| style.bg(theme.on_accent.opacity(0.08)))
-                                    .on_click(cx.listener(|tab, _, _, cx| {
-                                        tab.commit_menu = !tab.commit_menu;
-                                        cx.notify();
-                                    }))
-                            })
-                            .children(menu),
-                    ),
-            )
             .into_any_element()
     }
 }
@@ -3693,8 +3865,8 @@ impl GitTab {
                             .id("git-commit-close")
                             .debug_selector(|| "git-commit-close".into())
                             .role(gpui::Role::Button)
-                            .aria_label("Back to the working tree")
-                            .tooltip(text_tooltip("Back to the working tree"))
+                            .aria_label("Close the commit")
+                            .tooltip(text_tooltip("Close the commit"))
                             .size(px(22.0))
                             .flex_none()
                             .flex()
@@ -4088,6 +4260,32 @@ fn button_shell(
         .child(label)
 }
 
+fn back_to_history(id: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Button)
+        .aria_label("Back to history")
+        .flex_none()
+        .h(px(24.0))
+        .pl(px(4.0))
+        .pr(px(8.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .text_size(px(12.0))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(|style| style.text_color(theme.text).bg(theme.ink(0.06)))
+        .child(
+            icon(icons::ALT_ARROW_LEFT)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
+        .child("History")
+}
+
 fn detail_button(
     selector: &'static str,
     label: impl Into<SharedString>,
@@ -4269,6 +4467,7 @@ impl Render for GitTab {
         let root = div()
             .id("pull-requests-git")
             .debug_selector(|| "pull-requests-git".into())
+            .track_focus(&self.focus)
             .role(gpui::Role::Group)
             .aria_label("Git")
             .size_full()
@@ -4284,34 +4483,36 @@ impl Render for GitTab {
         if self.space.is_none() {
             return root.child(self.render_empty(&theme));
         }
+        if self.focus_message && self.composer_open {
+            self.focus_message = false;
+            if !self.writing() {
+                window.focus(&self.message.focus_handle(cx), cx);
+            }
+        }
         let files = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
         self.history
             .update(cx, |history, cx| history.set_working_tree(Some(files), cx));
-        let history = div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(self.history.clone()));
-        if self.compact {
-            return root.map(|el| match &self.detail {
-                Some(detail) => el.child(self.render_detail_panel(detail, &theme, cx)),
-                None => el.child(self.render_panel(&theme, cx)).child(history),
-            });
-        }
-        root.child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_row()
-                .child(history)
-                .child(match &self.detail {
-                    Some(detail) => self.render_detail_panel(detail, &theme, cx),
-                    None => self.render_panel(&theme, cx),
-                }),
-        )
+        let main = match &self.expanded {
+            Some(open) => self.render_file_diff(open, &theme, cx),
+            None => div()
+                .size_full()
+                .child(self.history.clone())
+                .into_any_element(),
+        };
+        let main = div().flex_1().min_w_0().min_h_0().child(main);
+        let body = div().flex_1().min_h_0().flex().flex_row();
+        let body = match &self.detail {
+            Some(detail) if self.compact => {
+                body.child(self.render_detail_panel(detail, &theme, cx))
+            }
+            Some(detail) => body
+                .child(main)
+                .child(self.render_detail_panel(detail, &theme, cx)),
+            None => body.child(main),
+        };
+        root.child(body).when(self.composer_open, |el| {
+            el.child(self.render_composer(&theme, cx))
+        })
     }
 }
 
@@ -4353,6 +4554,12 @@ impl super::PullRequestsPage {
             std::time::Instant::now(),
         );
         self.tab = tab;
+        if let Some((view, _)) = &self.git_view {
+            view.update(cx, |tab, cx| {
+                tab.composer_open = false;
+                cx.notify();
+            });
+        }
         crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
             settings.pull_requests_tab = tab;
         });
@@ -4435,9 +4642,84 @@ impl super::PullRequestsPage {
             &self.tab_focus,
             theme,
             cx,
-            |page, slot, _, cx| page.select_tab(PAGE_TABS[slot].0, cx),
+            |page, slot, window, cx| {
+                page.select_tab(PAGE_TABS[slot].0, cx);
+                window.focus(&page.tab_focus[slot], cx);
+            },
         );
-        crate::pull_request_detail::dock_row(pill, None)
+        let orb = (self.tab == PageTab::Git)
+            .then(|| self.commit_orb(theme, cx))
+            .flatten();
+        crate::pull_request_detail::dock_row(pill, orb)
+    }
+
+    fn commit_orb(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {
+        let (view, _) = self.git_view.as_ref()?;
+        let tab = view.read(cx);
+        tab.space.as_ref()?;
+        let count = tab.tree.as_ref().map_or(0, |tree| tree.files.len());
+        let label = match count {
+            0 => "Commit".to_owned(),
+            1 => "Commit, 1 changed file".to_owned(),
+            n => format!("Commit, {n} changed files"),
+        };
+        let view = view.downgrade();
+        Some(
+            crate::dock_orb::DockOrb {
+                id: "git-commit-orb",
+                glyph: icons::LUCIDE_GIT_COMMIT_HORIZONTAL,
+                tint: theme.text,
+                label: label.into(),
+                tooltip: "Commit  c",
+                marks: crate::dock_orb::Marks {
+                    working: false,
+                    count,
+                    dot: !tab.composer_open && tab.has_draft(cx),
+                },
+            }
+            .render(
+                theme,
+                move |_, _, cx| {
+                    view.update(cx, |tab, cx| tab.open_composer(cx)).ok();
+                },
+                cx,
+            ),
+        )
+    }
+
+    pub(crate) fn open_commit_composer_on_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key_char.as_deref() != Some("c")
+            || modifiers.platform
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.function
+            || self.tab != PageTab::Git
+        {
+            return false;
+        }
+        let Some((view, _)) = &self.git_view else {
+            return false;
+        };
+        view.update(cx, |tab, cx| {
+            let open = tab.space.is_some();
+            if open {
+                tab.open_composer(cx);
+            }
+            open
+        })
+    }
+
+    fn git_focus_parked(&self, window: &Window, cx: &App) -> bool {
+        self.tab_focus.iter().any(|focus| focus.is_focused(window))
+            || self
+                .git_view
+                .as_ref()
+                .is_some_and(|(view, _)| view.read(cx).focus.is_focused(window))
     }
 
     pub(super) fn render_git_page(
@@ -4463,6 +4745,12 @@ impl super::PullRequestsPage {
             .flex()
             .flex_col()
             .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
+            .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
+                if page.git_focus_parked(window, cx) && page.open_commit_composer_on_key(event, cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .flex_1()
@@ -4899,7 +5187,12 @@ mod tests {
     ) {
         let (state, calls, dir) = init_lab(cx, Default::default(), state, lab);
         let (tab, cx) = cx.add_window_view(|_, cx| GitTab::new(state, cx));
-        tab.update(cx, |tab, cx| tab.set_space(Some(space), cx));
+        cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+        tab.update(cx, |tab, cx| {
+            tab.set_space(Some(space), cx);
+            tab.tray_open = true;
+            tab.open_composer(cx);
+        });
         (tab, cx, calls, dir)
     }
 
@@ -4927,6 +5220,15 @@ mod tests {
         page.read_with(cx, |page, _| page.git_view.as_ref().unwrap().0.clone())
     }
 
+    fn open_page_tray(page: &Entity<PullRequestsPage>, cx: &mut gpui::VisualTestContext) {
+        settle(cx, |cx| cx.debug_bounds("git-commit-orb").is_some());
+        let tab = page_git_tab(page, cx);
+        tab.update(cx, |tab, cx| {
+            tab.tray_open = true;
+            tab.open_composer(cx);
+        });
+    }
+
     fn press(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx
             .debug_bounds(selector)
@@ -4950,7 +5252,8 @@ mod tests {
         let _guard = runtime.enter();
         let mut state = lab_state();
         state.selected_chat = Some("c-main".into());
-        let (_page, cx, calls, _dir) = open_page(cx, state, PageTab::Git);
+        let (page, cx, calls, _dir) = open_page(cx, state, PageTab::Git);
+        open_page_tray(&page, cx);
         settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
         assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
         assert!(cx.debug_bounds("pr-repository").is_some());
@@ -4976,6 +5279,7 @@ mod tests {
         let mut state = lab_state();
         state.selected_chat = Some("c-main".into());
         let (page, cx, calls, _dir) = open_page(cx, state, PageTab::Git);
+        open_page_tray(&page, cx);
         settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
         calls.lock().unwrap().clear();
         press(cx, "pr-repository");
@@ -5013,6 +5317,7 @@ mod tests {
         assert!(calls_of(&calls, methods::GET_WORKING_TREE).is_empty());
 
         press(cx, "pull-requests-tab-Git");
+        open_page_tray(&page, cx);
         settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
         page.read_with(cx, |page, cx| {
             assert_eq!(page.tab, PageTab::Git);
@@ -5055,9 +5360,18 @@ mod tests {
                 let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
                 let page = cx.debug_bounds("pull-requests-page").unwrap();
                 let repository = cx.debug_bounds("pr-repository").unwrap();
+                let right = match cx.debug_bounds("git-commit-orb") {
+                    Some(orb) => {
+                        assert_eq!(tab, "pull-requests-tab-Git", "the orb is Git's only");
+                        assert_eq!(orb.left(), dock.right() + px(8.0));
+                        assert!((orb.center().y - dock.center().y).abs() <= px(1.0));
+                        orb.right()
+                    }
+                    None => dock.right(),
+                };
                 assert_eq!(dock.bottom(), page.bottom() - px(16.0), "{tab} at {width}");
-                assert!((dock.center().x - page.center().x).abs() <= px(1.0));
-                assert!(dock.left() >= page.left() && dock.right() <= page.right());
+                assert!(((dock.left() + right) / 2.0 - page.center().x).abs() <= px(1.0));
+                assert!(dock.left() >= page.left() && right <= page.right());
                 assert!(
                     repository.bottom() < dock.top(),
                     "the switch left the header"
@@ -5077,6 +5391,249 @@ mod tests {
                 "Git content clears the dock"
             );
         }
+    }
+
+    #[test]
+    fn a_clean_tree_reads_as_one_status_line() {
+        let mut tree: WorkingTree = serde_json::from_value(tree()).unwrap();
+        tree.files.clear();
+        assert_eq!(
+            clean_status(&tree),
+            "Working tree clean · feature/7 · 2 ahead"
+        );
+        tree.behind = 3;
+        tree.ahead = 0;
+        assert_eq!(
+            clean_status(&tree),
+            "Working tree clean · feature/7 · 3 behind"
+        );
+        tree.branch = None;
+        tree.behind = 0;
+        assert_eq!(clean_status(&tree), "Working tree clean · detached HEAD");
+    }
+
+    fn git_page(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<PullRequestsPage>,
+        Entity<GitTab>,
+        &mut gpui::VisualTestContext,
+        Calls,
+        tempfile::TempDir,
+    ) {
+        let runtime_state = {
+            let mut state = lab_state();
+            state.selected_chat = Some("c-main".into());
+            state
+        };
+        let (page, cx, calls, dir) = open_page(cx, runtime_state, PageTab::Git);
+        cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+        settle(cx, |cx| cx.debug_bounds("git-commit-orb-count").is_some());
+        let tab = page_git_tab(&page, cx);
+        (page, tab, cx, calls, dir)
+    }
+
+    fn composer_open(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext) -> bool {
+        cx.run_until_parked();
+        let open = tab.read_with(cx, |tab, _| tab.composer_open);
+        assert_eq!(open, cx.debug_bounds("git-composer").is_some());
+        open
+    }
+
+    #[gpui::test]
+    fn the_commit_orb_counts_changes_and_opens_on_click_or_c_and_escape_folds_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, tab, cx, _calls, _dir) = git_page(cx);
+        page.read_with(cx, |page, cx| {
+            let tab = page.git_view.as_ref().unwrap().0.read(cx);
+            assert_eq!(tab.tree.as_ref().unwrap().files.len(), 2);
+        });
+        assert!(!composer_open(&tab, cx), "the Git tab opens on the orb");
+        assert!(cx.debug_bounds("git-commit-orb-dot").is_none());
+        assert!(cx.debug_bounds("pull-requests-git-panel").is_none());
+        for width in [600.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(900.0)));
+            cx.run_until_parked();
+            let git = cx.debug_bounds("pull-requests-git").unwrap();
+            let page = cx.debug_bounds("pull-requests-page").unwrap();
+            assert_eq!(git.size.width, page.size.width, "history spans the page");
+            let orb = cx.debug_bounds("git-commit-orb").unwrap();
+            assert!(orb.right() <= page.right());
+        }
+
+        for width in [600.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(900.0)));
+            press(cx, "git-commit-orb");
+            if cx.debug_bounds("git-tray").is_none() {
+                press(cx, "git-chip-files");
+            }
+            let page = cx.debug_bounds("pull-requests-page").unwrap();
+            let composer = cx.debug_bounds("git-composer").unwrap();
+            let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+            assert!(composer.left() >= page.left() && composer.right() <= page.right());
+            assert!(
+                composer.bottom() <= dock.top(),
+                "the composer rises above the dock"
+            );
+            for selector in [
+                "git-tray",
+                "git-staged-row-0",
+                "git-write-ai",
+                "git-commit-count",
+                "git-commit-more",
+                "git-commit-button",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    bounds.left() >= composer.left() && bounds.right() <= composer.right(),
+                    "{selector} fits the composer at {width}"
+                );
+            }
+            tab.update_in(cx, |tab, window, cx| {
+                assert!(tab.message.focus_handle(cx).is_focused(window))
+            });
+            cx.simulate_keystrokes("escape");
+            assert!(!composer_open(&tab, cx));
+        }
+        press(cx, "git-commit-orb");
+        assert!(composer_open(&tab, cx));
+        cx.simulate_keystrokes("escape");
+        assert!(!composer_open(&tab, cx));
+        tab.update_in(cx, |tab, window, _| assert!(tab.focus.is_focused(window)));
+
+        cx.simulate_keystrokes("c");
+        assert!(
+            composer_open(&tab, cx),
+            "c opens it with nothing typed into"
+        );
+        cx.simulate_keystrokes("c");
+        assert_eq!(message(&tab, cx), "c", "inside the box c is text");
+        cx.simulate_keystrokes("escape");
+        assert!(!composer_open(&tab, cx), "Esc folds a draft too");
+        assert!(cx.debug_bounds("git-commit-orb-dot").is_some());
+        cx.simulate_keystrokes("c");
+        assert!(composer_open(&tab, cx));
+        assert_eq!(message(&tab, cx), "c", "the draft is kept");
+        assert!(cx.debug_bounds("git-commit-orb-dot").is_none());
+    }
+
+    #[gpui::test]
+    fn an_empty_composer_folds_on_an_outside_click_or_leaving_git_and_a_draft_stays(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_page, tab, cx, _calls, _dir) = git_page(cx);
+        let outside = |cx: &mut gpui::VisualTestContext| {
+            let toolbar = cx.debug_bounds("pull-requests-git-toolbar").unwrap();
+            cx.simulate_click(toolbar.center(), gpui::Modifiers::default());
+        };
+
+        press(cx, "git-commit-orb");
+        press(cx, "git-commit-count");
+        assert!(composer_open(&tab, cx), "a click inside keeps it");
+        outside(cx);
+        assert!(
+            !composer_open(&tab, cx),
+            "an empty box folds on an outside click"
+        );
+
+        press(cx, "git-commit-orb");
+        set_message(&tab, cx, "Fix the panel");
+        outside(cx);
+        assert!(
+            composer_open(&tab, cx),
+            "a draft is not dropped by a stray click"
+        );
+
+        press(cx, "pull-requests-tab-PullRequests");
+        press(cx, "pull-requests-tab-Git");
+        assert!(!composer_open(&tab, cx), "leaving Git folds it");
+        assert!(cx.debug_bounds("git-commit-orb-dot").is_some());
+        assert_eq!(message(&tab, cx), "Fix the panel");
+
+        set_message(&tab, cx, "");
+        press(cx, "git-commit-orb");
+        press(cx, "pull-requests-tab-PullRequests");
+        assert!(!composer_open(&tab, cx));
+        assert!(
+            cx.debug_bounds("git-commit-orb").is_none(),
+            "the orb is Git's only"
+        );
+    }
+
+    #[gpui::test]
+    fn the_chips_toggle_the_file_tray_and_its_checkboxes_stage(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (tab, cx, calls, _dir) = open_loaded(cx, lab_state(), lab);
+        tab.update(cx, |tab, cx| {
+            tab.tray_open = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-tray").is_none());
+        assert!(cx.debug_bounds("git-staged-row-0").is_none());
+        for chip in ["git-chip-staged", "git-chip-changed", "git-chip-files"] {
+            assert!(cx.debug_bounds(chip).is_some(), "{chip}");
+        }
+        assert!(cx.debug_bounds("git-clean-status").is_none());
+
+        click(cx, "git-chip-files");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-tray").is_some());
+        assert!(cx.debug_bounds("git-stash-button").is_some());
+        let tray = cx.debug_bounds("git-tray").unwrap();
+        let message = cx.debug_bounds("git-commit-message").unwrap();
+        assert!(
+            tray.bottom() <= message.top(),
+            "the tray sits above the message"
+        );
+        let checkbox = cx.debug_bounds("git-changes-toggle-1").unwrap();
+        let row = cx.debug_bounds("git-changes-row-1").unwrap();
+        assert!(
+            checkbox.left() - row.left() < px(24.0),
+            "the checkbox leads the row"
+        );
+
+        click(cx, "git-changes-toggle-1");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION)[0]["action"],
+            serde_json::json!({"kind": "stage", "paths": ["notes/new file.txt"]})
+        );
+        assert!(
+            calls_of(&calls, methods::GET_WORKING_TREE_FILE_DIFF).is_empty(),
+            "the checkbox does not open the diff"
+        );
+
+        click(cx, "git-chip-staged");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-tray").is_none());
+    }
+
+    #[gpui::test]
+    fn a_clean_tree_shows_its_status_and_cannot_commit(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut clean = tree();
+        clean["files"] = serde_json::json!([]);
+        *lab.tree.lock().unwrap() = Some(clean);
+        let (tab, cx, calls, _dir) = open_loaded(cx, lab_state(), lab);
+        assert!(cx.debug_bounds("git-clean-status").is_some());
+        assert!(cx.debug_bounds("git-chip-files").is_none());
+        assert!(cx.debug_bounds("git-tray").is_none());
+        assert!(cx.debug_bounds("git-stash-button").is_some());
+        set_message(&tab, cx, "Nothing here");
+        click(cx, "git-commit-button");
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
     }
 
     fn calls_of(calls: &Calls, wanted: &str) -> Vec<serde_json::Value> {
@@ -5206,7 +5763,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_a_file_expands_its_diff_and_clicking_again_folds_it(cx: &mut gpui::TestAppContext) {
+    fn clicking_a_file_opens_its_diff_in_place_of_the_history_and_back_returns(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (tab, cx, calls, _dir) = open_tab(cx, lab_state());
@@ -5238,6 +5797,19 @@ mod tests {
             calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
             "expanding writes nothing"
         );
+        assert!(cx.debug_bounds("git-diff-view").is_some());
+        assert!(
+            cx.debug_bounds("git-working-tree-row").is_none(),
+            "the diff takes the history's place"
+        );
+        click(cx, "git-diff-back");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-diff-view").is_none());
+        assert!(cx.debug_bounds("git-working-tree-row").is_some());
+        tab.update(cx, |tab, cx| tab.open_composer(cx));
+        cx.run_until_parked();
+        click(cx, "git-staged-row-0");
+        settle(cx, |cx| cx.debug_bounds("git-file-diff").is_some());
         click(cx, "git-staged-row-0");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-file-diff").is_none());
@@ -6277,6 +6849,7 @@ mod tests {
         busy["agentActive"] = true.into();
         *lab.tree.lock().unwrap() = Some(busy);
         let (tab, cx, calls, _dir) = open_loaded(cx, lab_state(), lab);
+        assert!(cx.debug_bounds("git-agent-active").is_some());
         click(cx, "pull-requests-git-pull");
         cx.run_until_parked();
         assert!(calls_of(&calls, methods::SYNC_BRANCH).is_empty());
@@ -6288,7 +6861,6 @@ mod tests {
             );
             assert_eq!(tab.sync_refusal(SyncKind::Push, cx), None);
         });
-        assert!(cx.debug_bounds("git-agent-active").is_some());
 
         for (policy, push, pull) in [
             (crate::settings::GitAgentBusyPolicy::BlockAll, false, false),
@@ -6441,7 +7013,7 @@ mod tests {
             calls_of(&calls, methods::GET_CHECKOUT_DIFF),
             [serde_json::json!({"cwd": "/lab/repo", "mode": "commit", "commitSha": PICKED})]
         );
-        assert!(cx.debug_bounds("git-commit-button").is_none());
+        assert!(cx.debug_bounds("git-commit-detail").is_some());
         assert!(cx.debug_bounds("git-commit-subject").is_some());
         let selected = |cx: &mut gpui::VisualTestContext| {
             let history = tab.read_with(cx, |tab, _| tab.history.clone());
@@ -6480,13 +7052,13 @@ mod tests {
         show_commit(cx, &tab, history_commit(PICKED, &[], 1));
         open_commit(cx, &tab, history_commit(PICKED, &[], 1));
         assert!(
-            cx.debug_bounds("git-commit-button").is_some(),
-            "clicking the selected row again goes back to the working tree"
+            cx.debug_bounds("git-commit-detail").is_none(),
+            "clicking the selected row again goes back to the history"
         );
         show_commit(cx, &tab, history_commit(LOOSE, &[], 1));
         click(cx, "git-commit-close");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("git-commit-button").is_some());
+        assert!(cx.debug_bounds("git-commit-detail").is_none());
         assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
     }
 
@@ -6936,6 +7508,7 @@ mod tests {
         let mut state = lab_state();
         state.selected_chat = Some("c-main".into());
         let (page, cx, calls, _dir) = open_page(cx, state, PageTab::Git);
+        open_page_tray(&page, cx);
         settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
         let tab = page_git_tab(&page, cx);
         tab.update(cx, |tab, cx| {

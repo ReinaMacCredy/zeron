@@ -12119,6 +12119,10 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if self.open_commit_composer_on_c(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.type_into_composer(event, window, cx) {
             cx.stop_propagation();
             return;

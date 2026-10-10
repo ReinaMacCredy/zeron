@@ -159,6 +159,23 @@ impl Shell {
         parked
     }
 
+    pub(super) fn open_commit_composer_on_c(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(self.route, Route::PullRequests)
+            || self.pull_request_detail.is_some()
+            || !self.shell_focus_parked(window, cx)
+        {
+            return false;
+        }
+        self.pull_requests_page.clone().is_some_and(|page| {
+            page.update(cx, |page, cx| page.open_commit_composer_on_key(event, cx))
+        })
+    }
+
     pub(super) fn shell_focus_parked(&self, window: &Window, cx: &App) -> bool {
         window.focused(cx).is_none()
             || self.unfocused.is_focused(window)
