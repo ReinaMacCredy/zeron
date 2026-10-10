@@ -19,12 +19,12 @@ pub(super) fn compact_list_height(rows: usize) -> f32 {
 // handle reads as the thing to grab. Stops and pointer input share the
 // thumb's centre inset; the fill runs a rail radius past the centre, always
 // hidden under the thumb.
-const SLIDER_HEIGHT: f32 = 36.0;
+pub(super) const SLIDER_HEIGHT: f32 = 36.0;
 const RAIL_HEIGHT: f32 = 28.0;
 const RAIL_TOP: f32 = (SLIDER_HEIGHT - RAIL_HEIGHT) / 2.0;
 const THUMB_WIDTH: f32 = 44.0;
 const THUMB_HEIGHT: f32 = 32.0;
-const THUMB_INSET: f32 = THUMB_WIDTH / 2.0;
+pub(super) const THUMB_INSET: f32 = THUMB_WIDTH / 2.0;
 const FILL_PAST: f32 = RAIL_HEIGHT / 2.0;
 /// Both header buttons fill the header's height, so they sit one card inset
 /// from the card's top and sides and their radius is concentric with its
@@ -987,144 +987,81 @@ impl Pickers {
         }
         let entity = cx.entity().downgrade();
         let drag_entity = entity.clone();
-        let slider = div()
-            .id("compact-effort-slider")
-            .debug_selector(|| "glass-effort-slider".into())
-            .role(gpui::Role::Slider)
-            .aria_label("Reasoning effort")
-            .aria_value(effort.clone())
-            .aria_numeric_value(selected as f64)
-            .aria_min_numeric_value(0.0)
-            .aria_max_numeric_value(levels.len().saturating_sub(1) as f64)
-            .aria_numeric_value_step(1.0)
-            .aria_orientation(gpui::Orientation::Horizontal)
-            .aria_description("Use Left and Right to adjust reasoning; Home and End select the first and last levels")
-            .relative()
-            .h(px(SLIDER_HEIGHT))
-            .cursor_pointer()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                    window.focus(&this.focus, cx);
-                    this.compact_keyboard = false;
-                    if this.compact_model_picker(cx) {
-                        this.active = NO_ACTIVE_ROW;
-                    }
-                    this.compact_effort_dragging = true;
-                    this.pick_effort_at(event.position.x, cx);
-                    cx.notify();
-                    cx.stop_propagation();
-                }),
-            )
-            .child(
-                gpui::canvas(
-                    move |bounds, _, cx| {
-                        let _ = entity.update(cx, |this, _| this.effort_bounds = Some(bounds));
-                    },
-                    move |_, _, window, _| {
-                        let release = drag_entity.clone();
-                        window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                            if phase == gpui::DispatchPhase::Bubble {
-                                let _ = release.update(cx, |this, cx| {
-                                    if this.compact_effort_dragging {
-                                        this.compact_effort_dragging = false;
-                                        this.compact_motion.drag_fraction = None;
-                                        cx.notify();
-                                    }
-                                });
-                            }
-                        });
-                        let entity = drag_entity.clone();
-                        window.on_mouse_event(
-                            move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                                if phase == gpui::DispatchPhase::Bubble
-                                    && event.pressed_button == Some(gpui::MouseButton::Left)
-                                {
-                                    let _ = entity.update(cx, |this, cx| {
-                                        if this.compact_effort_dragging {
-                                            this.pick_effort_at(event.position.x, cx);
-                                        }
-                                    });
-                                }
-                            },
-                        );
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
-            .child(crate::glass::light(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top(px(RAIL_TOP))
-                    .h(px(RAIL_HEIGHT))
-                    .rounded_full(),
-                &theme,
-                1.0,
-            ))
-            // A contained glow: it must not wash over the option rows.
-            .child(effort_fill(
-                &theme,
-                fraction,
-                levels.len(),
-                Shimmer {
-                    intensity,
-                    phase,
-                    breath,
+        let slider = glass_track(
+            &theme,
+            Some(fraction),
+            levels.len(),
+            press,
+            highlighted,
+            Shimmer {
+                intensity,
+                phase,
+                breath,
+            },
+        )
+        .id("compact-effort-slider")
+        .debug_selector(|| "glass-effort-slider".into())
+        .role(gpui::Role::Slider)
+        .aria_label("Reasoning effort")
+        .aria_value(effort.clone())
+        .aria_numeric_value(selected as f64)
+        .aria_min_numeric_value(0.0)
+        .aria_max_numeric_value(levels.len().saturating_sub(1) as f64)
+        .aria_numeric_value_step(1.0)
+        .aria_orientation(gpui::Orientation::Horizontal)
+        .aria_description(
+            "Use Left and Right to adjust reasoning; Home and End select the first and last levels",
+        )
+        .cursor_pointer()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                window.focus(&this.focus, cx);
+                this.compact_keyboard = false;
+                if this.compact_model_picker(cx) {
+                    this.active = NO_ACTIVE_ROW;
+                }
+                this.compact_effort_dragging = true;
+                this.pick_effort_at(event.position.x, cx);
+                cx.notify();
+                cx.stop_propagation();
+            }),
+        )
+        .child(
+            gpui::canvas(
+                move |bounds, _, cx| {
+                    let _ = entity.update(cx, |this, _| this.effort_bounds = Some(bounds));
                 },
-            ))
-            .child({
-                // A plain handle that keeps its size; a press only lifts
-                // it on a softer, wider drop.
-                let (w, h) = (THUMB_WIDTH, THUMB_HEIGHT);
-                // Fast mode breathes a soft accent halo under the thumb.
-                let live = intensity * (0.55 + 0.45 * breath);
-                let place = |el: gpui::Div| {
-                    el.absolute()
-                        .left(gpui::relative(fraction))
-                        .ml(px(-w / 2.0))
-                        .w(px(w))
-                        .h(px(h))
-                        .rounded_full()
-                };
-                div()
-                    .absolute()
-                    .left(px(THUMB_INSET))
-                    .right(px(THUMB_INSET))
-                    .top(px((SLIDER_HEIGHT - h) / 2.0))
-                    .when(intensity > 0.001, |el| {
-                        el.child(place(div()).shadow(vec![gpui::BoxShadow {
-                            color: theme.accent.opacity(0.35 * live),
-                            offset: gpui::point(px(0.0), px(1.0)),
-                            blur_radius: px(10.0),
-                            spread_radius: px(0.0),
-                            inset: false,
-                        }]))
-                    })
-                    .when(press > 0.001, |el| {
-                        el.child(place(div()).shadow(vec![gpui::BoxShadow {
-                            color: gpui::black().opacity(0.12 * press),
-                            offset: gpui::point(px(0.0), px(2.0 * press)),
-                            blur_radius: px(8.0),
-                            spread_radius: px(0.0),
-                            inset: false,
-                        }]))
-                    })
-                    .when(highlighted, |el| {
-                        el.child(place(div()).shadow(vec![gpui::BoxShadow {
-                            color: theme.accent.opacity(0.4),
-                            offset: gpui::point(px(0.0), px(0.0)),
-                            blur_radius: px(0.0),
-                            spread_radius: px(3.0),
-                            inset: false,
-                        }]))
-                    })
-                    .child(
-                        crate::glass::thumb(place(div()), &theme),
-                    )
-            });
+                move |_, _, window, _| {
+                    let release = drag_entity.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            let _ = release.update(cx, |this, cx| {
+                                if this.compact_effort_dragging {
+                                    this.compact_effort_dragging = false;
+                                    this.compact_motion.drag_fraction = None;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    });
+                    let entity = drag_entity.clone();
+                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Bubble
+                            && event.pressed_button == Some(gpui::MouseButton::Left)
+                        {
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.compact_effort_dragging {
+                                    this.pick_effort_at(event.position.x, cx);
+                                }
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0(),
+        );
         Some(slider.into_any_element())
     }
 
@@ -1390,10 +1327,87 @@ impl Pickers {
     }
 }
 
+pub(super) fn glass_track(
+    theme: &Theme,
+    thumb: Option<f32>,
+    count: usize,
+    press: f32,
+    highlighted: bool,
+    shimmer: Shimmer,
+) -> gpui::Div {
+    let Shimmer {
+        intensity, breath, ..
+    } = shimmer;
+    div()
+        .relative()
+        .h(px(SLIDER_HEIGHT))
+        .child(crate::glass::light(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(RAIL_TOP))
+                .h(px(RAIL_HEIGHT))
+                .rounded_full(),
+            theme,
+            1.0,
+        ))
+        // A contained glow: it must not wash over the option rows.
+        .child(effort_fill(theme, thumb, count, shimmer))
+        .children(thumb.map(|fraction| {
+            // A plain handle that keeps its size; a press only lifts
+            // it on a softer, wider drop.
+            let (w, h) = (THUMB_WIDTH, THUMB_HEIGHT);
+            // Fast mode breathes a soft accent halo under the thumb.
+            let live = intensity * (0.55 + 0.45 * breath);
+            let place = |el: gpui::Div| {
+                el.absolute()
+                    .left(gpui::relative(fraction))
+                    .ml(px(-w / 2.0))
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded_full()
+            };
+            div()
+                .absolute()
+                .left(px(THUMB_INSET))
+                .right(px(THUMB_INSET))
+                .top(px((SLIDER_HEIGHT - h) / 2.0))
+                .when(intensity > 0.001, |el| {
+                    el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                        color: theme.accent.opacity(0.35 * live),
+                        offset: gpui::point(px(0.0), px(1.0)),
+                        blur_radius: px(10.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }]))
+                })
+                .when(press > 0.001, |el| {
+                    el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                        color: gpui::black().opacity(0.12 * press),
+                        offset: gpui::point(px(0.0), px(2.0 * press)),
+                        blur_radius: px(8.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }]))
+                })
+                .when(highlighted, |el| {
+                    el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                        color: theme.accent.opacity(0.4),
+                        offset: gpui::point(px(0.0), px(0.0)),
+                        blur_radius: px(0.0),
+                        spread_radius: px(3.0),
+                        inset: false,
+                    }]))
+                })
+                .child(crate::glass::thumb(place(div()), theme))
+        }))
+}
+
 /// The accent glass fill from the rail's start to just past the thumb, with
 /// the stops painted over rail and fill in one coordinate space.
 #[derive(Clone, Copy)]
-struct Shimmer {
+pub(super) struct Shimmer {
     /// 0 at rest, up to 1 for fast mode on a top level.
     intensity: f32,
     /// 0–1 position of the band's sweep.
@@ -1402,7 +1416,15 @@ struct Shimmer {
     breath: f32,
 }
 
-fn effort_fill(theme: &Theme, fraction: f32, count: usize, shimmer: Shimmer) -> AnyElement {
+impl Shimmer {
+    pub(super) const STILL: Self = Self {
+        intensity: 0.0,
+        phase: 0.0,
+        breath: 0.5,
+    };
+}
+
+fn effort_fill(theme: &Theme, fraction: Option<f32>, count: usize, shimmer: Shimmer) -> AnyElement {
     let Shimmer {
         intensity,
         phase,
@@ -1419,6 +1441,8 @@ fn effort_fill(theme: &Theme, fraction: f32, count: usize, shimmer: Shimmer) -> 
         move |bounds, _, window, _| {
             let width = f32::from(bounds.size.width);
             let run = (width - 2.0 * THUMB_INSET).max(0.0);
+            let filled = fraction.is_some();
+            let fraction = fraction.unwrap_or_default();
             let center = THUMB_INSET + fraction * run;
             let rect = |x: f32, y: f32, w: f32, h: f32| {
                 gpui::Bounds::new(
@@ -1426,11 +1450,13 @@ fn effort_fill(theme: &Theme, fraction: f32, count: usize, shimmer: Shimmer) -> 
                     gpui::size(px(w), px(h)),
                 )
             };
-            fill.paint(
-                window,
-                rect(0.0, RAIL_TOP, (center + FILL_PAST).min(width), RAIL_HEIGHT),
-                RAIL_HEIGHT / 2.0,
-            );
+            if filled {
+                fill.paint(
+                    window,
+                    rect(0.0, RAIL_TOP, (center + FILL_PAST).min(width), RAIL_HEIGHT),
+                    RAIL_HEIGHT / 2.0,
+                );
+            }
             // Fast mode: a band of light flows through the whole fill toward
             // the thumb. Two slow waves drift at different speeds, shading
             // the fill between a lifted accent and a hue-shifted one, and the
@@ -1438,7 +1464,7 @@ fn effort_fill(theme: &Theme, fraction: f32, count: usize, shimmer: Shimmer) -> 
             // strips whose gradients join end to end; the end strips carry
             // the fill's corner radius, so it never leaves the rounded ends.
             let fill_end = (center + FILL_PAST).min(width);
-            if intensity > 0.001 && fill_end > RAIL_HEIGHT {
+            if filled && intensity > 0.001 && fill_end > RAIL_HEIGHT {
                 let inset = 1.0;
                 let height = RAIL_HEIGHT - 2.0 * inset;
                 let radius = height / 2.0;
@@ -1510,7 +1536,7 @@ fn effort_fill(theme: &Theme, fraction: f32, count: usize, shimmer: Shimmer) -> 
                 };
                 let x = THUMB_INSET + stop * run;
                 // Filled stops follow the animated front, never jump ahead of it.
-                let color = if stop <= fraction {
+                let color = if filled && stop <= fraction {
                     filled_stop
                 } else {
                     open_stop
