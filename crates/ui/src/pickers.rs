@@ -759,7 +759,7 @@ impl EffortTween {
 
 const CONTEXT_WINDOW: &str = "contextWindow";
 const AUTO_COMPACT: &str = "autoCompact";
-const CONTEXT_CARD_EXTRA_HEIGHT: f32 = 44.0;
+const CONTEXT_CARD_HEIGHT: f32 = 98.0;
 const CONTEXT_WARNING_HEIGHT: f32 = 18.0;
 const CONTEXT_STOP_LABEL_WIDTH: f32 = 36.0;
 
@@ -2899,9 +2899,6 @@ impl Pickers {
     }
 
     fn context_groups(&self, cx: &App) -> Option<(SettingGroup, SettingGroup)> {
-        if self.compact_model_picker(cx) {
-            return None;
-        }
         let groups = self.setting_groups(cx);
         let find = |id: &str| {
             groups
@@ -2956,18 +2953,27 @@ impl Pickers {
         }
     }
 
-    fn step_context(&mut self, option: &str, delta: isize, cx: &mut Context<Self>) {
-        let Some((window, compact)) = self.context_groups(cx) else {
+    fn toggle_context_window(&mut self, cx: &mut Context<Self>) {
+        let Some((window, _)) = self.context_groups(cx) else {
             return;
         };
-        let group = if option == CONTEXT_WINDOW {
-            window
+        let target = if compact_applies(selected_value(&window)) {
+            "200k"
         } else {
-            compact
+            "1m"
         };
-        let current = group.choices.iter().position(|c| c.selected).unwrap_or(0);
-        let next = (current as isize + delta).clamp(0, group.choices.len() as isize - 1);
-        self.pick_context_choice(option, next as usize, cx);
+        if let Some(index) = window.choices.iter().position(|c| c.value == target) {
+            self.pick_context_choice(CONTEXT_WINDOW, index, cx);
+        }
+    }
+
+    fn step_auto_compact(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some((_, compact)) = self.context_groups(cx) else {
+            return;
+        };
+        let current = compact.choices.iter().position(|c| c.selected).unwrap_or(0);
+        let next = (current as isize + delta).clamp(0, compact.choices.len() as isize - 1);
+        self.pick_context_choice(AUTO_COMPACT, next as usize, cx);
     }
 
     /// Apply `change` to the selected chat's effective config and persist it:
@@ -3238,12 +3244,17 @@ impl Pickers {
             self.activate_model_index(self.active, cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
             // The effort and context cards have no choices menu (←/→ step
-            // them in place).
-            if let Some(group) = self.setting_groups(cx).get(index)
-                && group.id != ModelSetting::Reasoning
-                && !self.in_context_card(&group.id, cx)
-            {
-                self.open_setting(SettingScope::Tray, group.id.clone(), cx);
+            // them in place); Enter on the context window flips its switch.
+            if let Some(group) = self.setting_groups(cx).get(index) {
+                if option_id(&group.id) == Some(CONTEXT_WINDOW)
+                    && self.in_context_card(&group.id, cx)
+                {
+                    self.toggle_context_window(cx);
+                } else if group.id != ModelSetting::Reasoning
+                    && !self.in_context_card(&group.id, cx)
+                {
+                    self.open_setting(SettingScope::Tray, group.id.clone(), cx);
+                }
             }
         } else {
             self.activate_model_index(self.active, cx);
@@ -4003,8 +4014,10 @@ impl Pickers {
                     return;
                 }
                 Some(id) if self.in_context_card(&id, cx) => {
-                    if let Some(option) = option_id(&id) {
-                        self.step_context(option, delta, cx);
+                    if option_id(&id) == Some(CONTEXT_WINDOW) {
+                        self.toggle_context_window(cx);
+                    } else {
+                        self.step_auto_compact(delta, cx);
                     }
                     cx.stop_propagation();
                     return;
@@ -6920,34 +6933,88 @@ impl Pickers {
         let (window, compact) = self.context_groups(cx)?;
         let theme = Theme::of(cx).for_popup();
         let groups = self.setting_groups(cx);
+        let base = self.model_rows_len(cx);
         let cursor = |id: &str| {
             groups
                 .iter()
                 .position(|g| option_id(&g.id) == Some(id))
-                .is_some_and(|ix| self.active == self.model_rows_len(cx) + ix)
+                .is_some_and(|ix| self.active == base + ix)
         };
         let (window_cursor, compact_cursor) = (cursor(CONTEXT_WINDOW), cursor(AUTO_COMPACT));
         let window_choice = selected_value(&window);
-        let applies = compact_applies(window_choice);
+        let on = compact_applies(window_choice);
         let threshold = zeron_harness::claude::catalog::compact_threshold(
             window_choice,
-            if applies {
-                selected_value(&compact)
-            } else {
-                "auto"
-            },
-        );
-        let ring = gpui::BoxShadow {
-            color: theme.accent.opacity(0.4),
-            offset: gpui::point(px(0.0), px(0.0)),
-            blur_radius: px(0.0),
-            spread_radius: px(3.0),
-            inset: false,
-        };
+            selected_value(&compact),
+        )
+        .map(compact_tokens)
+        .unwrap_or_default();
 
+        let switch = div()
+            .id("context-1m-switch")
+            .debug_selector(|| "context-1m".into())
+            .role(gpui::Role::Switch)
+            .aria_label("1M context window")
+            .aria_toggled(if on {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .flex_none()
+            .h(px(20.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded_full()
+            .cursor_pointer()
+            .text_size(crate::typography::ui_rems(11.5))
+            .bg(if on {
+                theme.accent.opacity(0.16)
+            } else {
+                crate::theme::hairline(0.10)
+            })
+            .text_color(if on { theme.accent } else { theme.text_muted })
+            .when(on, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
+            .when(window_cursor, |el| {
+                el.shadow(vec![gpui::BoxShadow {
+                    color: theme.accent.opacity(0.4),
+                    offset: gpui::point(px(0.0), px(0.0)),
+                    blur_radius: px(0.0),
+                    spread_radius: px(3.0),
+                    inset: false,
+                }])
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_context_window(cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(24.0))
+                    .h(px(14.0))
+                    .rounded_full()
+                    .bg(if on {
+                        theme.accent
+                    } else {
+                        crate::theme::hairline(0.3)
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(2.0))
+                            .left(px(if on { 12.0 } else { 2.0 }))
+                            .size(px(10.0))
+                            .rounded_full()
+                            .bg(gpui::white()),
+                    ),
+            )
+            .child("1M");
         let header = div()
             .h(px(20.0))
-            .px(px(2.0))
+            .pl(px(2.0))
             .flex()
             .items_center()
             .justify_between()
@@ -6960,75 +7027,7 @@ impl Pickers {
                     .text_color(theme.text)
                     .child("Context"),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .children(threshold.map(|tokens| {
-                        SharedString::from(format!("compacts at ~{}", compact_tokens(tokens)))
-                    })),
-            );
-
-        let segments = window.choices.iter().enumerate().map(|(ix, choice)| {
-            div()
-                .id(("context-window-choice", ix))
-                .debug_selector(move || format!("context-window-{ix}"))
-                .flex_1()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .cursor_pointer()
-                .when(choice.selected, |el| {
-                    el.bg(theme.surface_raised)
-                        .text_color(theme.text)
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .shadow(vec![gpui::BoxShadow {
-                            color: gpui::black().opacity(0.18),
-                            offset: gpui::point(px(0.0), px(1.0)),
-                            blur_radius: px(2.0),
-                            spread_radius: px(0.0),
-                            inset: false,
-                        }])
-                })
-                .when(!choice.selected, |el| {
-                    el.text_color(theme.text_muted)
-                        .hover(|el| el.text_color(theme.text))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.pick_context_choice(CONTEXT_WINDOW, ix, cx);
-                    cx.stop_propagation();
-                }))
-                .child(SharedString::from(choice.label.clone()))
-        });
-        let segmented = div()
-            .mt(px(6.0))
-            .h(px(24.0))
-            .p(px(2.0))
-            .flex()
-            .gap(px(2.0))
-            .rounded(px(8.0))
-            .bg(crate::theme::hairline(0.14))
-            .when(window_cursor, |el| el.shadow(vec![ring.clone()]))
-            .children(segments);
-
-        let warning = window.choices.iter().find_map(|choice| {
-            let warning = choice.warning.as_ref()?;
-            Some(
-                div()
-                    .mt(px(4.0))
-                    .h(px(CONTEXT_WARNING_HEIGHT - 4.0))
-                    .px(px(2.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.warning)
-                    .child(SharedString::from(format!("{}: {warning}", choice.label))),
-            )
-        });
+            .child(switch);
 
         let len = compact.choices.len();
         let stop = Self::context_stop(&window, &compact);
@@ -7043,16 +7042,48 @@ impl Pickers {
             "context-thumb",
         );
         let measure = cx.entity().downgrade();
+        let increment = cx.entity().downgrade();
+        let decrement = cx.entity().downgrade();
         let track = div()
+            .id("context-compact-track")
             .debug_selector(|| "context-track".into())
+            .role(gpui::Role::Slider)
+            .aria_label("Auto-compact")
+            .aria_value(SharedString::from(
+                compact
+                    .choices
+                    .get(stop)
+                    .map(|c| c.label.clone())
+                    .unwrap_or_default(),
+            ))
+            .aria_numeric_value(stop as f64)
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value(len.saturating_sub(1) as f64)
+            .aria_numeric_value_step(1.0)
+            .aria_orientation(gpui::Orientation::Horizontal)
+            .aria_description(if on {
+                "Use Left and Right to choose when the chat compacts"
+            } else {
+                "Turn on the 1M context window to choose when the chat compacts"
+            })
+            .on_a11y_action(gpui::AccessibleAction::Increment, move |_, _, cx| {
+                increment
+                    .update(cx, |this, cx| this.step_auto_compact(1, cx))
+                    .ok();
+            })
+            .on_a11y_action(gpui::AccessibleAction::Decrement, move |_, _, cx| {
+                decrement
+                    .update(cx, |this, cx| this.step_auto_compact(-1, cx))
+                    .ok();
+            })
             .mt(px(8.0))
             .relative()
             .h(px(EFFORT_TRACK_HEIGHT))
             .w_full()
             .rounded_full()
             .bg(crate::theme::hairline(0.14))
-            .when(!applies, |el| el.opacity(0.4))
-            .when(applies, |el| {
+            .when(!on, |el| el.opacity(0.4))
+            .when(on, |el| {
                 el.cursor_pointer().on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -7080,6 +7111,7 @@ impl Pickers {
 
         let rail_len = len.saturating_sub(1).max(1) as f32;
         let labels = compact.choices.iter().enumerate().map(|(ix, choice)| {
+            let current = on && ix == stop;
             div()
                 .id(("context-stop", ix))
                 .absolute()
@@ -7089,15 +7121,13 @@ impl Pickers {
                 .w(px(CONTEXT_STOP_LABEL_WIDTH))
                 .text_center()
                 .text_size(crate::typography::ui_rems(10.5))
-                .text_color(if ix == stop && applies {
+                .text_color(if current {
                     theme.text
                 } else {
                     theme.text_muted
                 })
-                .when(ix == stop && applies, |el| {
-                    el.font_weight(gpui::FontWeight::SEMIBOLD)
-                })
-                .when(applies, |el| {
+                .when(current, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
+                .when(on, |el| {
                     el.cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pick_context_choice(AUTO_COMPACT, ix, cx);
@@ -7111,22 +7141,69 @@ impl Pickers {
             .h(px(14.0))
             .mx(px(EFFORT_THUMB_SIZE / 2.0))
             .relative()
-            .when(!applies, |el| el.opacity(0.4))
+            .when(!on, |el| el.opacity(0.4))
             .children(labels);
+
+        let readout = div()
+            .debug_selector(|| "context-readout".into())
+            .mt(px(6.0))
+            .h(px(14.0))
+            .px(px(2.0))
+            .flex()
+            .items_center()
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .when(!on, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.warning)
+                        .child(SharedString::from(format!(
+                            "{} window",
+                            window
+                                .choices
+                                .iter()
+                                .find(|c| c.selected)
+                                .map(|c| c.label.as_str())
+                                .unwrap_or_default()
+                        ))),
+                )
+                .child(div().flex_none().child("\u{a0}·\u{a0}"))
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(format!("compacts at ~{threshold}"))),
+            );
+
+        let warning = window.choices.iter().find_map(|choice| {
+            let warning = choice.warning.as_ref()?;
+            Some(
+                div()
+                    .mt(px(4.0))
+                    .h(px(CONTEXT_WARNING_HEIGHT - 4.0))
+                    .px(px(2.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.warning)
+                    .child(SharedString::from(format!("{}: {warning}", choice.label))),
+            )
+        });
 
         Some(
             div()
                 .debug_selector(|| "context-card".into())
                 .px(px(4.0))
                 .pt(px(2.0))
-                .pb(px(4.0))
+                .pb(px(6.0))
                 .flex()
                 .flex_col()
                 .child(header)
-                .child(segmented)
-                .children(warning)
                 .child(track)
                 .child(stops)
+                .child(readout)
+                .children(warning)
                 .into_any_element(),
         )
     }
@@ -7922,19 +7999,20 @@ fn tray_card_extra(groups: &[SettingGroup]) -> f32 {
     } else {
         0.0
     };
-    let context = if !has_context_card(groups) {
-        0.0
-    } else if groups
+    effort + context_card_extra(groups, 32.0)
+}
+
+fn context_card_extra(groups: &[SettingGroup], row_pitch: f32) -> f32 {
+    if !has_context_card(groups) {
+        return 0.0;
+    }
+    let warned = groups
         .iter()
         .filter(|g| option_id(&g.id) == Some(CONTEXT_WINDOW))
         .flat_map(|g| &g.choices)
-        .any(|c| c.warning.is_some())
-    {
-        CONTEXT_CARD_EXTRA_HEIGHT + CONTEXT_WARNING_HEIGHT
-    } else {
-        CONTEXT_CARD_EXTRA_HEIGHT
-    };
-    effort + context
+        .any(|c| c.warning.is_some());
+    let warning = if warned { CONTEXT_WARNING_HEIGHT } else { 0.0 };
+    CONTEXT_CARD_HEIGHT + warning + 2.0 - 2.0 * row_pitch
 }
 
 fn model_menu_budgets(height: f32, setting_count: usize, card_extra: f32) -> (f32, f32) {
@@ -11959,7 +12037,6 @@ mod tests {
                 "auto",
                 &[
                     ("auto", "Auto"),
-                    ("200k", "200K"),
                     ("300k", "300K"),
                     ("400k", "400K"),
                     ("600k", "600K"),
@@ -11984,7 +12061,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tray_budgets_the_context_card_only_with_both_options() {
+    fn the_tray_and_compact_panel_budget_the_context_card_only_with_both_options() {
         let groups = |model: &Model, usage| {
             build_setting_groups(
                 model.reasoning_levels.clone(),
@@ -11995,14 +12072,16 @@ mod tests {
             )
         };
         let both = groups(&long_context_model("fable", true), None);
+        let card = CONTEXT_CARD_HEIGHT + 2.0;
         assert_eq!(
             tray_card_extra(&both),
-            EFFORT_CARD_EXTRA_HEIGHT + CONTEXT_CARD_EXTRA_HEIGHT
+            EFFORT_CARD_EXTRA_HEIGHT + card - 64.0
         );
         assert_eq!(
             model_tray_height(both.len(), tray_card_extra(&both)),
-            3.0 * 32.0 + 7.0 + EFFORT_CARD_EXTRA_HEIGHT + CONTEXT_CARD_EXTRA_HEIGHT
+            32.0 + 7.0 + EFFORT_CARD_EXTRA_HEIGHT + card
         );
+        assert_eq!(context_card_extra(&both, 28.0), card - 56.0);
         let warned = groups(
             &long_context_model("fable", true),
             Some(zeron_proto::ContextUsage {
@@ -12012,16 +12091,15 @@ mod tests {
         );
         assert_eq!(
             tray_card_extra(&warned),
-            EFFORT_CARD_EXTRA_HEIGHT + CONTEXT_CARD_EXTRA_HEIGHT + CONTEXT_WARNING_HEIGHT
+            EFFORT_CARD_EXTRA_HEIGHT + card - 64.0 + CONTEXT_WARNING_HEIGHT
         );
         let window_only = groups(&long_context_model("sonnet", false), None);
         assert_eq!(tray_card_extra(&window_only), EFFORT_CARD_EXTRA_HEIGHT);
+        assert_eq!(context_card_extra(&window_only, 28.0), 0.0);
     }
 
     #[gpui::test]
-    fn context_card_arrows_step_each_control_and_enter_opens_nothing(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn context_card_keys_toggle_the_1m_switch_and_step_the_track(cx: &mut gpui::TestAppContext) {
         let handle = existing_claude_chat(cx);
         handle
             .update(cx, |pickers, window, cx| {
@@ -12066,10 +12144,10 @@ mod tests {
                 pickers.active = base + 2;
                 for (press, expect) in [
                     ("left", None),
-                    ("right", Some("200k")),
                     ("right", Some("300k")),
-                    ("left", Some("200k")),
-                    ("right", Some("300k")),
+                    ("right", Some("400k")),
+                    ("left", Some("300k")),
+                    ("right", Some("400k")),
                 ] {
                     pickers.on_key_down(&key(press), window, cx);
                     assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), expect);
@@ -12081,54 +12159,49 @@ mod tests {
                 assert!(pickers.is_open());
 
                 pickers.active = base + 1;
-                pickers.on_key_down(&key("right"), window, cx);
-                assert_eq!(option(pickers, CONTEXT_WINDOW, cx), None);
-                pickers.on_key_down(&key("left"), window, cx);
-                assert_eq!(option(pickers, CONTEXT_WINDOW, cx).as_deref(), Some("200k"));
-                assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), Some("300k"));
-                assert_eq!(stop(pickers, cx), 0);
-                pickers.on_key_down(&key("enter"), window, cx);
-                assert!(pickers.setting_menu.is_none());
-
-                pickers.active = base + 2;
-                for press in ["right", "left", "left"] {
+                for (press, window_choice) in [
+                    ("right", Some("200k")),
+                    ("enter", None),
+                    ("left", Some("200k")),
+                ] {
                     pickers.on_key_down(&key(press), window, cx);
-                    assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), Some("300k"));
+                    assert_eq!(
+                        option(pickers, CONTEXT_WINDOW, cx).as_deref(),
+                        window_choice
+                    );
+                    assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), Some("400k"));
+                    assert!(pickers.setting_menu.is_none());
                 }
                 assert_eq!(stop(pickers, cx), 0);
 
+                pickers.active = base + 2;
+                for press in ["right", "left", "left", "enter"] {
+                    pickers.on_key_down(&key(press), window, cx);
+                    assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), Some("400k"));
+                }
+                assert!(pickers.setting_menu.is_none());
+                assert_eq!(stop(pickers, cx), 0);
+
                 pickers.active = base + 1;
-                pickers.on_key_down(&key("right"), window, cx);
+                pickers.on_key_down(&key("enter"), window, cx);
                 assert_eq!(option(pickers, CONTEXT_WINDOW, cx), None);
                 assert_eq!(stop(pickers, cx), 2);
             })
             .unwrap();
     }
 
-    #[gpui::test]
-    fn context_card_renders_for_both_options_and_picks_by_pointer(cx: &mut gpui::TestAppContext) {
-        struct TrayFixture {
-            pickers: Entity<Pickers>,
-        }
-        impl Render for TrayFixture {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let menu = self.pickers.update(cx, |pickers, cx| {
-                    pickers.render_harness_model_popover(window, cx)
-                });
-                div()
-                    .size_full()
-                    .p(px(40.0))
-                    .child(div().w(px(304.0)).child(menu))
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
+    fn context_card_picker(
+        cx: &mut gpui::TestAppContext,
+        compact: bool,
+        dir: &std::path::Path,
+    ) -> Entity<Pickers> {
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             crate::composer::init(cx, Default::default());
             let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = false;
+            settings.compact_model_picker = compact;
             settings.compact_effort_slider = crate::settings::EffortSliderStyle::Stepped;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(settings, dir, cx);
         });
         let pickers = cx.update(|cx| {
             let state = cx.new(|_| AppState::new());
@@ -12149,6 +12222,35 @@ mod tests {
             pickers.pick_model("fable".into(), cx);
             pickers.open.open(PickerKind::HarnessModel);
         });
+        pickers
+    }
+
+    fn picked_option(pickers: &Pickers, id: &str, cx: &App) -> Option<String> {
+        pickers
+            .explicit_options(cx)
+            .get(id)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    }
+
+    #[gpui::test]
+    fn context_card_switch_and_track_pick_by_pointer(cx: &mut gpui::TestAppContext) {
+        struct TrayFixture {
+            pickers: Entity<Pickers>,
+        }
+        impl Render for TrayFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self.pickers.update(cx, |pickers, cx| {
+                    pickers.render_harness_model_popover(window, cx)
+                });
+                div()
+                    .size_full()
+                    .p(px(40.0))
+                    .child(div().w(px(304.0)).child(menu))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pickers = context_card_picker(cx, false, dir.path());
         let (_fixture, cx) = cx.add_window_view(|_, _| TrayFixture {
             pickers: pickers.clone(),
         });
@@ -12157,48 +12259,116 @@ mod tests {
             .debug_bounds("context-card")
             .expect("context card painted");
         assert!(
-            (card.size.height - px(64.0 - 2.0 + CONTEXT_CARD_EXTRA_HEIGHT)).abs() < px(1.0),
+            (card.size.height - px(CONTEXT_CARD_HEIGHT)).abs() < px(1.0),
             "{card:?}"
         );
-        let picked = |pickers: &Pickers, id: &str, cx: &App| {
-            pickers
-                .explicit_options(cx)
-                .get(id)
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        };
+        let readout = cx.debug_bounds("context-readout").expect("readout painted");
+        assert!(
+            card.bottom() - readout.bottom() >= px(4.0),
+            "{readout:?} in {card:?}"
+        );
 
         let track = cx.debug_bounds("context-track").expect("track painted");
         let usable = track.size.width - px(EFFORT_THUMB_SIZE);
-        let stop_x = |ix: f32| track.origin.x + px(EFFORT_THUMB_SIZE / 2.0) + usable * (ix / 5.0);
+        let stop_x = |ix: f32| track.origin.x + px(EFFORT_THUMB_SIZE / 2.0) + usable * (ix / 4.0);
         cx.simulate_click(
-            gpui::point(stop_x(3.0), track.center().y),
+            gpui::point(stop_x(2.0), track.center().y),
             gpui::Modifiers::default(),
         );
         pickers.read_with(cx, |pickers, cx| {
-            assert_eq!(picked(pickers, AUTO_COMPACT, cx).as_deref(), Some("400k"));
+            assert_eq!(
+                picked_option(pickers, AUTO_COMPACT, cx).as_deref(),
+                Some("400k")
+            );
             assert!(pickers.context_thumb(cx).1, "thumb glides to the stop");
         });
 
-        let narrow = cx
-            .debug_bounds("context-window-0")
-            .expect("200K segment painted");
-        cx.simulate_click(narrow.center(), gpui::Modifiers::default());
+        let switch = cx.debug_bounds("context-1m").expect("1M switch painted");
+        cx.simulate_click(switch.center(), gpui::Modifiers::default());
         pickers.read_with(cx, |pickers, cx| {
-            assert_eq!(picked(pickers, CONTEXT_WINDOW, cx).as_deref(), Some("200k"));
+            assert_eq!(
+                picked_option(pickers, CONTEXT_WINDOW, cx).as_deref(),
+                Some("200k")
+            );
+            assert_eq!(
+                picked_option(pickers, AUTO_COMPACT, cx).as_deref(),
+                Some("400k")
+            );
         });
         cx.simulate_click(
-            gpui::point(stop_x(5.0), track.center().y),
+            gpui::point(stop_x(4.0), track.center().y),
             gpui::Modifiers::default(),
         );
         pickers.read_with(cx, |pickers, cx| {
-            assert_eq!(picked(pickers, AUTO_COMPACT, cx).as_deref(), Some("400k"));
+            assert_eq!(
+                picked_option(pickers, AUTO_COMPACT, cx).as_deref(),
+                Some("400k")
+            );
+        });
+        cx.simulate_click(switch.center(), gpui::Modifiers::default());
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(picked_option(pickers, CONTEXT_WINDOW, cx), None);
         });
 
         pickers.update(cx, |pickers, cx| pickers.pick_model("sonnet".into(), cx));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("context-card").is_none());
+    }
+
+    #[gpui::test]
+    fn compact_panel_shows_the_context_card_without_clipping(cx: &mut gpui::TestAppContext) {
+        struct PanelFixture {
+            pickers: Entity<Pickers>,
+        }
+        impl Render for PanelFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.render_compact_menu(window, cx));
+                div().size_full().p(px(40.0)).child(menu)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pickers = context_card_picker(cx, true, dir.path());
+        let (_fixture, cx) = cx.add_window_view(|_, _| PanelFixture {
+            pickers: pickers.clone(),
+        });
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(600));
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let card = cx
+            .debug_bounds("context-card")
+            .expect("context card in the compact panel");
+        let effort = cx
+            .debug_bounds("effort-track")
+            .expect("reasoning slider painted");
+        assert!(card.top() > effort.bottom(), "{card:?} under {effort:?}");
+        let frame_bottom = pickers.read_with(cx, |pickers, _| {
+            px(40.0 + pickers.compact_motion.frame_height)
+        });
+        assert!(
+            card.bottom() <= frame_bottom,
+            "{card:?} clipped by a panel ending at {frame_bottom:?}"
+        );
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(
+                pickers.compact_options_height(cx),
+                Some(2.0 + 2.0 * 28.0 + context_card_extra(&pickers.setting_groups(cx), 28.0))
+            );
+        });
+
+        let switch = cx.debug_bounds("context-1m").expect("1M switch painted");
+        cx.simulate_click(switch.center(), gpui::Modifiers::default());
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(
+                picked_option(pickers, CONTEXT_WINDOW, cx).as_deref(),
+                Some("200k")
+            );
+        });
     }
 
     #[gpui::test]

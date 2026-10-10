@@ -137,7 +137,6 @@ fn auto_compact() -> ModelOption {
         "Auto-compact",
         &[
             ("auto", "Auto"),
-            ("200k", "200K"),
             ("300k", "300K"),
             ("400k", "400K"),
             ("600k", "600K"),

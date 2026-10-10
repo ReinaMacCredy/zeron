@@ -323,7 +323,7 @@ pub fn tool_list() -> Value {
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["get", "set"] },
-                    "autoCompact": { "type": "string", "enum": ["auto", "200k", "300k", "400k", "600k", "800k"] }
+                    "autoCompact": { "type": "string", "enum": ["auto", "300k", "400k", "600k", "800k"] }
                 },
                 "required": ["action"],
                 "additionalProperties": false

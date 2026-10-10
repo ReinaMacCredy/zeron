@@ -135,7 +135,6 @@ pub(crate) fn auto_compact() -> ModelOption {
 
 const AUTO_COMPACT_CHOICES: &[(&str, &str)] = &[
     ("auto", "Auto"),
-    ("200k", "200K"),
     ("300k", "300K"),
     ("400k", "400K"),
     ("600k", "600K"),
@@ -235,7 +234,6 @@ pub fn compact_threshold(window_choice: &str, compact_choice: &str) -> Option<u6
 
 pub fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
     match choice_id {
-        "200k" => Some(200_000),
         "300k" => Some(300_000),
         "400k" => Some(400_000),
         "600k" => Some(600_000),

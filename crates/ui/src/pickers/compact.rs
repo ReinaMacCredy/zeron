@@ -61,8 +61,9 @@ pub(super) const LIST_HEADER: f32 = 80.0;
 /// Option rows (26pt plus a 2pt gap) all show up to this many, then scroll.
 const OPTIONS_MAX_ROWS: usize = 6;
 /// The rows' 4pt top inset, then the rows; the panel's inset closes below.
+const COMPACT_OPTION_PITCH: f32 = 28.0;
 fn options_height(count: usize) -> f32 {
-    2.0 + count.min(OPTIONS_MAX_ROWS) as f32 * 28.0
+    2.0 + count.min(OPTIONS_MAX_ROWS) as f32 * COMPACT_OPTION_PITCH
 }
 
 /// Option ids Cursor uses for an effort ladder (its models carry none).
@@ -730,6 +731,18 @@ impl Pickers {
         self.pick_compact_effort(effort, index, cx);
     }
 
+    pub(super) fn compact_options_height(&self, cx: &App) -> Option<f32> {
+        let hidden = self.compact_hidden_options(cx);
+        let groups: Vec<SettingGroup> = self
+            .setting_groups(cx)
+            .into_iter()
+            .filter(|g| Self::compact_option_visible(&g.id, &hidden))
+            .collect();
+        (!groups.is_empty()).then(|| {
+            options_height(groups.len()) + context_card_extra(&groups, COMPACT_OPTION_PITCH)
+        })
+    }
+
     /// Effort and fast mode have their own controls in the compact card.
     pub(super) fn compact_option_visible(id: &ModelSetting, hidden: &[String]) -> bool {
         !matches!(id, ModelSetting::Reasoning)
@@ -772,21 +785,13 @@ impl Pickers {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let hidden = self.compact_hidden_options(cx);
-        let options = self
-            .setting_groups(cx)
-            .iter()
-            .filter(|g| Self::compact_option_visible(&g.id, &hidden))
-            .count();
         let effort = self.compact_effort(cx).is_some();
         let panel_height = CARD_BORDERS
             + header_block(effort)
             + if effort { EFFORT_BLOCK } else { 0.0 }
-            + if options == 0 {
-                0.0
-            } else {
-                OPTIONS_GAP + options_height(options)
-            };
+            + self
+                .compact_options_height(cx)
+                .map_or(0.0, |height| OPTIONS_GAP + height);
         let page = if self.compact_model_list {
             CompactPage::Models
         } else {
@@ -1358,13 +1363,7 @@ impl Pickers {
                     .child(slider),
             );
         }
-        let hidden = self.compact_hidden_options(cx);
-        let option_count = self
-            .setting_groups(cx)
-            .iter()
-            .filter(|g| Self::compact_option_visible(&g.id, &hidden))
-            .count();
-        if option_count > 0 {
+        if let Some(options_max) = self.compact_options_height(cx) {
             let options = self.render_traits_sections(window, cx);
             let scrollbar = popover::rail(self, "compact-options-scrollbar", &theme, cx);
             let chrome = CARD_BORDERS
@@ -1379,7 +1378,7 @@ impl Pickers {
                         .child(popover::faded_menu_list(
                             &self.menu_scroll,
                             popover::menu_scroll_list("compact-options", &self.menu_scroll)
-                                .max_h(px(options_height(option_count)
+                                .max_h(px(options_max
                                     .min((self.menu_geometry().height - chrome).max(0.0))))
                                 .child(options),
                         ))
