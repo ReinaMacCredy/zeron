@@ -3382,6 +3382,27 @@ mod tests {
         assert!(bar.bottom() <= nav.top(), "{bar:?} above {nav:?}");
         assert!(composer_focused(&composer, cx));
         assert!(cx.debug_bounds("pr-chat-orb").is_some(), "the orb stays");
+
+        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
+        assert!(
+            content.bottom() > bar.bottom(),
+            "{bar:?} floats over {content:?}"
+        );
+        cx.simulate_resize(gpui::size(px(900.0), px(480.0)));
+        settle(cx);
+        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
+        let bar = cx.debug_bounds("pr-chat-bar").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(content.left() + px(8.0), content.top() + px(40.0)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-20000.0))),
+            ..Default::default()
+        });
+        settle(cx);
+        let last = cx.debug_bounds("pr-handoff").expect("the last card");
+        assert!(
+            last.bottom() > content.top() && last.bottom() <= bar.top(),
+            "the last card scrolls clear of the bar: {last:?} {bar:?} {content:?}"
+        );
     }
 
     #[gpui::test]
@@ -3441,17 +3462,18 @@ mod tests {
         let bar = cx.debug_bounds("pr-chat-bar").unwrap();
         click(cx, "pr-chat-orb");
         settle(cx);
-        assert!(
-            cx.debug_bounds("pr-chat-bar").is_some(),
-            "the orb only opens"
-        );
-        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
-        cx.simulate_click(
-            gpui::point(content.left() + px(4.0), content.top() + px(4.0)),
-            gpui::Modifiers::default(),
-        );
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "the orb folds");
+        click(cx, "pr-chat-orb");
+        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "and reopens");
+
+        let checks = cx.debug_bounds("pr-checks-card").unwrap();
+        click(cx, "pr-checks-toggle");
         settle(cx);
         assert!(cx.debug_bounds("pr-chat-bar").is_none(), "outside click");
+        assert!(
+            cx.debug_bounds("pr-checks-card").unwrap().size.height > checks.size.height,
+            "the click still reaches the content under the fold"
+        );
 
         click(cx, "pr-chat-orb");
         cx.simulate_click(bar.center(), gpui::Modifiers::default());
@@ -3484,9 +3506,11 @@ mod tests {
             "a draft stays open on an outside click"
         );
         click(cx, "pr-chat-orb");
-        cx.simulate_keystrokes("escape");
         settle(cx);
-        assert!(cx.debug_bounds("pr-chat-bar").is_none());
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_none(),
+            "the orb folds a draft"
+        );
         assert!(cx.debug_bounds("pr-chat-orb-dot").is_some(), "draft dot");
 
         click(cx, "pr-chat-orb");
@@ -3495,6 +3519,34 @@ mod tests {
             "Why does CI fail?"
         );
         assert!(cx.debug_bounds("pr-chat-orb-dot").is_none());
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_none(),
+            "Esc folds a draft"
+        );
+        assert!(cx.debug_bounds("pr-chat-orb-dot").is_some());
+    }
+
+    #[gpui::test]
+    fn the_orb_folds_the_bar_even_with_a_frame_between_press_and_release(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_pr(&shell, cx, 7);
+        wire.open(&runtime, cx);
+        click(cx, "pr-chat-orb");
+        assert!(cx.debug_bounds("pr-chat-bar").is_some());
+        let orb = cx.debug_bounds("pr-chat-orb").unwrap().center();
+        cx.simulate_mouse_down(orb, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_some(),
+            "a press on the orb is not an outside click"
+        );
+        cx.simulate_mouse_up(orb, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "the orb folds");
+        assert!(page(&shell, cx).read_with(cx, |page, _| !page.chat_expanded()));
     }
 
     #[gpui::test]
@@ -3581,7 +3633,10 @@ mod tests {
             .expect("comment box kept");
         let content = cx.debug_bounds("pr-detail-scroll").unwrap();
         let nav = cx.debug_bounds("pr-detail-nav").unwrap();
-        assert!(content.bottom() <= bar.top(), "{content:?} {bar:?}");
+        assert!(
+            content.bottom() > bar.bottom(),
+            "floats over {content:?} {bar:?}"
+        );
         assert!(bar.bottom() <= comment.top(), "{bar:?} over {comment:?}");
         assert!(comment.bottom() <= nav.top(), "{comment:?} {nav:?}");
         assert!(
@@ -3623,8 +3678,8 @@ mod tests {
             let content = cx.debug_bounds("pr-detail-scroll").unwrap();
             assert!(bar.bottom() <= nav.top(), "tab {tab}: {bar:?} over {nav:?}");
             assert!(
-                content.bottom() <= bar.top(),
-                "tab {tab}: {content:?} under {bar:?}"
+                content.bottom() > bar.bottom(),
+                "tab {tab}: {bar:?} floats over {content:?}"
             );
             assert!(bar.size.width > px(150.0), "tab {tab}: {bar:?}");
             let composer = cx.debug_bounds("composer-surface").unwrap();

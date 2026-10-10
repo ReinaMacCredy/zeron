@@ -188,6 +188,7 @@ pub struct GitTab {
     tray_open: bool,
     focus_message: bool,
     focus: FocusHandle,
+    float: crate::dock_orb::Float,
 }
 
 fn workspace_target(space: &GitSpace, checkout_path: Option<&str>) -> WorkspaceTarget {
@@ -579,6 +580,7 @@ impl GitTab {
             tray_open: false,
             focus_message: false,
             focus: cx.focus_handle(),
+            float: Default::default(),
         }
     }
 
@@ -1047,6 +1049,14 @@ impl GitTab {
 
     pub(super) fn has_draft(&self, cx: &App) -> bool {
         !self.message.read(cx).text().trim().is_empty()
+    }
+
+    fn composer_lift(&self) -> f32 {
+        if self.composer_open {
+            self.float.height() + 8.0
+        } else {
+            0.0
+        }
     }
 
     fn composer_idle(&self, cx: &App) -> bool {
@@ -2769,28 +2779,27 @@ impl GitTab {
             .child(self.render_commit_box(staged.len(), commits, theme, cx));
         div()
             .id("git-composer-dock")
-            .flex_none()
-            .w_full()
-            .pt(px(8.0))
-            .child(
-                crate::settings::widgets::page_column().pt_0().pb_0().child(
-                    div()
-                        .occlude()
-                        .on_mouse_down_out(cx.listener(|tab, _, window, cx| {
-                            if tab.composer_idle(cx) {
-                                tab.fold_composer(window, cx);
-                            }
-                        }))
-                        .child(crate::dock_orb::rise(
-                            "git-composer-rise",
-                            crate::frost::frosted(
-                                crate::composer::COMPOSER_RADIUS,
-                                crate::frost::MENU_BLUR,
-                                surface,
-                            ),
-                        )),
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .child(crate::settings::widgets::page_column().pt_0().pb_0().child(
+                crate::dock_orb::float(
+                    "git-composer-rise",
+                    &self.float,
+                    cx.entity_id(),
+                    cx.listener(|tab, _, window, cx| {
+                        if tab.composer_idle(cx) {
+                            tab.fold_composer(window, cx);
+                        }
+                    }),
+                    crate::frost::frosted(
+                        crate::composer::COMPOSER_RADIUS,
+                        crate::frost::MENU_BLUR,
+                        surface,
+                    ),
                 ),
-            )
+            ))
             .into_any_element()
     }
 
@@ -2850,6 +2859,7 @@ impl GitTab {
                     .min_h_0()
                     .overflow_y_scroll()
                     .pt(px(8.0))
+                    .pb(px(self.composer_lift()))
                     .child(render_diff(open, theme)),
             )
             .into_any_element()
@@ -3895,7 +3905,7 @@ impl GitTab {
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
-                    .pb(px(12.0))
+                    .pb(px(12.0 + self.composer_lift()))
                     .child(
                         div()
                             .px(px(12.0))
@@ -4470,6 +4480,7 @@ impl Render for GitTab {
             .track_focus(&self.focus)
             .role(gpui::Role::Group)
             .aria_label("Git")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -4490,8 +4501,11 @@ impl Render for GitTab {
             }
         }
         let files = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
-        self.history
-            .update(cx, |history, cx| history.set_working_tree(Some(files), cx));
+        let lift = self.composer_lift();
+        self.history.update(cx, |history, cx| {
+            history.set_working_tree(Some(files), cx);
+            history.set_bottom_inset(lift, cx);
+        });
         let main = match &self.expanded {
             Some(open) => self.render_file_diff(open, &theme, cx),
             None => div()
@@ -4676,11 +4690,22 @@ impl super::PullRequestsPage {
                     count,
                     dot: !tab.composer_open && tab.has_draft(cx),
                 },
+                open: tab.composer_open,
             }
             .render(
                 theme,
-                move |_, _, cx| {
-                    view.update(cx, |tab, cx| tab.open_composer(cx)).ok();
+                &tab.float,
+                {
+                    let view = view.clone();
+                    move |_, cx| {
+                        view.update(cx, |tab, cx| tab.open_composer(cx)).ok();
+                    }
+                },
+                move |window, cx| {
+                    view.update(cx, |tab, cx| {
+                        tab.fold_composer(window, cx);
+                    })
+                    .ok();
                 },
                 cx,
             ),
@@ -5562,6 +5587,77 @@ mod tests {
         assert!(
             cx.debug_bounds("git-commit-orb").is_none(),
             "the orb is Git's only"
+        );
+    }
+
+    #[gpui::test]
+    fn the_orb_folds_the_floating_composer_and_a_history_click_folds_it_and_lands(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_page, tab, cx, _calls, _dir) = git_page(cx);
+        let history = tab.read_with(cx, |tab, _| tab.history.clone());
+        settle(cx, |cx| cx.debug_bounds("git-working-tree-row").is_some());
+        let rows = cx.debug_bounds("git-working-tree-row").unwrap();
+
+        press(cx, "git-commit-orb");
+        assert!(composer_open(&tab, cx));
+        settle(cx, |cx| {
+            cx.update(|window, _| window.refresh());
+            let height = cx
+                .debug_bounds("git-composer")
+                .map(|bounds| f32::from(bounds.size.height));
+            history.read_with(cx, |history, _| {
+                height.is_some_and(|height| history.bottom_inset() >= height)
+            })
+        });
+        let composer = cx.debug_bounds("git-composer").unwrap();
+        let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+        assert!(
+            history.read_with(cx, |history, _| history.bottom_inset())
+                >= f32::from(composer.size.height),
+            "the history's last rows scroll clear of the composer"
+        );
+        assert_eq!(
+            cx.debug_bounds("git-working-tree-row").unwrap(),
+            rows,
+            "the history keeps its place under the composer"
+        );
+        assert!(
+            composer.bottom() <= dock.top() && composer.top() > rows.bottom(),
+            "{composer:?} {dock:?} {rows:?}"
+        );
+
+        let orb = cx.debug_bounds("git-commit-orb").unwrap().center();
+        cx.simulate_mouse_down(orb, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(
+            composer_open(&tab, cx),
+            "a press on the orb is not an outside click"
+        );
+        cx.simulate_mouse_up(orb, gpui::MouseButton::Left, gpui::Modifiers::default());
+        assert!(!composer_open(&tab, cx), "the orb folds an empty composer");
+
+        press(cx, "git-commit-orb");
+        set_message(&tab, cx, "Fix the panel");
+        press(cx, "git-commit-orb");
+        assert!(!composer_open(&tab, cx), "the orb folds a draft");
+        assert!(cx.debug_bounds("git-commit-orb-dot").is_some());
+        assert_eq!(message(&tab, cx), "Fix the panel");
+        set_message(&tab, cx, "");
+
+        press(cx, "git-commit-orb");
+        assert!(composer_open(&tab, cx));
+        let commit_row = gpui::point(rows.left() + px(120.0), rows.center().y + rows.size.height);
+        cx.simulate_click(commit_row, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(!composer_open(&tab, cx), "an outside click folds it");
+        assert_eq!(
+            history.read_with(cx, |history, _| history.selected_sha().map(str::to_owned)),
+            Some("aaa".to_owned()),
+            "and the history row under the click still opens its commit"
         );
     }
 

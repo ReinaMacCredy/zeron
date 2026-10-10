@@ -497,6 +497,14 @@ impl PullRequestDetailPage {
             .is_some_and(|dock| dock.bar.is_some())
     }
 
+    pub(super) fn chat_lift(&self) -> f32 {
+        if self.chat_docked() {
+            self.chat_float.height() + 16.0
+        } else {
+            0.0
+        }
+    }
+
     pub(crate) fn parked_focus(&self, window: &Window) -> bool {
         self.content_focus.is_focused(window)
             || self.tree_focus.is_focused(window)
@@ -535,6 +543,7 @@ impl PullRequestDetailPage {
             1 => "Ask AI about this pull request, 1 new reply".to_owned(),
             n => format!("Ask AI about this pull request, {n} new replies"),
         };
+        let page = cx.weak_entity();
         crate::dock_orb::DockOrb {
             id: "pr-chat-orb",
             glyph: crate::icons::SPARK,
@@ -546,10 +555,16 @@ impl PullRequestDetailPage {
                 count: orb.unread,
                 dot: orb.draft,
             },
+            open: self.chat_expanded,
         }
         .render(
             theme,
-            |_, window, cx| window.dispatch_action(Box::new(OpenPrChat), cx),
+            &self.chat_float,
+            |window, cx| window.dispatch_action(Box::new(OpenPrChat), cx),
+            move |_, cx| {
+                page.update(cx, |page, cx| page.set_chat_expanded(false, cx))
+                    .ok();
+            },
             cx,
         )
     }
@@ -562,33 +577,36 @@ impl PullRequestDetailPage {
             div()
                 .id("pr-chat-dock")
                 .debug_selector(|| "pr-chat-dock".into())
-                .flex_none()
-                .w_full()
-                .pt(px(8.0))
-                .pb(px(if self.tab == Tab::Activity {
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(if self.tab == Tab::Activity {
                     8.0
                 } else {
                     NAV_CLEARANCE
                 }))
                 .child(
                     widgets::page_column().pt_0().pb_0().child(
-                        div()
-                            .relative()
-                            .on_mouse_down_out(cx.listener(move |page, _, _, cx| {
+                        crate::dock_orb::float(
+                            "pr-chat-rise",
+                            &self.chat_float,
+                            cx.entity_id(),
+                            cx.listener(move |page, _, _, cx| {
                                 if idle {
                                     page.set_chat_expanded(false, cx);
                                 }
-                            }))
-                            .children(dock.sheet.map(|sheet| {
-                                div()
-                                    .absolute()
-                                    .bottom_full()
-                                    .left_0()
-                                    .right_0()
-                                    .pb(px(8.0))
-                                    .child(sheet)
-                            }))
-                            .child(crate::dock_orb::rise("pr-chat-rise", bar)),
+                            }),
+                            bar,
+                        )
+                        .children(dock.sheet.map(|sheet| {
+                            div()
+                                .absolute()
+                                .bottom_full()
+                                .left_0()
+                                .right_0()
+                                .pb(px(8.0))
+                                .child(sheet)
+                        })),
                     ),
                 )
                 .into_any_element(),

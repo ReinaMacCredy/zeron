@@ -1387,6 +1387,7 @@ pub struct GitHistory {
     graph_geometry_morph: Rc<Cell<Option<GraphGeometryMorph>>>,
     graph_hover_suppressed: Rc<Cell<bool>>,
     list: ListState,
+    bottom_inset: f32,
     hovered_path: Option<usize>,
     hovered_graph_path: Option<usize>,
     hovered_row_path: Option<usize>,
@@ -2038,6 +2039,7 @@ impl GitHistory {
             graph_geometry_morph: Rc::new(Cell::new(None)),
             graph_hover_suppressed: Rc::new(Cell::new(false)),
             list: ListState::new(0, ListAlignment::Top, px(HISTORY_ROW_HEIGHT * 5.0)),
+            bottom_inset: 0.0,
             hovered_path: None,
             hovered_graph_path: None,
             hovered_row_path: None,
@@ -2078,6 +2080,13 @@ impl GitHistory {
         }
     }
 
+    pub fn set_bottom_inset(&mut self, inset: f32, cx: &mut Context<Self>) {
+        if self.bottom_inset != inset {
+            self.bottom_inset = inset;
+            cx.notify();
+        }
+    }
+
     pub fn set_working_tree(&mut self, files: Option<usize>, cx: &mut Context<Self>) {
         if self.working_tree == files {
             return;
@@ -2094,6 +2103,11 @@ impl GitHistory {
     #[cfg(test)]
     pub fn working_tree(&self) -> Option<usize> {
         self.working_tree
+    }
+
+    #[cfg(test)]
+    pub fn bottom_inset(&self) -> f32 {
+        self.bottom_inset
     }
 
     #[cfg(test)]
@@ -4598,6 +4612,7 @@ impl Render for GitHistory {
                 .child(
                     list(self.list.clone(), cx.processor(Self::render_row))
                         .size_full()
+                        .pb(px(self.bottom_inset))
                         .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
                 )
                 .into_any_element()

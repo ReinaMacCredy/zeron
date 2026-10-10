@@ -608,8 +608,8 @@ impl PullRequestDetailPage {
             .flex_col()
             .gap(px(1.0))
             .pt(px(4.0))
-            .pb(px(if wide && !self.chat_docked() {
-                NAV_CLEARANCE
+            .pb(px(if wide {
+                NAV_CLEARANCE + self.chat_lift()
             } else {
                 8.0
             }));
@@ -895,6 +895,7 @@ impl PullRequestDetailPage {
                         cx.processor(Self::render_code_row),
                     )
                     .size_full()
+                    .pb(px(self.chat_lift()))
                     .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
                 )
                 .children(self.sticky_header(theme, cx))
@@ -908,7 +909,7 @@ impl PullRequestDetailPage {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .when(!self.chat_docked(), |el| el.pb(px(NAV_CLEARANCE)))
+            .pb(px(NAV_CLEARANCE))
             .child(toolbar)
             .child(stream_frame(theme, viewport))
             .when(!wide && self.files_expanded, |el| {

@@ -1,6 +1,9 @@
+use std::{cell::Cell, rc::Rc};
+
 use gpui::{
-    AnimationExt as _, AnyElement, App, ClickEvent, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
+    AnimationExt as _, AnyElement, App, Bounds, EntityId, Hsla, InteractiveElement, IntoElement,
+    MouseDownEvent, ParentElement, Pixels, SharedString, StatefulInteractiveElement, Styled,
+    Window, div, prelude::*, px,
 };
 
 use crate::theme::Theme;
@@ -14,6 +17,24 @@ pub(crate) struct Marks {
     pub dot: bool,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct Float {
+    orb: Rc<Cell<Option<Bounds<Pixels>>>>,
+    height: Rc<Cell<f32>>,
+}
+
+impl Float {
+    pub(crate) fn height(&self) -> f32 {
+        self.height.get()
+    }
+
+    fn on_orb(&self, position: gpui::Point<Pixels>) -> bool {
+        self.orb
+            .get()
+            .is_some_and(|bounds| bounds.contains(&position))
+    }
+}
+
 pub(crate) struct DockOrb {
     pub id: &'static str,
     pub glyph: &'static str,
@@ -21,16 +42,20 @@ pub(crate) struct DockOrb {
     pub label: SharedString,
     pub tooltip: &'static str,
     pub marks: Marks,
+    pub open: bool,
 }
 
 impl DockOrb {
     pub(crate) fn render(
         self,
         theme: &Theme,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        float: &Float,
+        on_open: impl Fn(&mut Window, &mut App) + 'static,
+        on_fold: impl Fn(&mut Window, &mut App) + 'static,
         cx: &App,
     ) -> AnyElement {
         let id = self.id;
+        let open = self.open;
         let button = div()
             .id(id)
             .debug_selector(move || id.into())
@@ -49,7 +74,13 @@ impl DockOrb {
             .cursor_pointer()
             .focus_visible(|style| style.border_2().border_color(theme.accent))
             .tooltip(crate::settings::widgets::text_tooltip(self.tooltip))
-            .on_click(on_click)
+            .on_click(move |_, window, cx| {
+                if open {
+                    on_fold(window, cx)
+                } else {
+                    on_open(window, cx)
+                }
+            })
             .child(
                 crate::icons::icon(self.glyph)
                     .size(px(16.0))
@@ -121,10 +152,46 @@ impl DockOrb {
             .children(ring)
             .children(count)
             .children(dot)
+            .child({
+                let orb = float.orb.clone();
+                gpui::canvas(move |bounds, _, _| orb.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0()
+            })
             .into_any_element()
     }
 }
 
-pub(crate) fn rise(id: &'static str, composer: impl IntoElement) -> impl IntoElement {
-    crate::motion::menu_in_from(id, 8.0, div().child(composer))
+pub(crate) fn float(
+    id: &'static str,
+    float: &Float,
+    owner: EntityId,
+    on_outside: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    composer: impl IntoElement,
+) -> gpui::Div {
+    let orb = float.clone();
+    let height = float.height.clone();
+    div()
+        .relative()
+        .occlude()
+        .on_mouse_down_out(move |event, window, cx| {
+            if !orb.on_orb(event.position) {
+                on_outside(event, window, cx)
+            }
+        })
+        .child(crate::motion::menu_in_from(id, 8.0, div().child(composer)))
+        .child(
+            gpui::canvas(
+                move |bounds, window, _| {
+                    let measured = f32::from(bounds.size.height);
+                    if (height.get() - measured).abs() > 0.5 {
+                        height.set(measured);
+                        window.on_next_frame(move |_, cx| cx.notify(owner));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
 }

@@ -437,6 +437,7 @@ pub struct PullRequestDetailPage {
     actions: actions::ActionsState,
     chat_dock: Option<ChatDock>,
     chat_expanded: bool,
+    chat_float: crate::dock_orb::Float,
 }
 
 impl PullRequestDetailPage {
@@ -522,6 +523,7 @@ impl PullRequestDetailPage {
             actions: Default::default(),
             chat_dock: None,
             chat_expanded: false,
+            chat_float: Default::default(),
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -1574,7 +1576,7 @@ impl Render for PullRequestDetailPage {
         }
         self.park_hidden_chat_focus(window, cx);
         let theme = Theme::of(cx).clone();
-        let docked = self.chat_docked();
+        let lift = self.chat_lift();
         let empty_activity = self.tab == Tab::Activity
             && self
                 .detail
@@ -1592,11 +1594,10 @@ impl Render for PullRequestDetailPage {
                 .pt(px(24.0))
                 .pb(px(match self.tab {
                     // The comment dock sits below the scroll, not over it.
-                    Tab::Activity => 32.0,
+                    Tab::Activity => 32.0 + lift,
                     // The workspace reserves its own room for the navigation.
                     Tab::Code => 0.0,
-                    Tab::Summary if docked => 32.0,
-                    Tab::Summary => 76.0,
+                    Tab::Summary => 76.0 + lift,
                 }))
                 .text_size(crate::typography::ui_rems(13.0))
                 .text_color(theme.text);
@@ -2338,7 +2339,9 @@ impl Render for PullRequestDetailPage {
                     .flex_1()
                     .min_h_0()
                     .child(content)
-                    .children(chat)
+                    .children(
+                        chat.map(|chat| div().relative().flex_none().w_full().h_0().child(chat)),
+                    )
                     .children(comment)
                     .child(navigation),
             );
