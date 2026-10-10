@@ -2778,7 +2778,11 @@ impl ComposerInput {
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.placeholder = placeholder.into();
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.needs_measure = true;
+        }
+        self.placeholder = placeholder;
         cx.notify();
     }
 
@@ -4805,7 +4809,7 @@ impl ComposerInput {
         self.last_lines = lines;
         self.line_starts = line_starts;
         self.content_height = content_height.max(self.configured_line_height);
-        self.max_line_width = if is_placeholder { 0.0 } else { max_line_width };
+        self.max_line_width = max_line_width;
         self.last_width = f32::from(width);
         self.needs_measure = false;
         self.layout_epoch += 1;
@@ -13217,10 +13221,15 @@ impl Render for Composer {
                 input.layout_text(px(input.last_width), &style, window, cx);
             }
         });
+        let predicting = self.active_prediction(cx).is_some();
         let (text_width, has_newline, content_height, last_width, epoch) = {
             let input = self.input.read(cx);
             (
-                input.measured_text_width(),
+                if input.display_is_placeholder && !predicting {
+                    0.0
+                } else {
+                    input.measured_text_width()
+                },
                 input.has_newline(),
                 input.measured_content_height(),
                 input.last_width,
@@ -14538,6 +14547,63 @@ mod tests {
         handle
             .read_with(cx, |composer, cx| {
                 assert_eq!(composer.placeholder(cx), "Do anything…");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_wrapping_prediction_expands_the_empty_composer(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("chat-a".into()));
+                composer.on_state_changed(cx);
+                composer.route_snap_until = None;
+                composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
+                composer.set_available_width(800.0, cx);
+                window.resize(size(px(800.0), px(800.0)));
+            })
+            .unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..3 {
+                cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+            }
+        };
+        draw(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.width_changed_at = None;
+                assert!(!composer.expanded_mode);
+                composer.state.update(cx, |state, _| {
+                    state.set_composer_prediction(
+                        "chat-a",
+                        crate::state::ComposerPrediction {
+                            entry_id: "a1".into(),
+                            text: "Wait for the UI test gate to finish and tell me. ".repeat(4),
+                        },
+                    );
+                });
+            })
+            .unwrap();
+        draw(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                assert!(
+                    composer.expanded_mode,
+                    "a wrapping prediction must not clip"
+                );
+                composer
+                    .state
+                    .update(cx, |state, _| state.consume_composer_prediction("chat-a"));
+            })
+            .unwrap();
+        draw(cx);
+        handle
+            .read_with(cx, |composer, _| {
+                assert!(!composer.expanded_mode, "the idle placeholder fits compact");
             })
             .unwrap();
     }
