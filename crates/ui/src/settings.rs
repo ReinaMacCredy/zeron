@@ -613,6 +613,24 @@ pub fn commit_message_model(cx: &App) -> Option<CommitModelChoice> {
         .and_then(|store| store.current.commit_message_model.clone())
 }
 
+pub fn pr_chat_session(chat_id: &str, cx: &App) -> Option<PrChatSession> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.pr_chat_session(chat_id).cloned())
+}
+
+pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
+    cx.try_global::<SettingsStore>()
+        .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
+        .and_then(|store| store.current.pr_chat_sessions.get(scope).cloned())
+        .unwrap_or_default()
+}
+
+pub fn pr_chat_idle_limit(cx: &App) -> Option<chrono::Duration> {
+    cx.try_global::<SettingsStore>()
+        .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
+        .and_then(|store| store.current.pr_chat_idle_expiry.limit())
+}
+
 pub fn shortcut_combo(id: ShortcutId, cx: &App) -> String {
     match cx.try_global::<SettingsStore>() {
         Some(store) => store.current.keymap.get(id).to_owned(),
@@ -1237,6 +1255,68 @@ pub struct CommitModelChoice {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum PrChatHistory {
+    #[default]
+    KeepPerPr,
+    Fresh,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrChatIdleExpiry {
+    Never,
+    FiveMinutes,
+    TenMinutes,
+    #[default]
+    ThirtyMinutes,
+    OneHour,
+    OneDay,
+}
+
+impl PrChatIdleExpiry {
+    pub const ALL: [Self; 6] = [
+        Self::Never,
+        Self::FiveMinutes,
+        Self::TenMinutes,
+        Self::ThirtyMinutes,
+        Self::OneHour,
+        Self::OneDay,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Never => "Never",
+            Self::FiveMinutes => "5 min",
+            Self::TenMinutes => "10 min",
+            Self::ThirtyMinutes => "30 min",
+            Self::OneHour => "1 hour",
+            Self::OneDay => "1 day",
+        }
+    }
+
+    pub fn limit(self) -> Option<chrono::Duration> {
+        match self {
+            Self::Never => None,
+            Self::FiveMinutes => Some(chrono::Duration::minutes(5)),
+            Self::TenMinutes => Some(chrono::Duration::minutes(10)),
+            Self::ThirtyMinutes => Some(chrono::Duration::minutes(30)),
+            Self::OneHour => Some(chrono::Duration::hours(1)),
+            Self::OneDay => Some(chrono::Duration::days(1)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrChatSession {
+    pub chat_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum GitAgentBusyPolicy {
     #[default]
     SafeOnly,
@@ -1479,6 +1559,9 @@ pub struct UiSettings {
     pub commit_message_instruction: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_message_model: Option<CommitModelChoice>,
+    pub pr_chat_history: PrChatHistory,
+    pub pr_chat_idle_expiry: PrChatIdleExpiry,
+    pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
     pub git_agent_busy_policy: GitAgentBusyPolicy,
     pub device_auto_float: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1604,6 +1687,9 @@ impl Default for UiSettings {
             pause_animations_in_background: false,
             commit_message_instruction: DEFAULT_COMMIT_INSTRUCTION.to_string(),
             commit_message_model: None,
+            pr_chat_history: PrChatHistory::default(),
+            pr_chat_idle_expiry: PrChatIdleExpiry::default(),
+            pr_chat_sessions: Default::default(),
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
             device_auto_float: true,
             device_float_frame: None,
@@ -2282,6 +2368,9 @@ impl UiSettings {
             terminal_background,
             commit_message_instruction,
             commit_message_model,
+            pr_chat_history,
+            pr_chat_idle_expiry,
+            pr_chat_sessions,
             git_agent_busy_policy,
             device_auto_float,
             device_float_frame,
@@ -2293,6 +2382,69 @@ impl UiSettings {
             pull_request_stars,
         );
         current
+    }
+
+    pub fn pr_chat_ids(&self) -> impl Iterator<Item = &str> {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .map(|session| session.chat_id.as_str())
+    }
+
+    pub fn pr_chat_indexed(&self, chat_id: &str) -> bool {
+        self.pr_chat_ids().any(|id| id == chat_id)
+    }
+
+    pub fn pr_chat_fresh(&self, chat_id: &str) -> bool {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .any(|session| session.chat_id == chat_id && session.fresh)
+    }
+
+    pub fn index_pr_chat(&mut self, scope: &str, session: PrChatSession) {
+        if !self.pr_chat_indexed(&session.chat_id) {
+            self.pr_chat_sessions
+                .entry(scope.to_owned())
+                .or_default()
+                .push(session);
+        }
+    }
+
+    pub fn unindex_pr_chat(&mut self, chat_id: &str) {
+        for sessions in self.pr_chat_sessions.values_mut() {
+            sessions.retain(|session| session.chat_id != chat_id);
+        }
+        self.pr_chat_sessions
+            .retain(|_, sessions| !sessions.is_empty());
+    }
+
+    fn pr_chat_session(&self, chat_id: &str) -> Option<&PrChatSession> {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .find(|session| session.chat_id == chat_id)
+    }
+
+    pub fn stale_pr_chats(
+        &self,
+        chats: &[zeron_proto::Chat],
+        vanished: &std::collections::HashSet<String>,
+        live: &[&str],
+    ) -> Vec<String> {
+        // A missing row is not proof of deletion: another profile or device may own it.
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .filter(|session| !live.contains(&session.chat_id.as_str()))
+            .filter(|session| {
+                vanished.contains(&session.chat_id)
+                    || chats
+                        .iter()
+                        .any(|chat| chat.id == session.chat_id && chat.archived)
+            })
+            .map(|session| session.chat_id.clone())
+            .collect()
     }
 
     pub fn effective_commit_instruction(&self) -> &str {
@@ -2615,6 +2767,8 @@ mod tests {
             "Write a short commit message for this staged diff."
         );
         assert_eq!(legacy.commit_message_model, None);
+        assert_eq!(legacy.pr_chat_history, PrChatHistory::KeepPerPr);
+        assert_eq!(legacy.pr_chat_idle_expiry, PrChatIdleExpiry::ThirtyMinutes);
         assert_eq!(legacy.git_agent_busy_policy, GitAgentBusyPolicy::SafeOnly);
         assert_eq!(legacy, UiSettings::default());
         let saved = serde_json::to_string(&legacy).unwrap();
@@ -2691,6 +2845,78 @@ mod tests {
             Some("claude-haiku-4-5")
         );
         assert_eq!(merged.git_agent_busy_policy, GitAgentBusyPolicy::AllowAll);
+        assert_eq!(merged.pr_chat_history, PrChatHistory::KeepPerPr);
+
+        let mut stale = base.clone();
+        stale.pr_chat_history = PrChatHistory::Fresh;
+        let merged = UiSettings::merge_changes(&base, &stale, merged);
+        assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
+        assert_eq!(merged.commit_message_instruction, "Conventional please.");
+
+        let mut expiry = base.clone();
+        expiry.pr_chat_idle_expiry = PrChatIdleExpiry::OneDay;
+        let merged = UiSettings::merge_changes(&base, &expiry, merged);
+        assert_eq!(merged.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
+        assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
+        let mut other = base.clone();
+        other.sidebar_width = 280.0;
+        let merged = UiSettings::merge_changes(&base, &other, merged);
+        assert_eq!(merged.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
+        assert_eq!(
+            serde_json::to_value(PrChatIdleExpiry::FiveMinutes).unwrap(),
+            "five-minutes"
+        );
+    }
+
+    #[test]
+    fn a_file_from_the_fork_pr_page_keeps_its_pr_chat_index() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"prChatStyle":"bottom-bar","prChatHistory":"fresh","prChatIdleExpiry":"one-hour",
+            "prChatSessions":{"github.com/acme/zeron#7":[{"chatId":"pr-chat-1",
+            "createdAt":"2026-09-21T09:00:00Z","posted":[{"entryId":"m2","index":0,
+            "label":"Posted comment","at":"2026-09-21T09:01:00Z"}],"fresh":true}]}}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.pr_chat_history, PrChatHistory::Fresh);
+        assert_eq!(loaded.pr_chat_idle_expiry, PrChatIdleExpiry::OneHour);
+        assert!(loaded.pr_chat_indexed("pr-chat-1"));
+        assert!(loaded.pr_chat_fresh("pr-chat-1"));
+        let saved = serde_json::to_string(&loaded).unwrap();
+        assert!(!saved.contains("prChatStyle"));
+        assert!(saved.contains(r#""github.com/acme/zeron#7":[{"chatId":"pr-chat-1""#));
+    }
+
+    #[test]
+    fn the_pr_chat_index_defaults_empty_and_survives_a_concurrent_merge() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.pr_chat_sessions.is_empty());
+        let session = |id: &str| PrChatSession {
+            chat_id: id.into(),
+            created_at: chrono::Utc::now(),
+            fresh: false,
+        };
+        let base = UiSettings::default();
+        let mut edited = base.clone();
+        edited.index_pr_chat("github.com/acme/zeron#7", session("one"));
+        edited.index_pr_chat("github.com/acme/zeron#7", session("one"));
+        edited.index_pr_chat("github.com/acme/zeron#8", session("two"));
+        assert_eq!(edited.pr_chat_ids().collect::<Vec<_>>(), ["one", "two"]);
+        let mut current = base.clone();
+        current.sidebar_width = 333.0;
+        let merged = UiSettings::merge_changes(&base, &edited, current);
+        assert_eq!(merged.sidebar_width, 333.0);
+        assert!(merged.pr_chat_indexed("one") && merged.pr_chat_indexed("two"));
+        let mut pruned = merged.clone();
+        pruned.unindex_pr_chat("two");
+        assert!(!pruned.pr_chat_indexed("two"));
+        assert!(
+            !pruned
+                .pr_chat_sessions
+                .contains_key("github.com/acme/zeron#8")
+        );
     }
 
     #[test]
@@ -3612,6 +3838,16 @@ mod tests {
                 harness: zeron_proto::HarnessId::Codex,
                 model: "gpt-5.6-luna".into(),
             }),
+            pr_chat_history: PrChatHistory::Fresh,
+            pr_chat_idle_expiry: PrChatIdleExpiry::OneHour,
+            pr_chat_sessions: std::collections::BTreeMap::from([(
+                "github.com/acme/zeron#7".to_string(),
+                vec![PrChatSession {
+                    chat_id: "pr-chat-1".into(),
+                    created_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+                    fresh: true,
+                }],
+            )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
             device_auto_float: false,
             device_float_frame: Some(crate::device_panel::float::DeviceFloatFrame {
@@ -3632,6 +3868,10 @@ mod tests {
         assert!(json.contains(r#""commitMessageInstruction": "Use the imperative mood.""#));
         assert!(json.contains(r#""harness": "codex""#));
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
+        assert!(json.contains(r#""prChatHistory": "fresh""#));
+        assert!(json.contains(r#""prChatIdleExpiry": "one-hour""#));
+        assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
+        assert!(json.contains(r#""chatId": "pr-chat-1""#));
         assert!(json.contains(r#""deviceAutoFloat": false"#));
         assert!(json.contains(r#""deviceFloatFrame": {"#));
         assert!(json.contains(r#""servicesAllPorts": true"#));

@@ -608,7 +608,7 @@ impl PullRequestDetailPage {
             .flex_col()
             .gap(px(1.0))
             .pt(px(4.0))
-            .pb(px(if wide { NAV_CLEARANCE } else { 8.0 }));
+            .pb(px(8.0));
         let loading = self.diff.is_none();
         if loading {
             list = list.child(crate::pull_request_skeleton::tree(
@@ -904,7 +904,6 @@ impl PullRequestDetailPage {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .pb(px(NAV_CLEARANCE))
             .child(toolbar)
             .child(stream_frame(theme, viewport))
             .when(!wide && self.files_expanded, |el| {

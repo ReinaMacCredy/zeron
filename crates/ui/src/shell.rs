@@ -87,6 +87,7 @@ mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
+mod pr_chat;
 pub(crate) mod project_icon;
 mod side_chats;
 mod sidebar_pins;
@@ -2343,6 +2344,8 @@ pub struct Shell {
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
+    pr_chat: Option<pr_chat::PrChatPanel>,
+    pr_chat_trash: pr_chat::PrChatTrash,
     /// A detail view a history step landed on, opened by the next render
     /// (creating it needs the window).
     pending_pull_request: Option<(String, Option<String>)>,
@@ -2630,6 +2633,11 @@ impl Shell {
         // minted fresh once the spaces frame lands.
         let restored_drafts = crate::draft_store::sessions(cx);
         state.update(cx, |s, _| s.draft_sessions = restored_drafts);
+        let hidden = settings::current(cx)
+            .pr_chat_ids()
+            .map(str::to_owned)
+            .collect();
+        state.update(cx, |s, cx| s.set_hidden_chats(hidden, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let settings_search =
             cx.new(|cx| ComposerInput::with_context("Search settings…", "PaletteSearch", cx));
@@ -2940,6 +2948,8 @@ impl Shell {
             pull_requests_page: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
+            pr_chat: None,
+            pr_chat_trash: Default::default(),
             pending_pull_request: None,
             pull_request_cache: Default::default(),
             devices_page: None,
@@ -3192,6 +3202,7 @@ impl Shell {
         self.prune_file_explorers(cx);
         self.prune_canvas_browsers(cx);
         self.prune_device_shell(cx);
+        self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
@@ -6546,6 +6557,7 @@ impl Shell {
             .as_ref()
             .is_some_and(|detail| detail.read(cx).url == url)
         {
+            self.sync_pr_chat_target(true, cx);
             cx.notify();
             return;
         }
@@ -6564,10 +6576,13 @@ impl Shell {
                 cx,
             )
         }));
-        self.pull_request_detail_subscription = self
-            .pull_request_detail
-            .as_ref()
-            .map(|detail| cx.observe(detail, |_, _, cx| cx.notify()));
+        self.pull_request_detail_subscription = self.pull_request_detail.as_ref().map(|detail| {
+            cx.observe(detail, |shell, _, cx| {
+                shell.sync_pr_chat_target(false, cx);
+                cx.notify()
+            })
+        });
+        self.sync_pr_chat_target(true, cx);
         cx.notify();
     }
 
@@ -12087,6 +12102,18 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key == "escape"
+            && matches!(self.route, Route::PullRequests)
+            && self
+                .pull_request_detail
+                .as_ref()
+                .is_some_and(|page| page.read(cx).chat_bar_shown())
+            && self.pr_chat_sheet_open(cx)
+        {
+            self.fold_pr_chat(cx);
+            cx.stop_propagation();
+            return;
+        }
         // Escape targets the conversation that owns the focused composer: a
         // side chat's when its composer has focus, the main one otherwise.
         let (state, composer) = self
@@ -12784,6 +12811,8 @@ impl Shell {
                 .map(IntoElement::into_any_element)
                 .unwrap_or_else(|| Empty.into_any_element());
             if let Some(detail) = self.pull_request_detail.clone() {
+                let dock = self.render_pr_chat(window, cx);
+                detail.update(cx, |page, _| page.set_chat_dock(dock));
                 return div()
                     .flex_1()
                     .min_w_0()
@@ -15711,7 +15740,8 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &ToggleTerminal, window, cx| match this.route {
                     Route::Chat => this.toggle_terminal(window, cx),
-                    Route::PullRequests | Route::Settings(_) | Route::Terminal => {}
+                    Route::PullRequests => this.toggle_pr_chat(cx),
+                    Route::Settings(_) | Route::Terminal => {}
                 }),
             )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
@@ -15764,6 +15794,11 @@ impl Render for Shell {
                     this.show_pull_request_detail(action.0.clone(), target, window, cx);
                 },
             ))
+            .on_action(
+                cx.listener(|this, _: &crate::pull_request_detail::FocusPrChat, _, cx| {
+                    this.focus_pr_chat(cx)
+                }),
+            )
             .on_action(cx.listener(
                 |this, _: &crate::pull_request_detail::ClosePullRequest, _, cx| {
                     // Closing the detail view is Back when the board is

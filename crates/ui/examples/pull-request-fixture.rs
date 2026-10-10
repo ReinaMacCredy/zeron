@@ -247,6 +247,12 @@ fn main() -> anyhow::Result<()> {
                     detail.update(cx, |d, cx| d.fixture_select_tab(0, cx));
                     pause(cx, 800).await;
                     shot(cx, "13-summary-600-light")?;
+                    detail.update(cx, |d, cx| d.fixture_select_tab(1, cx));
+                    pause(cx, 800).await;
+                    shot(cx, "13b-code-600-light")?;
+                    detail.update(cx, |d, cx| d.fixture_select_tab(2, cx));
+                    pause(cx, 800).await;
+                    shot(cx, "13c-activity-600-light")?;
                     Ok(())
                 }
                 .await;

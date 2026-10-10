@@ -1,6 +1,8 @@
 //! Native PR inspection and explicit comment submission.
 #[path = "pull_request_actions.rs"]
 mod actions;
+#[path = "pull_request_chat.rs"]
+mod chat;
 #[path = "pull_request_code.rs"]
 mod code;
 #[path = "pull_request_handoff.rs"]
@@ -22,6 +24,10 @@ use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 use zeron_proto::change_request_assessment::{CiState, Facts, check_failed, check_status};
 use zeron_proto::{ChangeRequestDetail, ChangeRequestListItem};
 use zeron_rpc::methods;
+
+pub(crate) use chat::{
+    ChatDock, ChatRevision, ContextChip, FocusPrChat, PrChatContext, extract_badge, find_checkout,
+};
 
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
@@ -285,6 +291,7 @@ pub(crate) struct PullRequestCache {
     controls:
         std::collections::HashMap<(Option<String>, String), zeron_proto::ChangeRequestControls>,
     merge_method: Option<zeron_proto::ChangeRequestMergeMethod>,
+    activity_bar: chat::ActivityBar,
 }
 
 struct CommentSubmission {
@@ -428,6 +435,7 @@ pub struct PullRequestDetailPage {
     /// The image that failed to load, offered in the browser instead.
     image_failed: Option<String>,
     actions: actions::ActionsState,
+    chat_dock: Option<ChatDock>,
 }
 
 impl PullRequestDetailPage {
@@ -511,6 +519,7 @@ impl PullRequestDetailPage {
             image_previous_focus: None,
             image_failed: None,
             actions: Default::default(),
+            chat_dock: None,
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -1081,7 +1090,7 @@ impl PullRequestDetailPage {
     }
 }
 
-#[cfg(feature = "pull-request-fixture")]
+#[cfg(any(test, feature = "pull-request-fixture"))]
 impl PullRequestDetailPage {
     /// 0 Summary, 1 Code, 2 Activity.
     pub fn fixture_select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1511,11 +1520,8 @@ impl Render for PullRequestDetailPage {
                 })
                 .pt(px(24.0))
                 .pb(px(match self.tab {
-                    // The comment dock sits below the scroll, not over it.
-                    Tab::Activity => 32.0,
-                    // The workspace reserves its own room for the navigation.
                     Tab::Code => 0.0,
-                    Tab::Summary => 76.0,
+                    Tab::Summary | Tab::Activity => 32.0,
                 }))
                 .text_size(crate::typography::ui_rems(13.0))
                 .text_color(theme.text);
@@ -2234,7 +2240,11 @@ impl Render for PullRequestDetailPage {
         if self.tab_slide.animating_at(Instant::now()) {
             window.request_animation_frame();
         }
-        let composer = (self.tab == Tab::Activity).then(|| self.comment_composer(&theme, cx));
+        let composer = if self.chat_bar_shown() {
+            self.chat_dock(&theme, cx)
+        } else {
+            self.comment_composer(&theme, cx)
+        };
         let mut root = div()
             .size_full()
             .relative()
@@ -2256,7 +2266,7 @@ impl Render for PullRequestDetailPage {
                     .flex_1()
                     .min_h_0()
                     .child(content)
-                    .children(composer)
+                    .child(composer)
                     .child(navigation),
             );
         if let Some(preview) = &self.image_preview {
@@ -3055,9 +3065,10 @@ mod tests {
                 assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
                 let files = cx.debug_bounds("pr-file-list").unwrap();
                 assert!(files.top() >= search.bottom() && files.size.height > px(40.0));
+                let dock = cx.debug_bounds("pr-chat-dock").unwrap();
                 assert!(
-                    files.bottom() > viewport.bottom(),
-                    "the tree runs to the window edge while the diff clears the navigation"
+                    files.bottom() <= dock.top() && viewport.bottom() <= dock.top(),
+                    "the tree and the diff end above the bar and the navigation"
                 );
                 assert!(cx.debug_bounds("pr-files").is_none());
             } else {
@@ -3546,6 +3557,16 @@ mod tests {
         }
         cx.update(|window, _| window.set_rem_size(px(16.0)));
         cx.run_until_parked();
+        let platform = cx.debug_bounds("pr-verification-Windows").unwrap();
+        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
+        let hidden = platform.bottom() - content.bottom() + px(16.0);
+        if hidden > px(0.0) {
+            page.update(cx, |page, cx| {
+                page.scroll.scroll.set_offset(gpui::point(px(0.0), -hidden));
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
         let platform = cx.debug_bounds("pr-verification-Windows").unwrap();
         cx.simulate_mouse_down(
             platform.center(),
