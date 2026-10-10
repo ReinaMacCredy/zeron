@@ -83,6 +83,7 @@ pub struct AgentProfilesPage {
     claude_tools_task: Option<Task<()>>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
+    list_task: Option<Task<()>>,
     catalog_task: Option<Task<()>>,
     model_tasks: HashMap<HarnessId, Task<()>>,
     system_prompt: Loadable<String>,
@@ -134,6 +135,7 @@ impl AgentProfilesPage {
             claude_tools_task: None,
             error: None,
             task: None,
+            list_task: None,
             catalog_task: None,
             model_tasks: HashMap::new(),
             system_prompt: Loadable::Idle,
@@ -159,7 +161,7 @@ impl AgentProfilesPage {
             self.call_system_prompt(None, cx);
         }
         let list_engine = engine.clone();
-        self.task = Some(cx.spawn(async move |this, cx| {
+        self.list_task = Some(cx.spawn(async move |this, cx| {
             let result = crate::agent_profiles::list(&list_engine, None).await;
             this.update(cx, |page, cx| {
                 match result {
