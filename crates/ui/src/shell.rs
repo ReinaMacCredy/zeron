@@ -6597,6 +6597,23 @@ impl Shell {
         cx.notify();
     }
 
+    fn close_pull_request(&mut self, cx: &mut Context<Self>) {
+        // Closing the detail view is Back when the board is behind it, so
+        // history doesn't grow a loop.
+        if self.nav.previous() == Some(&NavEntry::PullRequests) {
+            self.navigate_back(cx);
+        } else {
+            self.dismiss_pull_request_detail(cx);
+            self.nav.push(NavEntry::PullRequests);
+        }
+        if let Some(page) = &self.pull_requests_page {
+            page.update(cx, |page, cx| {
+                page.select_tab(crate::pull_requests::PageTab::PullRequests, cx)
+            });
+        }
+        cx.notify();
+    }
+
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_search
             .update(cx, |input, cx| input.set_text("", cx));
@@ -12111,6 +12128,11 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key == "escape" && self.escape_closes_pull_request(window, cx) {
+            self.close_pull_request(cx);
+            cx.stop_propagation();
+            return;
+        }
         // Escape targets the conversation that owns the focused composer: a
         // side chat's when its composer has focus, the main one otherwise.
         let (state, composer) = self
@@ -15798,15 +15820,7 @@ impl Render for Shell {
             )
             .on_action(cx.listener(
                 |this, _: &crate::pull_request_detail::ClosePullRequest, _, cx| {
-                    // Closing the detail view is Back when the board is
-                    // behind it, so history doesn't grow a loop.
-                    if this.nav.previous() == Some(&NavEntry::PullRequests) {
-                        this.navigate_back(cx);
-                    } else {
-                        this.dismiss_pull_request_detail(cx);
-                        this.nav.push(NavEntry::PullRequests);
-                    }
-                    cx.notify();
+                    this.close_pull_request(cx)
                 },
             ))
             .on_action(cx.listener(
@@ -19048,16 +19062,97 @@ mod exit_regressions {
                     });
                     cx.run_until_parked();
                     let new_session = cx.debug_bounds("titlebar-new-session").unwrap();
-                    let title = cx.debug_bounds("pr-detail-title").unwrap();
+                    let back = cx.debug_bounds("pr-detail-back").unwrap();
                     assert!(
-                        title.left() >= new_session.right() + px(8.0),
-                        "PR header overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, title={title:?}, new_session={new_session:?}"
+                        back.left() >= new_session.right() + px(8.0),
+                        "PR header overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, back={back:?}, new_session={new_session:?}"
                     );
                     let external = cx.debug_bounds("pr-external").unwrap();
                     assert!(external.right() <= px(width));
                 }
             }
         }
+    }
+
+    #[gpui::test]
+    fn the_page_dock_gives_way_to_the_detail_and_back_or_escape_return(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.connection = zeron_proto::view::ConnectionStatus::Ready;
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.open_pull_requests(cx);
+        });
+        cx.simulate_resize(gpui::size(px(600.0), px(800.0)));
+        cx.run_until_parked();
+        let open = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.dispatch_action(
+                    Box::new(crate::pull_request_detail::OpenPullRequest(
+                        "https://github.com/a/b/pull/1".into(),
+                        None,
+                    )),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("pr-detail-nav").is_some());
+            assert!(
+                cx.debug_bounds("pull-requests-page-tabs").is_none(),
+                "the detail's dock is the only dock"
+            );
+        };
+        let on_board = |shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, _| {
+                assert!(matches!(shell.route, Route::PullRequests));
+                assert!(shell.pull_request_detail.is_none());
+            });
+            assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
+            assert!(cx.debug_bounds("pr-detail-nav").is_none());
+        };
+        on_board(&shell, cx);
+
+        open(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        on_board(&shell, cx);
+
+        open(cx);
+        let back = cx.debug_bounds("pr-detail-back").unwrap();
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        on_board(&shell, cx);
     }
 
     #[gpui::test]

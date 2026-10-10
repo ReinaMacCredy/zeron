@@ -130,6 +130,12 @@ pub(super) struct ActionsState {
     thread_busy: bool,
 }
 
+impl ActionsState {
+    pub(super) fn overlay_open(&self) -> bool {
+        self.confirm.is_some() || self.picker.is_open() || self.review_menu.is_open()
+    }
+}
+
 impl PullRequestDetailPage {
     pub(super) fn restore_controls(&mut self) {
         let key = (self.target.clone(), self.url.clone());

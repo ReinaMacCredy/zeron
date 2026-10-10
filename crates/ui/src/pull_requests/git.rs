@@ -181,6 +181,7 @@ pub struct GitTab {
     _message_edits: Subscription,
     _history_events: Subscription,
     compact: bool,
+    toolbar_lead: Vec<AnyElement>,
 }
 
 fn workspace_target(space: &GitSpace, checkout_path: Option<&str>) -> WorkspaceTarget {
@@ -547,11 +548,8 @@ impl GitTab {
             _message_edits: message_edits,
             _history_events: history_events,
             compact: false,
+            toolbar_lead: Vec::new(),
         }
-    }
-
-    pub(super) fn tree(&self) -> Option<&WorkingTree> {
-        self.tree.as_ref()
     }
 
     pub(super) fn checkout_path(&self) -> Option<&str> {
@@ -1772,15 +1770,22 @@ impl GitTab {
         self.open_sync(kind, cx);
     }
 
-    fn render_toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_toolbar(
+        &self,
+        lead: Vec<AnyElement>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id("pull-requests-git-toolbar")
+            .debug_selector(|| "pull-requests-git-toolbar".into())
             .flex_none()
             .flex()
             .items_center()
             .gap(px(if self.compact { 6.0 } else { 8.0 }))
             .px(px(12.0))
             .py(px(8.0))
+            .children(lead)
             .children(self.render_checkout_control(theme, cx))
             .child(div().flex_1())
             .children(self.render_sync_controls(theme, cx))
@@ -4263,6 +4268,7 @@ impl Render for GitTab {
         let theme = Theme::of(cx).clone();
         let root = div()
             .id("pull-requests-git")
+            .debug_selector(|| "pull-requests-git".into())
             .role(gpui::Role::Group)
             .aria_label("Git")
             .size_full()
@@ -4273,6 +4279,8 @@ impl Render for GitTab {
                     cx.stop_propagation();
                 }
             }));
+        let lead = std::mem::take(&mut self.toolbar_lead);
+        let root = root.child(self.render_toolbar(lead, &theme, cx));
         if self.space.is_none() {
             return root.child(self.render_empty(&theme));
         }
@@ -4286,7 +4294,6 @@ impl Render for GitTab {
             .flex()
             .flex_col()
             .child(div().flex_1().min_h_0().child(self.history.clone()));
-        let root = root.child(self.render_toolbar(&theme, cx));
         if self.compact {
             return root.map(|el| match &self.detail {
                 Some(detail) => el.child(self.render_detail_panel(detail, &theme, cx)),
@@ -4336,7 +4343,7 @@ pub(super) fn tab_slot(tab: PageTab) -> f32 {
 }
 
 impl super::PullRequestsPage {
-    pub(super) fn select_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
+    pub(crate) fn select_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
         if self.tab == tab {
             return;
         }
@@ -4396,12 +4403,7 @@ impl super::PullRequestsPage {
         view
     }
 
-    fn git_count(&self, cx: &App) -> Option<usize> {
-        let (view, _) = self.git_view.as_ref()?;
-        view.read(cx).tree().map(|tree| tree.files.len())
-    }
-
-    pub(super) fn render_page_switch(
+    pub(super) fn render_page_dock(
         &mut self,
         pull_requests: Option<usize>,
         theme: &Theme,
@@ -4412,86 +4414,30 @@ impl super::PullRequestsPage {
         if self.tab_slide.animating_at(now) {
             window.request_animation_frame();
         }
-        let position = self.tab_slide.value_at(now);
-        let slots = PAGE_TABS.len() as f32;
-        let git = self.git_count(cx);
-        let thumb = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(gpui::relative(position / slots))
-            .w(gpui::relative(1.0 / slots))
-            .child(
-                div()
-                    .size_full()
-                    .rounded(px(6.0))
-                    .bg(crate::theme::wash(0.12))
-                    .shadow(crate::theme::card_selected_shadows()),
+        let segments =
+            PAGE_TABS.map(
+                |(tab, label, id, glyph)| crate::pull_request_detail::DockSegment {
+                    id,
+                    label,
+                    glyph,
+                    count: match tab {
+                        PageTab::PullRequests => pull_requests,
+                        PageTab::Git => None,
+                    },
+                },
             );
-        let segments = PAGE_TABS
-            .into_iter()
-            .enumerate()
-            .map(|(slot, (tab, label, id, glyph))| {
-                let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
-                let hover_key = format!("pull-requests-tab-{}-{id}", cx.entity_id());
-                let hover = crate::motion::hover_t(&hover_key);
-                let tone = crate::motion::mix(theme.text_muted, theme.text, covered.max(hover));
-                let count = match tab {
-                    PageTab::PullRequests => pull_requests,
-                    PageTab::Git => git,
-                }
-                .filter(|count| *count > 0);
-                div()
-                    .id(id)
-                    .debug_selector(move || id.into())
-                    .role(gpui::Role::Tab)
-                    .aria_label(label)
-                    .aria_selected(self.tab == tab)
-                    .h_full()
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(6.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .whitespace_nowrap()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tone)
-                    .on_hover(crate::motion::hover_listener(hover_key))
-                    .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
-                    .child(icon(glyph).size(px(14.0)).flex_none().text_color(tone))
-                    .child(label)
-                    .children(count.map(|count| {
-                        div()
-                            .debug_selector(move || format!("pull-requests-tab-count-{tab:?}"))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(theme.text_muted)
-                            .child(count.to_string())
-                    }))
-            });
-        div()
-            .id("pull-requests-page-tabs")
-            .debug_selector(|| "pull-requests-page-tabs".into())
-            .role(gpui::Role::TabList)
-            .aria_label("Pull requests or Git")
-            .flex_none()
-            .h(px(super::HEADER_CONTROL_HEIGHT))
-            .p(px(2.0))
-            .rounded(px(8.0))
-            .bg(crate::theme::ink(0.035))
-            .child(
-                div()
-                    .relative()
-                    .h_full()
-                    .grid()
-                    .grid_cols(PAGE_TABS.len() as u16)
-                    .child(thumb)
-                    .children(segments),
-            )
-            .into_any_element()
+        let pill = crate::pull_request_detail::dock_pill(
+            "pull-requests-page-tabs",
+            "Pull requests or Git",
+            &segments,
+            tab_slot(self.tab) as usize,
+            self.tab_slide.value_at(now),
+            &self.tab_focus,
+            theme,
+            cx,
+            |page, slot, _, cx| page.select_tab(PAGE_TABS[slot].0, cx),
+        );
+        crate::pull_request_detail::dock_row(pill, None)
     }
 
     pub(super) fn render_git_page(
@@ -4502,40 +4448,29 @@ impl super::PullRequestsPage {
     ) -> AnyElement {
         let compact = f32::from(window.viewport_size().width) < COMPACT_WIDTH;
         let view = self.sync_git_tab(compact, cx);
+        let lead = vec![
+            self.render_repository_menu(theme, window, cx),
+            self.render_device_switcher(theme, cx),
+        ];
+        view.update(cx, |tab, _| tab.toolbar_lead = lead);
         let count = self.pull_request_count();
-        let header = crate::settings::widgets::page_column()
-            .id("pull-requests-column")
-            .debug_selector(|| "pull-requests-column".to_owned())
-            .max_w(px(super::PR_PAGE_MAX_WIDTH))
-            .pt_0()
-            .pb(px(Theme::SPACE_LG))
-            .flex_none()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .flex_wrap()
-                    .gap(px(12.0))
-                    .child(self.render_page_switch(count, theme, window, cx))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .flex_wrap()
-                            .gap(px(4.0))
-                            .child(self.render_repository_menu(theme, window, cx))
-                            .child(self.render_device_switcher(theme, cx)),
-                    ),
-            );
+        let dock = self.render_page_dock(count, theme, window, cx);
         div()
             .id("pull-requests-page")
+            .debug_selector(|| "pull-requests-page".into())
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
-            .child(header)
-            .child(div().flex_1().min_h_0().child(view))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .pb(px(crate::pull_request_detail::NAV_CLEARANCE))
+                    .child(view),
+            )
+            .child(dock)
             .into_any_element()
     }
 }
@@ -5065,7 +5000,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_switch_persists_the_tab_and_the_git_tab_stops_reading_off_screen(
+    fn the_dock_persists_the_tab_and_the_git_tab_stops_reading_off_screen(
         cx: &mut gpui::TestAppContext,
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -5083,7 +5018,7 @@ mod tests {
             assert_eq!(page.tab, PageTab::Git);
             assert_eq!(crate::settings::current(cx).pull_requests_tab, PageTab::Git);
         });
-        assert!(cx.debug_bounds("pull-requests-tab-count-Git").is_some());
+        assert!(cx.debug_bounds("pull-requests-tab-Git-count").is_none());
 
         press(cx, "pull-requests-tab-PullRequests");
         page.read_with(cx, |page, cx| {
@@ -5101,6 +5036,47 @@ mod tests {
         tab.read_with(cx, |tab, _| assert!(tab.visible));
         page.update(cx, |page, cx| page.on_hidden(cx));
         tab.read_with(cx, |tab, _| assert!(!tab.visible));
+    }
+
+    #[gpui::test]
+    fn the_page_dock_floats_at_the_bottom_of_the_board_and_the_git_tab(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = lab_state();
+        state.selected_chat = Some("c-main".into());
+        let (_page, cx, _calls, _dir) = open_page(cx, state, PageTab::PullRequests);
+        for width in [600.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(800.0)));
+            for tab in ["pull-requests-tab-PullRequests", "pull-requests-tab-Git"] {
+                press(cx, tab);
+                settle(cx, |cx| cx.debug_bounds("pr-repository").is_some());
+                let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+                let page = cx.debug_bounds("pull-requests-page").unwrap();
+                let repository = cx.debug_bounds("pr-repository").unwrap();
+                assert_eq!(dock.bottom(), page.bottom() - px(16.0), "{tab} at {width}");
+                assert!((dock.center().x - page.center().x).abs() <= px(1.0));
+                assert!(dock.left() >= page.left() && dock.right() <= page.right());
+                assert!(
+                    repository.bottom() < dock.top(),
+                    "the switch left the header"
+                );
+                assert!(cx.debug_bounds("pull-requests-page-tabs-thumb").is_some());
+            }
+            let toolbar = cx.debug_bounds("pull-requests-git-toolbar").unwrap();
+            let repository = cx.debug_bounds("pr-repository").unwrap();
+            assert!(
+                toolbar.top() <= repository.top() && repository.bottom() <= toolbar.bottom(),
+                "on Git the repository menu shares the toolbar row"
+            );
+            let content = cx.debug_bounds("pull-requests-git").unwrap();
+            let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+            assert!(
+                content.bottom() <= dock.top(),
+                "Git content clears the dock"
+            );
+        }
     }
 
     fn calls_of(calls: &Calls, wanted: &str) -> Vec<serde_json::Value> {
@@ -5195,7 +5171,11 @@ mod tests {
         );
         assert!(calls_of(&calls, methods::GET_WORKING_TREE).len() > reads_before);
         tab.read_with(cx, |tab, _| {
-            assert_eq!(tab.tree().unwrap().revision, "r2", "the tree is read again");
+            assert_eq!(
+                tab.tree.as_ref().unwrap().revision,
+                "r2",
+                "the tree is read again"
+            );
         });
         assert!(
             calls_of(&calls, methods::GET_WORKING_TREE_FILE_DIFF).is_empty(),
@@ -5454,7 +5434,7 @@ mod tests {
             let commit = tab.last_commit.as_ref().expect("the reply is kept");
             assert_eq!(commit.subject, "Fix the panel");
             assert_eq!(commit.branch.as_deref(), Some("feature/7"));
-            assert_eq!(tab.tree().unwrap().head_sha.as_deref(), Some("bbb"));
+            assert_eq!(tab.tree.as_ref().unwrap().head_sha.as_deref(), Some("bbb"));
         });
         assert!(cx.debug_bounds("git-last-commit").is_some());
     }
@@ -6100,7 +6080,7 @@ mod tests {
         settle_action(cx, tab, calls, 1);
         settle(cx, |cx| {
             tab.read_with(cx, |tab, _| {
-                tab.tree().unwrap().head_sha.as_deref() == Some("bbb")
+                tab.tree.as_ref().unwrap().head_sha.as_deref() == Some("bbb")
             })
         });
     }
@@ -6180,7 +6160,7 @@ mod tests {
         *lab.tree.lock().unwrap() = Some(clean);
         tab.update(cx, |tab, cx| tab.load(cx));
         settle(cx, |cx| {
-            tab.read_with(cx, |tab, _| tab.tree().unwrap().files.is_empty())
+            tab.read_with(cx, |tab, _| tab.tree.as_ref().unwrap().files.is_empty())
         });
         history.read_with(cx, |history, _| assert_eq!(history.working_tree(), Some(0)));
         assert!(cx.debug_bounds("git-working-tree-row").is_some());
@@ -6274,7 +6254,7 @@ mod tests {
         );
         settle(cx, |cx| {
             tab.read_with(cx, |tab, _| {
-                tab.tree().unwrap().head_sha.as_deref() == Some("ccc")
+                tab.tree.as_ref().unwrap().head_sha.as_deref() == Some("ccc")
             })
         });
         tab.update(cx, |tab, cx| tab.open_sync(SyncKind::Pull, cx));

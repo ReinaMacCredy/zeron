@@ -364,6 +364,7 @@ pub struct PullRequestsPage {
     _observe: Subscription,
     tab: PageTab,
     tab_slide: crate::motion::IndicatorSlide,
+    tab_focus: [gpui::FocusHandle; 2],
     git_view: Option<(Entity<git::GitTab>, Subscription)>,
     git_project: Option<ProjectRef>,
 }
@@ -631,6 +632,7 @@ impl PullRequestsPage {
             _observe: observe,
             tab,
             tab_slide: crate::motion::IndicatorSlide::at(git::tab_slot(tab), Instant::now()),
+            tab_focus: [cx.focus_handle(), cx.focus_handle()],
             git_view: None,
             git_project: None,
         };
@@ -2363,7 +2365,7 @@ impl Render for PullRequestsPage {
                     .items_center()
                     .flex_wrap()
                     .gap(px(12.0))
-                    .child(self.render_page_switch(count, &theme, window, cx))
+                    .child(widgets::page_header(&theme, "Pull requests", count))
                     .child(div().flex_1())
                     .child(
                         div()
@@ -2744,7 +2746,7 @@ impl Render for PullRequestsPage {
                             .mx_auto()
                             .px(px(PR_PAGE_HORIZONTAL_PADDING))
                             .pt(px(8.0))
-                            .pb(px(32.0))
+                            .pb(px(crate::pull_request_detail::NAV_CLEARANCE))
                             .child(content)
                             .children(load_more),
                     ),
@@ -2754,8 +2756,11 @@ impl Render for PullRequestsPage {
         };
         // Keep the page actions reachable while browsing a long list. Only the
         // results scroll; the shared edges remain identical in every layout.
+        let dock = self.render_page_dock(count, &theme, window, cx);
         div()
             .id("pull-requests-page")
+            .debug_selector(|| "pull-requests-page".into())
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -2776,6 +2781,7 @@ impl Render for PullRequestsPage {
                     .child(results)
                     .children(scrollbar),
             )
+            .child(dock)
             .into_any_element()
     }
 }
@@ -2842,7 +2848,9 @@ impl PullRequestsPage {
             .flex()
             .justify_center()
             .when(index == 0, |el| el.pt(px(8.0)))
-            .when(index + 1 == board.rows.len(), |el| el.pb(px(32.0)))
+            .when(index + 1 == board.rows.len(), |el| {
+                el.pb(px(crate::pull_request_detail::NAV_CLEARANCE))
+            })
             .child(
                 div()
                     .w_full()

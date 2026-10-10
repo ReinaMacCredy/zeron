@@ -504,6 +504,14 @@ impl PullRequestDetailPage {
             || self.tab_focus.iter().any(|focus| focus.is_focused(window))
     }
 
+    pub(crate) fn overlay_open(&self) -> bool {
+        self.actions.overlay_open()
+            || self.files_expanded
+            || self.image_preview.is_some()
+            || self.image_task.is_some()
+            || self.image_failed.is_some()
+    }
+
     pub(super) fn park_hidden_chat_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         let hidden = !self.chat_docked()
             && self

@@ -136,7 +136,7 @@ const NAV_SEGMENT_INSET: f32 = 2.0;
 const NAV_SEGMENT_HEIGHT: f32 = 36.0;
 /// Room above the window edge for the floating section navigation: its 16px
 /// inset, its height, and 16px of air. The diff and the comment dock end here.
-const NAV_CLEARANCE: f32 = 16.0 + NAV_HEIGHT + 16.0;
+pub(crate) const NAV_CLEARANCE: f32 = 16.0 + NAV_HEIGHT + 16.0;
 /// The pill's outer height: segment, its inset and the tray's padding on
 /// both sides, and the composer-style 1px edge.
 const NAV_HEIGHT: f32 = NAV_SEGMENT_HEIGHT + 2.0 * (NAV_SEGMENT_INSET + NAV_PADDING) + 2.0;
@@ -635,6 +635,35 @@ impl PullRequestDetailPage {
             .items_center()
             .gap(px(4.0))
             .child(
+                widgets::ghost_action(&theme)
+                    .id("pr-detail-back")
+                    .debug_selector(|| "pr-detail-back".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Back to pull requests")
+                    .tab_index(0)
+                    .flex_none()
+                    .gap(px(2.0))
+                    .pl(px(4.0))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus_visible(|style| style.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                        window.prevent_default()
+                    })
+                    .child(
+                        crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child("Pull requests")
+                    .on_click(|_, window, cx| {
+                        cx.stop_propagation();
+                        window.dispatch_action(Box::new(ClosePullRequest), cx);
+                    }),
+            )
+            .child(
                 div()
                     .id("pr-detail-title")
                     .debug_selector(|| "pr-detail-title".into())
@@ -904,29 +933,7 @@ impl PullRequestDetailPage {
         self.rebuild_stream(cx);
     }
 
-    /// Floating pill nav. One raised thumb glides between equal-width segments
-    /// (positioned as a fraction of the track, so it stays aligned at any label
-    /// length or text scale) while each segment's icon and label fade with the
-    /// thumb's coverage. The pill sizes to its content and only shrinks when
-    /// the window is narrower than that.
     fn navigation(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let slots = TABS.len() as f32;
-        let position = self.tab_slide.value_at(Instant::now());
-        let thumb = div()
-            .debug_selector(|| "pr-detail-nav-thumb".into())
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(gpui::relative(position / slots))
-            .w(gpui::relative(1.0 / slots))
-            .p(px(NAV_SEGMENT_INSET))
-            .child(
-                div()
-                    .size_full()
-                    .rounded_full()
-                    .bg(theme.glass_hover())
-                    .shadow(crate::theme::card_selected_shadows()),
-            );
         let counts = self.detail.as_ref().map(|detail| {
             [
                 None,
@@ -934,141 +941,24 @@ impl PullRequestDetailPage {
                 Some(detail.activity_comments().count()),
             ]
         });
-        let segments = TABS
-            .into_iter()
-            .enumerate()
-            .map(|(slot, (tab, label, id, glyph))| {
-                // 1 while the thumb sits on this slot, 0 once it is a slot away.
-                let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
-                let hover_key = format!("pr-detail-{}-{id}", cx.entity_id());
-                let hover = crate::motion::hover_t(&hover_key);
-                let emphasis = covered.max(hover);
-                let selected = tab == self.tab;
-                let count = counts
-                    .and_then(|counts| counts[slot])
-                    .filter(|count| *count > 0);
-                div()
-                    .id(id)
-                    .debug_selector(move || id.into())
-                    .role(gpui::Role::Tab)
-                    .aria_label(match count {
-                        Some(count) => format!("{label}, {count}"),
-                        None => label.to_owned(),
-                    })
-                    .aria_selected(selected)
-                    .track_focus(&self.tab_focus[slot].clone().tab_stop(selected))
-                    .tab_index(0)
-                    .min_w_0()
-                    .p(px(NAV_SEGMENT_INSET))
-                    .cursor_pointer()
-                    .on_hover(crate::motion::hover_listener(hover_key))
-                    .child(
-                        div()
-                            .h(px(NAV_SEGMENT_HEIGHT))
-                            .px(px(14.0))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(6.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
-                            .bg(crate::motion::mix(
-                                theme.glass_hover().opacity(0.0),
-                                theme.glass_hover(),
-                                hover * (1.0 - covered) * 0.6,
-                            ))
-                            .child(
-                                crate::icons::icon(glyph)
-                                    .size(px(14.0))
-                                    .flex_none()
-                                    .text_color(crate::motion::mix(
-                                        theme.text_muted,
-                                        theme.text,
-                                        emphasis,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_baseline()
-                                    .gap(px(6.0))
-                                    .line_height(crate::typography::ui_rems(16.0))
-                                    .child(div().min_w_0().truncate().child(label))
-                                    .children(count.map(|count| {
-                                        div()
-                                            .flex_none()
-                                            .text_size(crate::typography::ui_rems(11.0))
-                                            .font_weight(gpui::FontWeight::NORMAL)
-                                            .text_color(theme.text_muted)
-                                            .child(count.to_string())
-                                    })),
-                            ),
-                    )
-                    .rounded_full()
-                    .focus_visible(|style| style.border_2().border_color(theme.accent))
-                    .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
-                    .on_key_down(cx.listener(
-                        move |page, event: &gpui::KeyDownEvent, window, cx| {
-                            let next = match event.keystroke.key.as_str() {
-                                "left" => (slot + TABS.len() - 1) % TABS.len(),
-                                "right" => (slot + 1) % TABS.len(),
-                                "home" => 0,
-                                "end" => TABS.len() - 1,
-                                _ => return,
-                            };
-                            cx.stop_propagation();
-                            page.select_tab(TABS[next].0, cx);
-                            window.focus(&page.tab_focus[next], cx);
-                        },
-                    ))
-            });
-        let tabs = div()
-            .id("pr-detail-nav")
-            .debug_selector(|| "pr-detail-nav".into())
-            .role(gpui::Role::TabList)
-            .aria_label("Pull request sections")
-            .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .p(px(NAV_PADDING))
-            .rounded_full()
-            // The composer's material, so the two floating controls read as
-            // one family.
-            .border_1()
-            .border_color(theme.composer_surface_border())
-            .bg(theme.composer_surface_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg())
-            .flex_none()
-            .child(
-                div()
-                    .relative()
-                    .grid()
-                    .grid_cols(TABS.len() as u16)
-                    .child(thumb)
-                    .children(segments),
-            );
-        // Concentric: the pill radius is the segment radius plus the padding.
-        let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_SEGMENT_INSET + NAV_PADDING + 1.0;
-        div()
-            .absolute()
-            .bottom(px(16.0))
-            .left_0()
-            .right_0()
-            .px(px(16.0))
-            .flex()
-            .justify_center()
-            .items_center()
-            .gap(px(8.0))
-            .child(div().min_w_0().max_w_full().child(crate::frost::frosted(
-                radius,
-                crate::frost::MENU_BLUR,
-                tabs,
-            )))
-            .child(self.chat_orb(theme, cx))
-            .into_any_element()
+        let segments = TABS.map(|(tab, label, id, glyph)| DockSegment {
+            id,
+            label,
+            glyph,
+            count: counts.and_then(|counts| counts[tab_slot(tab) as usize]),
+        });
+        let pill = dock_pill(
+            "pr-detail-nav",
+            "Pull request sections",
+            &segments,
+            tab_slot(self.tab) as usize,
+            self.tab_slide.value_at(Instant::now()),
+            &self.tab_focus,
+            theme,
+            cx,
+            |page, slot, _, cx| page.select_tab(TABS[slot].0, cx),
+        );
+        dock_row(pill, Some(self.chat_orb(theme, cx)))
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
@@ -1094,6 +984,179 @@ impl PullRequestDetailPage {
         }
         cx.notify();
     }
+}
+
+pub(crate) struct DockSegment {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub glyph: &'static str,
+    pub count: Option<usize>,
+}
+
+/// Floating pill nav. One raised thumb glides between equal-width segments
+/// (positioned as a fraction of the track, so it stays aligned at any label
+/// length or text scale) while each segment's icon and label fade with the
+/// thumb's coverage. The pill sizes to its content and only shrinks when
+/// the window is narrower than that.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dock_pill<T: 'static>(
+    id: &'static str,
+    label: &'static str,
+    segments: &[DockSegment],
+    selected: usize,
+    position: f32,
+    focus: &[gpui::FocusHandle],
+    theme: &Theme,
+    cx: &mut Context<T>,
+    select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
+) -> AnyElement {
+    let slots = segments.len() as f32;
+    let thumb = div()
+        .debug_selector(move || format!("{id}-thumb"))
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(gpui::relative(position / slots))
+        .w(gpui::relative(1.0 / slots))
+        .p(px(NAV_SEGMENT_INSET))
+        .child(
+            div()
+                .size_full()
+                .rounded_full()
+                .bg(theme.glass_hover())
+                .shadow(crate::theme::card_selected_shadows()),
+        );
+    let len = segments.len();
+    let items = segments.iter().enumerate().map(|(slot, segment)| {
+        let (segment_id, label, glyph) = (segment.id, segment.label, segment.glyph);
+        // 1 while the thumb sits on this slot, 0 once it is a slot away.
+        let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
+        let hover_key = format!("{id}-{}-{segment_id}", cx.entity_id());
+        let hover = crate::motion::hover_t(&hover_key);
+        let emphasis = covered.max(hover);
+        let count = segment.count.filter(|count| *count > 0);
+        let click = select.clone();
+        let key = select.clone();
+        let focus = focus.to_vec();
+        div()
+            .id(segment_id)
+            .debug_selector(move || segment_id.into())
+            .role(gpui::Role::Tab)
+            .aria_label(match count {
+                Some(count) => format!("{label}, {count}"),
+                None => label.to_owned(),
+            })
+            .aria_selected(slot == selected)
+            .track_focus(&focus[slot].clone().tab_stop(slot == selected))
+            .tab_index(0)
+            .min_w_0()
+            .p(px(NAV_SEGMENT_INSET))
+            .cursor_pointer()
+            .on_hover(crate::motion::hover_listener(hover_key))
+            .child(
+                div()
+                    .h(px(NAV_SEGMENT_HEIGHT))
+                    .px(px(14.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
+                    .bg(crate::motion::mix(
+                        theme.glass_hover().opacity(0.0),
+                        theme.glass_hover(),
+                        hover * (1.0 - covered) * 0.6,
+                    ))
+                    .child(
+                        crate::icons::icon(glyph)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(6.0))
+                            .line_height(crate::typography::ui_rems(16.0))
+                            .child(div().min_w_0().truncate().child(label))
+                            .children(count.map(|count| {
+                                div()
+                                    .debug_selector(move || format!("{segment_id}-count"))
+                                    .flex_none()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .text_color(theme.text_muted)
+                                    .child(count.to_string())
+                            })),
+                    ),
+            )
+            .rounded_full()
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
+            .on_click(cx.listener(move |host, _, window, cx| click(host, slot, window, cx)))
+            .on_key_down(
+                cx.listener(move |host, event: &gpui::KeyDownEvent, window, cx| {
+                    let next = match event.keystroke.key.as_str() {
+                        "left" => (slot + len - 1) % len,
+                        "right" => (slot + 1) % len,
+                        "home" => 0,
+                        "end" => len - 1,
+                        _ => return,
+                    };
+                    cx.stop_propagation();
+                    key(host, next, window, cx);
+                    window.focus(&focus[next], cx);
+                }),
+            )
+    });
+    let tabs = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::TabList)
+        .aria_label(label)
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .p(px(NAV_PADDING))
+        .rounded_full()
+        // The composer's material, so the two floating controls read as
+        // one family.
+        .border_1()
+        .border_color(theme.composer_surface_border())
+        .bg(theme.composer_surface_bg())
+        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .flex_none()
+        .child(
+            div()
+                .relative()
+                .grid()
+                .grid_cols(len as u16)
+                .child(thumb)
+                .children(items),
+        );
+    // Concentric: the pill radius is the segment radius plus the padding.
+    let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_SEGMENT_INSET + NAV_PADDING + 1.0;
+    crate::frost::frosted(radius, crate::frost::MENU_BLUR, tabs).into_any_element()
+}
+
+pub(crate) fn dock_row(pill: AnyElement, orb: Option<AnyElement>) -> AnyElement {
+    div()
+        .absolute()
+        .bottom(px(16.0))
+        .left_0()
+        .right_0()
+        .px(px(16.0))
+        .flex()
+        .justify_center()
+        .items_center()
+        .gap(px(8.0))
+        .child(div().min_w_0().max_w_full().child(pill))
+        .children(orb)
+        .into_any_element()
 }
 
 #[cfg(any(test, feature = "pull-request-fixture"))]
@@ -3825,5 +3888,27 @@ mod tests {
         for selector in ["pr-detail-refresh", "pr-external"] {
             assert!(cx.debug_bounds(selector).is_some(), "{selector}");
         }
+    }
+
+    #[gpui::test]
+    fn the_back_control_leads_the_header_and_returns_to_the_board(cx: &mut gpui::TestAppContext) {
+        fixture::init(cx);
+        let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
+        for width in [600.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(800.0)));
+            cx.run_until_parked();
+            let back = cx.debug_bounds("pr-detail-back").unwrap();
+            let title = cx.debug_bounds("pr-detail-title").unwrap();
+            assert!(back.right() <= title.left(), "{back:?} {title:?}");
+            assert!(cx.debug_bounds("pr-detail-nav").is_some());
+            assert!(cx.debug_bounds("pull-requests-page-tabs").is_none());
+        }
+        host.read_with(cx, |host, _| assert!(!host.returned));
+        let page = host.read_with(cx, |host, _| host.page.clone());
+        page.update_in(cx, |page, window, cx| window.focus(&page.content_focus, cx));
+        let back = cx.debug_bounds("pr-detail-back").unwrap();
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        host.read_with(cx, |host, _| assert!(host.returned));
     }
 }

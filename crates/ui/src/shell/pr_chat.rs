@@ -152,15 +152,29 @@ impl Shell {
         let Some(page) = self.pull_request_detail.as_ref() else {
             return false;
         };
-        let parked = window.focused(cx).is_none()
-            || self.unfocused.is_focused(window)
-            || self.shortcut_focus.is_focused(window)
-            || self.navigation_focus.main.is_focused(window)
-            || page.read(cx).parked_focus(window);
+        let parked = self.shell_focus_parked(window, cx) || page.read(cx).parked_focus(window);
         if parked {
             self.reveal_pr_chat(cx);
         }
         parked
+    }
+
+    pub(super) fn shell_focus_parked(&self, window: &Window, cx: &App) -> bool {
+        window.focused(cx).is_none()
+            || self.unfocused.is_focused(window)
+            || self.shortcut_focus.is_focused(window)
+            || self.navigation_focus.main.is_focused(window)
+    }
+
+    pub(super) fn escape_closes_pull_request(&self, window: &Window, cx: &App) -> bool {
+        if !matches!(self.route, Route::PullRequests) {
+            return false;
+        }
+        self.pull_request_detail.as_ref().is_some_and(|page| {
+            let page = page.read(cx);
+            !page.overlay_open()
+                && (self.shell_focus_parked(window, cx) || page.parked_focus(window))
+        })
     }
 
     pub(super) fn reveal_pr_chat(&mut self, cx: &mut Context<Self>) {

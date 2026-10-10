@@ -195,6 +195,9 @@ fn main() -> anyhow::Result<()> {
                     window.update(cx, |_, w, _| w.resize(size(px(760.), px(848.))))?;
                     pause(cx, 600).await;
                     shot(cx, "03-board-760")?;
+                    window.update(cx, |_, w, _| w.resize(size(px(600.), px(848.))))?;
+                    pause(cx, 600).await;
+                    shot(cx, "03b-board-600")?;
                     window.update(cx, |_, w, _| w.resize(size(px(1320.), px(848.))))?;
                     set_delay(3)?;
                     window.update(cx, |_, w, cx| {
