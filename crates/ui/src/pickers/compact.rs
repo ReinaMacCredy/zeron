@@ -20,7 +20,7 @@ pub(super) fn compact_list_height(rows: usize) -> f32 {
 // thumb's centre inset; the fill runs a rail radius past the centre, always
 // hidden under the thumb.
 pub(super) const SLIDER_HEIGHT: f32 = 36.0;
-const RAIL_HEIGHT: f32 = 28.0;
+pub(super) const RAIL_HEIGHT: f32 = 28.0;
 const RAIL_TOP: f32 = (SLIDER_HEIGHT - RAIL_HEIGHT) / 2.0;
 const THUMB_WIDTH: f32 = 44.0;
 const THUMB_HEIGHT: f32 = 32.0;

@@ -763,6 +763,7 @@ const CONTEXT_CARD_HEIGHT: f32 = 104.0;
 const CONTEXT_WARNING_HEIGHT: f32 = 18.0;
 const CONTEXT_STOP_LABEL_WIDTH: f32 = 36.0;
 const CONTEXT_ZONE_GAP: f32 = 8.0;
+const CONTEXT_ZONE_WIDTH: f32 = 58.0;
 
 fn option_id(id: &ModelSetting) -> Option<&str> {
     match id {
@@ -7106,7 +7107,6 @@ impl Pickers {
         } else {
             EFFORT_THUMB_SIZE / 2.0
         };
-        let zone_width = 2.0 * inset + 16.0;
         let visual = |theme: &Theme,
                       len: usize,
                       thumb: Option<(usize, f32)>,
@@ -7125,20 +7125,17 @@ impl Pickers {
                 stepped_track(theme, len, thumb, 0.0, highlighted, selector)
             }
         };
-        let mut warm = theme.clone();
-        warm.accent = theme.warning;
-        warm.accent_strong = theme.warning;
-        let zone = visual(
-            &warm,
-            1,
-            (position == 0).then_some((0, 1.0)),
+        let zone = track_button(
+            &theme,
+            glass,
+            position == 0,
             compact_cursor && position == 0,
-            "context-zone-thumb",
+            window_label("200k"),
         )
         .id("context-zone")
         .debug_selector(|| "context-zone".into())
         .flex_none()
-        .w(px(zone_width))
+        .w(px(CONTEXT_ZONE_WIDTH))
         .cursor_pointer()
         .on_click(cx.listener(|this, _, _, cx| {
             this.pick_context_position(0, cx);
@@ -7157,6 +7154,7 @@ impl Pickers {
         .debug_selector(|| "context-track".into())
         .flex_1()
         .min_w_0()
+        .when(position == 0, |el| el.opacity(0.5))
         .cursor_pointer()
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -7221,26 +7219,18 @@ impl Pickers {
             .child(zone)
             .child(long_track);
 
-        let label = |text: SharedString, current: bool, tint: gpui::Hsla| {
-            div()
-                .text_size(crate::typography::ui_rems(10.5))
-                .text_color(if current { tint } else { theme.text_muted })
-                .when(current, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
-                .child(text)
-        };
-        let zone_label = label(window_label("200k"), position == 0, theme.warning)
-            .id("context-zone-label")
-            .flex_none()
-            .w(px(zone_width))
-            .text_center()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.pick_context_position(0, cx);
-                cx.stop_propagation();
-            }));
         let rail_len = long.len().saturating_sub(1).max(1) as f32;
         let long_labels = long_labels.into_iter().enumerate().map(|(ix, text)| {
-            label(text, position == ix + 1, theme.text)
+            let current = position == ix + 1;
+            div()
+                .text_size(crate::typography::ui_rems(10.5))
+                .text_color(if current {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .when(current, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
+                .child(text)
                 .id(("context-stop", ix))
                 .absolute()
                 .top_0()
@@ -7259,13 +7249,14 @@ impl Pickers {
             .h(px(14.0))
             .flex()
             .gap(px(CONTEXT_ZONE_GAP))
-            .child(zone_label)
+            .child(div().flex_none().w(px(CONTEXT_ZONE_WIDTH)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .relative()
                     .mx(px(inset))
+                    .when(position == 0, |el| el.opacity(0.5))
                     .children(long_labels),
             );
 
@@ -7536,6 +7527,60 @@ impl popover::ScrollRailHost for Pickers {
     fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
         Some(self.active_menu_scroll())
     }
+}
+
+fn track_button(
+    theme: &Theme,
+    glass: bool,
+    selected: bool,
+    highlighted: bool,
+    label: SharedString,
+) -> gpui::Div {
+    let surface = div()
+        .h(px(if glass {
+            compact::RAIL_HEIGHT
+        } else {
+            EFFORT_TRACK_HEIGHT
+        }))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(crate::typography::ui_rems(11.5));
+    let surface = match (glass, selected) {
+        (true, true) => {
+            let mut warm = theme.clone();
+            warm.accent_strong = theme.warning;
+            crate::glass::accent_plate(&warm, 1.0, 0.0).apply(surface)
+        }
+        (true, false) => crate::glass::light(surface, theme, 1.0),
+        (false, true) => surface.bg(theme.warning),
+        (false, false) => surface.bg(crate::theme::hairline(0.14)),
+    };
+    let on_warning = if crate::theme::contrast_ratio(gpui::black(), theme.warning)
+        >= crate::theme::contrast_ratio(gpui::white(), theme.warning)
+    {
+        gpui::black()
+    } else {
+        gpui::white()
+    };
+    surface
+        .text_color(if selected {
+            on_warning
+        } else {
+            theme.text_muted
+        })
+        .when(selected, |el| el.font_weight(gpui::FontWeight::BOLD))
+        .when(highlighted, |el| {
+            el.shadow(vec![gpui::BoxShadow {
+                color: theme.accent.opacity(0.4),
+                offset: gpui::point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(3.0),
+                inset: false,
+            }])
+        })
+        .child(label)
 }
 
 fn stop_at(
@@ -12622,10 +12667,22 @@ mod tests {
                 assert_eq!(cx.debug_bounds(hidden), None);
                 let track = cx.debug_bounds("context-track").expect("long track");
                 let zone = cx.debug_bounds("context-zone").expect("200K zone");
+                let rail = if glass {
+                    compact::RAIL_HEIGHT
+                } else {
+                    EFFORT_TRACK_HEIGHT
+                };
                 assert_eq!(
-                    (track.size.height, zone.size.height),
-                    (effort.size.height, effort.size.height),
+                    (track.size.height, zone.size),
+                    (
+                        effort.size.height,
+                        gpui::size(px(CONTEXT_ZONE_WIDTH), px(rail))
+                    ),
                     "{style:?}, compact {compact}"
+                );
+                assert!(
+                    (zone.center().y - track.center().y).abs() < px(0.5),
+                    "the button sits on the track's centre line"
                 );
                 let card = cx.debug_bounds("context-card").expect("context card");
                 assert!(
@@ -12655,8 +12712,65 @@ mod tests {
                         "{style:?}, compact {compact}"
                     );
                 });
+                cx.update(|window, cx| window.draw(cx).clear());
+                let card = cx.debug_bounds("context-card").expect("context card");
+                assert!(
+                    (card.size.height - px(CONTEXT_CARD_HEIGHT)).abs() < px(1.0),
+                    "200K: {style:?}, compact {compact}: {card:?}"
+                );
             }
         }
+    }
+
+    #[gpui::test]
+    fn the_200k_button_has_no_thumb_and_hides_the_long_track_thumb(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let pickers = context_card_picker(cx, false, dir.path());
+        let (_fixture, cx) = cx.add_window_view(|_, _| ContextFixture {
+            pickers: pickers.clone(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let thumb = cx
+            .debug_bounds("context-thumb")
+            .expect("1M thumb on the long track");
+        let track = cx.debug_bounds("context-track").expect("long track");
+        let zone = cx.debug_bounds("context-zone").expect("200K button");
+        assert!(track.contains(&thumb.center()), "{thumb:?} on {track:?}");
+        assert!(!zone.intersects(&thumb));
+
+        cx.simulate_click(zone.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(
+                picked_option(pickers, CONTEXT_WINDOW, cx).as_deref(),
+                Some("200k")
+            );
+            assert_eq!(pickers.context_thumb(cx), (0.0, false));
+        });
+        assert_eq!(
+            cx.debug_bounds("context-thumb"),
+            None,
+            "no thumb while 200K"
+        );
+        assert_eq!(
+            cx.debug_bounds("context-zone").map(|z| z.size),
+            Some(zone.size)
+        );
+
+        cx.simulate_click(
+            gpui::point(
+                track.right() - px(EFFORT_THUMB_SIZE / 2.0),
+                track.center().y,
+            ),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(picked_option(pickers, CONTEXT_WINDOW, cx), None);
+            assert_eq!(picked_option(pickers, AUTO_COMPACT, cx), None);
+        });
+        assert!(cx.debug_bounds("context-thumb").is_some());
     }
 
     fn context_long_stops_len(pickers: &Pickers, cx: &App) -> usize {
