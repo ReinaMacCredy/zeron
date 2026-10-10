@@ -16,7 +16,7 @@ impl Render for DropHost {
                 .into_any_element();
         }
         self.shell.update(cx, |shell, cx| {
-            let main = shell.render_main(window, 400., 400., cx);
+            let main = shell.render_main(window, 400., 400., 0., cx);
             let right = shell.render_right_pane(window, cx);
             // Tree and search rows stamp the explorer's current origin; the
             // stale source models a drag that outlived its workspace.

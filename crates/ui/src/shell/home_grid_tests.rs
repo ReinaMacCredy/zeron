@@ -11,7 +11,7 @@ impl Render for HeroHost {
         self.shell.update(cx, |shell, cx| {
             div()
                 .size_full()
-                .child(shell.render_main(window, 1000., 1000., cx))
+                .child(shell.render_main(window, 1000., 1000., 0., cx))
         })
     }
 }

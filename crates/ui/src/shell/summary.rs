@@ -851,7 +851,15 @@ impl Shell {
         if let Some(popover) = self.sidecar_popover_card(&theme, &sections, cx) {
             root = root.child(popover);
         }
-        root.into_any_element()
+        div()
+            .flex_none()
+            .h_full()
+            .w(px(width))
+            .child(crate::terminal::dock::above_terminal(
+                root,
+                self.terminal_geometry.clone(),
+            ))
+            .into_any_element()
     }
 
     fn sidecar_panel(

@@ -4,6 +4,7 @@ use gpui::{AppContext, TestAppContext, VisualTestContext};
 
 struct NavigationHost {
     shell: Entity<Shell>,
+    sidecar_width: f32,
     _data_dir: tempfile::TempDir,
 }
 
@@ -18,7 +19,9 @@ impl Render for NavigationHost {
             window.defer(cx, move |window, cx| {
                 restore_mounted_focus(&root, &preferred, &neutral, window, cx);
             });
-            let main = shell.render_main(window, 400., 400., cx);
+            let main = shell.render_main(window, 400., 400., self.sidecar_width, cx);
+            let sidecar =
+                (self.sidecar_width > 0.).then(|| shell.render_sidecar(self.sidecar_width, cx));
             let right = shell.render_right_pane(window, cx);
             div()
                 .size_full()
@@ -52,6 +55,7 @@ impl Render for NavigationHost {
                                 .h_full()
                                 .child(main),
                         )
+                        .children(sidecar)
                         .when(shell.right_pane_open(cx), |el| el.child(right)),
                 )
         })
@@ -59,6 +63,13 @@ impl Render for NavigationHost {
 }
 
 fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+    setup_with_sidecar(cx, 0.)
+}
+
+fn setup_with_sidecar(
+    cx: &mut TestAppContext,
+    sidecar_width: f32,
+) -> (Entity<Shell>, &mut VisualTestContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -125,6 +136,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         });
         NavigationHost {
             shell,
+            sidecar_width,
             _data_dir: dir,
         }
     });
@@ -545,6 +557,21 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
     cx.simulate_keystrokes("ctrl-c");
     assert_eq!(clipboard_text(cx).as_deref(), Some("sentinel"));
     clear_transcript_selection();
+}
+
+#[gpui::test]
+fn the_terminal_dock_runs_under_the_sidecar(cx: &mut TestAppContext) {
+    let (shell, cx) = setup_with_sidecar(cx, summary::SIDECAR_WIDTH);
+    let before = cx.debug_bounds("sidecar").unwrap();
+    cx.dispatch_action(ToggleTerminal);
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(shell.read_with(cx, |shell, cx| shell.terminal_open(cx)));
+    let dock = cx.debug_bounds("terminal-dock").unwrap();
+    let sidecar = cx.debug_bounds("sidecar").unwrap();
+    assert!(dock.size.height > px(0.));
+    assert_eq!(dock.right(), sidecar.right());
+    assert_eq!(sidecar.bottom(), dock.top());
+    assert_eq!(sidecar.bottom() + dock.size.height, before.bottom());
 }
 
 #[gpui::test]

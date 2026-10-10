@@ -12481,6 +12481,7 @@ impl Shell {
         window: &mut Window,
         main_content_width: f32,
         transcript_width: f32,
+        sidecar_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme_owned = Theme::of(cx).clone();
@@ -12926,7 +12927,12 @@ impl Shell {
                         )
                         .reserve_terminal(terminal_geometry.clone())
                     })
-                    .child(self.render_terminal_container(terminal_geometry, window, cx))
+                    .child(self.render_terminal_container(
+                        terminal_geometry,
+                        sidecar_width,
+                        window,
+                        cx,
+                    ))
             })
             .child(Self::attachment_drop_overlay(theme))
             .into_any_element()
@@ -13096,9 +13102,12 @@ impl Shell {
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
     /// over the panel, the whole container height-animated 200 ms on toggle.
+    /// It reaches `sidecar_width` past the column's right edge, under the
+    /// sidecar, which ends at the dock's top.
     fn render_terminal_container(
         &mut self,
         geometry: crate::terminal::dock::SharedGeometry,
+        sidecar_width: f32,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -13204,7 +13213,8 @@ impl Shell {
         // FLOATS over the panel's top edge (painted after, so it wins hit
         // testing) instead of stacking above it — stacked, its hitbox would read as
         // dead air between the seam and the tab bar (user report).
-        crate::terminal::dock::terminal(geometry, self.terminal_geometry.clone(), move |geometry| {
+        let measured = self.terminal_geometry.clone();
+        let dock = crate::terminal::dock::terminal(geometry, measured, move |geometry| {
             let inner = div()
                 .h(px(geometry.content_height))
                 .w_full()
@@ -13223,8 +13233,13 @@ impl Shell {
                 .h(px(geometry.height))
                 .child(inner)
                 .into_any_element()
-        })
-        .into_any_element()
+        });
+        div()
+            .debug_selector(|| "terminal-dock".into())
+            .flex_none()
+            .mr(px(-sidecar_width))
+            .child(dock)
+            .into_any_element()
     }
 
     /// Working indicator strip: gradient spinner + rotating flavour word (7s,
@@ -15653,14 +15668,16 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
-                // `=summary` / `=sidecar-popover` (capture knobs): one browser tab,
-                // then the sidecar expanded, or railed with its popover up.
+                // `=summary` / `=sidecar-popover` / `=sidecar-terminal` (capture
+                // knobs): one browser tab, then the sidecar expanded, railed with
+                // its popover up, or expanded over an open terminal dock.
                 if matches!(
                     self.debug_dialog.as_deref(),
-                    Some("summary" | "sidecar-popover")
+                    Some("summary" | "sidecar-popover" | "sidecar-terminal")
                 ) && self.state.read(cx).selected_chat.is_some()
                 {
                     let popover = self.debug_dialog.as_deref() == Some("sidecar-popover");
+                    let terminal = self.debug_dialog.as_deref() == Some("sidecar-terminal");
                     self.debug_dialog = None;
                     self.add_browser_surface(None, window, cx);
                     if self.right_pane_open(cx) != popover {
@@ -15668,6 +15685,9 @@ impl Render for Shell {
                     }
                     if popover {
                         self.set_sidecar_popover(true, cx);
+                    }
+                    if terminal && !self.terminal_open(cx) {
+                        self.toggle_terminal(window, cx);
                     }
                 }
                 if let Some(tab) = match self.debug_dialog.as_deref() {
@@ -15898,7 +15918,13 @@ impl Render for Shell {
                 let main = if pr_route {
                     self.render_pull_requests_column(column, window, cx)
                 } else {
-                    self.render_main(window, main_content_width, transcript_width, cx)
+                    self.render_main(
+                        window,
+                        main_content_width,
+                        transcript_width,
+                        sidecar_width,
+                        cx,
+                    )
                 };
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`

@@ -164,9 +164,9 @@ mod tests {
     }
     impl Render for DragHost {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let main = self
-                .shell
-                .update(cx, |shell, cx| shell.render_main(window, 600., 600., cx));
+            let main = self.shell.update(cx, |shell, cx| {
+                shell.render_main(window, 600., 600., 0., cx)
+            });
             div()
                 .flex()
                 .w(px(900.))
