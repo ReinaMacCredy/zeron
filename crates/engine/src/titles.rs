@@ -152,56 +152,24 @@ impl TitleGenerator {
         _cwd: &str,
     ) -> Option<String> {
         let settings = self.inner.registry.title_settings();
-        let enabled = self.inner.registry.enabled_set();
-        let harness_id = settings.harness.or_else(|| {
-            if zeron_harness::supports_titles(harness_id) {
-                Some(harness_id)
-            } else {
-                enabled
-                    .iter()
-                    .copied()
-                    .find(|id| zeron_harness::supports_titles(*id))
-            }
-        })?;
-        if !zeron_harness::supports_titles(harness_id) {
-            return None;
-        }
-        // Order this entire isolated subprocess against a queued update for
-        // the same CLI. The fair registry gate prevents late title work from
-        // jumping ahead of an accepted writer.
-        let execution_lease = Arc::new(self.inner.registry.execution_lease(harness_id).await);
-        let harness = match self.inner.registry.resolve(harness_id) {
-            Ok(harness) => harness,
-            Err(err) => {
-                tracing::debug!(error = %err, "titling harness unavailable");
-                return None;
-            }
-        };
-        let model = match settings.model {
-            Some(model) => Some(model),
-            None => cheapest_model(
-                &tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    self.inner
-                        .registry
-                        .discover_models_with_lease(harness_id, execution_lease.clone()),
-                )
-                .await
-                .ok()?
-                .unwrap_or_default(),
-            ),
-        };
+        let target = one_shot_target(
+            &self.inner.registry,
+            settings.harness,
+            settings.model,
+            harness_id,
+        )
+        .await?;
         let title_prompt = format!(
             "{}\n\nSession request (JSON string):\n{}",
             zeron_harness::TITLE_INSTRUCTIONS,
             serde_json::to_string(prompt).ok()?
         );
         run_one_shot(
-            harness.as_ref(),
-            execution_lease,
+            target.harness.as_ref(),
+            target.lease,
             OneShot {
-                harness: harness_id,
-                model,
+                harness: target.harness_id,
+                model: target.model,
                 prompt: title_prompt,
                 instructions: zeron_harness::TITLE_INSTRUCTIONS,
                 attempt_timeout: std::time::Duration::from_secs(30),
@@ -212,6 +180,63 @@ impl TitleGenerator {
         .await
         .ok()
     }
+}
+
+pub(crate) struct OneShotTarget {
+    pub harness_id: HarnessId,
+    pub harness: Arc<dyn zeron_harness::Harness>,
+    pub lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+    pub model: Option<String>,
+}
+
+pub(crate) async fn one_shot_target(
+    registry: &HarnessRegistry,
+    configured: Option<HarnessId>,
+    model: Option<String>,
+    session: HarnessId,
+) -> Option<OneShotTarget> {
+    let harness_id = configured.or_else(|| {
+        if zeron_harness::supports_titles(session) {
+            Some(session)
+        } else {
+            registry
+                .enabled_set()
+                .into_iter()
+                .find(|id| zeron_harness::supports_titles(*id))
+        }
+    })?;
+    if !zeron_harness::supports_titles(harness_id) {
+        return None;
+    }
+    // Order this entire isolated subprocess against a queued update for
+    // the same CLI. The fair registry gate prevents late one-shot work from
+    // jumping ahead of an accepted writer.
+    let lease = Arc::new(registry.execution_lease(harness_id).await);
+    let harness = match registry.resolve(harness_id) {
+        Ok(harness) => harness,
+        Err(err) => {
+            tracing::debug!(error = %err, "one-shot harness unavailable");
+            return None;
+        }
+    };
+    let model = match model {
+        Some(model) => Some(model),
+        None => cheapest_model(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                registry.discover_models_with_lease(harness_id, lease.clone()),
+            )
+            .await
+            .ok()?
+            .unwrap_or_default(),
+        ),
+    };
+    Some(OneShotTarget {
+        harness_id,
+        harness,
+        lease,
+        model,
+    })
 }
 
 pub(crate) struct OneShot {

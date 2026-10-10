@@ -749,6 +749,13 @@ pub(crate) struct CanvasTarget {
     device: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposerPrediction {
+    pub entry_id: String,
+    pub text: String,
+}
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
@@ -899,6 +906,8 @@ pub struct AppState {
     queue_task: Option<Task<()>>,
     token_rate: Option<u32>,
     token_rate_task: Option<Task<()>>,
+    composer_prediction: Option<(String, ComposerPrediction)>,
+    composer_prediction_task: Option<Task<()>>,
     change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
@@ -1019,6 +1028,8 @@ impl AppState {
             queue_task: None,
             token_rate: None,
             token_rate_task: None,
+            composer_prediction: None,
+            composer_prediction_task: None,
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
@@ -1304,6 +1315,8 @@ impl AppState {
             self.queue_task = None;
             self.token_rate = None;
             self.token_rate_task = None;
+            self.composer_prediction = None;
+            self.composer_prediction_task = None;
         }
         (changed, gone)
     }
@@ -1848,6 +1861,51 @@ impl AppState {
         struct RateFrame {
             rate: Option<u32>,
         }
+        self.spawn_selected_chat_watch(
+            cx,
+            handle,
+            chat_id,
+            methods::WATCH_TOKEN_RATE,
+            |state, _, frame: RateFrame| {
+                let changed = state.token_rate != frame.rate;
+                state.token_rate = frame.rate;
+                changed
+            },
+        )
+    }
+
+    fn spawn_prediction_watch(
+        &self,
+        cx: &mut Context<Self>,
+        handle: EngineHandle,
+        chat_id: String,
+    ) -> Task<()> {
+        #[derive(serde::Deserialize)]
+        struct PredictionFrame {
+            prediction: Option<ComposerPrediction>,
+        }
+        self.spawn_selected_chat_watch(
+            cx,
+            handle,
+            chat_id,
+            methods::WATCH_COMPOSER_PREDICTION,
+            |state, chat_id, frame: PredictionFrame| {
+                let next = frame.prediction.map(|p| (chat_id.to_string(), p));
+                let changed = state.composer_prediction != next;
+                state.composer_prediction = next;
+                changed
+            },
+        )
+    }
+
+    fn spawn_selected_chat_watch<F: serde::de::DeserializeOwned + 'static>(
+        &self,
+        cx: &mut Context<Self>,
+        handle: EngineHandle,
+        chat_id: String,
+        method: &'static str,
+        apply: fn(&mut Self, &str, F) -> bool,
+    ) -> Task<()> {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         let device_id = self
             .chats
@@ -1860,26 +1918,21 @@ impl AppState {
                     "chatId": chat_id,
                     "targetDeviceId": device_id,
                 });
-                let mut rx = match handle
-                    .client()
-                    .subscribe_checked(methods::WATCH_TOKEN_RATE, params)
-                    .await
-                {
+                let mut rx = match handle.client().subscribe_checked(method, params).await {
                     Ok(rx) => rx,
                     Err(err) => {
-                        tracing::debug!(%chat_id, error = %err, "token rate watch unavailable");
+                        tracing::debug!(%chat_id, method, error = %err, "chat watch unavailable");
                         return;
                     }
                 };
                 while let Some(value) = rx.recv().await {
-                    let Ok(frame) = serde_json::from_value::<RateFrame>(value) else {
+                    let Ok(frame) = serde_json::from_value::<F>(value) else {
                         continue;
                     };
                     let alive = this.update(cx, |state, cx| {
                         if state.selected_chat.as_deref() == Some(chat_id.as_str())
-                            && state.token_rate != frame.rate
+                            && apply(state, &chat_id, frame)
                         {
-                            state.token_rate = frame.rate;
                             cx.notify();
                         }
                     });
@@ -1890,6 +1943,29 @@ impl AppState {
                 cx.background_executor().timer(RETRY_DELAY).await;
             }
         })
+    }
+
+    pub fn composer_prediction(&self, chat_id: &str) -> Option<&ComposerPrediction> {
+        self.composer_prediction
+            .as_ref()
+            .filter(|(id, _)| id == chat_id)
+            .map(|(_, prediction)| prediction)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_composer_prediction(
+        &mut self,
+        chat_id: &str,
+        prediction: ComposerPrediction,
+    ) {
+        self.composer_prediction = Some((chat_id.to_string(), prediction));
+    }
+
+    /// Sending supersedes the prediction before the engine says so.
+    pub fn consume_composer_prediction(&mut self, chat_id: &str) {
+        if self.composer_prediction(chat_id).is_some() {
+            self.composer_prediction = None;
+        }
     }
 
     pub fn session_stats_for(&self, chat_id: Option<&str>) -> Option<zeron_proto::SessionStats> {
@@ -2829,6 +2905,8 @@ impl AppState {
         self.transcript_task = Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
         self.token_rate_task =
             Some(self.spawn_token_rate_watch(cx, handle.clone(), chat_id.clone()));
+        self.composer_prediction_task =
+            Some(self.spawn_prediction_watch(cx, handle.clone(), chat_id.clone()));
         if handle
             .engine_info()
             .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -2994,6 +3072,8 @@ impl AppState {
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             self.token_rate_task =
                 Some(self.spawn_token_rate_watch(cx, handle.clone(), chat_id.clone()));
+            self.composer_prediction_task =
+                Some(self.spawn_prediction_watch(cx, handle.clone(), chat_id.clone()));
             if handle
                 .engine_info()
                 .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -3420,6 +3500,8 @@ impl AppState {
         self.queue_task = None;
         self.token_rate = None;
         self.token_rate_task = None;
+        self.composer_prediction = None;
+        self.composer_prediction_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) restores the pick set aside above.

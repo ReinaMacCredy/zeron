@@ -53,6 +53,9 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// Composer predictions. No params / `PredictionSettings` → the settings.
+    pub const GET_PREDICTION_SETTINGS: &str = "GetPredictionSettings";
+    pub const SET_PREDICTION_SETTINGS: &str = "SetPredictionSettings";
     /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
@@ -78,6 +81,9 @@ pub mod methods {
     /// Live output tokens/s of `chatId`'s running harness: `{chatId}` →
     /// stream of `{rate}` (`null` until enough output to measure).
     pub const WATCH_TOKEN_RATE: &str = "WatchTokenRate";
+    /// The predicted next message for `chatId`'s composer: `{chatId}` →
+    /// stream of `{prediction}` (`null` while there is none).
+    pub const WATCH_COMPOSER_PREDICTION: &str = "WatchComposerPrediction";
     /// Create a sidechat of `sourceChatId` under the client-minted `chatId`,
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.

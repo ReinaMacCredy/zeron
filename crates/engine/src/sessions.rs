@@ -554,6 +554,7 @@ struct Inner {
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
+    predictions: Arc<crate::predictions::Predictions>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
     /// Fired with `(chat_id, cwd)` when a user prompt starts a turn (fresh
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
@@ -734,7 +735,7 @@ impl SessionsEngine {
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 journal,
-                registry,
+                registry: registry.clone(),
                 tool_server_port: Mutex::new(None),
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
@@ -751,6 +752,7 @@ impl SessionsEngine {
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
+                predictions: crate::predictions::Predictions::new(registry),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 computer: Mutex::new(None),
@@ -827,6 +829,7 @@ impl SessionsEngine {
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
+        self.inner.predictions.clear(chat_id);
         if let Some(listener) = self.inner.turn_listener.get() {
             listener(chat_id, cwd);
         }
@@ -975,6 +978,38 @@ impl SessionsEngine {
     }
 
     /// The chat's live output tokens/s; never persisted.
+    /// Subscribing predicts a reply that completed while nobody watched.
+    pub fn watch_prediction(
+        &self,
+        chat_id: &str,
+    ) -> watch::Receiver<Option<crate::predictions::Prediction>> {
+        let rx = self.inner.predictions.watch(chat_id);
+        let harness = self
+            .last_request(chat_id)
+            .and_then(|request| request.harness)
+            .or_else(|| {
+                self.workspace()?
+                    .chat(chat_id)
+                    .ok()
+                    .flatten()?
+                    .config
+                    .map(|config| config.harness)
+            });
+        if let Some(harness) = harness {
+            self.inner.predictions.refresh(chat_id, harness, || {
+                self.doc_handle(chat_id)
+                    .ok()
+                    .and_then(|handle| handle.doc().read_entries().ok())
+                    .unwrap_or_default()
+            });
+        }
+        rx
+    }
+
+    pub fn clear_predictions(&self) {
+        self.inner.predictions.clear_all();
+    }
+
     pub fn watch_token_rate(&self, chat_id: &str) -> watch::Receiver<Option<u32>> {
         lock(&self.inner.token_rates)
             .entry(chat_id.to_string())
@@ -1407,6 +1442,7 @@ impl SessionsEngine {
         // lastMessageAt bump must never be observable ahead of the live run.
         if !idle {
             self.inner.note_message(chat_id, &request.prompt);
+            self.inner.predictions.clear(chat_id);
         }
 
         // Name the chat NOW, off the first prompt — not after the first
@@ -5530,6 +5566,11 @@ async fn drive_run(
                 && let Some(titles) = inner.titles.get()
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
+            }
+            if *status == DoneStatus::Completed {
+                inner.predictions.refresh(&chat_id, harness_id, || {
+                    doc_ref.read_entries().unwrap_or_default()
+                });
             }
             // A turn stopped in place: the runtime lives on, parked like a
             // completed turn. Steers it had accepted but not yet delivered
