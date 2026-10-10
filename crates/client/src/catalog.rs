@@ -362,14 +362,14 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 "Fable 5.1",
                 "Most intelligent model for building agents",
                 FULL_LADDER,
-                vec![context_window("200k"), auto_compact()],
+                vec![context_window("1m"), auto_compact()],
             ),
             model(
                 "claude-fable-5",
                 "Fable 5",
                 "Previous generation Fable",
                 FULL_LADDER,
-                vec![context_window("200k"), auto_compact()],
+                vec![context_window("1m"), auto_compact()],
             ),
             model(
                 "claude-opus-5",
@@ -377,7 +377,7 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 "Powerful model for complex work",
                 FULL_LADDER,
                 vec![
-                    context_window("200k"),
+                    context_window("1m"),
                     auto_compact(),
                     toggle("fastMode", "Fast Mode"),
                 ],
@@ -401,7 +401,7 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 "Sonnet 5",
                 "Balanced speed and intelligence",
                 CLAUDE_XHIGH,
-                vec![context_window("200k"), auto_compact()],
+                vec![context_window("1m"), auto_compact()],
             ),
             model(
                 "claude-haiku-4-5",
