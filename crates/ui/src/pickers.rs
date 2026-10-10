@@ -92,7 +92,6 @@ fn workspace_footer_row() -> gpui::Div {
 
 fn terminal_button(open: bool, theme: &Theme, cx: &App) -> AnyElement {
     const HOVER: &str = "composer-footer-terminal";
-    let hovered = motion::hover_t(HOVER) > 0.0;
     let rest = theme.text_muted.opacity(0.6);
     let fg = if open {
         theme.accent
@@ -134,7 +133,7 @@ fn terminal_button(open: bool, theme: &Theme, cx: &App) -> AnyElement {
                 .text_color(fg),
         )
         .child("Terminal")
-        .when(open || hovered, |el| {
+        .when(open, |el| {
             el.child(popover::kbd_hint(theme, &shortcut))
         })
         .into_any_element()
