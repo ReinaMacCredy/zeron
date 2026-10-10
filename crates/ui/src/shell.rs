@@ -6184,6 +6184,12 @@ impl Shell {
         {
             page.update(cx, |page, cx| page.refresh(cx));
         }
+        // Agents write profiles through the engine, which never bumps the UI's change signal.
+        if section == SettingsSection::AgentProfiles
+            && let Some(page) = &self.agent_profiles_page
+        {
+            page.update(cx, |page, cx| page.load(cx));
+        }
         if !matches!(self.route, Route::Settings(_)) {
             self.settings_focus_pending = true;
         }

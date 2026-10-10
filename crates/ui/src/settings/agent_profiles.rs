@@ -147,7 +147,7 @@ impl AgentProfilesPage {
         page
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };

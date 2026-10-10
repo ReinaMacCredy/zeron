@@ -2189,6 +2189,9 @@ impl Harness for AcpHarness {
             && live.permission_mode == next.permission_mode
             && live.computer_control == next.computer_control
     }
+    fn launch_reads_instructions(&self) -> bool {
+        true
+    }
 
     fn supports_steering(&self) -> bool {
         true

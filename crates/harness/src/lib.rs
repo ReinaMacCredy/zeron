@@ -286,6 +286,11 @@ pub trait Harness: Send + Sync {
             && same_model_options(&live.model_options, &next.model_options)
             && live.cwd == next.cwd
     }
+    /// Whether the tool server's guidance (system prompt and profile
+    /// instructions) is fixed at launch, so a change needs a new runtime.
+    fn launch_reads_instructions(&self) -> bool {
+        false
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
         Ok(None)

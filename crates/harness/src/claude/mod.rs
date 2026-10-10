@@ -615,6 +615,9 @@ impl Harness for ClaudeHarness {
             && auto_compact_window(live) == auto_compact_window(next)
             && live.disabled_tools == next.disabled_tools
     }
+    fn launch_reads_instructions(&self) -> bool {
+        true
+    }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {

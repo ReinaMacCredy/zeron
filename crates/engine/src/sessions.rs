@@ -103,6 +103,7 @@ struct RuntimeConfig {
     harness_id: HarnessId,
     request: RunRequest,
     harness: Arc<dyn Harness>,
+    instructions: String,
 }
 
 impl RuntimeConfig {
@@ -111,6 +112,7 @@ impl RuntimeConfig {
             harness_id,
             request: request.clone(),
             harness,
+            instructions: String::new(),
         }
     }
 
@@ -123,8 +125,15 @@ impl RuntimeConfig {
     /// How `request` reaches this runtime: `Some(false)` as is, `Some(true)`
     /// with its configuration adopted in place first
     /// ([`Harness::reconfigures_in_place`]), `None` only by replacing it.
-    fn route(&self, harness_id: HarnessId, request: &RunRequest) -> Option<bool> {
-        if self.can_route(harness_id, request) {
+    fn route(
+        &self,
+        harness_id: HarnessId,
+        request: &RunRequest,
+        instructions: &str,
+    ) -> Option<bool> {
+        if self.instructions != instructions && self.harness.launch_reads_instructions() {
+            None
+        } else if self.can_route(harness_id, request) {
             Some(false)
         } else if self.harness_id == harness_id
             && self.same_launch(request)
@@ -575,6 +584,7 @@ impl Inner {
         chat_id: &str,
         secret: &str,
         computer_control: bool,
+        instructions: &str,
     ) -> Option<zeron_harness::ToolServer> {
         let port = (*lock(&self.tool_server_port))?;
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
@@ -596,11 +606,8 @@ impl Inner {
         #[cfg(not(target_os = "macos"))]
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
-        let system_prompt = self.registry.system_prompt();
-        let instructions = config.map(|c| c.instructions).unwrap_or_default();
         let blocks: Vec<&str> = [
-            Some(system_prompt.as_str()).filter(|text| !text.is_empty()),
-            Some(instructions.as_str()).filter(|text| !text.is_empty()),
+            Some(instructions).filter(|text| !text.is_empty()),
             computer_guidance
                 .as_deref()
                 .filter(|_| live(ToolGroup::Computer)),
@@ -624,6 +631,20 @@ impl Inner {
             env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
             guidance,
         })
+    }
+
+    /// The host system prompt, then the chat's own instructions: what a run launches with.
+    fn instructions_for(&self, chat_id: &str) -> String {
+        let chat = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id))
+            .map(|config| config.instructions)
+            .unwrap_or_default();
+        [self.registry.system_prompt(), chat]
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     fn computer(&self) -> Option<Arc<ComputerRuntime>> {
@@ -918,11 +939,15 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return false;
         }
+        let instructions = request.map(|_| self.inner.instructions_for(chat_id));
         let live = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.runtime_config.harness_id,
                 h.steerable
-                    && request.is_none_or(|(id, r)| h.runtime_config.route(id, r).is_some()),
+                    && request.is_none_or(|(id, r)| {
+                        let instructions = instructions.as_deref().unwrap_or_default();
+                        h.runtime_config.route(id, r, instructions).is_some()
+                    }),
             )
         });
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
@@ -1169,11 +1194,12 @@ impl SessionsEngine {
             turn_computer = false;
             request.computer_control = live;
         }
+        let instructions = self.inner.instructions_for(chat_id);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
                 h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
-                h.runtime_config.route(harness_id, &request),
+                h.runtime_config.route(harness_id, &request, &instructions),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
@@ -1342,7 +1368,7 @@ impl SessionsEngine {
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
         let RunSetup {
-            handle: run,
+            handle: mut run,
             mut controls,
             engine_rx,
             cancel_rx,
@@ -1354,9 +1380,13 @@ impl SessionsEngine {
                 steerable: harness.supports_steering(),
             },
         );
-        controls.tool_server =
-            self.inner
-                .tool_server_for(chat_id, &run.computer.secret, request.computer_control);
+        controls.tool_server = self.inner.tool_server_for(
+            chat_id,
+            &run.computer.secret,
+            request.computer_control,
+            &instructions,
+        );
+        run.runtime_config.instructions = instructions;
         let run_computer = run.computer.clone();
         let fork_history_sent = run.fork_history_sent.clone();
         let run_id = run.run_id.clone();
@@ -5976,7 +6006,7 @@ mod tests {
             [false, true].map(|computer| {
                 sessions
                     .inner
-                    .tool_server_for("chat", "secret", computer)
+                    .tool_server_for("chat", "secret", computer, "")
                     .and_then(|server| server.guidance)
                     .unwrap()
             })
@@ -6006,7 +6036,7 @@ mod tests {
         let guidance = |computer| {
             sessions
                 .inner
-                .tool_server_for("chat", "secret", computer)
+                .tool_server_for("chat", "secret", computer, "")
                 .and_then(|server| server.guidance)
         };
         let mut settings = zeron_proto::tools::ToolSettings::default();
@@ -6054,7 +6084,12 @@ mod tests {
         let guidance = || {
             sessions
                 .inner
-                .tool_server_for("chat", "secret", false)
+                .tool_server_for(
+                    "chat",
+                    "secret",
+                    false,
+                    &sessions.inner.instructions_for("chat"),
+                )
                 .and_then(|server| server.guidance)
         };
         assert_eq!(guidance(), None);
@@ -6544,10 +6579,10 @@ mod tests {
 
         let mut launch = follow_up.clone();
         launch.permission_mode = PermissionMode::Ask;
-        assert_eq!(config.route(HarnessId::Grok, &launch), None);
+        assert_eq!(config.route(HarnessId::Grok, &launch, ""), None);
         launch.permission_mode = follow_up.permission_mode;
         launch.computer_control = !follow_up.computer_control;
-        assert_eq!(config.route(HarnessId::Grok, &launch), None);
+        assert_eq!(config.route(HarnessId::Grok, &launch, ""), None);
 
         follow_up.model = Some("grok-4.5".into());
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
@@ -6555,6 +6590,17 @@ mod tests {
 
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
+
+        let pi = RuntimeConfig::new(
+            HarnessId::Pi,
+            &initial,
+            Arc::new(zeron_harness::PiHarness::new()),
+        );
+        assert_eq!(
+            pi.route(HarnessId::Pi, &initial, "never read"),
+            Some(false),
+            "a driver that never reads the instructions keeps its run"
+        );
     }
 
     #[test]
@@ -6578,12 +6624,17 @@ mod tests {
         let mut effort = follow_up.clone();
         effort.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert_eq!(
-            config.route(HarnessId::ClaudeCode, &effort),
+            config.route(HarnessId::ClaudeCode, &effort, ""),
             Some(true),
             "a harness that changes effort in place keeps its run"
         );
+        assert_eq!(
+            config.route(HarnessId::ClaudeCode, &effort, "Lead the room."),
+            None,
+            "a profile's instructions ride --append-system-prompt, read only at launch"
+        );
         effort.permission_mode = PermissionMode::Ask;
-        assert_eq!(config.route(HarnessId::ClaudeCode, &effort), None);
+        assert_eq!(config.route(HarnessId::ClaudeCode, &effort, ""), None);
 
         follow_up
             .model_options

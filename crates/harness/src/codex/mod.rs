@@ -659,6 +659,9 @@ impl Harness for CodexHarness {
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
     }
+    fn launch_reads_instructions(&self) -> bool {
+        true
+    }
 
     /// The signed-in account's visible `model/list` is authoritative. A
     /// curated snapshot keeps the picker operational when the experimental
