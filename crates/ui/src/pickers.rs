@@ -809,7 +809,7 @@ impl EffortTween {
 const CONTEXT_WINDOW: &str = "contextWindow";
 const AUTO_COMPACT: &str = "autoCompact";
 const CONTEXT_CARD_HEIGHT: f32 = 104.0;
-const CONTEXT_WARNING_HEIGHT: f32 = 18.0;
+const CONTEXT_WARNING_HEIGHT: f32 = 32.0;
 const CONTEXT_STOP_LABEL_WIDTH: f32 = 36.0;
 const CONTEXT_ZONE_GAP: f32 = 8.0;
 const CONTEXT_ZONE_WIDTH: f32 = 58.0;
@@ -7355,8 +7355,10 @@ impl Pickers {
                     .mt(px(4.0))
                     .h(px(CONTEXT_WARNING_HEIGHT - 4.0))
                     .px(px(2.0))
-                    .truncate()
+                    .debug_selector(|| "context-warning".into())
+                    .overflow_hidden()
                     .text_size(crate::typography::ui_rems(11.0))
+                    .line_height(px(14.0))
                     .text_color(theme.warning)
                     .child(SharedString::from(warning.clone())),
             )
@@ -12855,6 +12857,55 @@ mod tests {
                 Some("200k")
             );
         });
+    }
+
+    #[gpui::test]
+    fn the_context_warning_wraps_onto_a_second_line(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let pickers = context_card_picker(cx, true, dir.path());
+        pickers.update(cx, |pickers, cx| {
+            pickers.state.update(cx, |state, _| {
+                state.selected_chat = Some("c1".into());
+                state.context_usage = Some(zeron_proto::ContextUsage {
+                    tokens: Some(312_000),
+                    window: Some(1_000_000),
+                });
+            });
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| ContextFixture {
+            pickers: pickers.clone(),
+        });
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(600));
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let card = cx.debug_bounds("context-card").expect("context card");
+        let warning = cx.debug_bounds("context-warning").expect("warning painted");
+        assert!(
+            (card.size.height - px(CONTEXT_CARD_HEIGHT + CONTEXT_WARNING_HEIGHT)).abs() < px(1.0),
+            "{card:?}"
+        );
+        assert!(warning.bottom() <= card.bottom(), "{warning:?} in {card:?}");
+        assert!(
+            warning.size.height >= px(28.0),
+            "two 14px lines: {warning:?}"
+        );
+        let text = "Switching to 200K compacts this chat (~312K in use)";
+        let width = cx.update(|window, cx| {
+            let size = crate::typography::ui_rems(11.0).to_pixels(window.rem_size());
+            let run = window.text_style().to_run(text.len());
+            window
+                .text_system()
+                .shape_line(text.into(), size, &[run], None)
+                .width
+        });
+        let inner = warning.size.width - px(4.0);
+        assert!(
+            width > inner && width <= inner * 2.0,
+            "{width:?} must need two lines of {inner:?}"
+        );
     }
 
     #[gpui::test]
