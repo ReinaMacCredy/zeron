@@ -24,6 +24,11 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
+mod git;
+
+pub(crate) use git::OpenSourceControlSettings;
+pub use git::PageTab;
+
 const PR_PAGE_MAX_WIDTH: f32 = 760.0;
 const PR_PAGE_HORIZONTAL_PADDING: f32 = 40.0;
 const PR_TABLE_ROW_HEIGHT: f32 = 64.0;
@@ -357,6 +362,10 @@ pub struct PullRequestsPage {
     option_focus: gpui::FocusHandle,
     return_focus: Option<gpui::FocusHandle>,
     _observe: Subscription,
+    tab: PageTab,
+    tab_slide: crate::motion::IndicatorSlide,
+    git_view: Option<(Entity<git::GitTab>, Subscription)>,
+    git_project: Option<ProjectRef>,
 }
 
 impl PullRequestsPage {
@@ -370,6 +379,18 @@ impl PullRequestsPage {
     }
     pub(crate) fn target_device(&self) -> Option<String> {
         self.target_device.clone()
+    }
+
+    fn pull_request_count(&self) -> Option<usize> {
+        let initial_loading =
+            self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Loading);
+        (!initial_loading && !matches!(self.load_state, PullRequestsLoadState::Failed(_))
+            || !self.items.is_empty())
+        .then(|| {
+            self.paging.total.map_or(self.items.len(), |total| {
+                (total as usize).max(self.items.len())
+            })
+        })
     }
 
     fn scroll_to_top(&mut self) {
@@ -555,6 +576,7 @@ impl PullRequestsPage {
         });
         let mut filter_fades = crate::motion::HoverFades::default();
         filter_fades.set_at("pr-filter-authored", true, true, Instant::now());
+        let tab = crate::settings::current(cx).pull_requests_tab;
         let mut page = Self {
             state,
             search,
@@ -607,6 +629,10 @@ impl PullRequestsPage {
             option_focus: cx.focus_handle().tab_stop(true),
             return_focus: None,
             _observe: observe,
+            tab,
+            tab_slide: crate::motion::IndicatorSlide::at(git::tab_slot(tab), Instant::now()),
+            git_view: None,
+            git_project: None,
         };
         page.initialize_repository(cx);
         page
@@ -663,6 +689,9 @@ impl PullRequestsPage {
                 None if fallback.is_some() => Vec::new(),
                 None => recent_git_projects(state, &local),
             };
+        if let Some(project) = &context {
+            self.git_project = Some(project.clone());
+        }
         self.seen_context = context;
         if candidates.is_empty() {
             if let Some((repo, target)) = fallback {
@@ -706,6 +735,9 @@ impl PullRequestsPage {
                 }
                 page.load_state = PullRequestsLoadState::Idle;
                 let found = found.map(|(repo, target, project)| {
+                    if !explicit_context {
+                        page.git_project = Some(project.clone());
+                    }
                     page.project_repositories.insert(project, repo.clone());
                     (repo, target)
                 });
@@ -779,9 +811,10 @@ impl PullRequestsPage {
     }
 
     /// Keep the retained route entity dormant while another outlet is active.
-    pub fn on_hidden(&mut self) {
+    pub fn on_hidden(&mut self, cx: &mut Context<Self>) {
         self.cancel_project_detection();
         self.visible = false;
+        self.sync_git_visibility(cx);
         self.sort_menu = popover::Popup::default();
         self.repository_menu = popover::Popup::default();
         if self.initial_scope_task.take().is_some() {
@@ -1015,6 +1048,7 @@ impl PullRequestsPage {
             .unwrap_or(&engine.engine_info().device_id);
         let target = (device != local).then(|| device.clone());
         let project = ProjectRef { path, device };
+        self.git_project = Some(project.clone());
         let mut params = params_for_target(target.as_deref());
         params["cwd"] = project.path.clone().into();
         self.initial_scope_attempted = true;
@@ -2249,6 +2283,9 @@ impl Render for PullRequestsPage {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
+        if self.tab == PageTab::Git {
+            return self.render_git_page(&theme, window, cx);
+        }
         let initial_loading =
             self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Loading);
         let refreshing =
@@ -2266,14 +2303,7 @@ impl Render for PullRequestsPage {
             }
         }
         self.refresh_error_shown = refresh_error;
-        let count = (!initial_loading
-            && !matches!(self.load_state, PullRequestsLoadState::Failed(_))
-            || !self.items.is_empty())
-        .then(|| {
-            self.paging.total.map_or(self.items.len(), |total| {
-                (total as usize).max(self.items.len())
-            })
-        });
+        let count = self.pull_request_count();
         let board = self.board(cx);
         let items = board.items.clone();
         let layout = self
@@ -2333,7 +2363,7 @@ impl Render for PullRequestsPage {
                     .items_center()
                     .flex_wrap()
                     .gap(px(12.0))
-                    .child(widgets::page_header(&theme, "Pull requests", count))
+                    .child(self.render_page_switch(count, &theme, window, cx))
                     .child(div().flex_1())
                     .child(
                         div()
@@ -2746,6 +2776,7 @@ impl Render for PullRequestsPage {
                     .child(results)
                     .children(scrollbar),
             )
+            .into_any_element()
     }
 }
 
@@ -4003,7 +4034,7 @@ mod tests {
         page.update(cx, |page, cx| {
             assert_eq!(page.load_state, PullRequestsLoadState::Idle);
             assert_eq!(page.filter, ChangeRequestFilter::Authored);
-            page.on_hidden();
+            page.on_hidden(cx);
             page.on_visible(cx);
             assert_eq!(page.load_state, PullRequestsLoadState::Idle);
             // No engine exists. Any accidental request would produce Network.
@@ -4326,7 +4357,7 @@ mod tests {
                 Some("owner/canonical")
             );
             assert_eq!(page.snapshots.last().unwrap().0.1, "owner/canonical");
-            page.on_hidden();
+            page.on_hidden(cx);
             page.on_visible(cx);
         });
         cx.run_until_parked();
@@ -4433,7 +4464,7 @@ mod tests {
         assert_eq!(*lookups.lock().unwrap(), ["/scratch", "/comet"]);
 
         // Opened from a session in another project: that project's PRs.
-        page.update(cx, |page, _| page.on_hidden());
+        page.update(cx, |page, cx| page.on_hidden(cx));
         state.update(cx, |state, _| {
             state.chats = vec![session("docs", None)];
             state.selected_chat = Some("chat".into());
@@ -4452,7 +4483,7 @@ mod tests {
         });
         settle(cx);
         page.update(cx, |page, cx| {
-            page.on_hidden();
+            page.on_hidden(cx);
             page.on_visible(cx);
         });
         settle(cx);
@@ -4512,7 +4543,7 @@ mod tests {
                 Some("owner/canonical")
             );
             assert_eq!(page.snapshots.last().unwrap().0.1, "owner/canonical");
-            page.on_hidden();
+            page.on_hidden(cx);
             page.on_visible(cx);
         });
         cx.run_until_parked();
@@ -4571,7 +4602,7 @@ mod tests {
                 Some("owner/canonical")
             );
             assert_eq!(page.snapshots.last().unwrap().0.1, "owner/canonical");
-            page.on_hidden();
+            page.on_hidden(cx);
             page.on_visible(cx);
         });
         cx.run_until_parked();

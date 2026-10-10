@@ -5967,7 +5967,7 @@ impl Shell {
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
-                page.update(cx, |page, _| page.on_hidden());
+                page.update(cx, |page, cx| page.on_hidden(cx));
             }
         }
         self.route = route;
@@ -15733,6 +15733,11 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &RandomWallpaper, _, cx| {
                 this.random_wallpaper(cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &crate::pull_requests::OpenSourceControlSettings, _, cx| {
+                    this.open_settings(SettingsSection::SourceControl, cx)
+                },
+            ))
             .on_action(cx.listener(
                 |this, action: &crate::pull_request_detail::OpenPullRequest, window, cx| {
                     let target = if let Some(device) = action.1.clone() {
