@@ -32,6 +32,9 @@ impl Render for NavigationHost {
                 .on_action(cx.listener(|shell, _: &PrevSession, window, cx| {
                     shell.cycle_navigation(false, window, cx);
                 }))
+                .on_action(cx.listener(|shell, _: &ToggleTerminal, window, cx| {
+                    shell.toggle_terminal(window, cx);
+                }))
                 .on_modifiers_changed(
                     cx.listener(|shell, event, _, cx| shell.on_modifiers_changed(event, cx)),
                 )
@@ -542,4 +545,20 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
     cx.simulate_keystrokes("ctrl-c");
     assert_eq!(clipboard_text(cx).as_deref(), Some("sentinel"));
     clear_transcript_selection();
+}
+
+#[gpui::test]
+fn the_footer_terminal_button_toggles_the_drawer(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    for open in [true, false] {
+        let button = cx
+            .debug_bounds("composer-footer-terminal")
+            .expect("Terminal button drawn in the session footer");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.terminal_open(cx)),
+            open
+        );
+    }
 }

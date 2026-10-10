@@ -12482,6 +12482,11 @@ impl Shell {
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
         let _ = (text, border, faint);
+        let terminal_open = self.terminal_open(cx);
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| {
+            pickers.set_terminal_open(Some(terminal_open), cx)
+        });
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let home = settings::home_widgets(cx);
         let home_on = home.any_visible();
