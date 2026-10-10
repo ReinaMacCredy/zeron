@@ -311,8 +311,7 @@ pub trait Harness: Send + Sync {
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         self.commands().await
     }
-    /// What a chat on this harness can run without beyond Zeron's own tools,
-    /// as seen from `cwd` (project-scoped MCP servers differ per directory).
+    /// `cwd` matters: project-scoped MCP servers differ per directory.
     async fn tool_inventory(
         &self,
         _cwd: &std::path::Path,

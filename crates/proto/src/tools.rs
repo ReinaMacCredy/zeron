@@ -289,7 +289,6 @@ impl ToolSettings {
         }
     }
 
-    /// These settings with a chat's own Zeron tool entries also turned off.
     pub fn for_chat(&self, chat_disabled: &[String]) -> ToolSettings {
         let mut settings = self.clone();
         for name in chat_disabled
@@ -304,7 +303,6 @@ impl ToolSettings {
 
 pub const ZERON_TOOL_PREFIX: &str = "mcp__zeron__";
 
-/// The Claude tool-name prefix the CLI gives an MCP server's tools.
 pub fn mcp_server_rule(server: &str) -> String {
     let name: String = server
         .chars()
@@ -337,7 +335,6 @@ pub struct McpServerEntry {
     pub source: String,
 }
 
-/// What a harness can turn off per chat beyond Zeron's own tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HarnessToolInventory {

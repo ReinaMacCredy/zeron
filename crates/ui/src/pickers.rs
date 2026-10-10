@@ -746,6 +746,52 @@ impl EffortTween {
             true,
         )
     }
+
+    fn glide(snap: Option<Self>, target: f32, cx: &App) -> (f32, bool) {
+        match snap {
+            Some(snap) if (snap.to - target).abs() <= 1e-4 && !motion::reduced_motion(cx) => {
+                snap.eval(motion::SNAP, std::time::Instant::now())
+            }
+            _ => (target, false),
+        }
+    }
+}
+
+const CONTEXT_WINDOW: &str = "contextWindow";
+const AUTO_COMPACT: &str = "autoCompact";
+const CONTEXT_CARD_EXTRA_HEIGHT: f32 = 44.0;
+const CONTEXT_WARNING_HEIGHT: f32 = 18.0;
+const CONTEXT_STOP_LABEL_WIDTH: f32 = 36.0;
+
+fn option_id(id: &ModelSetting) -> Option<&str> {
+    match id {
+        ModelSetting::Option(id) => Some(id),
+        ModelSetting::Reasoning => None,
+    }
+}
+
+fn is_context_option(id: &ModelSetting) -> bool {
+    matches!(option_id(id), Some(CONTEXT_WINDOW | AUTO_COMPACT))
+}
+
+fn has_context_card(groups: &[SettingGroup]) -> bool {
+    [CONTEXT_WINDOW, AUTO_COMPACT]
+        .iter()
+        .all(|id| groups.iter().any(|g| option_id(&g.id) == Some(id)))
+}
+
+fn selected_value(group: &SettingGroup) -> &str {
+    group
+        .choices
+        .iter()
+        .find(|c| c.selected)
+        .map(|c| c.value.as_str())
+        .unwrap_or_default()
+}
+
+fn compact_applies(window_choice: &str) -> bool {
+    zeron_harness::claude::catalog::context_window_tokens(window_choice)
+        .is_some_and(|tokens| tokens > 200_000)
 }
 
 /// A mid-chat model pick awaiting the switch-model dialog's answer. With
@@ -875,6 +921,8 @@ pub struct Pickers {
     effort_press: Option<EffortTween>,
     effort_dragging: bool,
     effort_track: Option<gpui::Bounds<gpui::Pixels>>,
+    context_snap: Option<EffortTween>,
+    context_track: Option<gpui::Bounds<gpui::Pixels>>,
     setting_scope: SettingScope,
     /// The model row whose settings card is open (see [`configured_in_place`]).
     config_row: Option<usize>,
@@ -1194,7 +1242,7 @@ impl Pickers {
             target_generation: 0,
             menu_geometry: HashMap::new(),
             model_trigger_bounds: None,
-            open_model_height: model_menu_height(0, false),
+            open_model_height: model_menu_height(0, 0.0),
             chip_width: None,
             chip_resizing: false,
             compact_model_list: false,
@@ -1227,6 +1275,8 @@ impl Pickers {
             effort_press: None,
             effort_dragging: false,
             effort_track: None,
+            context_snap: None,
+            context_track: None,
             setting_scope: SettingScope::Tray,
             config_row: None,
             config_hover: popover::HoverIntent::default(),
@@ -1819,7 +1869,7 @@ impl Pickers {
         }
         if kind == PickerKind::HarnessModel {
             let groups = self.setting_groups(cx);
-            self.open_model_height = model_menu_height(groups.len(), has_effort_card(&groups));
+            self.open_model_height = model_menu_height(groups.len(), tray_card_extra(&groups));
             self.compact_model_list = false;
             self.compact_strip_viewed = None;
             self.compact_effort_dragging = false;
@@ -2736,13 +2786,7 @@ impl Pickers {
     /// ladder or config changed underneath) is dropped, not replayed.
     fn effort_thumb(&self, cx: &App) -> (f32, bool) {
         let target = Self::effort_fraction(self.effort_index(cx), self.trait_ladder(cx).len());
-        let Some(snap) = self.effort_snap else {
-            return (target, false);
-        };
-        if (snap.to - target).abs() > 1e-4 || motion::reduced_motion(cx) {
-            return (target, false);
-        }
-        snap.eval(motion::SNAP, std::time::Instant::now())
+        EffortTween::glide(self.effort_snap, target, cx)
     }
 
     /// The pressed-disc scale progress this frame and whether it is mid-flight.
@@ -2782,11 +2826,7 @@ impl Pickers {
     /// Nearest stop to a pointer x over the rail (the track minus the
     /// edge-aligned thumb), from the track's last painted bounds.
     fn effort_index_at(&self, x: gpui::Pixels, cx: &App) -> Option<usize> {
-        let track = self.effort_track?;
-        let last = self.trait_ladder(cx).len().checked_sub(1)?;
-        let usable = (f32::from(track.size.width) - EFFORT_THUMB_SIZE).max(1.0);
-        let along = (f32::from(x - track.origin.x) - EFFORT_THUMB_SIZE / 2.0).clamp(0.0, usable);
-        Some((along / usable * last as f32).round() as usize)
+        stop_at(self.effort_track?, x, self.trait_ladder(cx).len())
     }
 
     fn set_effort_pressed(&mut self, pressed: bool, cx: &mut Context<Self>) {
@@ -2856,6 +2896,78 @@ impl Pickers {
             self.save_defaults();
         }
         cx.notify();
+    }
+
+    fn context_groups(&self, cx: &App) -> Option<(SettingGroup, SettingGroup)> {
+        if self.compact_model_picker(cx) {
+            return None;
+        }
+        let groups = self.setting_groups(cx);
+        let find = |id: &str| {
+            groups
+                .iter()
+                .find(|g| option_id(&g.id) == Some(id))
+                .cloned()
+        };
+        Some((find(CONTEXT_WINDOW)?, find(AUTO_COMPACT)?))
+    }
+
+    fn in_context_card(&self, id: &ModelSetting, cx: &App) -> bool {
+        is_context_option(id) && self.context_groups(cx).is_some()
+    }
+
+    fn context_stop(window: &SettingGroup, compact: &SettingGroup) -> usize {
+        if compact_applies(selected_value(window)) {
+            compact.choices.iter().position(|c| c.selected).unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn context_thumb(&self, cx: &App) -> (f32, bool) {
+        let Some((window, compact)) = self.context_groups(cx) else {
+            return (0.0, false);
+        };
+        let target =
+            Self::effort_fraction(Self::context_stop(&window, &compact), compact.choices.len());
+        EffortTween::glide(self.context_snap, target, cx)
+    }
+
+    fn pick_context_choice(&mut self, option: &str, index: usize, cx: &mut Context<Self>) {
+        let Some((window, compact)) = self.context_groups(cx) else {
+            return;
+        };
+        let group = if option == CONTEXT_WINDOW {
+            window
+        } else if compact_applies(selected_value(&window)) {
+            compact
+        } else {
+            return;
+        };
+        let Some(choice) = group.choices.get(index).filter(|c| !c.selected) else {
+            return;
+        };
+        let (from, _) = self.context_thumb(cx);
+        self.pick_option(option.into(), choice.value.clone(), choice.default, cx);
+        if let Some((window, compact)) = self.context_groups(cx) {
+            let to =
+                Self::effort_fraction(Self::context_stop(&window, &compact), compact.choices.len());
+            self.context_snap = Some(EffortTween::new(from, to));
+        }
+    }
+
+    fn step_context(&mut self, option: &str, delta: isize, cx: &mut Context<Self>) {
+        let Some((window, compact)) = self.context_groups(cx) else {
+            return;
+        };
+        let group = if option == CONTEXT_WINDOW {
+            window
+        } else {
+            compact
+        };
+        let current = group.choices.iter().position(|c| c.selected).unwrap_or(0);
+        let next = (current as isize + delta).clamp(0, group.choices.len() as isize - 1);
+        self.pick_context_choice(option, next as usize, cx);
     }
 
     /// Apply `change` to the selected chat's effective config and persist it:
@@ -3125,9 +3237,11 @@ impl Pickers {
         } else if self.compact_model_picker(cx) && self.compact_model_list {
             self.activate_model_index(self.active, cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
-            // The effort card has no choices menu (←/→ step it in place).
+            // The effort and context cards have no choices menu (←/→ step
+            // them in place).
             if let Some(group) = self.setting_groups(cx).get(index)
                 && group.id != ModelSetting::Reasoning
+                && !self.in_context_card(&group.id, cx)
             {
                 self.open_setting(SettingScope::Tray, group.id.clone(), cx);
             }
@@ -3879,16 +3993,23 @@ impl Pickers {
             && self.open_kind() == Some(PickerKind::HarnessModel)
             && let Some(index) = self.active.checked_sub(self.model_rows_len(cx))
         {
-            // ←/→ on the effort card step the ladder; → on any other trait
-            // row opens its choices.
-            let on_card = self
-                .setting_groups(cx)
-                .get(index)
-                .is_some_and(|g| g.id == ModelSetting::Reasoning);
-            if on_card {
-                self.step_effort(if event.keystroke.key == "left" { -1 } else { 1 }, cx);
-                cx.stop_propagation();
-                return;
+            // ←/→ on the effort or context card step it in place; → on any
+            // other trait row opens its choices.
+            let delta = if event.keystroke.key == "left" { -1 } else { 1 };
+            match self.setting_groups(cx).get(index).map(|g| g.id.clone()) {
+                Some(ModelSetting::Reasoning) => {
+                    self.step_effort(delta, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                Some(id) if self.in_context_card(&id, cx) => {
+                    if let Some(option) = option_id(&id) {
+                        self.step_context(option, delta, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
             }
             if event.keystroke.key == "right" {
                 self.activate_model_row(cx);
@@ -5246,7 +5367,7 @@ impl Pickers {
         let height = self.menu_geometry().height.min(self.open_model_height);
         let groups = self.setting_groups(cx);
         let (list_height, tray_height) =
-            model_menu_budgets(height, groups.len(), has_effort_card(&groups));
+            model_menu_budgets(height, groups.len(), tray_card_extra(&groups));
         let list_height = if compact {
             compact::compact_list_height(self.model_rows_len(cx))
                 .min((height - compact::LIST_HEADER - 2.0).max(0.0))
@@ -6002,7 +6123,7 @@ impl Pickers {
         let Some(row) = self.card_row(cx) else {
             return div().into_any_element();
         };
-        let settings = self.render_setting_rows(SettingScope::Card, None, cx);
+        let settings = self.render_setting_rows(SettingScope::Card, None, None, cx);
         let toggles: Vec<AnyElement> = self
             .card_groups(cx)
             .into_iter()
@@ -6370,7 +6491,8 @@ impl Pickers {
                     self.render_effort_card(highlighted, &theme, window, cx)
                 })
         };
-        self.render_setting_rows(SettingScope::Tray, effort_card, cx)
+        let context_card = self.render_context_card(cx);
+        self.render_setting_rows(SettingScope::Tray, effort_card, context_card, cx)
     }
 
     /// Setting triggers for the tray or a hover card. Card rows stay out of
@@ -6379,8 +6501,10 @@ impl Pickers {
         &mut self,
         scope: SettingScope,
         mut effort_card: Option<AnyElement>,
+        mut context_card: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let context_live = context_card.is_some();
         let theme = Theme::of(cx).for_popup();
         let tray = scope == SettingScope::Tray;
         let base_index = if tray {
@@ -6420,6 +6544,10 @@ impl Pickers {
                 && let Some(card) = effort_card.take()
             {
                 rows.push(card);
+                continue;
+            }
+            if tray && context_live && is_context_option(&group.id) {
+                rows.extend(context_card.take());
                 continue;
             }
             let open = self.setting_scope == scope && self.setting_menu.as_ref() == Some(&group.id);
@@ -6788,6 +6916,221 @@ impl Pickers {
         .into_any_element()
     }
 
+    fn render_context_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (window, compact) = self.context_groups(cx)?;
+        let theme = Theme::of(cx).for_popup();
+        let groups = self.setting_groups(cx);
+        let cursor = |id: &str| {
+            groups
+                .iter()
+                .position(|g| option_id(&g.id) == Some(id))
+                .is_some_and(|ix| self.active == self.model_rows_len(cx) + ix)
+        };
+        let (window_cursor, compact_cursor) = (cursor(CONTEXT_WINDOW), cursor(AUTO_COMPACT));
+        let window_choice = selected_value(&window);
+        let applies = compact_applies(window_choice);
+        let threshold = zeron_harness::claude::catalog::compact_threshold(
+            window_choice,
+            if applies {
+                selected_value(&compact)
+            } else {
+                "auto"
+            },
+        );
+        let ring = gpui::BoxShadow {
+            color: theme.accent.opacity(0.4),
+            offset: gpui::point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(3.0),
+            inset: false,
+        };
+
+        let header = div()
+            .h(px(20.0))
+            .px(px(2.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Context"),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .children(threshold.map(|tokens| {
+                        SharedString::from(format!("compacts at ~{}", compact_tokens(tokens)))
+                    })),
+            );
+
+        let segments = window.choices.iter().enumerate().map(|(ix, choice)| {
+            div()
+                .id(("context-window-choice", ix))
+                .debug_selector(move || format!("context-window-{ix}"))
+                .flex_1()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .cursor_pointer()
+                .when(choice.selected, |el| {
+                    el.bg(theme.surface_raised)
+                        .text_color(theme.text)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .shadow(vec![gpui::BoxShadow {
+                            color: gpui::black().opacity(0.18),
+                            offset: gpui::point(px(0.0), px(1.0)),
+                            blur_radius: px(2.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }])
+                })
+                .when(!choice.selected, |el| {
+                    el.text_color(theme.text_muted)
+                        .hover(|el| el.text_color(theme.text))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.pick_context_choice(CONTEXT_WINDOW, ix, cx);
+                    cx.stop_propagation();
+                }))
+                .child(SharedString::from(choice.label.clone()))
+        });
+        let segmented = div()
+            .mt(px(6.0))
+            .h(px(24.0))
+            .p(px(2.0))
+            .flex()
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .bg(crate::theme::hairline(0.14))
+            .when(window_cursor, |el| el.shadow(vec![ring.clone()]))
+            .children(segments);
+
+        let warning = window.choices.iter().find_map(|choice| {
+            let warning = choice.warning.as_ref()?;
+            Some(
+                div()
+                    .mt(px(4.0))
+                    .h(px(CONTEXT_WARNING_HEIGHT - 4.0))
+                    .px(px(2.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.warning)
+                    .child(SharedString::from(format!("{}: {warning}", choice.label))),
+            )
+        });
+
+        let len = compact.choices.len();
+        let stop = Self::context_stop(&window, &compact);
+        let (thumb, _) = self.context_thumb(cx);
+        let rail = stepped_rail(
+            &theme,
+            len,
+            stop,
+            thumb,
+            0.0,
+            compact_cursor,
+            "context-thumb",
+        );
+        let measure = cx.entity().downgrade();
+        let track = div()
+            .debug_selector(|| "context-track".into())
+            .mt(px(8.0))
+            .relative()
+            .h(px(EFFORT_TRACK_HEIGHT))
+            .w_full()
+            .rounded_full()
+            .bg(crate::theme::hairline(0.14))
+            .when(!applies, |el| el.opacity(0.4))
+            .when(applies, |el| {
+                el.cursor_pointer().on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                        if let Some(index) = this.context_track.and_then(|track| {
+                            let len = this.context_groups(cx)?.1.choices.len();
+                            stop_at(track, event.position.x, len)
+                        }) {
+                            this.pick_context_choice(AUTO_COMPACT, index, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                )
+            })
+            .child(rail)
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ = measure.update(cx, |this, _| this.context_track = Some(bounds));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+
+        let rail_len = len.saturating_sub(1).max(1) as f32;
+        let labels = compact.choices.iter().enumerate().map(|(ix, choice)| {
+            div()
+                .id(("context-stop", ix))
+                .absolute()
+                .top_0()
+                .left(gpui::relative(ix as f32 / rail_len))
+                .ml(px(-CONTEXT_STOP_LABEL_WIDTH / 2.0))
+                .w(px(CONTEXT_STOP_LABEL_WIDTH))
+                .text_center()
+                .text_size(crate::typography::ui_rems(10.5))
+                .text_color(if ix == stop && applies {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .when(ix == stop && applies, |el| {
+                    el.font_weight(gpui::FontWeight::SEMIBOLD)
+                })
+                .when(applies, |el| {
+                    el.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pick_context_choice(AUTO_COMPACT, ix, cx);
+                            cx.stop_propagation();
+                        }))
+                })
+                .child(SharedString::from(choice.label.clone()))
+        });
+        let stops = div()
+            .mt(px(4.0))
+            .h(px(14.0))
+            .mx(px(EFFORT_THUMB_SIZE / 2.0))
+            .relative()
+            .when(!applies, |el| el.opacity(0.4))
+            .children(labels);
+
+        Some(
+            div()
+                .debug_selector(|| "context-card".into())
+                .px(px(4.0))
+                .pt(px(2.0))
+                .pb(px(4.0))
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(segmented)
+                .children(warning)
+                .child(track)
+                .child(stops)
+                .into_any_element(),
+        )
+    }
+
     fn render_effort_track(
         &mut self,
         highlighted: bool,
@@ -6795,103 +7138,19 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let len = self.trait_ladder(cx).len();
-        let rail_len = len.saturating_sub(1).max(1) as f32;
         let selected = self.effort_index(cx);
         let (thumb, _) = self.effort_thumb(cx);
         let (press, _) = self.effort_press();
         let dragging = self.effort_dragging;
-
-        // At the first stop the fill sits entirely under the thumb, and
-        // anti-aliasing would leave a sliver of accent peeking out: fade it
-        // with the thumb's travel instead of relying on the overlap.
-        let fill_opacity = (thumb * rail_len).clamp(0.0, 1.0);
-        let fill = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left_0()
-            .w(gpui::relative(thumb.max(0.0)))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(-EFFORT_THUMB_SIZE / 2.0))
-                    .right(px(-EFFORT_THUMB_SIZE / 2.0))
-                    .rounded_full()
-                    .bg(theme.accent)
-                    .opacity(fill_opacity),
-            );
-        let marks = (0..len).map(|i| {
-            div()
-                .absolute()
-                .top(px((EFFORT_TRACK_HEIGHT - EFFORT_MARK_SIZE) / 2.0))
-                .left(gpui::relative(i as f32 / rail_len))
-                .ml(px(-EFFORT_MARK_SIZE / 2.0))
-                .size(px(EFFORT_MARK_SIZE))
-                .rounded_full()
-                .bg(if i <= selected {
-                    gpui::white().opacity(0.55)
-                } else {
-                    crate::theme::hairline(0.28)
-                })
-        });
-        // Press feedback swells the inner disc, not the thumb box: the box
-        // is what the rail positions, so scaling it would shift the thumb
-        // off the track edge and expose the fill behind it.
-        let disc = EFFORT_THUMB_SIZE * (1.0 + 0.05 * press);
-        let mut shadows = vec![
-            gpui::BoxShadow {
-                color: gpui::black().opacity(motion::lerp(0.18, 0.22, press)),
-                offset: gpui::point(px(0.0), px(motion::lerp(1.0, 2.0, press))),
-                blur_radius: px(motion::lerp(2.0, 5.0, press)),
-                spread_radius: px(0.0),
-                inset: false,
-            },
-            gpui::BoxShadow {
-                color: gpui::black().opacity(0.08),
-                offset: gpui::point(px(0.0), px(0.0)),
-                blur_radius: px(0.0),
-                spread_radius: px(0.5),
-                inset: false,
-            },
-        ];
-        if highlighted {
-            shadows.push(gpui::BoxShadow {
-                color: theme.accent.opacity(0.4),
-                offset: gpui::point(px(0.0), px(0.0)),
-                blur_radius: px(0.0),
-                spread_radius: px(3.0),
-                inset: false,
-            });
-        }
-        let thumb_el = div()
-            .debug_selector(|| "effort-thumb".into())
-            .absolute()
-            .top(px((EFFORT_TRACK_HEIGHT - EFFORT_THUMB_SIZE) / 2.0))
-            .left(gpui::relative(thumb))
-            .ml(px(-EFFORT_THUMB_SIZE / 2.0))
-            .size(px(EFFORT_THUMB_SIZE))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(disc))
-                    .rounded_full()
-                    .bg(gpui::white())
-                    .shadow(shadows),
-            );
-        let rail = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(px(EFFORT_THUMB_SIZE / 2.0))
-            .right(px(EFFORT_THUMB_SIZE / 2.0))
-            .child(fill)
-            .children(marks)
-            .child(thumb_el);
+        let rail = stepped_rail(
+            theme,
+            len,
+            selected,
+            thumb,
+            press,
+            highlighted,
+            "effort-thumb",
+        );
 
         // The pointer may leave the track mid-drag, so while held the move
         // and release are read window-wide from the canvas paint (the same
@@ -7092,6 +7351,116 @@ impl popover::ScrollRailHost for Pickers {
     fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
         Some(self.active_menu_scroll())
     }
+}
+
+fn stop_at(track: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels, len: usize) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let usable = (f32::from(track.size.width) - EFFORT_THUMB_SIZE).max(1.0);
+    let along = (f32::from(x - track.origin.x) - EFFORT_THUMB_SIZE / 2.0).clamp(0.0, usable);
+    Some((along / usable * last as f32).round() as usize)
+}
+
+fn stepped_rail(
+    theme: &Theme,
+    len: usize,
+    selected: usize,
+    thumb: f32,
+    press: f32,
+    highlighted: bool,
+    thumb_selector: &'static str,
+) -> gpui::Div {
+    let rail_len = len.saturating_sub(1).max(1) as f32;
+    // At the first stop the fill sits entirely under the thumb, and
+    // anti-aliasing would leave a sliver of accent peeking out: fade it
+    // with the thumb's travel instead of relying on the overlap.
+    let fill_opacity = (thumb * rail_len).clamp(0.0, 1.0);
+    let fill = div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(gpui::relative(thumb.max(0.0)))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-EFFORT_THUMB_SIZE / 2.0))
+                .right(px(-EFFORT_THUMB_SIZE / 2.0))
+                .rounded_full()
+                .bg(theme.accent)
+                .opacity(fill_opacity),
+        );
+    let marks = (0..len).map(|i| {
+        div()
+            .absolute()
+            .top(px((EFFORT_TRACK_HEIGHT - EFFORT_MARK_SIZE) / 2.0))
+            .left(gpui::relative(i as f32 / rail_len))
+            .ml(px(-EFFORT_MARK_SIZE / 2.0))
+            .size(px(EFFORT_MARK_SIZE))
+            .rounded_full()
+            .bg(if i <= selected {
+                gpui::white().opacity(0.55)
+            } else {
+                crate::theme::hairline(0.28)
+            })
+    });
+    // Press feedback swells the inner disc, not the thumb box: the box
+    // is what the rail positions, so scaling it would shift the thumb
+    // off the track edge and expose the fill behind it.
+    let disc = EFFORT_THUMB_SIZE * (1.0 + 0.05 * press);
+    let mut shadows = vec![
+        gpui::BoxShadow {
+            color: gpui::black().opacity(motion::lerp(0.18, 0.22, press)),
+            offset: gpui::point(px(0.0), px(motion::lerp(1.0, 2.0, press))),
+            blur_radius: px(motion::lerp(2.0, 5.0, press)),
+            spread_radius: px(0.0),
+            inset: false,
+        },
+        gpui::BoxShadow {
+            color: gpui::black().opacity(0.08),
+            offset: gpui::point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.5),
+            inset: false,
+        },
+    ];
+    if highlighted {
+        shadows.push(gpui::BoxShadow {
+            color: theme.accent.opacity(0.4),
+            offset: gpui::point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(3.0),
+            inset: false,
+        });
+    }
+    let thumb_el = div()
+        .debug_selector(move || thumb_selector.into())
+        .absolute()
+        .top(px((EFFORT_TRACK_HEIGHT - EFFORT_THUMB_SIZE) / 2.0))
+        .left(gpui::relative(thumb))
+        .ml(px(-EFFORT_THUMB_SIZE / 2.0))
+        .size(px(EFFORT_THUMB_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .flex_none()
+                .size(px(disc))
+                .rounded_full()
+                .bg(gpui::white())
+                .shadow(shadows),
+        );
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(EFFORT_THUMB_SIZE / 2.0))
+        .right(px(EFFORT_THUMB_SIZE / 2.0))
+        .child(fill)
+        .children(marks)
+        .child(thumb_el)
 }
 
 fn context_window_warning(
@@ -7536,31 +7905,41 @@ fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
 
 // Tabs and search consume 80px, with 2px reserved for the card border.
 // Keep one model row where possible; long option stacks scroll in the tray.
-fn model_menu_height(setting_count: usize, effort_card: bool) -> f32 {
-    82.0 + 216.0 + model_tray_height(setting_count, effort_card)
+fn model_menu_height(setting_count: usize, card_extra: f32) -> f32 {
+    82.0 + 216.0 + model_tray_height(setting_count, card_extra)
 }
 
-fn model_tray_height(setting_count: usize, effort_card: bool) -> f32 {
+fn model_tray_height(setting_count: usize, card_extra: f32) -> f32 {
     if setting_count == 0 {
         return 0.0;
     }
-    let card = if effort_card {
+    (setting_count as f32 * 32.0 + 7.0 + card_extra).min(236.0)
+}
+
+fn tray_card_extra(groups: &[SettingGroup]) -> f32 {
+    let effort = if groups.iter().any(|g| g.id == ModelSetting::Reasoning) {
         EFFORT_CARD_EXTRA_HEIGHT
     } else {
         0.0
     };
-    (setting_count as f32 * 32.0 + 7.0 + card).min(236.0)
-}
-
-fn has_effort_card(groups: &[SettingGroup]) -> bool {
-    groups
+    let context = if !has_context_card(groups) {
+        0.0
+    } else if groups
         .iter()
-        .any(|group| group.id == ModelSetting::Reasoning)
+        .filter(|g| option_id(&g.id) == Some(CONTEXT_WINDOW))
+        .flat_map(|g| &g.choices)
+        .any(|c| c.warning.is_some())
+    {
+        CONTEXT_CARD_EXTRA_HEIGHT + CONTEXT_WARNING_HEIGHT
+    } else {
+        CONTEXT_CARD_EXTRA_HEIGHT
+    };
+    effort + context
 }
 
-fn model_menu_budgets(height: f32, setting_count: usize, effort_card: bool) -> (f32, f32) {
+fn model_menu_budgets(height: f32, setting_count: usize, card_extra: f32) -> (f32, f32) {
     let body = (height - 82.0).max(0.0);
-    let desired_tray = model_tray_height(setting_count, effort_card);
+    let desired_tray = model_tray_height(setting_count, card_extra);
     let tray = desired_tray.min((body - 30.0).max(0.0));
     // The list absorbs changes in tray height, keeping the card's top edge
     // and search field stationary while choosing models and options.
@@ -7861,7 +8240,7 @@ impl Render for Pickers {
         // The effort card's tweens are manual-drive (see `EffortTween`): keep
         // frames coming while the thumb glides or the pressed disc settles.
         if matches!(overlay, Some((PickerKind::HarnessModel, _)))
-            && (self.effort_thumb(cx).1 || self.effort_press().1)
+            && (self.effort_thumb(cx).1 || self.effort_press().1 || self.context_thumb(cx).1)
         {
             window.request_animation_frame();
         }
@@ -8577,8 +8956,8 @@ mod tests {
             let geometry = popover::menu_geometry(top, bottom, viewport);
             assert_eq!(geometry.below, below);
             for settings in [0, 1, 3, 20] {
-                let height = geometry.height.min(model_menu_height(settings, false));
-                let (list, tray) = model_menu_budgets(height, settings, false);
+                let height = geometry.height.min(model_menu_height(settings, 0.0));
+                let (list, tray) = model_menu_budgets(height, settings, 0.0);
                 assert!(list + tray + 82.0 <= geometry.height);
                 assert!((0.0..=216.0).contains(&list));
                 assert!((0.0..=236.0).contains(&tray));
@@ -8587,7 +8966,7 @@ mod tests {
                 }
             }
         }
-        assert!(model_menu_budgets(180.0, 2, false).0 < model_menu_budgets(400.0, 2, false).0);
+        assert!(model_menu_budgets(180.0, 2, 0.0).0 < model_menu_budgets(400.0, 2, 0.0).0);
     }
 
     #[gpui::test]
@@ -8641,12 +9020,9 @@ mod tests {
                     assert_eq!(geometry.below, new_thread && !near_bottom);
                     assert!(geometry.height > 180.0);
                     assert!(
-                        model_menu_budgets(
-                            geometry.height.min(model_menu_height(2, false)),
-                            2,
-                            false
-                        )
-                        .0 >= 30.0
+                        model_menu_budgets(geometry.height.min(model_menu_height(2, 0.0)), 2, 0.0)
+                            .0
+                            >= 30.0
                     );
                 })
                 .unwrap();
@@ -8827,7 +9203,7 @@ mod tests {
                 pickers.config.harness = Some(HarnessId::Codex);
                 pickers.config.model = Some("model".into());
                 pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
-                pickers.open_model_height = model_menu_height(2, false);
+                pickers.open_model_height = model_menu_height(2, 0.0);
                 pickers.menu_geometry.insert(
                     PickerKind::HarnessModel,
                     popover::MenuGeometry {
@@ -8883,7 +9259,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     (f32::from(bounds.get().size.height)
-                        - available.min(model_menu_height(2, false)))
+                        - available.min(model_menu_height(2, 0.0)))
                     .abs()
                         < 0.1,
                     "settings={settings}, available={available}, bounds={:?}",
@@ -11549,6 +11925,280 @@ mod tests {
                 assert!(pickers.chat_context_usage(cx).is_none());
             })
             .unwrap();
+    }
+
+    fn long_context_model(id: &str, auto_compact: bool) -> Model {
+        let select = |id: &str, label: &str, default: &str, choices: &[(&str, &str)]| ModelOption {
+            id: id.into(),
+            label: label.into(),
+            default_choice: default.into(),
+            choices: choices
+                .iter()
+                .map(|(id, label)| ModelOptionChoice {
+                    id: (*id).into(),
+                    label: (*label).into(),
+                })
+                .collect(),
+        };
+        let mut model = bare_model(id, id);
+        model.reasoning_levels = vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+        ];
+        model.options = vec![select(
+            CONTEXT_WINDOW,
+            "Context Window",
+            "1m",
+            &[("200k", "200K"), ("1m", "1M")],
+        )];
+        if auto_compact {
+            model.options.push(select(
+                AUTO_COMPACT,
+                "Auto-compact",
+                "auto",
+                &[
+                    ("auto", "Auto"),
+                    ("200k", "200K"),
+                    ("300k", "300K"),
+                    ("400k", "400K"),
+                    ("600k", "600K"),
+                    ("800k", "800K"),
+                ],
+            ));
+        }
+        model
+    }
+
+    #[test]
+    fn compact_threshold_sits_33k_under_the_effective_window() {
+        let at = |window, compact| {
+            zeron_harness::claude::catalog::compact_threshold(window, compact).map(compact_tokens)
+        };
+        assert_eq!(at("1m", "auto").as_deref(), Some("967K"));
+        assert_eq!(at("1m", "300k").as_deref(), Some("267K"));
+        assert_eq!(at("1m", "400k").as_deref(), Some("367K"));
+        assert_eq!(at("200k", "auto").as_deref(), Some("167K"));
+        assert_eq!(at("200k", "800k").as_deref(), Some("167K"));
+        assert_eq!(at("standard", "auto"), None);
+    }
+
+    #[test]
+    fn the_tray_budgets_the_context_card_only_with_both_options() {
+        let groups = |model: &Model, usage| {
+            build_setting_groups(
+                model.reasoning_levels.clone(),
+                Some(ReasoningLevel::High),
+                Some(model),
+                &Default::default(),
+                usage,
+            )
+        };
+        let both = groups(&long_context_model("fable", true), None);
+        assert_eq!(
+            tray_card_extra(&both),
+            EFFORT_CARD_EXTRA_HEIGHT + CONTEXT_CARD_EXTRA_HEIGHT
+        );
+        assert_eq!(
+            model_tray_height(both.len(), tray_card_extra(&both)),
+            3.0 * 32.0 + 7.0 + EFFORT_CARD_EXTRA_HEIGHT + CONTEXT_CARD_EXTRA_HEIGHT
+        );
+        let warned = groups(
+            &long_context_model("fable", true),
+            Some(zeron_proto::ContextUsage {
+                tokens: Some(230_000),
+                window: Some(1_000_000),
+            }),
+        );
+        assert_eq!(
+            tray_card_extra(&warned),
+            EFFORT_CARD_EXTRA_HEIGHT + CONTEXT_CARD_EXTRA_HEIGHT + CONTEXT_WARNING_HEIGHT
+        );
+        let window_only = groups(&long_context_model("sonnet", false), None);
+        assert_eq!(tray_card_extra(&window_only), EFFORT_CARD_EXTRA_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn context_card_arrows_step_each_control_and_enter_opens_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, window, cx| {
+                pickers.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![long_context_model("fable", true)]),
+                );
+                pickers.open.open(PickerKind::HarnessModel);
+                window.focus(&pickers.focus, cx);
+                let ids: Vec<_> = pickers
+                    .setting_groups(cx)
+                    .into_iter()
+                    .map(|g| g.id)
+                    .collect();
+                assert_eq!(
+                    ids,
+                    [
+                        ModelSetting::Reasoning,
+                        ModelSetting::Option(CONTEXT_WINDOW.into()),
+                        ModelSetting::Option(AUTO_COMPACT.into()),
+                    ]
+                );
+                let key = |key: &str| KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                let option = |pickers: &Pickers, id: &str, cx: &App| {
+                    pickers
+                        .resolved(cx)
+                        .model_options
+                        .get(id)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                };
+                let stop = |pickers: &Pickers, cx: &App| {
+                    let (window, compact) = pickers.context_groups(cx).unwrap();
+                    Pickers::context_stop(&window, &compact)
+                };
+                let base = pickers.model_rows_len(cx);
+
+                pickers.active = base + 2;
+                for (press, expect) in [
+                    ("left", None),
+                    ("right", Some("200k")),
+                    ("right", Some("300k")),
+                    ("left", Some("200k")),
+                    ("right", Some("300k")),
+                ] {
+                    pickers.on_key_down(&key(press), window, cx);
+                    assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), expect);
+                }
+                assert_eq!(stop(pickers, cx), 2);
+                assert!(pickers.context_snap.is_some());
+                pickers.on_key_down(&key("enter"), window, cx);
+                assert!(pickers.setting_menu.is_none());
+                assert!(pickers.is_open());
+
+                pickers.active = base + 1;
+                pickers.on_key_down(&key("right"), window, cx);
+                assert_eq!(option(pickers, CONTEXT_WINDOW, cx), None);
+                pickers.on_key_down(&key("left"), window, cx);
+                assert_eq!(option(pickers, CONTEXT_WINDOW, cx).as_deref(), Some("200k"));
+                assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), Some("300k"));
+                assert_eq!(stop(pickers, cx), 0);
+                pickers.on_key_down(&key("enter"), window, cx);
+                assert!(pickers.setting_menu.is_none());
+
+                pickers.active = base + 2;
+                for press in ["right", "left", "left"] {
+                    pickers.on_key_down(&key(press), window, cx);
+                    assert_eq!(option(pickers, AUTO_COMPACT, cx).as_deref(), Some("300k"));
+                }
+                assert_eq!(stop(pickers, cx), 0);
+
+                pickers.active = base + 1;
+                pickers.on_key_down(&key("right"), window, cx);
+                assert_eq!(option(pickers, CONTEXT_WINDOW, cx), None);
+                assert_eq!(stop(pickers, cx), 2);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn context_card_renders_for_both_options_and_picks_by_pointer(cx: &mut gpui::TestAppContext) {
+        struct TrayFixture {
+            pickers: Entity<Pickers>,
+        }
+        impl Render for TrayFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self.pickers.update(cx, |pickers, cx| {
+                    pickers.render_harness_model_popover(window, cx)
+                });
+                div()
+                    .size_full()
+                    .p(px(40.0))
+                    .child(div().w(px(304.0)).child(menu))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = false;
+            settings.compact_effort_slider = crate::settings::EffortSliderStyle::Stepped;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let pickers = cx.update(|cx| {
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Pickers::new(state, cx))
+        });
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![
+                    long_context_model("fable", true),
+                    long_context_model("sonnet", false),
+                ]),
+            );
+            pickers.pick_model("fable".into(), cx);
+            pickers.open.open(PickerKind::HarnessModel);
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| TrayFixture {
+            pickers: pickers.clone(),
+        });
+        cx.run_until_parked();
+        let card = cx
+            .debug_bounds("context-card")
+            .expect("context card painted");
+        assert!(
+            (card.size.height - px(64.0 - 2.0 + CONTEXT_CARD_EXTRA_HEIGHT)).abs() < px(1.0),
+            "{card:?}"
+        );
+        let picked = |pickers: &Pickers, id: &str, cx: &App| {
+            pickers
+                .explicit_options(cx)
+                .get(id)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+
+        let track = cx.debug_bounds("context-track").expect("track painted");
+        let usable = track.size.width - px(EFFORT_THUMB_SIZE);
+        let stop_x = |ix: f32| track.origin.x + px(EFFORT_THUMB_SIZE / 2.0) + usable * (ix / 5.0);
+        cx.simulate_click(
+            gpui::point(stop_x(3.0), track.center().y),
+            gpui::Modifiers::default(),
+        );
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(picked(pickers, AUTO_COMPACT, cx).as_deref(), Some("400k"));
+            assert!(pickers.context_thumb(cx).1, "thumb glides to the stop");
+        });
+
+        let narrow = cx
+            .debug_bounds("context-window-0")
+            .expect("200K segment painted");
+        cx.simulate_click(narrow.center(), gpui::Modifiers::default());
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(picked(pickers, CONTEXT_WINDOW, cx).as_deref(), Some("200k"));
+        });
+        cx.simulate_click(
+            gpui::point(stop_x(5.0), track.center().y),
+            gpui::Modifiers::default(),
+        );
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(picked(pickers, AUTO_COMPACT, cx).as_deref(), Some("400k"));
+        });
+
+        pickers.update(cx, |pickers, cx| pickers.pick_model("sonnet".into(), cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("context-card").is_none());
     }
 
     #[gpui::test]

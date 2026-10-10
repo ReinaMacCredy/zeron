@@ -3,8 +3,8 @@ use super::*;
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
 use crate::agent_profiles::{
-    ProfileWrite, brand_badge, char_count, draft_summary, expand_toggle, folded_row, mode_label,
-    summary,
+    ProfileWrite, brand_badge, char_count, draft_summary, expand_toggle, folded_row, in_pairs,
+    mode_label, summary,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -16,6 +16,7 @@ pub(super) struct ProfilePick {
     permission_mode: Option<PermissionMode>,
     model_options: serde_json::Map<String, serde_json::Value>,
     instructions: String,
+    disabled_tools: Vec<String>,
 }
 
 impl ProfilePick {
@@ -28,6 +29,7 @@ impl ProfilePick {
             permission_mode: profile.permission_mode,
             model_options: profile.model_options.clone(),
             instructions: profile.instructions.clone(),
+            disabled_tools: profile.disabled_tools.clone(),
         }
     }
 
@@ -50,6 +52,7 @@ impl ProfilePick {
             config.model_options = self.model_options.clone();
         }
         config.instructions = self.instructions.clone();
+        config.disabled_tools = self.disabled_tools.clone();
         config.profile_id = Some(self.profile_id.clone());
     }
 }
@@ -60,15 +63,24 @@ pub(super) enum Drift {
     Model,
     Effort,
     Mode,
-    Options,
+    Options(Vec<String>),
+    Tools,
     Instructions,
 }
 
-fn option_drifts(profile: &AgentProfile, current: &ResolvedRunConfig) -> bool {
+fn option_drifts(profile: &AgentProfile, current: &ResolvedRunConfig) -> Vec<String> {
     profile
         .model_options
         .iter()
-        .any(|(key, value)| current.model_options.get(key) != Some(value))
+        .filter(|(key, value)| current.model_options.get(*key) != Some(value))
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+fn tools_drift(profile: &AgentProfile, current: &ResolvedRunConfig) -> bool {
+    use std::collections::BTreeSet;
+    profile.disabled_tools.iter().collect::<BTreeSet<_>>()
+        != current.disabled_tools.iter().collect::<BTreeSet<_>>()
 }
 
 pub(super) fn profile_drift(profile: &AgentProfile, current: &ResolvedRunConfig) -> Vec<Drift> {
@@ -98,8 +110,12 @@ pub(super) fn profile_drift(profile: &AgentProfile, current: &ResolvedRunConfig)
     {
         drift.push(Drift::Mode);
     }
-    if option_drifts(profile, current) {
-        drift.push(Drift::Options);
+    let options = option_drifts(profile, current);
+    if !options.is_empty() {
+        drift.push(Drift::Options(options));
+    }
+    if tools_drift(profile, current) {
+        drift.push(Drift::Tools);
     }
     if profile.instructions != current.instructions {
         drift.push(Drift::Instructions);
@@ -138,6 +154,7 @@ fn absorb_current(profile: &AgentProfile, current: &ResolvedRunConfig) -> AgentP
             })
             .collect()
     };
+    draft.disabled_tools = current.disabled_tools.clone();
     draft
 }
 
@@ -147,6 +164,7 @@ pub(super) enum EditField {
     Model,
     Mode,
     Effort,
+    ModelOption(usize),
 }
 
 pub(super) struct ProfileEdit {
@@ -232,7 +250,15 @@ impl Pickers {
     pub(super) fn applied_profile(&self, cx: &App) -> Option<(AgentProfile, Vec<Drift>)> {
         let id = self.effective_profile_id(cx)?;
         let profile = self.profiles.ready()?.iter().find(|p| p.id == id)?.clone();
-        let drift = profile_drift(&profile, &self.resolved(cx));
+        let mut current = self.resolved(cx);
+        // The picker drops an option set to its default; a profile may name it.
+        for option in self.selected_model(cx).map_or(&[][..], |m| &m.options) {
+            current
+                .model_options
+                .entry(option.id.clone())
+                .or_insert_with(|| serde_json::Value::String(option.default_choice.clone()));
+        }
+        let drift = profile_drift(&profile, &current);
         Some((profile, drift))
     }
 
@@ -313,11 +339,37 @@ impl Pickers {
                     profile.permission_mode.map(mode_label).unwrap_or_default(),
                     mode_label(resolved.permission_mode)
                 ),
-                Drift::Options => "options changed".to_string(),
+                Drift::Options(keys) => {
+                    let options = resolved
+                        .harness
+                        .zip(resolved.model.as_deref())
+                        .and_then(|(harness, model)| self.profile_catalog_model(harness, model))
+                        .map(|model| model.options.clone())
+                        .unwrap_or_default();
+                    let names = keys
+                        .iter()
+                        .map(|key| {
+                            options
+                                .iter()
+                                .find(|option| option.id == *key)
+                                .map_or(key.as_str(), |option| option.label.as_str())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{names} changed")
+                }
+                Drift::Tools => "tools changed".to_string(),
                 Drift::Instructions => "instructions changed".to_string(),
             })
             .collect::<Vec<_>>()
             .join(" · ")
+    }
+
+    fn profile_catalog_model(&self, harness: HarnessId, model: &str) -> Option<&Model> {
+        self.models
+            .get(&harness)
+            .and_then(|models| models.ready())
+            .and_then(|models| models.iter().find(|m| m.id == model))
     }
 
     fn profile_model_label(&self, harness: HarnessId, model: &str) -> String {
@@ -406,6 +458,7 @@ impl Pickers {
                 self.config.permission_mode = mode;
             }
             self.config.instructions = pick.instructions.clone();
+            self.config.disabled_tools = pick.disabled_tools.clone();
             self.config.profile_id = Some(pick.profile_id.clone());
             if !pick.model_options.is_empty()
                 && let Some(model) = pick
@@ -434,6 +487,7 @@ impl Pickers {
         draft.permission_mode = Some(resolved.permission_mode);
         draft.model_options = resolved.model_options;
         draft.instructions = resolved.instructions;
+        draft.disabled_tools = resolved.disabled_tools;
         draft
     }
 
@@ -967,7 +1021,30 @@ impl Pickers {
                     }))
                     .collect()
             }
+            EditField::ModelOption(ix) => {
+                let Some(option) = self.edit_options(draft).into_iter().nth(ix) else {
+                    return Vec::new();
+                };
+                let current = draft.model_options.get(&option.id).and_then(|v| v.as_str());
+                std::iter::once(("Keep current".into(), current.is_none()))
+                    .chain(option.choices.iter().map(|choice| {
+                        (
+                            SharedString::from(choice.label.clone()),
+                            current == Some(choice.id.as_str()),
+                        )
+                    }))
+                    .collect()
+            }
         }
+    }
+
+    fn edit_options(&self, draft: &AgentProfileDraft) -> Vec<zeron_proto::ModelOption> {
+        draft
+            .model
+            .as_deref()
+            .and_then(|id| self.profile_catalog_model(draft.harness, id))
+            .map(|model| model.options.clone())
+            .unwrap_or_default()
     }
 
     fn edit_models(&self, draft: &AgentProfileDraft) -> Vec<Model> {
@@ -1020,12 +1097,17 @@ impl Pickers {
                 });
             }
             EditField::Model => {
+                let models = self.edit_models(&draft);
                 let model = ix
                     .checked_sub(1)
-                    .and_then(|ix| self.edit_models(&draft).get(ix).map(|m| m.id.clone()));
+                    .and_then(|ix| models.get(ix).map(|m| m.id.clone()));
                 self.edit_profile_draft(cx, |draft| {
+                    draft.model_options = crate::agent_profiles::options_for_model(
+                        &models,
+                        model.as_deref(),
+                        std::mem::take(&mut draft.model_options),
+                    );
                     draft.model = model;
-                    draft.model_options.clear();
                 });
             }
             EditField::Mode => {
@@ -1039,6 +1121,24 @@ impl Pickers {
                     .checked_sub(1)
                     .and_then(|ix| self.edit_levels(&draft).get(ix).copied());
                 self.edit_profile_draft(cx, |draft| draft.reasoning = level);
+            }
+            EditField::ModelOption(option_ix) => {
+                let Some(option) = self.edit_options(&draft).into_iter().nth(option_ix) else {
+                    return;
+                };
+                let choice = ix
+                    .checked_sub(1)
+                    .and_then(|ix| option.choices.get(ix).map(|c| c.id.clone()));
+                self.edit_profile_draft(cx, |draft| match choice {
+                    Some(choice) => {
+                        draft
+                            .model_options
+                            .insert(option.id, serde_json::Value::String(choice));
+                    }
+                    None => {
+                        draft.model_options.remove(&option.id);
+                    }
+                });
             }
         }
     }
@@ -1179,13 +1279,13 @@ impl Pickers {
             );
         }
 
-        let label = |text: &'static str| {
+        let label = |text: &str| {
             div()
                 .mb(px(3.0))
                 .text_size(crate::typography::ui_rems(11.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
-                .child(text)
+                .child(SharedString::from(text.to_string()))
         };
         let field_box = || {
             div()
@@ -1199,7 +1299,7 @@ impl Pickers {
                 .items_center()
                 .gap(px(7.0))
         };
-        let chooser = |id: &'static str,
+        let chooser = |id: gpui::ElementId,
                        field: EditField,
                        value: String,
                        mark: Option<(&'static str, Option<gpui::Hsla>)>,
@@ -1252,27 +1352,56 @@ impl Pickers {
             .map(|level| reasoning_label(level).to_string())
             .unwrap_or_else(|| "Keep current".to_string());
         let harness_chooser = chooser(
-            "profile-edit-harness",
+            "profile-edit-harness".into(),
             EditField::Harness,
             harness_display_name(draft.harness).to_string(),
             Some((brand, tint)),
             cx,
         );
         let model_chooser = chooser(
-            "profile-edit-model",
+            "profile-edit-model".into(),
             EditField::Model,
             model_value,
             Some((brand, tint)),
             cx,
         );
-        let mode_chooser = chooser("profile-edit-mode", EditField::Mode, mode_value, None, cx);
+        let mode_chooser = chooser(
+            "profile-edit-mode".into(),
+            EditField::Mode,
+            mode_value,
+            None,
+            cx,
+        );
         let effort_chooser = chooser(
-            "profile-edit-effort",
+            "profile-edit-effort".into(),
             EditField::Effort,
             effort_value,
             None,
             cx,
         );
+        let option_fields = self
+            .edit_options(&draft)
+            .into_iter()
+            .enumerate()
+            .map(|(ix, option)| {
+                let value = draft
+                    .model_options
+                    .get(&option.id)
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| option.choices.iter().find(|c| c.id == id))
+                    .map_or_else(|| "Keep current".to_string(), |c| c.label.clone());
+                div()
+                    .child(label(&option.label))
+                    .child(chooser(
+                        ("profile-edit-option", ix).into(),
+                        EditField::ModelOption(ix),
+                        value,
+                        None,
+                        cx,
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let name = edit.name.clone();
         let notes = edit.notes.clone();
         let error = edit.error.clone();
@@ -1382,6 +1511,12 @@ impl Pickers {
                     .child(effort_chooser)
                     .into_any_element(),
             ))
+            .children(in_pairs(option_fields).into_iter().map(|pair| {
+                let mut pair = pair.into_iter();
+                let first = pair.next().unwrap_or_else(|| div().into_any_element());
+                let second = pair.next().unwrap_or_else(|| div().into_any_element());
+                two(first, second)
+            }))
         };
         let body = body.child(notes_field).when_some(error, |el, error| {
             el.child(
@@ -1416,6 +1551,7 @@ impl Pickers {
                                 draft.reasoning = current.reasoning;
                                 draft.permission_mode = current.permission_mode;
                                 draft.model_options = current.model_options;
+                                draft.disabled_tools = current.disabled_tools;
                             });
                         }))
                         .child("Use current selection"),
@@ -1567,7 +1703,7 @@ mod tests {
         current.model_options.remove("context");
         assert_eq!(
             profile_drift(&planner, &current),
-            [Drift::Effort, Drift::Options]
+            [Drift::Effort, Drift::Options(vec!["context".into()])]
         );
         let saved = absorb_current(&planner, &current);
         assert_eq!(saved.reasoning, Some(ReasoningLevel::Max));
@@ -1577,5 +1713,66 @@ mod tests {
 
         current.harness = Some(HarnessId::Codex);
         assert_eq!(profile_drift(&planner, &current), [Drift::Harness]);
+    }
+
+    fn tools(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_pick_replaces_the_tool_set_even_when_empty() {
+        let mut config = ChatConfig {
+            harness: HarnessId::ClaudeCode,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: PermissionMode::Full,
+            instructions: String::new(),
+            profile_id: None,
+            disabled_tools: tools(&["WebFetch"]),
+        };
+        let mut lean = profile("Lean", "");
+        lean.harness = HarnessId::ClaudeCode;
+        lean.disabled_tools = tools(&["mcp__xcode", "mcp__zeron__delegate_task"]);
+        ProfilePick::of(&lean).write(&mut config);
+        assert_eq!(
+            config.disabled_tools,
+            tools(&["mcp__xcode", "mcp__zeron__delegate_task"])
+        );
+
+        let mut full = profile("Full", "");
+        full.harness = HarnessId::ClaudeCode;
+        ProfilePick::of(&full).write(&mut config);
+        assert!(config.disabled_tools.is_empty());
+
+        lean.harness = HarnessId::Codex;
+        ProfilePick::of(&lean).write(&mut config);
+        assert_eq!(config.disabled_tools, lean.disabled_tools);
+    }
+
+    #[test]
+    fn drift_compares_tool_sets_and_save_absorbs_them() {
+        let mut lean = profile("Lean", "");
+        lean.harness = HarnessId::ClaudeCode;
+        lean.disabled_tools = tools(&["WebFetch", "mcp__xcode"]);
+        let mut current = ResolvedRunConfig {
+            harness: Some(HarnessId::ClaudeCode),
+            permission_mode: PermissionMode::Full,
+            profile_id: Some("lean".into()),
+            disabled_tools: tools(&["mcp__xcode", "WebFetch"]),
+            ..Default::default()
+        };
+        assert!(profile_drift(&lean, &current).is_empty());
+
+        current.disabled_tools.push("NotebookEdit".into());
+        assert_eq!(profile_drift(&lean, &current), [Drift::Tools]);
+        let saved = absorb_current(&lean, &current);
+        assert_eq!(saved.disabled_tools, current.disabled_tools);
+
+        current.disabled_tools.clear();
+        assert_eq!(profile_drift(&lean, &current), [Drift::Tools]);
+        lean.disabled_tools.clear();
+        assert!(profile_drift(&lean, &current).is_empty());
     }
 }

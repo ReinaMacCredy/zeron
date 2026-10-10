@@ -2304,7 +2304,6 @@ fn check_tool_names(names: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Refused when the profile would widen what the chat may do.
 fn applied_profile(
     current: &zeron_proto::ChatConfig,
     profile: &AgentProfile,

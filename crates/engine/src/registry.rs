@@ -537,8 +537,6 @@ impl HarnessRegistry {
         self.prefs().tools.clone()
     }
 
-    /// The one place Settings > Tools, Device hub agent access and a chat's
-    /// own `disabled_tools` combine into what that chat's `zeron mcp` serves.
     pub fn tool_settings_state(
         &self,
         devices_on: bool,

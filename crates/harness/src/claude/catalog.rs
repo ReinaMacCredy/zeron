@@ -221,7 +221,19 @@ pub(crate) fn builtin_tool_groups() -> Vec<zeron_proto::tools::BuiltinToolGroup>
     .collect()
 }
 
-pub(crate) fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
+/// The CLI compacts this far below the chosen window (live-probed on 2.1.293).
+pub const AUTO_COMPACT_HEADROOM: u64 = 33_000;
+
+/// Where a chat with these picks compacts; a custom window applies on 1M only.
+pub fn compact_threshold(window_choice: &str, compact_choice: &str) -> Option<u64> {
+    let window = context_window_tokens(window_choice)?;
+    let chosen = auto_compact_tokens(compact_choice)
+        .filter(|_| window > 200_000)
+        .map_or(window, |tokens| tokens.min(window));
+    Some(chosen.saturating_sub(AUTO_COMPACT_HEADROOM))
+}
+
+pub fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
     match choice_id {
         "200k" => Some(200_000),
         "300k" => Some(300_000),

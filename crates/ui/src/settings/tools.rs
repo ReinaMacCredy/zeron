@@ -401,7 +401,7 @@ fn group_icon(group: ToolGroup) -> &'static str {
     }
 }
 
-fn switch(
+pub(super) fn switch(
     theme: &Theme,
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,

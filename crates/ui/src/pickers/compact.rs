@@ -331,7 +331,7 @@ impl Pickers {
         self.compact_keyboard = false;
         self.compact_motion = CompactMotion::default();
         let groups = self.setting_groups(cx);
-        self.open_model_height = model_menu_height(groups.len(), has_effort_card(&groups));
+        self.open_model_height = model_menu_height(groups.len(), tray_card_extra(&groups));
         self.model_rail = self.primed_model_rail(cx);
         self.search_reset_muted = !self.search.read(cx).text().is_empty();
         self.search.update(cx, |input, cx| {

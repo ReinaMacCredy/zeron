@@ -136,8 +136,7 @@ fn auto_compact_window(request: &RunRequest) -> Option<u64> {
         .and_then(catalog::auto_compact_tokens)
 }
 
-/// The user's own MCP servers from an `mcp_status` response; Zeron's server
-/// is listed with its own tools instead.
+/// Zeron's own server is left out: its tools are switched one by one.
 fn mcp_servers_of(status: &Value) -> Vec<zeron_proto::tools::McpServerEntry> {
     status
         .get("response")
