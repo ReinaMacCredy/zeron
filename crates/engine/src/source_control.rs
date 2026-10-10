@@ -3,8 +3,12 @@
 //! Process execution and provider calls intentionally live outside this layer so
 //! remote parsing and head selector construction remain deterministic and testable.
 
+#[path = "source_control_actions.rs"]
+mod actions;
 #[path = "source_control_review_threads.rs"]
 mod review_threads;
+
+pub use actions::ActionError;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -526,12 +530,8 @@ impl GitHubCli {
             return Err(classify_github_failure(&output.stderr));
         }
         // Evict after the server accepted the write, even if its reply cannot
-        // be decoded. A read already in flight may predate it: keep it out too.
-        let key = format!("false:{url}:");
-        let mut cache = self.pr_cache.lock().await;
-        cache.entries.retain(|entry| !entry.0.starts_with(&key));
-        cache.in_flight.retain(|entry, _| !entry.starts_with(&key));
-        drop(cache);
+        // be decoded.
+        self.evict_detail(&url).await;
         if output.stdout_truncated {
             return Err(ChangeRequestError::Decode);
         }
@@ -551,6 +551,14 @@ impl GitHubCli {
             created_at: value["created_at"].as_str().unwrap_or_default().into(),
             ..Default::default()
         })
+    }
+
+    /// A read already in flight may predate the write: keep it out too.
+    async fn evict_detail(&self, url: &str) {
+        let key = format!("false:{url}:");
+        let mut cache = self.pr_cache.lock().await;
+        cache.entries.retain(|entry| !entry.0.starts_with(&key));
+        cache.in_flight.retain(|entry, _| !entry.starts_with(&key));
     }
 
     async fn fetch_revision_diff(&self, url: &str, head: &str, base: &str) -> PrResult {
@@ -2134,13 +2142,13 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct FakeProcessRunner {
+    pub(super) struct FakeProcessRunner {
         requests: Mutex<Vec<ProcessRequest>>,
         responses: Mutex<VecDeque<Result<ProcessOutput, ProcessRunError>>>,
     }
 
     impl FakeProcessRunner {
-        fn with_responses(
+        pub(super) fn with_responses(
             responses: impl IntoIterator<Item = Result<ProcessOutput, ProcessRunError>>,
         ) -> Arc<Self> {
             Arc::new(Self {
@@ -2149,7 +2157,7 @@ mod tests {
             })
         }
 
-        fn requests(&self) -> Vec<ProcessRequest> {
+        pub(super) fn requests(&self) -> Vec<ProcessRequest> {
             self.requests.lock().unwrap().clone()
         }
     }
@@ -2214,7 +2222,9 @@ mod tests {
         );
     }
 
-    fn command_success(stdout: impl Into<Vec<u8>>) -> Result<ProcessOutput, ProcessRunError> {
+    pub(super) fn command_success(
+        stdout: impl Into<Vec<u8>>,
+    ) -> Result<ProcessOutput, ProcessRunError> {
         Ok(ProcessOutput {
             success: true,
             stdout: stdout.into(),

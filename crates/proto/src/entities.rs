@@ -1178,6 +1178,65 @@ pub struct ChangeRequestCheck {
     pub target_url: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestControls {
+    pub merge_methods: Vec<ChangeRequestMergeMethod>,
+    pub can_write: bool,
+    pub can_triage: bool,
+    pub did_author: bool,
+    pub labels: Vec<ChangeRequestLabelCandidate>,
+    pub reviewers: Vec<ChangeRequestReviewerCandidate>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestLabelCandidate {
+    pub name: String,
+    pub color: Option<String>,
+    pub description: Option<String>,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestLabelCandidates {
+    pub labels: Vec<ChangeRequestLabelCandidate>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestReviewerCandidate {
+    pub login: String,
+    pub name: Option<String>,
+    pub team: bool,
+    pub requested: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestReviewerCandidates {
+    pub reviewers: Vec<ChangeRequestReviewerCandidate>,
+    pub truncated: bool,
+}
+
 /// Latest successful change request resolution for one checkout and branch.
 ///
 /// `change_request: None` is an authoritative successful lookup with no match;

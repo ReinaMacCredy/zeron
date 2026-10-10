@@ -1727,6 +1727,13 @@ fn change_request_rpc_error(error: ChangeRequestError) -> RpcError {
     RpcError::Capability(code.into())
 }
 
+fn action_rpc_error(error: crate::source_control::ActionError) -> RpcError {
+    match error {
+        crate::source_control::ActionError::Refused(message) => RpcError::Failed(message),
+        crate::source_control::ActionError::Host(error) => change_request_rpc_error(error),
+    }
+}
+
 /// Reply deadline for a relay-forwarded unary call. The relay is WebSocket
 /// frames through a DO: a dropped frame (host socket replaced mid-call, DO
 /// restart) loses the reply SILENTLY — the DO's auto-pong keeps the client
@@ -1846,6 +1853,13 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Outlives the engine's own write timeout, which covers commit hooks.
         methods::RUN_WORKING_TREE_ACTION => Duration::from_secs(180),
+        // Up to three sequential gh calls, each under the 20-second GitHub timeout.
+        methods::MERGE_CHANGE_REQUEST
+        | methods::SET_CHANGE_REQUEST_LABEL
+        | methods::SET_CHANGE_REQUEST_REVIEWER
+        | methods::SUBMIT_CHANGE_REQUEST_REVIEW
+        | methods::REPLY_TO_CHANGE_REQUEST_THREAD
+        | methods::SET_CHANGE_REQUEST_THREAD_RESOLVED => Duration::from_secs(90),
         // Outlives the engine's own compaction timeout, so a forwarded call
         // reports the harness's outcome rather than a transport timeout.
         methods::COMPACT_CHAT => Duration::from_secs(660),
@@ -2014,6 +2028,15 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_CHANGE_REQUEST
             | methods::GET_CHANGE_REQUEST_DIFF
             | methods::POST_CHANGE_REQUEST_COMMENT
+            | methods::GET_CHANGE_REQUEST_CONTROLS
+            | methods::MERGE_CHANGE_REQUEST
+            | methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES
+            | methods::SET_CHANGE_REQUEST_LABEL
+            | methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES
+            | methods::SET_CHANGE_REQUEST_REVIEWER
+            | methods::SUBMIT_CHANGE_REQUEST_REVIEW
+            | methods::REPLY_TO_CHANGE_REQUEST_THREAD
+            | methods::SET_CHANGE_REQUEST_THREAD_RESOLVED
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -3476,6 +3499,126 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&comment)
+            }
+            methods::GET_CHANGE_REQUEST_CONTROLS
+            | methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES
+            | methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                }
+                let p: P = parse_params(params)?;
+                match method {
+                    methods::GET_CHANGE_REQUEST_CONTROLS => RpcReply::value(
+                        &self
+                            .github
+                            .change_request_controls(&p.url)
+                            .await
+                            .map_err(change_request_rpc_error)?,
+                    ),
+                    methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES => RpcReply::value(
+                        &self
+                            .github
+                            .label_candidates(&p.url)
+                            .await
+                            .map_err(change_request_rpc_error)?,
+                    ),
+                    _ => RpcReply::value(
+                        &self
+                            .github
+                            .reviewer_candidates(&p.url)
+                            .await
+                            .map_err(change_request_rpc_error)?,
+                    ),
+                }
+            }
+            methods::MERGE_CHANGE_REQUEST => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    method: zeron_proto::ChangeRequestMergeMethod,
+                }
+                let p: P = parse_params(params)?;
+                self.github
+                    .merge(&p.url, p.method)
+                    .await
+                    .map_err(action_rpc_error)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::SET_CHANGE_REQUEST_LABEL => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    name: String,
+                    add: bool,
+                }
+                let p: P = parse_params(params)?;
+                self.github
+                    .set_label(&p.url, &p.name, p.add)
+                    .await
+                    .map_err(action_rpc_error)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::SET_CHANGE_REQUEST_REVIEWER => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    login: String,
+                    #[serde(default)]
+                    team: bool,
+                    add: bool,
+                }
+                let p: P = parse_params(params)?;
+                self.github
+                    .set_reviewer(&p.url, &p.login, p.team, p.add)
+                    .await
+                    .map_err(action_rpc_error)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::SUBMIT_CHANGE_REQUEST_REVIEW => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    event: zeron_proto::ChangeRequestReviewEvent,
+                    #[serde(default)]
+                    body: String,
+                }
+                let p: P = parse_params(params)?;
+                self.github
+                    .submit_review(&p.url, p.event, &p.body)
+                    .await
+                    .map_err(action_rpc_error)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::REPLY_TO_CHANGE_REQUEST_THREAD => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    url: String,
+                    thread_id: String,
+                    body: String,
+                }
+                let p: P = parse_params(params)?;
+                self.github
+                    .reply_to_thread(&p.url, &p.thread_id, &p.body)
+                    .await
+                    .map_err(action_rpc_error)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::SET_CHANGE_REQUEST_THREAD_RESOLVED => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    url: String,
+                    thread_id: String,
+                    resolved: bool,
+                }
+                let p: P = parse_params(params)?;
+                self.github
+                    .set_thread_resolved(&p.url, &p.thread_id, p.resolved)
+                    .await
+                    .map_err(action_rpc_error)?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_CHANGE_REQUEST | methods::GET_CHANGE_REQUEST_DIFF => {
                 #[derive(Deserialize)]
@@ -5714,6 +5857,19 @@ mod tests {
         assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
         assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
+        for method in [
+            methods::GET_CHANGE_REQUEST_CONTROLS,
+            methods::MERGE_CHANGE_REQUEST,
+            methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES,
+            methods::SET_CHANGE_REQUEST_LABEL,
+            methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES,
+            methods::SET_CHANGE_REQUEST_REVIEWER,
+            methods::SUBMIT_CHANGE_REQUEST_REVIEW,
+            methods::REPLY_TO_CHANGE_REQUEST_THREAD,
+            methods::SET_CHANGE_REQUEST_THREAD_RESOLVED,
+        ] {
+            assert!(forwardable(method) && !is_stream_method(method));
+        }
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
     }
