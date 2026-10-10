@@ -4039,6 +4039,10 @@ impl Transcript {
             .iter()
             .any(|v| v.status == Some(zeron_proto::DelegationStatus::Failed));
         let open = (ids.len() == 1).then(|| ids[0].clone());
+        let (glyph, tint) = match views {
+            [one] => crate::pickers::agent_brand_icon(one.harness, one.model.as_deref()),
+            _ => (crate::icons::BOT, None),
+        };
         div()
             .w_full()
             .flex()
@@ -4053,10 +4057,10 @@ impl Transcript {
                 theme.text_muted
             })
             .child(
-                crate::icons::icon(crate::icons::BOT)
+                crate::icons::icon(glyph)
                     .size(px(12.0))
                     .flex_none()
-                    .text_color(theme.text_faint),
+                    .text_color(tint.unwrap_or(theme.text_faint)),
             )
             .child(
                 div()
@@ -5421,11 +5425,7 @@ impl Transcript {
         let chat_id = self.chat_id.clone().unwrap_or_default();
         let state = self.state.read(cx);
         let chats = &state.chats;
-        let harness = chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.config.as_ref())
-            .map(|config| config.harness);
+        let harness = state.chat_harness(&chat_id);
         let mut seen = std::collections::HashSet::new();
         self.rows
             .iter()
@@ -10384,8 +10384,13 @@ impl Transcript {
                         tool.subagent_status,
                         Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
                     );
+                    let mark = crate::pickers::agent_brand_icon(
+                        self.state.read(cx).chat_harness(&chat_id),
+                        None,
+                    );
                     return subagent_chip(
                         tool,
+                        mark,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenSubagent {
@@ -11957,6 +11962,7 @@ fn device_chip_content(tool: &ToolItem) -> Option<(SharedString, String)> {
 
 fn chip_header_row(
     tool: &ToolItem,
+    mark: Option<(&'static str, Option<gpui::Hsla>)>,
     trail: Option<ChipTrail>,
     file_opener: Option<&ToolFileOpener>,
     theme: &Theme,
@@ -12030,15 +12036,16 @@ fn chip_header_row(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        crate::icons::icon(match tool.kind {
-                            ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
-                            ToolItemKind::Note => crate::icons::PEN,
-                            ToolItemKind::Call => tool_icon_path(&tool.call),
-                        })
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                    ),
+                    .child({
+                        let (glyph, tint) = mark.unwrap_or(match tool.kind {
+                            ToolItemKind::Thought => (crate::icons::CHAT_ROUND_LINE, None),
+                            ToolItemKind::Note => (crate::icons::PEN, None),
+                            ToolItemKind::Call => (tool_icon_path(&tool.call), None),
+                        });
+                        crate::icons::icon(glyph)
+                            .size(px(12.0))
+                            .text_color(tint.unwrap_or(theme.text_muted))
+                    }),
             )
         })
         .child(
@@ -12285,6 +12292,7 @@ fn chip_header(
 ) -> gpui::Div {
     chip_header_row(
         tool,
+        None,
         Some(ChipTrail::Chevron { open }),
         file_opener,
         theme,
@@ -12545,7 +12553,15 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, file_opener, theme, view, cx)),
+                .child(chip_header_row(
+                    tool,
+                    None,
+                    None,
+                    file_opener,
+                    theme,
+                    view,
+                    cx,
+                )),
         )
         .into_any_element()
 }
@@ -12757,6 +12773,7 @@ pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
 /// collapse header for it to hang from).
 fn subagent_chip(
     tool: &ToolItem,
+    mark: (&'static str, Option<gpui::Hsla>),
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     rail: bool,
@@ -12769,7 +12786,15 @@ fn subagent_chip(
         None,
         rail,
         on_open,
-        chip_header_row(tool, Some(ChipTrail::OpenArrow), None, theme, view, cx),
+        chip_header_row(
+            tool,
+            Some(mark),
+            Some(ChipTrail::OpenArrow),
+            None,
+            theme,
+            view,
+            cx,
+        ),
     )
 }
 

@@ -2631,6 +2631,15 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    pub(crate) fn chat_harness(&self, chat_id: &str) -> Option<HarnessId> {
+        self.chats
+            .iter()
+            .find(|c| c.id == chat_id)?
+            .config
+            .as_ref()
+            .map(|config| config.harness)
+    }
+
     /// The newest unexpired sidechat of `chat_id`, if any. Newest by
     /// creation, not by activity: the pill and slash command both reopen the
     /// most recently STARTED side conversation.
