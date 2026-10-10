@@ -2,8 +2,9 @@ use gpui::{
     App, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Stateful, Styled as _, div, px,
 };
-use serde_json::{Value, json};
-use zeron_proto::{AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, HarnessId};
+use serde_json::{Map, Value, json};
+use zeron_proto::tools::{HarnessToolInventory, TOOL_GROUPS, ToolGroupInfo, ZERON_TOOL_PREFIX};
+use zeron_proto::{AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, HarnessId, Model};
 use zeron_rpc::methods;
 
 use crate::state::EngineHandle;
@@ -31,6 +32,7 @@ pub fn summary(profile: &AgentProfile, harness_name: &str, model_label: Option<&
         model_label.or(profile.model.as_deref()),
         profile.permission_mode,
         profile.reasoning,
+        profile.disabled_tools.len(),
     )
 }
 
@@ -44,6 +46,7 @@ pub fn draft_summary(
         model_label.or(draft.model.as_deref()),
         draft.permission_mode,
         draft.reasoning,
+        draft.disabled_tools.len(),
     );
     let name = draft.name.trim();
     if name.is_empty() {
@@ -58,6 +61,7 @@ fn summary_line(
     model: Option<&str>,
     mode: Option<zeron_proto::PermissionMode>,
     reasoning: Option<zeron_proto::ReasoningLevel>,
+    tools_off: usize,
 ) -> String {
     let mut parts = vec![harness_name.to_string()];
     if let Some(model) = model {
@@ -69,7 +73,85 @@ fn summary_line(
     if let Some(level) = reasoning {
         parts.push(crate::pickers::reasoning_label(level).to_string());
     }
+    if tools_off > 0 {
+        parts.push(format!("{tools_off} tools off"));
+    }
     parts.join(" · ")
+}
+
+pub fn options_for_model(
+    models: &[Model],
+    model: Option<&str>,
+    options: Map<String, Value>,
+) -> Map<String, Value> {
+    model
+        .and_then(|id| models.iter().find(|m| m.id == id))
+        .map(|model| crate::pickers::offered_options(model, options))
+        .unwrap_or_default()
+}
+
+pub fn in_pairs<T>(items: Vec<T>) -> Vec<Vec<T>> {
+    let mut pairs: Vec<Vec<T>> = Vec::new();
+    for item in items {
+        match pairs.last_mut() {
+            Some(pair) if pair.len() < 2 => pair.push(item),
+            _ => pairs.push(vec![item]),
+        }
+    }
+    pairs
+}
+
+pub fn zeron_rule(tool: &str) -> String {
+    format!("{ZERON_TOOL_PREFIX}{tool}")
+}
+
+pub fn set_rules(disabled: &mut Vec<String>, rules: &[String], on: bool) {
+    disabled.retain(|rule| !rules.contains(rule));
+    if !on {
+        disabled.extend(rules.iter().cloned());
+    }
+}
+
+pub fn rules_on(disabled: &[String], rules: &[String]) -> usize {
+    rules.iter().filter(|rule| !disabled.contains(rule)).count()
+}
+
+pub fn zeron_unlocked(info: &ToolGroupInfo, ceiling: &[String]) -> Vec<String> {
+    info.tools()
+        .iter()
+        .filter(|tool| !ceiling.iter().any(|off| off == tool.name))
+        .map(|tool| zeron_rule(tool.name))
+        .collect()
+}
+
+pub fn set_zeron_group(
+    disabled: &mut Vec<String>,
+    info: &ToolGroupInfo,
+    ceiling: &[String],
+    on: bool,
+) {
+    if on {
+        let all: Vec<String> = info.tools().iter().map(|t| zeron_rule(t.name)).collect();
+        set_rules(disabled, &all, true);
+    } else {
+        set_rules(disabled, &zeron_unlocked(info, ceiling), false);
+    }
+}
+
+pub fn unlisted_rules(disabled: &[String], inventory: &HarnessToolInventory) -> Vec<String> {
+    disabled
+        .iter()
+        .filter(|rule| match rule.strip_prefix(ZERON_TOOL_PREFIX) {
+            Some(name) => !TOOL_GROUPS
+                .iter()
+                .any(|info| info.tools().iter().any(|tool| tool.name == name)),
+            None => {
+                !inventory.builtin.iter().any(|g| g.tools.contains(rule))
+                    && !inventory.mcp_servers.iter().any(|s| &s.rule == *rule)
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 pub fn char_count(text: &str, limit: usize) -> SharedString {
@@ -150,6 +232,7 @@ pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
         model_options: profile.model_options.clone(),
         notes: profile.notes.clone(),
         instructions: profile.instructions.clone(),
+        disabled_tools: profile.disabled_tools.clone(),
     }
 }
 
@@ -163,6 +246,7 @@ pub fn blank_draft(harness: HarnessId) -> AgentProfileDraft {
         model_options: Default::default(),
         notes: String::new(),
         instructions: String::new(),
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -259,6 +343,7 @@ mod tests {
             notes: String::new(),
             instructions: String::new(),
             by_agent: false,
+            disabled_tools: Vec::new(),
         };
         assert_eq!(
             summary(&profile, "Codex", Some("GPT-5.6")),
@@ -274,5 +359,127 @@ mod tests {
             "Reviewer · Codex"
         );
         assert_eq!(char_count("ừ ok", 2000).as_ref(), "4 / 2000");
+        profile.disabled_tools = vec!["WebFetch".into(), "mcp__xcode".into()];
+        assert_eq!(summary(&profile, "Codex", None), "Codex · 2 tools off");
+    }
+
+    fn rules(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_zeron_group_switch_writes_only_unlocked_tools() {
+        let pages = zeron_proto::tools::tool_group(zeron_proto::tools::ToolGroup::Pages);
+        let ceiling = rules(&["html_preview"]);
+        let mut disabled = rules(&["WebFetch"]);
+        set_zeron_group(&mut disabled, pages, &ceiling, false);
+        assert_eq!(disabled, rules(&["WebFetch", "mcp__zeron__html_render"]));
+        assert_eq!(rules_on(&disabled, &zeron_unlocked(pages, &ceiling)), 0);
+
+        disabled.push("mcp__zeron__html_preview".into());
+        set_zeron_group(&mut disabled, pages, &ceiling, true);
+        assert_eq!(disabled, rules(&["WebFetch"]));
+
+        set_rules(&mut disabled, &[zeron_rule("html_render")], false);
+        set_rules(&mut disabled, &[zeron_rule("html_render")], false);
+        assert_eq!(disabled, rules(&["WebFetch", "mcp__zeron__html_render"]));
+    }
+
+    #[test]
+    fn built_in_groups_and_servers_write_their_rules() {
+        let web = zeron_proto::tools::BuiltinToolGroup {
+            id: "web".into(),
+            title: "Web".into(),
+            summary: String::new(),
+            tools: rules(&["WebSearch", "WebFetch"]),
+        };
+        let xcode = zeron_proto::tools::McpServerEntry {
+            name: "xcode".into(),
+            rule: zeron_proto::tools::mcp_server_rule("xcode"),
+            status: "connected".into(),
+            source: "user".into(),
+        };
+        let mut disabled = Vec::new();
+        set_rules(&mut disabled, &web.tools, false);
+        set_rules(&mut disabled, std::slice::from_ref(&xcode.rule), false);
+        assert_eq!(disabled, rules(&["WebSearch", "WebFetch", "mcp__xcode"]));
+        assert_eq!(rules_on(&disabled, &web.tools), 0);
+
+        disabled.push("mcp__gone".into());
+        disabled.push("mcp__zeron__retired_tool".into());
+        disabled.push("mcp__zeron__terminal".into());
+        let inventory = HarnessToolInventory {
+            builtin: vec![web.clone()],
+            mcp_servers: vec![xcode],
+        };
+        assert_eq!(
+            unlisted_rules(&disabled, &inventory),
+            rules(&["mcp__gone", "mcp__zeron__retired_tool"])
+        );
+
+        set_rules(&mut disabled, &web.tools, true);
+        assert_eq!(
+            disabled,
+            rules(&[
+                "mcp__xcode",
+                "mcp__gone",
+                "mcp__zeron__retired_tool",
+                "mcp__zeron__terminal"
+            ])
+        );
+    }
+
+    #[test]
+    fn options_follow_the_new_model() {
+        let option = |id: &str, choices: &[&str]| zeron_proto::ModelOption {
+            id: id.into(),
+            label: id.into(),
+            choices: choices
+                .iter()
+                .map(|c| zeron_proto::ModelOptionChoice {
+                    id: c.to_string(),
+                    label: c.to_string(),
+                })
+                .collect(),
+            default_choice: choices[0].into(),
+        };
+        let model = |id: &str, options: Vec<zeron_proto::ModelOption>| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options,
+        };
+        let models = [
+            model(
+                "opus",
+                vec![
+                    option("contextWindow", &["200k", "1m"]),
+                    option("autoCompact", &["auto", "400k"]),
+                ],
+            ),
+            model("sonnet", vec![option("contextWindow", &["200k"])]),
+        ];
+        let picked = json!({ "contextWindow": "1m", "autoCompact": "400k" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            options_for_model(&models, Some("opus"), picked.clone()),
+            picked
+        );
+        assert!(options_for_model(&models, Some("sonnet"), picked.clone()).is_empty());
+        let kept = json!({ "contextWindow": "200k", "autoCompact": "400k" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            options_for_model(&models, Some("sonnet"), kept),
+            json!({ "contextWindow": "200k" })
+                .as_object()
+                .cloned()
+                .unwrap()
+        );
+        assert!(options_for_model(&models, None, picked).is_empty());
     }
 }

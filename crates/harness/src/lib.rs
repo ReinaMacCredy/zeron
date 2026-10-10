@@ -311,6 +311,13 @@ pub trait Harness: Send + Sync {
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         self.commands().await
     }
+    /// `cwd` matters: project-scoped MCP servers differ per directory.
+    async fn tool_inventory(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<zeron_proto::tools::HarnessToolInventory, HarnessError> {
+        Ok(Default::default())
+    }
     /// Project-scoped skills; None means this provider does not advertise skills.
     async fn skills(
         &self,

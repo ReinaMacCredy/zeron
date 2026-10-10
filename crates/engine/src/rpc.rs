@@ -415,6 +415,12 @@ async fn blocking<T: Send + 'static>(
         .map_err(|err| RpcError::Failed(err.to_string()))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct GetToolSettingsParams {
+    chat_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpsertAgentProfileParams {
@@ -936,17 +942,16 @@ impl EngineRpc {
         self
     }
 
-    fn tool_settings_state(&self) -> zeron_proto::tools::ToolSettingsState {
-        let devices_off = !self
+    fn tool_settings_state(&self, chat_id: Option<&str>) -> zeron_proto::tools::ToolSettingsState {
+        let devices_on = self
             .device_hub
             .as_ref()
             .is_some_and(|hub| hub.agent_access_enabled());
-        let also_off = if devices_off {
-            vec![zeron_proto::tools::ToolGroup::Devices]
-        } else {
-            Vec::new()
-        };
-        self.registry.tool_settings().state(&also_off)
+        let chat_disabled = chat_id
+            .and_then(|id| self.workspace.chat_config(id))
+            .map(|config| config.disabled_tools)
+            .unwrap_or_default();
+        self.registry.tool_settings_state(devices_on, &chat_disabled)
     }
 
     fn device_hub(&self) -> Result<&std::sync::Arc<crate::device_hub::DeviceHub>, RpcError> {
@@ -1857,7 +1862,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // reports the harness's outcome rather than a transport timeout.
         methods::COMPACT_CHAT => Duration::from_secs(660),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
-        methods::LIST_MODELS | methods::LIST_COMMANDS | methods::GENERATE_COMMIT_MESSAGE => {
+        methods::LIST_MODELS
+        | methods::LIST_COMMANDS
+        | methods::LIST_HARNESS_TOOLS
+        | methods::GENERATE_COMMIT_MESSAGE => {
             Duration::from_secs(100)
         }
         _ => Duration::from_secs(30),
@@ -1964,6 +1972,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
+            | methods::LIST_HARNESS_TOOLS
             | methods::HARNESS_COMPACTION
             | methods::COMPACT_CHAT
             | methods::STOP_BACKGROUND_TASK
@@ -2423,11 +2432,18 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.delegation_settings())
             }
-            methods::GET_TOOL_SETTINGS => RpcReply::value(&self.tool_settings_state()),
+            methods::GET_TOOL_SETTINGS => {
+                let p: GetToolSettingsParams = if params.is_null() {
+                    GetToolSettingsParams::default()
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(&self.tool_settings_state(p.chat_id.as_deref()))
+            }
             methods::SET_TOOL_SETTINGS => {
                 let p: zeron_proto::tools::ToolSettings = parse_params(params)?;
                 self.registry.set_tool_settings(p);
-                RpcReply::value(&self.tool_settings_state())
+                RpcReply::value(&self.tool_settings_state(None))
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
@@ -2515,6 +2531,30 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
+            }
+            methods::LIST_HARNESS_TOOLS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    harness: HarnessId,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let root = self
+                    .catalog_root(&FileSearchParams {
+                        query: String::new(),
+                        chat_id: None,
+                        space_id: p.space_id,
+                        path: None,
+                    })
+                    .await?;
+                let inventory = self
+                    .registry
+                    .discover_tool_inventory(p.harness, &root)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&inventory)
             }
             methods::HARNESS_COMPACTION => {
                 let p: zeron_proto::HarnessCompactionParams = parse_params(params)?;

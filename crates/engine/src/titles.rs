@@ -250,6 +250,7 @@ pub(crate) async fn run_one_shot(
             branch: None,
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         };
         match tokio::time::timeout(
             run.attempt_timeout,
@@ -439,6 +440,7 @@ mod tests {
             branch: None,
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         };
         let result = collect_text(&harness, request, None, zeron_harness::TITLE_INSTRUCTIONS).await;
         assert!(

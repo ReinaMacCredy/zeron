@@ -56,6 +56,7 @@ impl Shell {
                 permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             });
         let saved = settings::current(cx);
         let device = saved.codex_voice_device.unwrap_or(device);

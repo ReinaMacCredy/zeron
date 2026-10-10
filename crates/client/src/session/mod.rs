@@ -1116,6 +1116,7 @@ impl SessionHandle {
                     forked_at: None,
                     computer_control: false,
                     permission_mode: Default::default(),
+                    disabled_tools: config.map(|c| c.disabled_tools.clone()).unwrap_or_default(),
                 };
                 self.core.queue_command(
                     &device_id,

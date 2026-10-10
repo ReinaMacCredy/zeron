@@ -1851,6 +1851,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host

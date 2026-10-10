@@ -11788,6 +11788,7 @@ impl Composer {
                         branch: None,
                         forked_at: None,
                         computer_control: false,
+                        disabled_tools: resolved.disabled_tools.clone(),
                     },
                     message_id: message_id.clone(),
                 };
@@ -17795,6 +17796,7 @@ mod tests {
                             permission_mode: zeron_proto::PermissionMode::Full,
                             instructions: String::new(),
                             profile_id: None,
+                            disabled_tools: Vec::new(),
                         }),
                         last_message_preview: None,
                         last_message_at: None,
@@ -17979,6 +17981,7 @@ mod tests {
                                 permission_mode: zeron_proto::PermissionMode::Full,
                                 instructions: String::new(),
                                 profile_id: None,
+                                disabled_tools: Vec::new(),
                             });
                             chat.last_message_at =
                                 Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
@@ -18351,6 +18354,7 @@ mod tests {
                             permission_mode: zeron_proto::PermissionMode::Full,
                             instructions: String::new(),
                             profile_id: None,
+                            disabled_tools: Vec::new(),
                         })
                     };
                     let mut src = chat_row("src", None);

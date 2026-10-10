@@ -230,6 +230,22 @@ impl HarnessRegistry {
         })?
     }
 
+    pub async fn discover_tool_inventory(
+        &self,
+        id: HarnessId,
+        cwd: &Path,
+    ) -> Result<zeron_proto::tools::HarnessToolInventory, HarnessError> {
+        let cwd = cwd.to_owned();
+        let lease = self.execution_lease(id).await;
+        let harness = self.resolve(id)?;
+        tokio::spawn(async move {
+            let _lease = lease;
+            harness.tool_inventory(&cwd).await
+        })
+        .await
+        .map_err(|error| HarnessError::Protocol(format!("tool discovery task failed: {error}")))?
+    }
+
     pub async fn discover_skills(
         &self,
         id: HarnessId,
@@ -519,6 +535,21 @@ impl HarnessRegistry {
 
     pub fn tool_settings(&self) -> zeron_proto::tools::ToolSettings {
         self.prefs().tools.clone()
+    }
+
+    pub fn tool_settings_state(
+        &self,
+        devices_on: bool,
+        chat_disabled: &[String],
+    ) -> zeron_proto::tools::ToolSettingsState {
+        let also_off: &[zeron_proto::tools::ToolGroup] = if devices_on {
+            &[]
+        } else {
+            &[zeron_proto::tools::ToolGroup::Devices]
+        };
+        let mut state = self.tool_settings().for_chat(chat_disabled).state(also_off);
+        state.settings = self.tool_settings();
+        state
     }
 
     pub fn set_tool_settings(&self, settings: zeron_proto::tools::ToolSettings) {
@@ -1145,6 +1176,36 @@ mod tests {
     /// `descriptors()` stamps the per-device enabled flag; `set_enabled`
     /// guards the gate (no enabling missing CLIs, no disabling the last one)
     /// and persists across a reload.
+    #[test]
+    fn a_chats_tool_set_narrows_the_global_one_and_keeps_its_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        let mut global = zeron_proto::tools::ToolSettings::default();
+        global.set_tool("html_render", false);
+        registry.set_tool_settings(global.clone());
+        let chat = vec!["mcp__zeron__ask_user".to_owned(), "WebFetch".to_owned()];
+        let state = registry.tool_settings_state(false, &chat);
+        assert_eq!(
+            state.settings, global,
+            "Settings > Tools shows the global switches"
+        );
+        assert!(state.disabled.iter().any(|t| t == "html_render"));
+        assert!(state.disabled.iter().any(|t| t == "ask_user"));
+        assert!(
+            state.disabled.iter().any(|t| t == "device_list"),
+            "agent access off"
+        );
+        assert!(!state.disabled.iter().any(|t| t == "WebFetch"));
+        assert!(
+            !registry
+                .tool_settings_state(true, &[])
+                .disabled
+                .iter()
+                .any(|t| t == "device_list")
+        );
+    }
+
     #[test]
     fn enablement_stamps_guards_and_persists() {
         let dir = tempfile::tempdir().unwrap();

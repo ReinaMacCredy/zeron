@@ -121,6 +121,48 @@ fn flag_settings(request: &RunRequest) -> Value {
     })
 }
 
+/// Only a 1M window takes a custom auto-compact window: under 200K every
+/// choice would sit at or past the window itself. The CLI reads it at launch
+/// only: `apply_flag_settings` updates `get_settings` but not the compaction
+/// threshold, even after a turn (live-probed on 2.1.293).
+fn auto_compact_window(request: &RunRequest) -> Option<u64> {
+    if disables_1m_context(request) {
+        return None;
+    }
+    request
+        .model_options
+        .get("autoCompact")
+        .and_then(Value::as_str)
+        .and_then(catalog::auto_compact_tokens)
+}
+
+/// Zeron's own server is left out: its tools are switched one by one.
+fn mcp_servers_of(status: &Value) -> Vec<zeron_proto::tools::McpServerEntry> {
+    status
+        .get("response")
+        .and_then(|r| r.get("mcpServers"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|server| {
+            let text = |key: &str| {
+                server
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let name = text("name");
+            (!name.is_empty() && name != "zeron").then(|| zeron_proto::tools::McpServerEntry {
+                rule: zeron_proto::tools::mcp_server_rule(&name),
+                status: text("status"),
+                source: text("scope"),
+                name,
+            })
+        })
+        .collect()
+}
+
 /// The suffix alone can't express 200K: the catalog's long-context models
 /// are `native_1m` in the CLI, so a bare id still runs at 1M and only the
 /// env kill switch brings it down (see `catalog::context_window`).
@@ -288,9 +330,16 @@ impl ClaudeHarness {
         if request.reasoning == Some(ReasoningLevel::Ultracode) {
             settings.insert("ultracode".into(), Value::Bool(true));
         }
+        if let Some(window) = auto_compact_window(request) {
+            settings.insert("autoCompactWindow".into(), Value::from(window));
+        }
         if !settings.is_empty() {
             args.push("--settings".into());
             args.push(Value::Object(settings).to_string());
+        }
+        if !request.disabled_tools.is_empty() {
+            args.push("--disallowedTools".into());
+            args.push(request.disabled_tools.join(","));
         }
         args
     }
@@ -370,6 +419,14 @@ impl ClaudeHarness {
     }
 
     async fn probe_initialize(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
+        self.probe_control(cwd, "initialize").await
+    }
+
+    async fn probe_control(
+        &self,
+        cwd: Option<&std::path::Path>,
+        subtype: &str,
+    ) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         if let Some(cwd) = cwd {
@@ -406,7 +463,7 @@ impl ClaudeHarness {
             let request = serde_json::json!({
                 "type": "control_request",
                 "request_id": PROBE_ID,
-                "request": { "subtype": "initialize" },
+                "request": { "subtype": subtype },
             });
             stdin
                 .write_all(format!("{request}\n").as_bytes())
@@ -429,20 +486,21 @@ impl ClaudeHarness {
                     let msg = response
                         .get("error")
                         .and_then(Value::as_str)
-                        .unwrap_or("initialize control request failed");
-                    return Err(HarnessError::Protocol(msg.into()));
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{subtype} control request failed"));
+                    return Err(HarnessError::Protocol(msg));
                 }
                 return Ok(response);
             }
-            Err(HarnessError::Protocol(
-                "claude exited before answering the initialize control request".into(),
-            ))
+            Err(HarnessError::Protocol(format!(
+                "claude exited before answering the {subtype} control request"
+            )))
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(HarnessError::Protocol("Claude initialize timed out".into())),
+            Err(_) => Err(HarnessError::Protocol(format!("Claude {subtype} timed out"))),
         }
     }
 }
@@ -544,7 +602,8 @@ impl Harness for ClaudeHarness {
     /// Model, context window, effort, fast mode, thinking and ultracode all
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
     /// the directory, the permission mode, the computer grant, a fork or
-    /// branch cut and the 200K env switch it launched with need a new one.
+    /// branch cut, the 200K env switch, the auto-compact window and the
+    /// disallowed tools it launched with need a new one.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
@@ -553,6 +612,8 @@ impl Harness for ClaudeHarness {
             && (next.forked_at.is_none() || next.forked_at == live.forked_at)
             && (next.branch.is_none() || next.branch == live.branch)
             && disables_1m_context(live) == disables_1m_context(next)
+            && auto_compact_window(live) == auto_compact_window(next)
+            && live.disabled_tools == next.disabled_tools
     }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
@@ -627,6 +688,16 @@ impl Harness for ClaudeHarness {
         ))
     }
 
+    async fn tool_inventory(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<zeron_proto::tools::HarnessToolInventory, HarnessError> {
+        let status = self.probe_control(Some(cwd), "mcp_status").await?;
+        Ok(zeron_proto::tools::HarnessToolInventory {
+            builtin: catalog::builtin_tool_groups(),
+            mcp_servers: mcp_servers_of(&status),
+        })
+    }
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         self.discover_commands(None).await
     }
@@ -1684,6 +1755,7 @@ mod tests {
                 branch: None,
                 forked_at: None,
                 computer_control: false,
+                disabled_tools: Vec::new(),
             };
             if let Some(choice) = choice {
                 request
@@ -1713,6 +1785,114 @@ mod tests {
         assert_eq!(build(None), (Some("claude-fable-5-1".into()), false));
     }
 
+    #[test]
+    fn auto_compact_pick_launches_a_window_and_needs_a_new_process() {
+        let request = |window: &str, compact: &str| {
+            let mut options = serde_json::Map::new();
+            options.insert("contextWindow".into(), json!(window));
+            options.insert("autoCompact".into(), json!(compact));
+            RunRequest {
+                prompt: String::new(),
+                harness: None,
+                model: Some("claude-opus-5-5".into()),
+                reasoning: None,
+                model_options: options,
+                cwd: String::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Full,
+                auto_approve: false,
+                resume: None,
+                attachments: Vec::new(),
+                worktree: None,
+                mcp: None,
+                branch: None,
+                forked_at: None,
+                computer_control: false,
+                disabled_tools: Vec::new(),
+            }
+        };
+        let settings = |request: &RunRequest| {
+            let args = ClaudeHarness::launch_args(request);
+            args.iter()
+                .position(|a| a == "--settings")
+                .map(|i| serde_json::from_str::<Value>(&args[i + 1]).unwrap())
+                .and_then(|s| s.get("autoCompactWindow").cloned())
+        };
+        assert_eq!(settings(&request("1m", "400k")), Some(json!(400_000)));
+        assert_eq!(settings(&request("1m", "auto")), None);
+        assert_eq!(settings(&request("200k", "400k")), None);
+        assert!(flag_settings(&request("1m", "400k")).get("autoCompactWindow").is_none());
+
+        let harness = ClaudeHarness::new();
+        assert!(!harness.reconfigures_in_place(&request("1m", "auto"), &request("1m", "300k")));
+        assert!(harness.reconfigures_in_place(&request("1m", "300k"), &request("1m", "300k")));
+        assert!(
+            !harness.reconfigures_in_place(&request("200k", "auto"), &request("1m", "auto")),
+            "the 200K switch already restarts"
+        );
+    }
+
+    #[test]
+    fn mcp_status_lists_the_users_servers_with_their_rules() {
+        let status = json!({ "response": { "mcpServers": [
+            { "name": "maestro", "status": "connected", "scope": "user" },
+            { "name": "claude.ai Claude Docs", "status": "pending", "scope": "claudeai" },
+            { "name": "zeron", "status": "connected", "scope": "dynamic" }
+        ] } });
+        let servers = mcp_servers_of(&status);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].rule, "mcp__maestro");
+        assert_eq!(servers[1].rule, "mcp__claude_ai_Claude_Docs");
+        assert_eq!(servers[1].source, "claudeai");
+    }
+
+    #[test]
+    fn builtin_groups_never_offer_the_core_tools_twice() {
+        let groups = catalog::builtin_tool_groups();
+        let mut seen = std::collections::BTreeSet::new();
+        for tool in groups.iter().flat_map(|g| &g.tools) {
+            assert!(seen.insert(tool.clone()), "{tool} listed twice");
+            assert!(!["Bash", "Read", "Edit", "Write", "ToolSearch"].contains(&tool.as_str()));
+        }
+    }
+
+    #[test]
+    fn disabled_tools_launch_as_disallowed_and_need_a_new_process() {
+        let request = |tools: &[&str]| RunRequest {
+            prompt: String::new(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+            branch: None,
+            forked_at: None,
+            computer_control: false,
+            disabled_tools: tools.iter().map(|t| t.to_string()).collect(),
+        };
+        let disallowed = |request: &RunRequest| {
+            let args = ClaudeHarness::launch_args(request);
+            args.iter()
+                .position(|a| a == "--disallowedTools")
+                .map(|i| args[i + 1].clone())
+        };
+        assert_eq!(
+            disallowed(&request(&["WebFetch", "mcp__xcode", "mcp__zeron__delegate_task"])),
+            Some("WebFetch,mcp__xcode,mcp__zeron__delegate_task".into())
+        );
+        assert_eq!(disallowed(&request(&[])), None);
+        let harness = ClaudeHarness::new();
+        assert!(!harness.reconfigures_in_place(&request(&[]), &request(&["WebFetch"])));
+        assert!(harness.reconfigures_in_place(&request(&["WebFetch"]), &request(&["WebFetch"])));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn permission_mode_selects_the_cli_flags() {
@@ -1737,6 +1917,7 @@ mod tests {
                 branch: None,
                 forked_at: None,
                 computer_control: false,
+                disabled_tools: Vec::new(),
             };
             harness
                 .build_command(&exe, &request)
@@ -1874,6 +2055,7 @@ mod tests {
             }),
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         };
         let args = |cmd: &Command| -> Vec<String> {
             cmd.as_std()
@@ -1956,6 +2138,7 @@ mod tests {
             }),
             forked_at: Some(at.into()),
             computer_control: false,
+            disabled_tools: Vec::new(),
         };
         let run = |request: &RunRequest| {
             let cmd = harness.build_command(&exe, request);

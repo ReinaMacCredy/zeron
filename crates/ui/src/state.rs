@@ -6131,6 +6131,7 @@ mod tests {
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -6158,6 +6159,7 @@ mod tests {
                 permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             },
         );
     }

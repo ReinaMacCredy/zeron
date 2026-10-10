@@ -107,6 +107,7 @@ impl Rig {
                     permission_mode: Default::default(),
                     instructions: String::new(),
                     profile_id: None,
+                    disabled_tools: Vec::new(),
                 },
             )
             .unwrap();
@@ -138,6 +139,7 @@ impl Rig {
             forked_at: None,
             computer_control: false,
             permission_mode: Default::default(),
+            disabled_tools: Vec::new(),
         }
     }
 

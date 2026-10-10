@@ -2806,6 +2806,7 @@ mod tests {
             branch: None,
             forked_at: None,
             computer_control,
+            disabled_tools: Vec::new(),
         }
     }
 

@@ -129,6 +129,7 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
             branch: None,
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         },
         message_id: message_id.into(),
     }

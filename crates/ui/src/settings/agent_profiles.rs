@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, Context, Entity, Focusable as _, SharedString, Subscription, Task, Window, div,
     prelude::*, px,
 };
 use zeron_engine::registry::HarnessDescriptor;
+use zeron_proto::tools::{
+    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, tool_group,
+};
 use zeron_proto::{
     AgentProfile, AgentProfileDraft, HarnessId, Model, PermissionMode, ReasoningLevel,
 };
@@ -12,9 +15,11 @@ use zeron_rpc::methods;
 
 use crate::agent_profiles::{
     ProfileWrite, blank_draft, brand_badge, char_count, draft_of, draft_summary, expand_toggle,
-    folded_row, mode_label, summary,
+    folded_row, in_pairs, mode_label, options_for_model, rules_on, set_rules, set_zeron_group,
+    summary, unlisted_rules, zeron_rule, zeron_unlocked,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
+use crate::device_panel::setup::activate;
 use crate::pickers::{harness_brand_icon, offered_harnesses, reasoning_label};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -33,7 +38,8 @@ struct Editor {
     name: Entity<ComposerInput>,
     notes: Entity<ComposerInput>,
     instructions: Entity<ComposerInput>,
-    expanded: Option<LongField>,
+    expanded: Option<Fold>,
+    tools_open: HashSet<ToolGroup>,
     error: Option<SharedString>,
     saving: bool,
     confirm_delete: bool,
@@ -46,6 +52,18 @@ enum LongField {
     Notes,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Fold {
+    Text(LongField),
+    Tools,
+}
+
+const FOLDS: [Fold; 3] = [
+    Fold::Text(LongField::Instructions),
+    Fold::Text(LongField::Notes),
+    Fold::Tools,
+];
+
 pub struct AgentProfilesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -53,11 +71,16 @@ pub struct AgentProfilesPage {
     harnesses: Vec<HarnessDescriptor>,
     models: HashMap<HarnessId, Vec<Model>>,
     editor: Option<Editor>,
-    boot_expand: Option<LongField>,
+    boot_expand: Option<Fold>,
     harness_select: widgets::SelectState,
     model_select: widgets::SelectState,
     mode_select: widgets::SelectState,
     effort_select: widgets::SelectState,
+    option_selects: HashMap<String, widgets::SelectState>,
+    tool_ceiling: Loadable<Vec<String>>,
+    claude_tools: Loadable<HarnessToolInventory>,
+    tool_ceiling_task: Option<Task<()>>,
+    claude_tools_task: Option<Task<()>>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
     catalog_task: Option<Task<()>>,
@@ -95,14 +118,20 @@ impl AgentProfilesPage {
             models: HashMap::new(),
             editor: None,
             boot_expand: match std::env::var("ZERON_OPEN_PROFILE_FIELD").as_deref() {
-                Ok("instructions") => Some(LongField::Instructions),
-                Ok("notes") => Some(LongField::Notes),
+                Ok("instructions") => Some(Fold::Text(LongField::Instructions)),
+                Ok("notes") => Some(Fold::Text(LongField::Notes)),
+                Ok("tools") => Some(Fold::Tools),
                 _ => None,
             },
             harness_select: Default::default(),
             model_select: Default::default(),
             mode_select: Default::default(),
             effort_select: Default::default(),
+            option_selects: HashMap::new(),
+            tool_ceiling: Loadable::Idle,
+            claude_tools: Loadable::Idle,
+            tool_ceiling_task: None,
+            claude_tools_task: None,
             error: None,
             task: None,
             catalog_task: None,
@@ -312,19 +341,77 @@ impl AgentProfilesPage {
             cx.notify()
         });
         self.ensure_models(draft.harness, cx);
+        let expanded = self.boot_expand.take();
         self.editor = Some(Editor {
             profile_id,
             draft,
             name,
             notes,
             instructions,
-            expanded: self.boot_expand.take(),
+            expanded,
+            tools_open: HashSet::new(),
             error: None,
             saving: false,
             confirm_delete: false,
             _events: [name_events, notes_events, instructions_events],
         });
+        if expanded == Some(Fold::Tools) {
+            self.load_tools(cx);
+        }
         cx.notify();
+    }
+
+    fn load_tools(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(harness) = self.editor.as_ref().map(|editor| editor.draft.harness) else {
+            return;
+        };
+        if self.tool_ceiling.ready().is_none() {
+            self.tool_ceiling = Loadable::Loading;
+        }
+        let ceiling_engine = engine.clone();
+        self.tool_ceiling_task = Some(cx.spawn(async move |this, cx| {
+            let reply = ceiling_engine
+                .client()
+                .call_as::<ToolSettingsState>(methods::GET_TOOL_SETTINGS, serde_json::json!({}))
+                .await;
+            this.update(cx, |page, cx| {
+                match reply {
+                    Ok(state) => page.tool_ceiling = Loadable::Ready(state.disabled),
+                    Err(error) if page.tool_ceiling.ready().is_none() => {
+                        page.tool_ceiling = Loadable::Error(error.to_string())
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        if harness != HarnessId::ClaudeCode
+            || matches!(self.claude_tools, Loadable::Loading | Loadable::Ready(_))
+        {
+            return;
+        }
+        self.claude_tools = Loadable::Loading;
+        self.claude_tools_task = Some(cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call_as::<HarnessToolInventory>(
+                    methods::LIST_HARNESS_TOOLS,
+                    serde_json::json!({ "harness": HarnessId::ClaudeCode }),
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                page.claude_tools = match reply {
+                    Ok(inventory) => Loadable::Ready(inventory),
+                    Err(error) => Loadable::Error(error.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
@@ -337,18 +424,22 @@ impl AgentProfilesPage {
         true
     }
 
-    fn expand(&mut self, field: Option<LongField>, window: &mut Window, cx: &mut Context<Self>) {
+    fn expand(&mut self, field: Option<Fold>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
         editor.expanded = field;
-        if let Some(field) = field {
-            let input = match field {
-                LongField::Instructions => &editor.instructions,
-                LongField::Notes => &editor.notes,
-            };
-            let handle = input.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
+        match field {
+            Some(Fold::Text(field)) => {
+                let input = match field {
+                    LongField::Instructions => &editor.instructions,
+                    LongField::Notes => &editor.notes,
+                };
+                let handle = input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            Some(Fold::Tools) => self.load_tools(cx),
+            None => {}
         }
         cx.notify();
     }
@@ -506,6 +597,7 @@ impl AgentProfilesPage {
         let notes = editor.notes.clone();
         let instructions = editor.instructions.clone();
         let expanded = editor.expanded;
+        let tools_open = editor.tools_open.clone();
         let error = editor.error.clone();
         let confirm_delete = editor.confirm_delete;
         let saving = editor.saving;
@@ -561,8 +653,12 @@ impl AgentProfilesPage {
                 .and_then(|ix| models.get(ix))
                 .map(|m| m.id.clone());
             page.edit_draft(cx, |draft| {
+                draft.model_options = options_for_model(
+                    &models,
+                    model.as_deref(),
+                    std::mem::take(&mut draft.model_options),
+                );
                 draft.model = model;
-                draft.model_options.clear();
             });
         })
         .render(&self.model_select, cx);
@@ -617,6 +713,55 @@ impl AgentProfilesPage {
                 page.edit_draft(cx, |draft| draft.reasoning = level);
             })
             .render(&self.effort_select, cx);
+
+        let model_choices = models_for(&self.models, &draft)
+            .map(|model| model.options.clone())
+            .unwrap_or_default();
+        let mut option_fields = Vec::new();
+        for option in model_choices {
+            let key = option.id.clone();
+            self.option_selects.entry(key.clone()).or_default();
+            let current = draft.model_options.get(&key).and_then(|v| v.as_str());
+            let selected = option
+                .choices
+                .iter()
+                .position(|choice| Some(choice.id.as_str()) == current)
+                .map_or(0, |ix| ix + 1);
+            let reach_key = key.clone();
+            let choices = option.choices.clone();
+            let select = widgets::select(
+                format!("profile-option-{key}"),
+                option.label.clone(),
+                &theme,
+                move |page: &mut Self| page.option_selects.entry(reach_key.clone()).or_default(),
+            )
+            .options(
+                std::iter::once(widgets::SelectOption::new("Keep current")).chain(
+                    option
+                        .choices
+                        .iter()
+                        .map(|choice| widgets::SelectOption::new(choice.label.clone())),
+                ),
+                selected,
+            )
+            .width(196.0)
+            .on_select(move |page, ix, _, cx| {
+                let choice = ix.checked_sub(1).and_then(|ix| choices.get(ix));
+                let key = key.clone();
+                page.edit_draft(cx, |draft| match choice {
+                    Some(choice) => {
+                        draft
+                            .model_options
+                            .insert(key, serde_json::Value::String(choice.id.clone()));
+                    }
+                    None => {
+                        draft.model_options.remove(&key);
+                    }
+                });
+            })
+            .render(&self.option_selects[&option.id], cx);
+            option_fields.push((option.label, select));
+        }
 
         let field = |label: &str, control: AnyElement| {
             div()
@@ -701,7 +846,7 @@ impl AgentProfilesPage {
                     "Agents read this to pick a profile for delegate_task.",
                 ),
             };
-            let open = expanded == Some(which);
+            let open = expanded == Some(Fold::Text(which));
             let title = field_label(&theme, label).when(open, |el| {
                 el.flex()
                     .child(div().flex_1())
@@ -723,7 +868,7 @@ impl AgentProfilesPage {
                     .child(
                         expand_toggle(toggle_id, open, theme.text_muted).on_click(cx.listener(
                             move |this, _, window, cx| {
-                                this.expand((!open).then_some(which), window, cx)
+                                this.expand((!open).then_some(Fold::Text(which)), window, cx)
                             },
                         )),
                     ),
@@ -749,12 +894,13 @@ impl AgentProfilesPage {
                     .child(brand_badge(draft.harness, 24.0, theme.text))
                     .child(popover::dialog_title(&theme, title)),
             );
+        let tools_line = if draft.disabled_tools.is_empty() {
+            "All tools on".to_string()
+        } else {
+            format!("{} off", draft.disabled_tools.len())
+        };
         let card = match expanded {
             Some(open) => {
-                let (other, other_label) = match open {
-                    LongField::Instructions => (LongField::Notes, "When to use"),
-                    LongField::Notes => (LongField::Instructions, "Instructions"),
-                };
                 let mut folded = draft.clone();
                 folded.name = name.read(cx).text().to_string();
                 let line = draft_summary(
@@ -764,19 +910,43 @@ impl AgentProfilesPage {
                         .as_deref(),
                 );
                 let tall = px((f32::from(viewport.height) - 340.0).clamp(160.0, 440.0));
-                card.child(
+                let mut card = card.child(
                     folded_row("profile-folded", line, theme.text_muted)
                         .mt(px(12.0))
                         .on_click(cx.listener(|this, _, window, cx| this.expand(None, window, cx))),
-                )
-                .child(
-                    folded_row("profile-folded-other", other_label, theme.text_muted)
-                        .mt(px(6.0))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.expand(Some(other), window, cx)
-                        })),
-                )
-                .child(long_field(open, tall.into(), cx))
+                );
+                for other in FOLDS.into_iter().filter(|fold| *fold != open) {
+                    let (id, label) = match other {
+                        Fold::Text(LongField::Instructions) => {
+                            ("profile-folded-instructions", "Instructions".to_string())
+                        }
+                        Fold::Text(LongField::Notes) => {
+                            ("profile-folded-notes", "When to use".to_string())
+                        }
+                        Fold::Tools => ("profile-folded-tools", format!("Tools · {tools_line}")),
+                    };
+                    card = card.child(
+                        folded_row(id, label, theme.text_muted)
+                            .mt(px(6.0))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.expand(Some(other), window, cx)
+                            })),
+                    );
+                }
+                match open {
+                    Fold::Text(which) => card.child(long_field(which, tall.into(), cx)),
+                    Fold::Tools => card
+                        .child(
+                            div().relative().child(field_label(&theme, "Tools")).child(
+                                expand_toggle("profile-tools-collapse", true, theme.text_muted)
+                                    .top(px(8.0))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.expand(None, window, cx)
+                                    })),
+                            ),
+                        )
+                        .child(self.render_tools(&theme, &draft, &tools_open, tall, cx)),
+                }
             }
             None => card
                 .child(field(
@@ -797,6 +967,21 @@ impl AgentProfilesPage {
                         .child(field("Mode", mode_select.into_any_element()))
                         .child(field("Effort", effort_select.into_any_element())),
                 )
+                .children(in_pairs(option_fields).into_iter().map(|pair| {
+                    let mut row = div().flex().gap(px(12.0));
+                    for (label, select) in pair {
+                        row = row.child(field(&label, select.into_any_element()));
+                    }
+                    row
+                }))
+                .child(field(
+                    "Tools",
+                    folded_row("profile-tools-folded", tools_line, theme.text_muted)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.expand(Some(Fold::Tools), window, cx)
+                        }))
+                        .into_any_element(),
+                ))
                 .child(long_field(
                     LongField::Instructions,
                     crate::typography::ui_rems(INPUT_LINE_HEIGHT * 5.0).into(),
@@ -828,6 +1013,286 @@ impl AgentProfilesPage {
             cx.notify();
         }
     }
+
+    fn render_tools(
+        &self,
+        theme: &Theme,
+        draft: &AgentProfileDraft,
+        open_groups: &HashSet<ToolGroup>,
+        height: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ceiling = self.tool_ceiling.ready().cloned().unwrap_or_default();
+        let settled = !matches!(self.tool_ceiling, Loadable::Idle | Loadable::Loading);
+        let disabled = &draft.disabled_tools;
+        let mut list = div()
+            .id("profile-tools")
+            .h(height)
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .child(tools_heading(theme, "Zeron tools"));
+        if let Loadable::Error(error) = &self.tool_ceiling {
+            list = list.child(tools_note(
+                theme,
+                format!("Settings > Tools unavailable: {error}"),
+            ));
+        }
+        for info in TOOL_GROUPS {
+            let group = info.group;
+            let unlocked = zeron_unlocked(info, &ceiling);
+            let locked = unlocked.is_empty();
+            let live = rules_on(disabled, &unlocked);
+            let on = !locked && live > 0;
+            let open = open_groups.contains(&group);
+            let badge = if locked {
+                Some(widgets::badge(theme, "off in Settings"))
+            } else if live < unlocked.len() {
+                Some(widgets::badge_active(
+                    theme,
+                    format!("{live} of {}", unlocked.len()),
+                ))
+            } else {
+                None
+            };
+            let group_ceiling = ceiling.clone();
+            let title = div()
+                .id(SharedString::from(format!("profile-tools-open-{group:?}")))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .cursor_pointer()
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    if let Some(editor) = page.editor.as_mut()
+                        && !editor.tools_open.remove(&group)
+                    {
+                        editor.tools_open.insert(group);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    crate::icons::icon(if open {
+                        crate::icons::ALT_ARROW_DOWN
+                    } else {
+                        crate::icons::ALT_ARROW_RIGHT
+                    })
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+                )
+                .child(tools_title(theme, info.title, false))
+                .children(badge);
+            list = list.child(tools_row(theme, false).child(title).child(activate(
+                super::tools::switch(
+                    theme,
+                    format!("profile-tools-group-{group:?}"),
+                    info.title,
+                    on,
+                ),
+                settled && !locked,
+                cx,
+                move |page: &mut Self, cx| {
+                    let ceiling = group_ceiling.clone();
+                    page.edit_draft(cx, |draft| {
+                        set_zeron_group(&mut draft.disabled_tools, tool_group(group), &ceiling, !on)
+                    })
+                },
+            )));
+            if !open {
+                continue;
+            }
+            for tool in info.tools() {
+                let name = tool.name;
+                let rule = zeron_rule(name);
+                let locked = ceiling.iter().any(|off| off == name);
+                let on = !locked && !disabled.contains(&rule);
+                let text = div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(tools_title(theme, name, true))
+                    .when(locked, |el| {
+                        el.child(tools_detail(theme, "off in Settings"))
+                    });
+                list = list.child(tools_row(theme, true).child(text).child(activate(
+                    super::tools::switch(theme, format!("profile-tools-tool-{name}"), name, on),
+                    settled && !locked,
+                    cx,
+                    move |page: &mut Self, cx| {
+                        let rule = rule.clone();
+                        page.edit_draft(cx, |draft| {
+                            set_rules(&mut draft.disabled_tools, &[rule], !on)
+                        })
+                    },
+                )));
+            }
+        }
+        let claude = draft.harness == HarnessId::ClaudeCode;
+        if claude {
+            list = list.child(tools_heading(theme, "Claude built-in"));
+            match &self.claude_tools {
+                Loadable::Idle | Loadable::Loading => {
+                    list = list.child(tools_note(theme, "Asking Claude Code for its tools…"))
+                }
+                Loadable::Error(error) => {
+                    list = list.child(tools_note(
+                        theme,
+                        format!("Could not list Claude's tools: {error}"),
+                    ))
+                }
+                Loadable::Ready(inventory) => {
+                    for builtin in &inventory.builtin {
+                        let on = rules_on(disabled, &builtin.tools) == builtin.tools.len();
+                        let rules = builtin.tools.clone();
+                        let text = div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(tools_title(theme, builtin.title.clone(), false))
+                            .when(!builtin.summary.is_empty(), |el| {
+                                el.child(tools_detail(theme, builtin.summary.clone()))
+                            });
+                        list = list.child(tools_row(theme, false).child(text).child(activate(
+                            super::tools::switch(
+                                theme,
+                                format!("profile-tools-builtin-{}", builtin.id),
+                                builtin.title.clone(),
+                                on,
+                            ),
+                            true,
+                            cx,
+                            move |page: &mut Self, cx| {
+                                let rules = rules.clone();
+                                page.edit_draft(cx, |draft| {
+                                    set_rules(&mut draft.disabled_tools, &rules, !on)
+                                })
+                            },
+                        )));
+                    }
+                    list = list.child(tools_heading(theme, "MCP servers"));
+                    if inventory.mcp_servers.is_empty() {
+                        list =
+                            list.child(tools_note(theme, "No MCP servers in your Claude config."));
+                    }
+                    for server in &inventory.mcp_servers {
+                        let on = !disabled.contains(&server.rule);
+                        let rule = server.rule.clone();
+                        let text = div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(tools_title(theme, server.name.clone(), false))
+                            .when(!server.status.is_empty(), |el| {
+                                el.child(tools_detail(theme, server.status.clone()))
+                            });
+                        list = list.child(tools_row(theme, false).child(text).child(activate(
+                            super::tools::switch(
+                                theme,
+                                format!("profile-tools-server-{}", server.rule),
+                                server.name.clone(),
+                                on,
+                            ),
+                            true,
+                            cx,
+                            move |page: &mut Self, cx| {
+                                let rule = rule.clone();
+                                page.edit_draft(cx, |draft| {
+                                    set_rules(&mut draft.disabled_tools, &[rule], !on)
+                                })
+                            },
+                        )));
+                    }
+                }
+            }
+        }
+        let inventory = match &self.claude_tools {
+            Loadable::Ready(inventory) if claude => Some(inventory.clone()),
+            Loadable::Idle | Loadable::Loading if claude => None,
+            _ => Some(HarnessToolInventory::default()),
+        };
+        let unlisted = inventory
+            .map(|inventory| unlisted_rules(disabled, &inventory))
+            .unwrap_or_default();
+        if !unlisted.is_empty() {
+            list = list.child(tools_heading(theme, "Not found"));
+        }
+        for rule in unlisted {
+            let text = div()
+                .flex_1()
+                .min_w_0()
+                .child(tools_title(theme, rule.clone(), true))
+                .child(tools_detail(theme, "not found · turn on to remove"));
+            let id = format!("profile-tools-unlisted-{rule}");
+            list = list.child(tools_row(theme, false).child(text).child(activate(
+                super::tools::switch(theme, id, rule.clone(), false),
+                true,
+                cx,
+                move |page: &mut Self, cx| {
+                    let rule = rule.clone();
+                    page.edit_draft(cx, |draft| {
+                        set_rules(&mut draft.disabled_tools, &[rule], true)
+                    })
+                },
+            )));
+        }
+        list.into_any_element()
+    }
+}
+
+fn models_for<'a>(
+    models: &'a HashMap<HarnessId, Vec<Model>>,
+    draft: &AgentProfileDraft,
+) -> Option<&'a Model> {
+    let id = draft.model.as_deref()?;
+    models.get(&draft.harness)?.iter().find(|m| m.id == id)
+}
+
+fn tools_heading(theme: &Theme, label: &'static str) -> gpui::Div {
+    div()
+        .mt(px(10.0))
+        .mb(px(2.0))
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child(label)
+}
+
+fn tools_note(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .py(px(6.0))
+        .text_size(px(12.0))
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
+fn tools_row(theme: &Theme, nested: bool) -> gpui::Div {
+    div()
+        .min_h(px(36.0))
+        .py(px(4.0))
+        .when(nested, |el| el.pl(px(18.0)))
+        .border_t_1()
+        .border_color(widgets::row_divider(theme))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+}
+
+fn tools_title(theme: &Theme, text: impl Into<SharedString>, mono: bool) -> gpui::Div {
+    div()
+        .truncate()
+        .text_size(px(12.5))
+        .text_color(theme.text)
+        .when(mono, |el| {
+            el.font_family(theme.font_mono.clone()).text_size(px(12.0))
+        })
+        .child(text.into())
+}
+
+fn tools_detail(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .truncate()
+        .text_size(px(11.0))
+        .text_color(theme.text_muted)
+        .child(text.into())
 }
 
 fn field_label(theme: &Theme, label: &str) -> gpui::Div {

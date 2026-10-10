@@ -177,6 +177,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 forked_at: None,
                 computer_control: false,
                 permission_mode: Default::default(),
+                disabled_tools: Vec::new(),
             },
             Some("side-user".into()),
         )
@@ -427,6 +428,7 @@ async fn side_turn(
                 forked_at: None,
                 computer_control: false,
                 permission_mode: Default::default(),
+                disabled_tools: Vec::new(),
             },
             Some(message_id.into()),
         )
@@ -639,6 +641,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         forked_at: None,
         computer_control: false,
         permission_mode: Default::default(),
+        disabled_tools: Vec::new(),
     };
     let settle = |count: usize| {
         let seen = seen.clone();
@@ -828,6 +831,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         forked_at: None,
         computer_control: false,
         permission_mode: Default::default(),
+        disabled_tools: Vec::new(),
     };
     core.sessions
         .dispatch(

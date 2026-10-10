@@ -129,6 +129,7 @@ impl AgentProfilesStore {
                 notes: draft.notes,
                 instructions: draft.instructions,
                 by_agent,
+                disabled_tools: draft.disabled_tools,
             };
             if index == profiles.len() {
                 profiles.push(profile);
@@ -226,11 +227,20 @@ fn normalize_draft(draft: AgentProfileDraft) -> Result<AgentProfileDraft, Engine
         .model
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty());
+    let mut disabled_tools: Vec<String> = draft
+        .disabled_tools
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    disabled_tools.sort();
+    disabled_tools.dedup();
     Ok(AgentProfileDraft {
         name,
         notes,
         instructions,
         model,
+        disabled_tools,
         ..draft
     })
 }
@@ -250,6 +260,7 @@ mod tests {
             model_options: Default::default(),
             notes: " Review a diff. ".into(),
             instructions: " Review only. ".into(),
+            disabled_tools: Vec::new(),
         }
     }
 
@@ -271,6 +282,25 @@ mod tests {
         let reopened = AgentProfilesStore::open(temp.path()).unwrap();
         assert_eq!(reopened.snapshot(), snapshot);
         assert_eq!(reopened.profile("ui-work-2").unwrap().name, "UI work");
+    }
+
+    #[test]
+    fn a_tool_set_persists_trimmed_sorted_and_unique() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AgentProfilesStore::open(temp.path()).unwrap();
+        let mut lean = draft("Lean");
+        lean.disabled_tools = vec![
+            " WebFetch ".into(),
+            "mcp__xcode".into(),
+            "WebFetch".into(),
+            " ".into(),
+        ];
+        store.upsert(None, lean).unwrap();
+        let reopened = AgentProfilesStore::open(temp.path()).unwrap();
+        assert_eq!(
+            reopened.profile("lean").unwrap().disabled_tools,
+            ["WebFetch", "mcp__xcode"]
+        );
     }
 
     #[test]

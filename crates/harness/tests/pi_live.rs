@@ -102,6 +102,7 @@ async fn real_pi_mock_lifecycle() {
             forked_at: None,
             computer_control: false,
             mcp: None,
+            disabled_tools: Vec::new(),
         };
         let previous_session = session.clone();
         let mut stream = harness.run(request, controls).await.unwrap();
@@ -209,6 +210,7 @@ async fn real_pi_mock_lifecycle() {
         forked_at: None,
         computer_control: false,
         permission_mode: Default::default(),
+        disabled_tools: Vec::new(),
     };
     let events: Vec<_> = tokio::time::timeout(
         Duration::from_secs(20),
@@ -288,6 +290,7 @@ async fn real_pi_steering_bursts_share_the_next_model_call() {
         forked_at: None,
         computer_control: false,
         permission_mode: Default::default(),
+        disabled_tools: Vec::new(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let calls = cwd.join("probe-model-calls.jsonl");

@@ -260,6 +260,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
             resume: None,
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         },
         message_id: "msg-relay-1".into(),
     })

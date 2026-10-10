@@ -58,6 +58,7 @@ async fn main() {
         resume: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     };
     let mut stream = AcpHarness::grok()
         .run(request, controls)
