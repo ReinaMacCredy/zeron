@@ -321,6 +321,7 @@ pub struct AppearancePage {
     /// asks for a new blur level that is still off-thread; painting this
     /// instead of nothing keeps the preview from blinking.
     chat_preview_artwork: Option<Arc<gpui::RenderImage>>,
+    terminal_preview_artwork: Option<Arc<gpui::RenderImage>>,
 }
 
 impl AppearancePage {
@@ -586,6 +587,7 @@ impl AppearancePage {
             library_error: None,
             background_error: None,
             chat_preview_artwork: None,
+            terminal_preview_artwork: None,
         }
     }
 
@@ -1163,19 +1165,8 @@ impl AppearancePage {
         ui_settings: &crate::settings::UiSettings,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        use crate::settings::{ChatBackgroundPlacement, SavePolicy, update_chat_background};
+        use crate::settings::{SavePolicy, update_chat_background};
         let chat = ui_settings.chat_background;
-        let switch = |id: &'static str, on: bool| {
-            div()
-                .id(id)
-                .flex_none()
-                .size(px(40.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .child(widgets::toggle_switch(theme, on, id))
-        };
         let mut rows = vec![
             widgets::card_row(theme, false)
                 .child(widgets::row_tile(theme, icons::CHAT_ROUND_LINE))
@@ -1194,34 +1185,22 @@ impl AppearancePage {
                         )),
                 )
                 .child(
-                    switch("chat-background-enabled", chat.enabled).on_click(cx.listener(
-                        move |_, _, _, cx| {
+                    background_switch(theme, "chat-background-enabled", chat.enabled).on_click(
+                        cx.listener(move |_, _, _, cx| {
                             update_chat_background(SavePolicy::Immediate, cx, |chat| {
                                 chat.enabled = !chat.enabled;
                             });
                             cx.notify();
-                        },
-                    )),
+                        }),
+                    ),
                 )
                 .into_any_element(),
         ];
         if !chat.enabled {
             return rows;
         }
-        let artwork = ui_settings
-            .new_thread_composer_background
-            .as_ref()
-            .and_then(|background| {
-                crate::new_thread_background_effects::prepare(
-                    ui_settings.new_thread_background_effect,
-                    theme,
-                    Path::new(&background.path),
-                    chat.blur_level(),
-                    cx,
-                )
-            });
-        if artwork.is_some() {
-            self.chat_preview_artwork = artwork;
+        if let Some(artwork) = background_artwork(ui_settings, chat, theme, cx) {
+            self.chat_preview_artwork = Some(artwork);
         }
         rows.push(
             widgets::card_row(theme, false)
@@ -1232,37 +1211,64 @@ impl AppearancePage {
                 ))
                 .into_any_element(),
         );
-        let placement_controls = ChatBackgroundPlacement::ALL
+        rows.extend(background_tuning_rows(
+            theme,
+            chat,
+            &CHAT_BACKGROUND_IDS,
+            |policy, cx, mutate| update_chat_background(policy, cx, |chat| mutate(chat)),
+            cx,
+        ));
+        rows
+    }
+
+    fn render_terminal_background_rows(
+        &mut self,
+        theme: &Theme,
+        ui_settings: &crate::settings::UiSettings,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::settings::{
+            ChatBackground, SavePolicy, TerminalBackgroundMode, update_terminal_background,
+        };
+        let terminal = ui_settings.terminal_background;
+        let chat = ui_settings.chat_background;
+        let mode_controls = TerminalBackgroundMode::ALL
             .into_iter()
-            .map(|placement| {
+            .map(|mode| {
                 choice_chip(
                     theme,
-                    format!(
-                        "chat-background-placement-{}",
-                        placement.label().to_lowercase()
-                    ),
-                    placement.label(),
-                    placement == chat.placement,
+                    format!("terminal-background-mode-{mode:?}"),
+                    mode.label(),
+                    mode == terminal.mode,
                 )
                 .on_click(cx.listener(move |_, _, _, cx| {
-                    update_chat_background(SavePolicy::Immediate, cx, |chat| {
-                        chat.placement = placement;
+                    update_terminal_background(SavePolicy::Immediate, cx, |terminal| {
+                        if mode == TerminalBackgroundMode::Custom
+                            && terminal.custom == ChatBackground::default()
+                        {
+                            terminal.custom = chat;
+                        }
+                        terminal.mode = mode;
                     });
                     cx.notify();
                 }))
             })
             .collect::<Vec<_>>();
-        rows.push(
+        let mut rows = vec![
             widgets::card_row(theme, false)
-                .child(widgets::row_tile(theme, icons::TUNING))
+                .child(widgets::row_tile(theme, icons::TERMINAL))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(theme, "Placement"))
+                        .child(widgets::row_title(theme, "Terminal background"))
                         .child(widgets::meta_line(
                             theme,
-                            vec![div().child(chat.placement.description()).into_any_element()],
+                            vec![
+                                div()
+                                    .child("Artwork behind terminal tabs.")
+                                    .into_any_element(),
+                            ],
                         )),
                 )
                 .child(
@@ -1272,100 +1278,37 @@ impl AppearancePage {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .children(placement_controls),
+                        .children(mode_controls),
                 )
                 .into_any_element(),
-        );
+        ];
+        let resolved = terminal.resolve(chat);
+        if !resolved.visible() {
+            return rows;
+        }
+        if let Some(artwork) = background_artwork(ui_settings, resolved, theme, cx) {
+            self.terminal_preview_artwork = Some(artwork);
+        }
         rows.push(
             widgets::card_row(theme, false)
-                .child(widgets::row_tile(theme, icons::TUNING))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(widgets::row_title(theme, "Opacity"))
-                        .child(widgets::meta_line(
-                            theme,
-                            vec![
-                                div()
-                                    .child(SharedString::from(format!(
-                                        "{}%",
-                                        (chat.opacity * 100.0).round()
-                                    )))
-                                    .into_any_element(),
-                            ],
-                        )),
-                )
-                .child(slider(
+                .child(chat_background_preview(
                     theme,
-                    "chat-background-opacity",
-                    chat.opacity,
-                    |fraction, cx| {
-                        update_chat_background(SavePolicy::Debounced, cx, |chat| {
-                            chat.opacity = fraction;
-                        });
-                    },
+                    self.terminal_preview_artwork.clone(),
+                    resolved,
                 ))
                 .into_any_element(),
         );
-        rows.push(
-            widgets::card_row(theme, false)
-                .child(widgets::row_tile(theme, icons::TUNING))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(widgets::row_title(theme, "Blur"))
-                        .child(widgets::meta_line(
-                            theme,
-                            vec![
-                                div()
-                                    .child(SharedString::from(format!("{}px", chat.blur)))
-                                    .into_any_element(),
-                            ],
-                        )),
-                )
-                .child(slider(
-                    theme,
-                    "chat-background-blur",
-                    chat.blur / crate::settings::CHAT_BACKGROUND_BLUR_MAX,
-                    |fraction, cx| {
-                        update_chat_background(SavePolicy::Debounced, cx, |chat| {
-                            chat.blur = fraction * crate::settings::CHAT_BACKGROUND_BLUR_MAX;
-                        });
-                    },
-                ))
-                .into_any_element(),
-        );
-        rows.push(
-            widgets::card_row(theme, false)
-                .child(widgets::row_tile(theme, icons::TUNING))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(widgets::row_title(theme, "Scrim"))
-                        .child(widgets::meta_line(
-                            theme,
-                            vec![
-                                div()
-                                    .child("Darkens the artwork toward the bottom so text stays readable.")
-                                    .into_any_element(),
-                            ],
-                        )),
-                )
-                .child(
-                    switch("chat-background-scrim", chat.scrim).on_click(cx.listener(
-                        move |_, _, _, cx| {
-                            update_chat_background(SavePolicy::Immediate, cx, |chat| {
-                                chat.scrim = !chat.scrim;
-                            });
-                            cx.notify();
-                        },
-                    )),
-                )
-                .into_any_element(),
-        );
+        if terminal.mode == TerminalBackgroundMode::Custom {
+            rows.extend(background_tuning_rows(
+                theme,
+                terminal.custom,
+                &TERMINAL_BACKGROUND_IDS,
+                |policy, cx, mutate| {
+                    update_terminal_background(policy, cx, |terminal| mutate(&mut terminal.custom))
+                },
+                cx,
+            ));
+        }
         rows
     }
 
@@ -1856,6 +1799,203 @@ fn slider(
 
 /// A miniature of the conversation column drawn through the same layer the
 /// shell paints, so the baked blur reads at the same ratio as in the app.
+struct BackgroundIds {
+    placement: &'static str,
+    opacity: &'static str,
+    blur: &'static str,
+    scrim: &'static str,
+}
+
+const CHAT_BACKGROUND_IDS: BackgroundIds = BackgroundIds {
+    placement: "chat-background-placement",
+    opacity: "chat-background-opacity",
+    blur: "chat-background-blur",
+    scrim: "chat-background-scrim",
+};
+
+const TERMINAL_BACKGROUND_IDS: BackgroundIds = BackgroundIds {
+    placement: "terminal-background-placement",
+    opacity: "terminal-background-opacity",
+    blur: "terminal-background-blur",
+    scrim: "terminal-background-scrim",
+};
+
+type BackgroundUpdate =
+    fn(crate::settings::SavePolicy, &mut gpui::App, &dyn Fn(&mut crate::settings::ChatBackground));
+
+fn background_switch(theme: &Theme, id: &'static str, on: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(40.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .child(widgets::toggle_switch(theme, on, id))
+}
+
+fn background_artwork(
+    ui_settings: &crate::settings::UiSettings,
+    background: crate::settings::ChatBackground,
+    theme: &Theme,
+    cx: &mut gpui::App,
+) -> Option<Arc<gpui::RenderImage>> {
+    ui_settings
+        .new_thread_composer_background
+        .as_ref()
+        .and_then(|artwork| {
+            crate::new_thread_background_effects::prepare(
+                ui_settings.new_thread_background_effect,
+                theme,
+                Path::new(&artwork.path),
+                background.blur_level(),
+                cx,
+            )
+        })
+}
+
+fn background_tuning_rows(
+    theme: &Theme,
+    background: crate::settings::ChatBackground,
+    ids: &'static BackgroundIds,
+    update: BackgroundUpdate,
+    cx: &mut Context<AppearancePage>,
+) -> Vec<AnyElement> {
+    use crate::settings::{ChatBackgroundPlacement, SavePolicy};
+    let placement_controls = ChatBackgroundPlacement::ALL
+        .into_iter()
+        .map(|placement| {
+            choice_chip(
+                theme,
+                format!("{}-{}", ids.placement, placement.label().to_lowercase()),
+                placement.label(),
+                placement == background.placement,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| {
+                update(SavePolicy::Immediate, cx, &|background| {
+                    background.placement = placement;
+                });
+                cx.notify();
+            }))
+        })
+        .collect::<Vec<_>>();
+    vec![
+        widgets::card_row(theme, false)
+            .child(widgets::row_tile(theme, icons::TUNING))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Placement"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(background.placement.description())
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .ml(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(placement_controls),
+            )
+            .into_any_element(),
+        widgets::card_row(theme, false)
+            .child(widgets::row_tile(theme, icons::TUNING))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Opacity"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(SharedString::from(format!(
+                                    "{}%",
+                                    (background.opacity * 100.0).round()
+                                )))
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(slider(
+                theme,
+                ids.opacity,
+                background.opacity,
+                move |fraction, cx| {
+                    update(SavePolicy::Debounced, cx, &|background| {
+                        background.opacity = fraction;
+                    });
+                },
+            ))
+            .into_any_element(),
+        widgets::card_row(theme, false)
+            .child(widgets::row_tile(theme, icons::TUNING))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Blur"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(SharedString::from(format!("{}px", background.blur)))
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(slider(
+                theme,
+                ids.blur,
+                background.blur / crate::settings::CHAT_BACKGROUND_BLUR_MAX,
+                move |fraction, cx| {
+                    update(SavePolicy::Debounced, cx, &|background| {
+                        background.blur = fraction * crate::settings::CHAT_BACKGROUND_BLUR_MAX;
+                    });
+                },
+            ))
+            .into_any_element(),
+        widgets::card_row(theme, false)
+            .child(widgets::row_tile(theme, icons::TUNING))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Scrim"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(
+                                    "Darkens the artwork toward the bottom so text stays readable.",
+                                )
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                background_switch(theme, ids.scrim, background.scrim).on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        update(SavePolicy::Immediate, cx, &|background| {
+                            background.scrim = !background.scrim;
+                        });
+                        cx.notify();
+                    },
+                )),
+            )
+            .into_any_element(),
+    ]
+}
+
 fn chat_background_preview(
     theme: &Theme,
     artwork: Option<Arc<gpui::RenderImage>>,
@@ -4319,6 +4459,7 @@ impl Render for AppearancePage {
         }
         if background_available {
             settings_rows.extend(self.render_chat_background_rows(&theme, &ui_settings, cx));
+            settings_rows.extend(self.render_terminal_background_rows(&theme, &ui_settings, cx));
         }
         if let Some(error) = self.background_error.clone() {
             settings_rows.push(

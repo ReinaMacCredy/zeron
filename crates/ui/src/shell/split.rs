@@ -473,7 +473,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         // A draft has no doc to show beside another session.
-        if self.state.read(cx).is_draft(&chat_id) {
+        if self.state.read(cx).is_draft(&chat_id) || terminal_tabs::is_terminal_tab(&chat_id) {
             return;
         }
         let selected = self.state.read(cx).focused_id();
@@ -770,7 +770,9 @@ impl Shell {
         let selected = self.state.read(cx).selected_chat.clone();
         let state = self.state.clone();
         let inert = std::rc::Rc::new(move |chat_id: &str, cx: &App| {
-            state.read(cx).is_draft(chat_id) || selected.as_deref() == Some(chat_id)
+            state.read(cx).is_draft(chat_id)
+                || terminal_tabs::is_terminal_tab(chat_id)
+                || selected.as_deref() == Some(chat_id)
         });
         let (hot, prev, epoch) = self
             .split_drop_hot

@@ -1,4 +1,5 @@
 //! Global action and conversation search, using the sidebar's conversation rows.
+use super::terminal_tabs::TerminalLaunch;
 use super::*;
 use crate::appearance::AppearanceMode;
 
@@ -41,6 +42,7 @@ impl EnterPress {
 #[derive(Clone, Debug, PartialEq)]
 enum Entry {
     NewChat,
+    NewTerminal(TerminalLaunch),
     NewProject,
     Settings,
     Theme(AppearanceMode),
@@ -51,6 +53,7 @@ impl Entry {
     fn action(&self) -> Option<(&'static str, &'static str)> {
         match self {
             Self::NewChat => Some(("New chat", icons::PEN_NEW_SQUARE)),
+            Self::NewTerminal(launch) => Some((launch.menu_label(), launch.brand().0)),
             Self::NewProject => Some(("New project", icons::FOLDER)),
             Self::Settings => Some(("Open settings", icons::SETTINGS)),
             Self::Theme(mode) => Some((
@@ -72,19 +75,20 @@ fn matches_query(query: &str, text: &str) -> bool {
 }
 
 fn actions_for(query: &str, is_dark: bool) -> Vec<Entry> {
-    [
-        Entry::NewChat,
-        Entry::NewProject,
-        Entry::Settings,
-        Entry::Theme(if is_dark {
-            AppearanceMode::Light
-        } else {
-            AppearanceMode::Dark
-        }),
-    ]
-    .into_iter()
-    .filter(|entry| matches_query(query, entry.action().unwrap().0))
-    .collect()
+    [Entry::NewChat]
+        .into_iter()
+        .chain(TerminalLaunch::ALL.map(Entry::NewTerminal))
+        .chain([
+            Entry::NewProject,
+            Entry::Settings,
+            Entry::Theme(if is_dark {
+                AppearanceMode::Light
+            } else {
+                AppearanceMode::Dark
+            }),
+        ])
+        .filter(|entry| matches_query(query, entry.action().unwrap().0))
+        .collect()
 }
 
 impl Shell {
@@ -248,6 +252,7 @@ impl Shell {
         self.close_command_palette(window, cx);
         match entry {
             Entry::NewChat => self.open_new_session(None, cx),
+            Entry::NewTerminal(launch) => self.open_terminal_tab(launch, cx),
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => self.open_last_settings(cx),
             Entry::Theme(_) => unreachable!(),
@@ -775,6 +780,9 @@ mod tests {
             actions_for("", true),
             vec![
                 Entry::NewChat,
+                Entry::NewTerminal(TerminalLaunch::Shell),
+                Entry::NewTerminal(TerminalLaunch::ClaudeCode),
+                Entry::NewTerminal(TerminalLaunch::Codex),
                 Entry::NewProject,
                 Entry::Settings,
                 Entry::Theme(AppearanceMode::Light)
@@ -782,7 +790,17 @@ mod tests {
         );
         assert_eq!(
             actions_for("new", true),
-            vec![Entry::NewChat, Entry::NewProject]
+            vec![
+                Entry::NewChat,
+                Entry::NewTerminal(TerminalLaunch::Shell),
+                Entry::NewTerminal(TerminalLaunch::ClaudeCode),
+                Entry::NewTerminal(TerminalLaunch::Codex),
+                Entry::NewProject
+            ]
+        );
+        assert_eq!(
+            actions_for("codex", true),
+            vec![Entry::NewTerminal(TerminalLaunch::Codex)]
         );
         assert_eq!(actions_for("settings", true), vec![Entry::Settings]);
         assert_eq!(

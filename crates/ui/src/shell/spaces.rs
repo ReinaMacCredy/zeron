@@ -229,7 +229,7 @@ mod pinned_session_tests {
         });
         cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
-            Shell::new(
+            let mut shell = Shell::new(
                 state,
                 EngineBootConfig {
                     data_dir: path.into(),
@@ -241,7 +241,9 @@ mod pinned_session_tests {
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
-            )
+            );
+            shell.terminals_synced = true;
+            shell
         })
     }
 
@@ -2292,7 +2294,7 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
-const SIDEBAR_SECTION_GAP: f32 = 12.0;
+pub(super) const SIDEBAR_SECTION_GAP: f32 = 12.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
@@ -2459,7 +2461,7 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
 }
 
 /// `icon` leads the label — a project group's icon, which its rows then omit.
-fn sidebar_disclosure_header(
+pub(super) fn sidebar_disclosure_header(
     theme: &Theme,
     icon: Option<AnyElement>,
     label: SharedString,

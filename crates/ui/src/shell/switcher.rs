@@ -292,7 +292,7 @@ impl Shell {
         if matches!(self.route, Route::PullRequests) {
             self.close_pull_requests(cx);
         }
-        if !matches!(self.route, Route::Chat) {
+        if !matches!(self.route, Route::Chat | Route::Terminal) {
             return;
         }
         if let Some(sw) = self.switcher.as_mut() {
@@ -306,7 +306,7 @@ impl Shell {
         }
         if self.settings.switcher_cycles_tabs {
             let order = self.open_tab_ids(cx);
-            let focused = self.state.read(cx).focused_id();
+            let focused = self.selected_tab_id(cx);
             let next = match focused.and_then(|id| order.iter().position(|t| *t == id)) {
                 Some(ix) => step_index(ix, order.len(), forward),
                 None if forward => 0,
@@ -338,7 +338,7 @@ impl Shell {
         let strip: Vec<String> = self
             .open_tab_ids(cx)
             .into_iter()
-            .filter(|id| !idle.contains(id))
+            .filter(|id| !idle.contains(id) && !terminal_tabs::is_terminal_tab(id))
             .collect();
         let candidates = switcher_candidates(recent, &strip);
         let order = switcher_capped(
