@@ -4,13 +4,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use zeron_proto::HarnessId;
 
-use crate::registry::HarnessRegistry;
+use crate::agent_accounts::keychain;
+use crate::registry::{CustomPredictionApi, HarnessRegistry, PredictionSettings};
 use crate::titles::{OneShot, one_shot_target, run_one_shot};
+
+const KEY_SERVICE: &str = "Zeron prediction API key";
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 const EARLIER_MESSAGES: usize = 8;
 const EARLIER_MESSAGE_CHARS: usize = 500;
@@ -68,15 +72,20 @@ impl PredictionContext {
         })
     }
 
-    fn prompt(&self) -> String {
+    fn data(&self) -> String {
         let data = serde_json::json!({
             "earlierMessages": self.earlier,
             "lastMessage": self.last_message,
             "agentReply": self.reply,
         });
+        format!("Conversation (JSON):\n{data}")
+    }
+
+    fn prompt(&self) -> String {
         format!(
-            "{}\n\nConversation (JSON):\n{data}",
-            zeron_harness::PREDICTION_INSTRUCTIONS
+            "{}\n\n{}",
+            zeron_harness::PREDICTION_INSTRUCTIONS,
+            self.data()
         )
     }
 }
@@ -132,9 +141,39 @@ impl ChatSlot {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PredictionSettingsUpdate {
+    #[serde(flatten)]
+    pub settings: PredictionSettings,
+    /// Write-only; an empty string removes the stored key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PredictionSettingsState {
+    #[serde(flatten)]
+    pub settings: PredictionSettings,
+    pub has_api_key: bool,
+}
+
+fn valid_api_key(key: &str) -> bool {
+    (1..=512).contains(&key.len())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._~+/=-".contains(c))
+}
+
+fn completion_text(reply: &serde_json::Value) -> Option<&str> {
+    reply["choices"][0]["message"]["content"].as_str()
+}
+
 pub(crate) struct Predictions {
     registry: Arc<HarnessRegistry>,
     chats: Mutex<HashMap<String, ChatSlot>>,
+    http: reqwest::Client,
 }
 
 impl Predictions {
@@ -142,7 +181,59 @@ impl Predictions {
         Arc::new(Self {
             registry,
             chats: Mutex::new(HashMap::new()),
+            http: reqwest::Client::builder()
+                .timeout(API_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
         })
+    }
+
+    /// One key per engine data dir, so a Dev bundle never replaces the app's.
+    fn key_account(&self) -> Option<String> {
+        self.registry
+            .data_dir()
+            .map(|dir| dir.to_string_lossy().into_owned())
+    }
+
+    async fn api_key(&self) -> Option<String> {
+        keychain::read_secret(KEY_SERVICE, &self.key_account()?).await
+    }
+
+    pub(crate) async fn settings_state(&self) -> PredictionSettingsState {
+        PredictionSettingsState {
+            settings: self.registry.prediction_settings(),
+            has_api_key: self.api_key().await.is_some(),
+        }
+    }
+
+    pub(crate) async fn update_settings(
+        &self,
+        update: PredictionSettingsUpdate,
+    ) -> Result<PredictionSettingsState, String> {
+        let api_key = update.api_key.map(|key| key.trim().to_string());
+        if let Some(key) = api_key.as_deref()
+            && !key.is_empty()
+            && !valid_api_key(key)
+        {
+            return Err("That does not look like an API key".into());
+        }
+        self.registry.set_prediction_settings(update.settings)?;
+        if let Some(key) = api_key {
+            let account = self
+                .key_account()
+                .ok_or_else(|| "The engine has no data directory".to_string())?;
+            if key.is_empty() {
+                keychain::delete_secret(KEY_SERVICE, &account).await;
+            } else {
+                keychain::write_secret(KEY_SERVICE, &account, &key)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        if !self.registry.prediction_settings().enabled {
+            self.clear_all();
+        }
+        Ok(self.settings_state().await)
     }
 
     fn chats(&self) -> MutexGuard<'_, HashMap<String, ChatSlot>> {
@@ -218,9 +309,13 @@ impl Predictions {
         let this = self.clone();
         let chat_id = chat_id.to_string();
         tokio::spawn(async move {
-            let text = this
-                .generate(settings.harness, settings.model, session_harness, &context)
-                .await;
+            let text = match settings.custom {
+                Some(api) => this.generate_with_api(&api, &context).await,
+                None => {
+                    this.generate(settings.harness, settings.model, session_harness, &context)
+                        .await
+                }
+            };
             let mut chats = this.chats();
             let Some(slot) = chats.get_mut(&chat_id) else {
                 return;
@@ -236,6 +331,39 @@ impl Predictions {
                 }));
             }
         });
+    }
+
+    async fn generate_with_api(
+        &self,
+        api: &CustomPredictionApi,
+        context: &PredictionContext,
+    ) -> Option<String> {
+        let body = serde_json::json!({
+            "model": api.model,
+            "messages": [
+                { "role": "system", "content": zeron_harness::PREDICTION_INSTRUCTIONS },
+                { "role": "user", "content": context.data() },
+            ],
+        });
+        let mut request = self.http.post(api.endpoint()).json(&body);
+        if let Some(key) = self.api_key().await {
+            request = request.bearer_auth(key);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::debug!(base_url = %api.base_url, error = %error.without_url(), "prediction API unreachable");
+                return None;
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            tracing::debug!(base_url = %api.base_url, %status, "prediction API refused");
+            return None;
+        }
+        let reply: serde_json::Value = response.json().await.ok()?;
+        let text = clean_prediction(completion_text(&reply)?);
+        (!text.is_empty()).then_some(text)
     }
 
     async fn generate(
@@ -425,5 +553,104 @@ mod tests {
         predictions.refresh("c", HarnessId::Mock, || {
             panic!("unwatched reads no entries")
         });
+    }
+
+    #[test]
+    fn api_keys_are_plain_tokens() {
+        assert!(valid_api_key("sk-or-v1-abc123"));
+        assert!(valid_api_key("gsk_AbC.def~ghi+jk/l="));
+        assert!(!valid_api_key(""));
+        assert!(!valid_api_key("sk abc"));
+        assert!(!valid_api_key("sk\"; rm"));
+        assert!(!valid_api_key(&"a".repeat(513)));
+    }
+
+    #[test]
+    fn completion_text_reads_the_first_choice() {
+        let reply = serde_json::json!({
+            "choices": [{ "message": { "role": "assistant", "content": "Ship it" } }]
+        });
+        assert_eq!(completion_text(&reply), Some("Ship it"));
+        let empty = serde_json::json!({ "choices": [{ "message": { "content": null } }] });
+        assert_eq!(completion_text(&empty), None);
+        assert_eq!(completion_text(&serde_json::json!({})), None);
+    }
+
+    #[tokio::test]
+    async fn a_custom_api_answers_through_chat_completions_without_a_key() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            let head = String::from_utf8(request).unwrap();
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|n| n.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).await.unwrap();
+            let reply = br#"{"choices":[{"message":{"role":"assistant","content":"\"Fix the spacing.\""}}]}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        reply.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(reply).await.unwrap();
+            (
+                head,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        });
+        let registry = Arc::new(HarnessRegistry::new());
+        registry
+            .set_prediction_settings(PredictionSettings {
+                enabled: true,
+                custom: Some(CustomPredictionApi {
+                    base_url: format!("http://127.0.0.1:{port}/v1/"),
+                    model: "small-model".into(),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let predictions = Predictions::new(registry);
+        let mut rx = predictions.watch("c");
+        predictions.refresh("c", HarnessId::Mock, completed_turn);
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rx.borrow().as_ref().unwrap().text, "Fix the spacing.");
+        let (head, body) = server.await.unwrap();
+        assert!(head.starts_with("POST /v1/chat/completions "), "{head}");
+        assert!(
+            !head.to_ascii_lowercase().contains("authorization"),
+            "{head}"
+        );
+        assert_eq!(body["model"], "small-model");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            zeron_harness::PREDICTION_INSTRUCTIONS
+        );
+        assert!(
+            body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("The card is built.")
+        );
     }
 }

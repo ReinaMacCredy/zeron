@@ -2897,7 +2897,7 @@ impl AgentAccounts {
 // Every call is bounded at 15s: an unanswered Keychain consent dialog blocks
 // `security` INDEFINITELY, and this runs on every list.
 #[cfg(target_os = "macos")]
-mod keychain {
+pub(crate) mod keychain {
     use super::*;
 
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
@@ -2920,6 +2920,65 @@ mod keychain {
 
     fn account() -> String {
         std::env::var("USER").unwrap_or_else(|_| "unknown".into())
+    }
+
+    pub(crate) async fn read_secret(service: &str, account: &str) -> Option<String> {
+        let (ok, stdout, _) =
+            exec(&["find-generic-password", "-a", account, "-s", service, "-w"]).await;
+        let secret = stdout.trim();
+        (ok && !secret.is_empty()).then(|| secret.to_string())
+    }
+
+    /// The secret goes over stdin (`security -i`), never argv, so `ps` cannot
+    /// see it. Callers keep `secret` free of quotes, whitespace and backslashes.
+    pub(crate) async fn write_secret(
+        service: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), EngineError> {
+        use tokio::io::AsyncWriteExt;
+        if [service, account]
+            .iter()
+            .any(|value| value.contains(['"', '\\', '\n', '\r']))
+        {
+            return Err(EngineError::Other(
+                "Keychain names must be plain text".into(),
+            ));
+        }
+        let run = async {
+            let mut child = tokio::process::Command::new("/usr/bin/security")
+                .arg("-i")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            stdin
+                .write_all(
+                    format!(
+                        "add-generic-password -U -a \"{account}\" -s \"{service}\" -w {secret}\n"
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            drop(stdin);
+            child.wait_with_output().await
+        };
+        match tokio::time::timeout(EXEC_TIMEOUT, run).await {
+            Ok(Ok(out)) if out.status.success() && out.stderr.is_empty() => Ok(()),
+            Ok(Ok(out)) => Err(EngineError::Other(format!(
+                "Keychain write failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))),
+            Ok(Err(error)) => Err(EngineError::Other(format!(
+                "Keychain write failed: {error}"
+            ))),
+            Err(_) => Err(EngineError::Other("Keychain write timed out".into())),
+        }
+    }
+
+    pub(crate) async fn delete_secret(service: &str, account: &str) {
+        exec(&["delete-generic-password", "-a", account, "-s", service]).await;
     }
 
     /// Whether the item exists (metadata only — needs no authorization).

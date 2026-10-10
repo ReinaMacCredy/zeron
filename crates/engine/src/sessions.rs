@@ -1006,8 +1006,15 @@ impl SessionsEngine {
         rx
     }
 
-    pub fn clear_predictions(&self) {
-        self.inner.predictions.clear_all();
+    pub async fn prediction_settings(&self) -> crate::predictions::PredictionSettingsState {
+        self.inner.predictions.settings_state().await
+    }
+
+    pub async fn update_prediction_settings(
+        &self,
+        update: crate::predictions::PredictionSettingsUpdate,
+    ) -> Result<crate::predictions::PredictionSettingsState, String> {
+        self.inner.predictions.update_settings(update).await
     }
 
     pub fn watch_token_rate(&self, chat_id: &str) -> watch::Receiver<Option<u32>> {

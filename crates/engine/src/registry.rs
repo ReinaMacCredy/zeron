@@ -139,6 +139,41 @@ pub struct PredictionSettings {
     pub enabled: bool,
     pub harness: Option<HarnessId>,
     pub model: Option<String>,
+    /// Wins over `harness`/`model` when set.
+    pub custom: Option<CustomPredictionApi>,
+}
+
+/// An OpenAI-compatible chat completions API. Its key lives in the Keychain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CustomPredictionApi {
+    pub base_url: String,
+    pub model: String,
+}
+
+impl CustomPredictionApi {
+    pub fn endpoint(&self) -> String {
+        format!("{}/chat/completions", self.base_url)
+    }
+
+    fn normalized(self) -> Result<Self, String> {
+        let base_url = self.base_url.trim().trim_end_matches('/').to_string();
+        let url = reqwest::Url::parse(&base_url)
+            .map_err(|_| "Enter the API base URL, like https://api.openai.com/v1".to_string())?;
+        let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        match url.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            _ => {
+                return Err("Use an https URL; plain http only works for localhost".into());
+            }
+        }
+        let model = self.model.trim().to_string();
+        if model.is_empty() {
+            return Err("Enter the model the API should use".into());
+        }
+        Ok(Self { base_url, model })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,9 +560,21 @@ impl HarnessRegistry {
             return Err("Choose a prediction harness before choosing a model".into());
         }
         settings.model = settings.model.filter(|model| !model.trim().is_empty());
+        settings.custom = settings
+            .custom
+            .map(CustomPredictionApi::normalized)
+            .transpose()?;
         self.prefs().predictions = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.prefs_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
     }
 
     pub fn delegation_settings(&self) -> DelegationSettings {
@@ -1726,5 +1773,36 @@ mod gate_tests {
         );
         assert!(!called);
         registry.end_update(HarnessId::Codex);
+    }
+
+    #[test]
+    fn custom_prediction_apis_need_https_except_on_loopback() {
+        let api = |base_url: &str, model: &str| CustomPredictionApi {
+            base_url: base_url.into(),
+            model: model.into(),
+        };
+        let ok = api(" https://openrouter.ai/api/v1/ ", " gpt-mini ")
+            .normalized()
+            .unwrap();
+        assert_eq!(ok.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(ok.model, "gpt-mini");
+        assert_eq!(
+            ok.endpoint(),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert!(
+            api("http://localhost:11434/v1", "llama")
+                .normalized()
+                .is_ok()
+        );
+        assert!(api("http://127.0.0.1:1234/v1", "qwen").normalized().is_ok());
+        assert!(api("http://api.example.com/v1", "m").normalized().is_err());
+        assert!(api("ftp://localhost/v1", "m").normalized().is_err());
+        assert!(api("not a url", "m").normalized().is_err());
+        assert!(
+            api("https://api.example.com/v1", "  ")
+                .normalized()
+                .is_err()
+        );
     }
 }

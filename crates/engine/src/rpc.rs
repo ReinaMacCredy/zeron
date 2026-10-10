@@ -2427,18 +2427,16 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.title_settings())
             }
             methods::GET_PREDICTION_SETTINGS => {
-                RpcReply::value(&self.registry.prediction_settings())
+                RpcReply::value(&self.sessions.prediction_settings().await)
             }
             methods::SET_PREDICTION_SETTINGS => {
-                let p: crate::registry::PredictionSettings = parse_params(params)?;
-                self.registry
-                    .set_prediction_settings(p)
+                let p: crate::predictions::PredictionSettingsUpdate = parse_params(params)?;
+                let state = self
+                    .sessions
+                    .update_prediction_settings(p)
+                    .await
                     .map_err(RpcError::Failed)?;
-                let settings = self.registry.prediction_settings();
-                if !settings.enabled {
-                    self.sessions.clear_predictions();
-                }
-                RpcReply::value(&settings)
+                RpcReply::value(&state)
             }
             methods::GET_DELEGATION_SETTINGS => {
                 RpcReply::value(&self.registry.delegation_settings())
