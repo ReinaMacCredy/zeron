@@ -8,7 +8,12 @@ const COMMENT_FIELDS: &str =
 const PAGE_INFO: &str = "pageInfo { hasNextPage endCursor }";
 
 impl GitHubCli {
-    async fn review_query(&self, query: String, variables: Value, budget: &mut usize) -> PrResult {
+    pub(super) async fn review_query(
+        &self,
+        query: String,
+        variables: Value,
+        budget: &mut usize,
+    ) -> PrResult {
         let output = self
             .runner
             .run(ProcessRequest {

@@ -226,7 +226,7 @@ impl PullRequestDetailPage {
     }
 
     /// Keep the unsent comment for the next visit to this pull request.
-    fn save_draft(&self, cx: &App) {
+    pub(super) fn save_draft(&self, cx: &App) {
         self.cache.borrow_mut().set_draft(
             &self.target,
             &self.url,
@@ -396,6 +396,8 @@ impl PullRequestDetailPage {
                         .flex_none()
                         .flex()
                         .items_center()
+                        .gap(px(4.0))
+                        .children(self.review_trigger(theme, cx))
                         .child(
                             // While `gh` posts, a spinner stands in for the arrow.
                             if sending {

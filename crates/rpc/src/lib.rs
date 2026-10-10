@@ -324,6 +324,15 @@ pub mod methods {
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
     pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
     pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
+    pub const GET_CHANGE_REQUEST_CONTROLS: &str = "GetChangeRequestControls";
+    pub const MERGE_CHANGE_REQUEST: &str = "MergeChangeRequest";
+    pub const LIST_CHANGE_REQUEST_LABEL_CANDIDATES: &str = "ListChangeRequestLabelCandidates";
+    pub const SET_CHANGE_REQUEST_LABEL: &str = "SetChangeRequestLabel";
+    pub const LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES: &str = "ListChangeRequestReviewerCandidates";
+    pub const SET_CHANGE_REQUEST_REVIEWER: &str = "SetChangeRequestReviewer";
+    pub const SUBMIT_CHANGE_REQUEST_REVIEW: &str = "SubmitChangeRequestReview";
+    pub const REPLY_TO_CHANGE_REQUEST_THREAD: &str = "ReplyToChangeRequestThread";
+    pub const SET_CHANGE_REQUEST_THREAD_RESOLVED: &str = "SetChangeRequestThreadResolved";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.

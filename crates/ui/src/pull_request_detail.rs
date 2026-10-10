@@ -1,4 +1,6 @@
 //! Native PR inspection and explicit comment submission.
+#[path = "pull_request_actions.rs"]
+mod actions;
 #[path = "pull_request_code.rs"]
 mod code;
 #[path = "pull_request_handoff.rs"]
@@ -280,6 +282,9 @@ pub(crate) struct PullRequestCache {
     drafts: std::collections::HashMap<(Option<String>, String), (String, Option<String>)>,
     /// A post belongs to the window/profile, not to a particular detail view.
     submissions: std::collections::HashMap<(Option<String>, String), Entity<CommentSubmission>>,
+    controls:
+        std::collections::HashMap<(Option<String>, String), zeron_proto::ChangeRequestControls>,
+    merge_method: Option<zeron_proto::ChangeRequestMergeMethod>,
 }
 
 struct CommentSubmission {
@@ -422,6 +427,7 @@ pub struct PullRequestDetailPage {
     image_previous_focus: Option<gpui::FocusHandle>,
     /// The image that failed to load, offered in the browser instead.
     image_failed: Option<String>,
+    actions: actions::ActionsState,
 }
 
 impl PullRequestDetailPage {
@@ -504,6 +510,7 @@ impl PullRequestDetailPage {
             image_cached: None,
             image_previous_focus: None,
             image_failed: None,
+            actions: Default::default(),
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -563,6 +570,7 @@ impl PullRequestDetailPage {
             if let Some(diff) = snapshot.diff {
                 page.install_diff(diff, cx);
             }
+            page.restore_controls();
         }
         let draft = page
             .cache
@@ -794,6 +802,7 @@ impl PullRequestDetailPage {
                         if page.tab == Tab::Code && page.diff.is_none() {
                             page.load_diff(false, cx);
                         }
+                        page.load_controls(cx);
                     }
                     Err(error) => page.error = Some(error),
                 }
@@ -1528,6 +1537,11 @@ impl Render for PullRequestDetailPage {
                     .take(2)
                     .collect::<Vec<_>>()
                     .join("/");
+                let overview_rows = if self.tab == Tab::Summary {
+                    self.overview_rows(&theme, cx)
+                } else {
+                    Vec::new()
+                };
                 column = column
                     .when(self.tab != Tab::Code, |column| {
                         column.child(
@@ -1589,7 +1603,8 @@ impl Render for PullRequestDetailPage {
                                     ),
                                     false,
                                     &theme,
-                                )),
+                                ))
+                                .children(overview_rows),
                         )
                     });
                 match self.tab {
@@ -1814,6 +1829,7 @@ impl Render for PullRequestDetailPage {
                             );
                         column = column
                             .child(assessment_card)
+                            .children(self.merge_card(detail, &theme, cx))
                             .child(checks.mt(px(CARD_GAP)))
                             .child(self.handoff_card(detail, &theme, cx));
                         let description = div()
@@ -2108,6 +2124,9 @@ impl Render for PullRequestDetailPage {
                                                         cx.weak_entity(),
                                                     ))
                                                 },
+                                            ))
+                                            .children(self.thread_actions(
+                                                detail, index, comment, &theme, cx,
                                             )),
                                     ),
                             );
@@ -2290,6 +2309,9 @@ impl Render for PullRequestDetailPage {
                     }),
             );
         }
+        if let Some(dialog) = self.merge_dialog(window, &theme, cx) {
+            root = root.child(dialog);
+        }
         root
     }
 }
@@ -2465,6 +2487,9 @@ mod tests {
         let _guard = runtime.enter();
         fixture::init(cx);
         let rpc = ScriptedRpc::new(|method, _| async move {
+            if method == methods::GET_CHANGE_REQUEST_CONTROLS {
+                return Err(zeron_rpc::RpcError::UnknownMethod(method));
+            }
             assert_eq!(method, methods::GET_CHANGE_REQUEST);
             zeron_rpc::RpcReply::value(&ChangeRequestDetail {
                 number: 1,
@@ -2532,6 +2557,9 @@ mod tests {
             let head = head.clone();
             let base = base.clone();
             async move {
+                if method == methods::GET_CHANGE_REQUEST_CONTROLS {
+                    return Err(zeron_rpc::RpcError::UnknownMethod(method));
+                }
                 assert_eq!(params["headRefOid"], head);
                 assert_eq!(params["refresh"], true);
                 match method.as_str() {
@@ -2593,7 +2621,11 @@ mod tests {
             .update(cx, |page, _, cx| page.select_tab(Tab::Code, cx))
             .unwrap();
         rpc.settle(cx, &runtime, |cx| {
-            window.update(cx, |page, _, _| page.diff.is_some()).unwrap()
+            window
+                .update(cx, |page, _, _| {
+                    page.diff.is_some() && page.actions.controls.error().is_some()
+                })
+                .unwrap()
         });
         window
             .update(cx, |page, _, _| {
@@ -2601,7 +2633,7 @@ mod tests {
                 assert_eq!(page.diff.as_ref().unwrap().patch, "new patch");
             })
             .unwrap();
-        assert_eq!(rpc.completed(), 2);
+        assert_eq!(rpc.completed(), 3);
     }
 
     #[gpui::test]
@@ -2647,6 +2679,9 @@ mod tests {
                                     assert_eq!(params["refresh"], true);
                                     zeron_rpc::RpcReply::value(&"current patch")
                                 }
+                            }
+                            methods::GET_CHANGE_REQUEST_CONTROLS => {
+                                Err(zeron_rpc::RpcError::UnknownMethod(method))
                             }
                             _ => panic!("unexpected RPC"),
                         }
