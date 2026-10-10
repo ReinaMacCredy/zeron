@@ -3383,6 +3383,15 @@ mod tests {
         assert!(composer_focused(&composer, cx));
         assert!(cx.debug_bounds("pr-chat-orb").is_some(), "the orb stays");
 
+        let card = cx.debug_bounds("pr-chat-card").expect("one card");
+        for part in ["composer-surface", "composer-footer", "picker-permission"] {
+            let bounds = cx.debug_bounds(part).unwrap();
+            assert!(inside(card, bounds), "{part} {bounds:?} sits in {card:?}");
+        }
+        assert!(
+            (bar.bottom() - card.bottom()).abs() <= px(8.0),
+            "nothing hangs below the card: {card:?} {bar:?}"
+        );
         let content = cx.debug_bounds("pr-detail-scroll").unwrap();
         assert!(
             content.bottom() > bar.bottom(),

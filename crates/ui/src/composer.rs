@@ -13420,7 +13420,7 @@ impl Render for Composer {
             .flex_col()
             .gap(px(Theme::SPACE_SM))
             .px(px(Theme::SPACE_LG))
-            .pb(px(Theme::SPACE_LG))
+            .when(!self.pr_chat, |el| el.pb(px(Theme::SPACE_LG)))
             .when_some(failure, |el, message| {
                 // Amber with "Warning" for the offline-ish case (engine not
                 // connected), red with "Error" for send/run failures. Click
@@ -13981,9 +13981,14 @@ impl Render for Composer {
             )
             .rounded(px(surface_radius))
             .border_1()
-            .border_color(pill_border)
-            .bg(theme.composer_surface_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg());
+            .when(self.pr_chat, |el| {
+                el.border_color(gpui::transparent_black())
+            })
+            .when(!self.pr_chat, |el| {
+                el.border_color(pill_border)
+                    .bg(theme.composer_surface_bg())
+                    .when(!theme.is_frost(), |el| el.shadow_lg())
+            });
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -14255,7 +14260,11 @@ impl Render for Composer {
                     this.add_thread_mention(&payload.chat_id, window, cx);
                 },
             ))
-            .child(crate::frost::frosted(surface_radius, 16.0, body))
+            .child(if self.pr_chat {
+                body.into_any_element()
+            } else {
+                crate::frost::frosted(surface_radius, 16.0, body).into_any_element()
+            })
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background
@@ -14313,23 +14322,19 @@ impl Render for Composer {
             container
         };
         let dictation_status = self.render_dictation_status(cx);
-        let container = container.child(
-            div()
-                .track_focus(&self.dictation_focus)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape"
-                        && this.input.read(cx).dictation.phase.active()
-                    {
-                        this.dismiss_dictation(cx);
-                        cx.stop_propagation();
-                    }
-                }))
-                .flex()
-                .flex_col()
-                .gap(px(Theme::SPACE_SM))
-                .child(pill_surface)
-                .children(dictation_status),
-        );
+        let pill_block = div()
+            .track_focus(&self.dictation_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.input.read(cx).dictation.phase.active() {
+                    this.dismiss_dictation(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .flex()
+            .flex_col()
+            .gap(px(Theme::SPACE_SM))
+            .child(pill_surface)
+            .children(dictation_status);
 
         // The lower slot keeps a stable footprint for Git projects while its
         // old floating checkout/ref controls dissolve into the session footer.
@@ -14340,7 +14345,7 @@ impl Render for Composer {
         } else {
             session_chrome
         };
-        let container = if bottom_slot > 0.0 {
+        let footer_slot = if bottom_slot > 0.0 {
             // The pickers carry the composer's chat binding, so a bound
             // composer's footer reads and writes ITS chat (split partner,
             // sidechat), never the selection's.
@@ -14367,12 +14372,14 @@ impl Render for Composer {
                 self.account_usage
                     .update(cx, |usage, cx| usage.track(harness, target, chat, cx));
             }
-            container.child(
+            Some(
                 div()
                     .w_full()
                     .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
-                    .mb(px(-Theme::SPACE_SM * bottom_slot))
+                    .when(!self.pr_chat, |slot| {
+                        slot.mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
+                            .mb(px(-Theme::SPACE_SM * bottom_slot))
+                    })
                     .relative()
                     .when(new_thread_chrome_opacity > 0.0, |slot| {
                         slot.child(
@@ -14417,7 +14424,28 @@ impl Render for Composer {
                     }),
             )
         } else {
-            container
+            None
+        };
+        let container = if self.pr_chat {
+            container.child(crate::frost::frosted(
+                surface_radius,
+                crate::frost::MENU_BLUR,
+                div()
+                    .id("pr-chat-card")
+                    .debug_selector(|| "pr-chat-card".into())
+                    .rounded(px(surface_radius))
+                    .border_1()
+                    .border_color(pill_border)
+                    .bg(theme.composer_surface_bg())
+                    .when(!theme.is_frost(), |el| el.shadow_lg())
+                    .pb(px(Theme::SPACE_SM))
+                    .flex()
+                    .flex_col()
+                    .child(pill_block)
+                    .children(footer_slot),
+            ))
+        } else {
+            container.child(pill_block).children(footer_slot)
         };
         // Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
         if let Some(preview) = self.preview.clone() {
