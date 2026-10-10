@@ -331,6 +331,7 @@ pub struct TerminalPanel {
     /// explicitly (no ensure-on-open/chat-switch), and closing the last tab
     /// must not dispatch the bottom drawer's [`ToggleTerminal`].
     embedded: bool,
+    scope: Option<String>,
     /// The right pane is in its width tween. Keep painting the retained grid
     /// through the changing clip, but do not feed transient widths into the
     /// emulator: alternate-screen rows truncate rather than reflow.
@@ -372,6 +373,7 @@ impl TerminalPanel {
             chats: HashMap::new(),
             open: false,
             embedded: false,
+            scope: None,
             resize_suspended: false,
             window_corner_bl: false,
             window_corner_br: false,
@@ -392,6 +394,35 @@ impl TerminalPanel {
         let mut panel = Self::new(state, cx);
         panel.embedded = true;
         panel
+    }
+
+    pub fn new_scoped(state: Entity<AppState>, scope: &str, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new_embedded(state, cx);
+        panel.scope = Some(scope.to_string());
+        panel
+    }
+
+    pub fn grid_size(&self) -> Option<(u16, u16)> {
+        self.geometry.map(|geometry| (geometry.cols, geometry.rows))
+    }
+
+    pub fn tabs_of(&self, chat: &str) -> Vec<(u64, Option<String>, SharedString, bool)> {
+        self.chats
+            .get(chat)
+            .map(|tabs| {
+                tabs.tabs
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.key,
+                            t.terminal_id.clone(),
+                            Self::display_title(t),
+                            t.exited.is_some(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -507,6 +538,20 @@ impl TerminalPanel {
         key
     }
 
+    #[cfg(test)]
+    pub(crate) fn reserve_attached_for_test(
+        &mut self,
+        chat: &str,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let key = self.reserve_tab_for_chat(chat.to_string(), "Terminal", cx);
+        if let Some(tab) = self.tab_mut(chat, key) {
+            tab.terminal_id = Some(terminal_id.to_string());
+        }
+        key
+    }
+
     /// Attach and stream a PTY that was already opened by the owning engine.
     pub fn attach_reserved_session(
         &mut self,
@@ -516,12 +561,14 @@ impl TerminalPanel {
         target_device_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.tab_mut(chat, key).is_none() {
-            return false;
-        }
         let Some(engine) = self.engine(cx) else {
             return false;
         };
+        let Some(tab) = self.tab_mut(chat, key) else {
+            return false;
+        };
+        tab.terminal_id = Some(session.id.clone());
+        tab.target_device_id = target_device_id.clone();
         let run = Self::spawn_session(
             chat.to_string(),
             key,
@@ -571,7 +618,12 @@ impl TerminalPanel {
     /// Close the selected chat's tab `key` (surface-tab ✕).
     pub fn close_tab_by_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
         let chat = self.selected_chat(cx);
-        self.close_tab(&chat, key, window, cx);
+        self.close_tab(&chat, key, Some(window), cx);
+    }
+
+    pub fn kill_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
+        let chat = self.selected_chat(cx);
+        self.close_tab(&chat, key, None, cx);
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
@@ -621,7 +673,10 @@ impl TerminalPanel {
     }
 
     fn selected_chat(&self, cx: &App) -> String {
-        self.state.read(cx).panel_session_key()
+        match &self.scope {
+            Some(scope) => scope.clone(),
+            None => self.state.read(cx).panel_session_key(),
+        }
     }
 
     fn ensure_tab(&mut self, cx: &mut Context<Self>) {
@@ -1414,7 +1469,13 @@ impl TerminalPanel {
         }
     }
 
-    fn close_tab(&mut self, chat: &str, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab(
+        &mut self,
+        chat: &str,
+        key: u64,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let engine = self.engine(cx);
         let Some(tabs) = self.chats.get_mut(chat) else {
             return;
@@ -1431,7 +1492,11 @@ impl TerminalPanel {
         // dead space (user request). Same path as the collapse chevron.
         // Embedded, the SHELL owns emptiness (it falls back to the surface
         // picker) — dispatching here would toggle the bottom drawer instead.
-        if now_empty && self.open && !self.embedded {
+        if now_empty
+            && self.open
+            && !self.embedded
+            && let Some(window) = window
+        {
             window.dispatch_action(Box::new(ToggleTerminal), cx);
         }
         if let (Some(engine), Some(id)) = (engine, tab.terminal_id.clone()) {
@@ -1583,7 +1648,7 @@ impl TerminalPanel {
                             .hover(|s| s.bg(crate::theme::ink(0.09)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.close_tab(&chat_close2, key, window, cx);
+                                this.close_tab(&chat_close2, key, Some(window), cx);
                             }))
                             .tooltip(crate::settings::widgets::text_tooltip("Close terminal"))
                             .child(
@@ -1621,7 +1686,7 @@ impl TerminalPanel {
                             .on_mouse_down(
                                 MouseButton::Middle,
                                 cx.listener(move |this, _, window, cx| {
-                                    this.close_tab(&chat_close, key, window, cx);
+                                    this.close_tab(&chat_close, key, Some(window), cx);
                                 }),
                             )
                             .on_drag(

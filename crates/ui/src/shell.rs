@@ -98,6 +98,7 @@ mod summary;
 mod switcher;
 use side_chats::SideChatTab;
 mod tabs;
+mod terminal_tabs;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
@@ -902,6 +903,7 @@ pub enum Route {
     Chat,
     Settings(SettingsSection),
     PullRequests,
+    Terminal,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -2227,9 +2229,17 @@ pub struct Shell {
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
     right_terminal: Option<Entity<TerminalPanel>>,
+    main_terminal: Option<Entity<TerminalPanel>>,
+    _main_terminal_observe: Option<Subscription>,
+    terminal_tab_signature: Vec<(u64, SharedString, bool)>,
+    active_terminal_tab: Option<String>,
+    terminal_launches: std::collections::HashMap<String, terminal_tabs::TerminalLaunch>,
+    terminals_synced: bool,
+    terminals_sync_task: Option<Task<()>>,
     canvas_browser_drafts: std::collections::HashMap<String, bool>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    new_tab_menu: popover::Popup<()>,
     sidecar_collapsed_now: Option<bool>,
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
@@ -2827,7 +2837,7 @@ impl Shell {
             _ => None,
         };
         let nav = NavHistory::new(match route {
-            Route::Chat | Route::PullRequests => NavEntry::Chat(String::new()),
+            Route::Chat | Route::PullRequests | Route::Terminal => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -2877,8 +2887,16 @@ impl Shell {
             jump_hints: false,
             terminal: None,
             right_terminal: None,
+            main_terminal: None,
+            _main_terminal_observe: None,
+            terminal_tab_signature: Vec::new(),
+            active_terminal_tab: None,
+            terminal_launches: std::collections::HashMap::new(),
+            terminals_synced: false,
+            terminals_sync_task: None,
             canvas_browser_drafts: std::collections::HashMap::new(),
             right_plus: popover::Popup::default(),
+            new_tab_menu: popover::Popup::default(),
             sidecar_collapsed_now: None,
             sidecar_flip: None,
             sidecar_popover: None,
@@ -3268,6 +3286,27 @@ impl Shell {
                 _ => {}
             }
         }
+        if let Some(which) = self.debug_dialog.clone()
+            && state.read(cx).chats_synced
+            && state.read(cx).engine().is_some()
+        {
+            let launch = match which.as_str() {
+                "terminal" => Some(terminal_tabs::TerminalLaunch::Shell),
+                "terminal-claude" => Some(terminal_tabs::TerminalLaunch::ClaudeCode),
+                "terminal-codex" => Some(terminal_tabs::TerminalLaunch::Codex),
+                _ => None,
+            };
+            if let Some(launch) = launch {
+                self.debug_dialog = None;
+                self.open_terminal_tab(launch, cx);
+            } else if which == "new-tab-menu" {
+                self.debug_dialog = Some("new-tab-menu-open".into());
+                self.open_terminal_tab(terminal_tabs::TerminalLaunch::Shell, cx);
+            } else if which == "new-tab-menu-open" && matches!(self.route, Route::Terminal) {
+                self.debug_dialog = None;
+                self.new_tab_menu.open(());
+            }
+        }
         // Capture knob: `ZERON_DEMO_UPLOAD=<pct>:<image path>` — once a chat
         // is selected, push a fake sending echo carrying that image as a
         // pending attachment and freeze upload progress at <pct>, so the
@@ -3554,6 +3593,7 @@ impl Shell {
         // Reconcile the device-local tab list (prune against the doc,
         // selected-chat invariant).
         self.prune_split(cx);
+        self.sync_terminal_tabs(cx);
         self.sync_open_tabs(cx);
         // Heal a dangling sidebar filter (space deleted, possibly elsewhere):
         // fall back to "All" rather than filtering everything out.
@@ -8159,13 +8199,7 @@ impl Shell {
                     .flex_none()
                     .ml(px(TITLEBAR_GROUP_GAP))
                     .opacity(plus_alpha)
-                    .child(window_control_button(
-                        "titlebar-new-session",
-                        icons::PLUS,
-                        ShortcutId::NewSession.label(),
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
-                    ))
+                    .child(self.render_titlebar_plus(cx))
             }))
             .into_any_element()
     }
@@ -8180,6 +8214,9 @@ impl Shell {
                 .active_draft
                 .as_deref()
                 .is_some_and(|id| crate::draft_store::has_content(id, cx));
+        if matches!(self.route, Route::Terminal) {
+            return 1.0;
+        }
         titlebar_new_session_alpha(
             matches!(self.route, Route::Chat),
             state.selected_chat.is_some() || leaving_invested_draft,
@@ -10152,6 +10189,7 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
+        let terminal_section = self.render_terminal_section(theme, cx);
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -10312,6 +10350,7 @@ impl Shell {
                     // is the whole column; a little air stands in.
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
                     .child(active_list)
+                    .children(terminal_section)
                     .children(archived_section)
                     .children(moving_row),
             ),
@@ -15459,7 +15498,7 @@ impl Render for Shell {
                 cx.listener(|this, _: &ToggleTerminal, window, cx| match this.route {
                     Route::Chat => this.toggle_terminal(window, cx),
                     Route::PullRequests => this.toggle_pr_chat(cx),
-                    Route::Settings(_) => {}
+                    Route::Settings(_) | Route::Terminal => {}
                 }),
             )
             .on_action(
@@ -15811,6 +15850,7 @@ impl Render for Shell {
                 self.sync_pull_requests_visibility(cx);
                 self.sync_pull_request_surfaces(cx);
                 let pr_route = matches!(self.route, Route::PullRequests);
+                let page_route = pr_route || matches!(self.route, Route::Terminal);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     // A call started from Settings opens its stage here too.
@@ -15855,13 +15895,13 @@ impl Render for Shell {
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
-                let split_open = on_chat && !pr_route && self.split.is_some();
+                let split_open = on_chat && !page_route && self.split.is_some();
                 let full_column = conversation_width(
                     viewport - self.files_reserved_width(cx),
                     self.sidebar_target(),
                     right_target_width,
                 );
-                let sidecar_width = if pr_route {
+                let sidecar_width = if page_route {
                     0.0
                 } else {
                     self.sidecar_layout(full_column, split_open, cx)
@@ -15917,6 +15957,8 @@ impl Render for Shell {
                 );
                 let main = if pr_route {
                     self.render_pull_requests_column(column, window, cx)
+                } else if matches!(self.route, Route::Terminal) {
+                    self.render_terminal_column(column, window, cx)
                 } else {
                     self.render_main(
                         window,
@@ -15974,7 +16016,7 @@ impl Render for Shell {
                     .split
                     .as_ref()
                     .map(|s| s.side)
-                    .filter(|_| on_chat && !pr_route);
+                    .filter(|_| on_chat && !page_route);
                 let main_veil = split_side
                     .and_then(|side| self.render_split_size_veil(main_content_width, side, cx));
                 let main_header = split_side
@@ -15986,7 +16028,7 @@ impl Render for Shell {
                             .left_0()
                             .right_0()
                     });
-                let main = if !pr_route && (main_transition.is_some() || split_open) {
+                let main = if !page_route && (main_transition.is_some() || split_open) {
                     div()
                         .h_full()
                         .w(px(main_content_width))
@@ -16002,7 +16044,7 @@ impl Render for Shell {
                 };
                 let split_pane = split_side
                     .and_then(|_| self.render_split_pane(column - main_content_width, cx));
-                let drop_zones = (on_chat && !pr_route)
+                let drop_zones = (on_chat && !page_route)
                     .then(|| self.render_split_drop_zones(cx))
                     .flatten();
                 // Floats over the panes' shared border like the sidebar seam

@@ -241,6 +241,50 @@ impl ChatBackground {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalBackgroundMode {
+    #[default]
+    SameAsChat,
+    Custom,
+    Off,
+}
+
+impl TerminalBackgroundMode {
+    pub const ALL: [Self; 3] = [Self::SameAsChat, Self::Custom, Self::Off];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SameAsChat => "Same as chat",
+            Self::Custom => "Custom",
+            Self::Off => "Off",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TerminalBackground {
+    pub mode: TerminalBackgroundMode,
+    pub custom: ChatBackground,
+}
+
+impl TerminalBackground {
+    pub fn resolve(&self, chat: ChatBackground) -> ChatBackground {
+        match self.mode {
+            TerminalBackgroundMode::SameAsChat => chat,
+            TerminalBackgroundMode::Custom => ChatBackground {
+                enabled: true,
+                ..self.custom
+            },
+            TerminalBackgroundMode::Off => ChatBackground {
+                enabled: false,
+                ..chat
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FrostTuning {
@@ -756,6 +800,19 @@ pub fn update_chat_background(
     if update(policy, cx, |settings| {
         mutate(&mut settings.chat_background);
         settings.chat_background = settings.chat_background.clamped();
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn update_terminal_background(
+    policy: SavePolicy,
+    cx: &mut App,
+    mutate: impl FnOnce(&mut TerminalBackground),
+) {
+    if update(policy, cx, |settings| {
+        mutate(&mut settings.terminal_background);
+        settings.terminal_background.custom = settings.terminal_background.custom.clamped();
     }) {
         cx.refresh_windows();
     }
@@ -1503,6 +1560,7 @@ pub struct UiSettings {
     pub new_thread_background_effect: NewThreadBackgroundEffect,
     /// How the same artwork shows behind an open conversation.
     pub chat_background: ChatBackground,
+    pub terminal_background: TerminalBackground,
     /// Snap animations to rest. Defaults to following the OS.
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
@@ -1631,6 +1689,7 @@ impl Default for UiSettings {
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             chat_background: ChatBackground::default(),
+            terminal_background: TerminalBackground::default(),
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
             commit_message_instruction: DEFAULT_COMMIT_INSTRUCTION.to_string(),
@@ -2316,6 +2375,7 @@ impl UiSettings {
             sidecar_collapsed,
             frost,
             chat_background,
+            terminal_background,
             commit_message_instruction,
             commit_message_model,
             pr_chat_history,
@@ -2471,6 +2531,7 @@ impl UiSettings {
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
         self.chat_background = self.chat_background.clamped();
+        self.terminal_background.custom = self.terminal_background.custom.clamped();
         self.frost = self.frost.clamped();
         self.ui_font_size = self.ui_font_size.normalized();
         if let Some(background) = self.new_thread_composer_background.as_mut() {
@@ -3802,6 +3863,13 @@ mod tests {
                 blur: 16.0,
                 scrim: false,
             },
+            terminal_background: TerminalBackground {
+                mode: TerminalBackgroundMode::Custom,
+                custom: ChatBackground {
+                    opacity: 0.5,
+                    ..ChatBackground::default()
+                },
+            },
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
             commit_message_instruction: "Use the imperative mood.".into(),
@@ -3876,6 +3944,29 @@ mod tests {
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
         assert!(json.contains(r#""codeFontSize": 11.0"#));
+    }
+
+    #[test]
+    fn terminal_background_follows_chat_unless_custom_or_off() {
+        let chat = ChatBackground {
+            enabled: true,
+            opacity: 0.3,
+            blur: 0.0,
+            ..ChatBackground::default()
+        };
+        let mut terminal = TerminalBackground::default();
+        assert_eq!(terminal.resolve(chat), chat);
+        terminal.mode = TerminalBackgroundMode::Off;
+        assert!(!terminal.resolve(chat).visible());
+        terminal.mode = TerminalBackgroundMode::Custom;
+        terminal.custom = ChatBackground {
+            enabled: false,
+            placement: ChatBackgroundPlacement::Full,
+            ..chat
+        };
+        let custom = terminal.resolve(chat);
+        assert!(custom.visible());
+        assert_eq!(custom.placement, ChatBackgroundPlacement::Full);
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! fixed-width tabs, drop-index math, 150ms sibling slide, and drag ghost.
 //! Overflow scrolls horizontally with edge fades.
 
+use super::terminal_tabs::{is_terminal_tab, keep_terminal_tab};
 use super::*;
 use crate::terminal::panel::{drop_index, reorder_tabs, slide_offset};
 use zeron_proto::ChatIndicator;
@@ -441,6 +442,7 @@ impl Shell {
             || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()
             || self.right_plus.get().is_some()
+            || self.new_tab_menu.get().is_some()
             || !self.pending_file_closes.is_empty()
             || self.pending_exit.is_some()
     }
@@ -555,6 +557,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match id {
+            Some(id) if is_terminal_tab(&id) => self.show_terminal_tab(id, cx),
             Some(id) if self.state.read(cx).is_draft(&id) => self.open_draft(id, snapshot, cx),
             Some(id) if snapshot => self.open_chat(id, cx),
             Some(id) => self.select_existing_chat(id, cx),
@@ -574,7 +577,9 @@ impl Shell {
 
     /// Open a draft from its sidebar row, tab or switcher card.
     pub(crate) fn open_draft(&mut self, draft_id: String, snapshot: bool, cx: &mut Context<Self>) {
-        if self.state.read(cx).focused_id().as_deref() == Some(draft_id.as_str()) {
+        if matches!(self.route, Route::Chat)
+            && self.state.read(cx).focused_id().as_deref() == Some(draft_id.as_str())
+        {
             return;
         }
         if snapshot {
@@ -712,6 +717,7 @@ impl Shell {
         let Some(open) = self.settings.open_tabs.as_ref() else {
             return Vec::new();
         };
+        let terminals = self.live_terminal_tab_ids(cx);
         let state = self.state.read(cx);
         let now = Utc::now();
         let chats: std::collections::HashMap<_, _> = state
@@ -728,7 +734,8 @@ impl Shell {
             .filter(|id| {
                 // A draft is always a place the user is working in (d18); a
                 // session started in the background shows from its send on.
-                drafts.contains(id.as_str())
+                terminals.contains(id.as_str())
+                    || drafts.contains(id.as_str())
                     || state.send_pending(id, now)
                     || chats.get(id.as_str()).is_some_and(|c| !c.archived)
             })
@@ -869,6 +876,7 @@ impl Shell {
                     .flatten()
                     .filter(|id| {
                         selected.as_deref() == Some(id.as_str())
+                            || is_terminal_tab(id)
                             || pair.is_some_and(|p| p.contains(id))
                             || state.is_draft(id)
                             || state.send_pending(id, now)
@@ -902,9 +910,14 @@ impl Shell {
             .flat_map(|p| [p.left.clone(), p.right.clone()])
             .collect();
         let opened = self.auto_open_tab_ids(cx);
+        let terminals = self.live_terminal_tab_ids(cx);
+        let terminals_synced = self.terminals_synced;
         let tabs = self.settings.open_tabs.get_or_insert_with(Vec::new);
         let before = tabs.len();
         tabs.retain(|id| {
+            if is_terminal_tab(id) {
+                return keep_terminal_tab(id, terminals_synced, &terminals);
+            }
             live.contains(id)
                 || selected.as_deref() == Some(id.as_str())
                 || pair.contains(id)
@@ -927,6 +940,9 @@ impl Shell {
     /// running on its host and stays in the sidebar). Selection moves to a
     /// neighbor; the last tab lands on the new-session canvas.
     pub(super) fn close_session_tab(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if is_terminal_tab(&chat_id) {
+            return self.close_terminal_tab(&chat_id, cx);
+        }
         let order = self.open_tab_ids(cx);
         let (focused, is_draft) = {
             let state = self.state.read(cx);
@@ -956,7 +972,7 @@ impl Shell {
         if self.split_pair_contains(&chat_id) {
             self.dissolve_split_pair(cx);
         }
-        if focused.as_deref() == Some(chat_id.as_str()) {
+        if matches!(self.route, Route::Chat) && focused.as_deref() == Some(chat_id.as_str()) {
             if is_draft {
                 // Leaving the draft on the canvas would re-open its tab.
                 self.state.update(cx, |s, _| s.active_draft = None);
@@ -972,6 +988,12 @@ impl Shell {
     /// consumes it (the canvas is a draft), so `⌘W` never closes the window
     /// from there.
     pub fn close_focused_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        if matches!(self.route, Route::Terminal)
+            && let Some(id) = self.active_terminal_tab.clone()
+        {
+            self.close_terminal_tab(&id, cx);
+            return true;
+        }
         if !matches!(self.route, Route::Chat) {
             return false;
         }
@@ -1031,7 +1053,7 @@ impl Shell {
         {
             self.dissolve_split_pair(cx);
         }
-        let selected = self.state.read(cx).focused_id();
+        let selected = self.selected_tab_id(cx);
         if let Some(selected) = selected
             && !kept.contains(&selected)
         {
@@ -1112,6 +1134,11 @@ impl Shell {
             order.insert(left_ix + 1, pair.right.clone());
             Some((pair.left.clone(), pair.right.clone()))
         });
+        let terminals: std::collections::HashMap<String, super::terminal_tabs::TerminalTabRow> =
+            self.terminal_tab_rows(cx)
+                .into_iter()
+                .map(|row| (row.id.clone(), row))
+                .collect();
         let tabs: Vec<(
             String,
             SharedString,
@@ -1138,6 +1165,15 @@ impl Shell {
             order
                 .iter()
                 .filter_map(|id| {
+                    if let Some(row) = terminals.get(id) {
+                        return Some((
+                            id.clone(),
+                            row.title.clone(),
+                            Vec::new(),
+                            ChatIndicator::Idle,
+                            false,
+                        ));
+                    }
                     if drafts.contains(id.as_str()) {
                         return Some((
                             id.clone(),
@@ -1168,11 +1204,7 @@ impl Shell {
                 })
                 .collect()
         };
-        let selected = self
-            .state
-            .read(cx)
-            .focused_id()
-            .filter(|_| !matches!(self.route, Route::PullRequests));
+        let selected = self.selected_tab_id(cx);
         let split = self.split_chat_id().map(str::to_string);
         // Keep the selected tab visible: on selection change, scroll it into
         // view (minimal movement — a new session's tab materializes at the far
@@ -1234,7 +1266,13 @@ impl Shell {
                     // Hover state lives in Shell (the trailing slot swaps dot ↔
                     // close), so the wash snaps off it too — gpui allows only one
                     // `on_hover` per element, and the state listener wins.
-                    let dim = !is_draft && status == ChatIndicator::Idle;
+                    let terminal = terminals
+                        .get(&id)
+                        .map(|row| (row.launch.brand(), row.exited));
+                    let dim = match terminal {
+                        Some((_, exited)) => exited,
+                        None => !is_draft && status == ChatIndicator::Idle,
+                    };
                     let (text_color, bg) = if is_selected {
                         (theme.text, crate::theme::glass_selected_bg())
                     } else if is_hovered {
@@ -1249,7 +1287,12 @@ impl Shell {
                         (false, true) => 0.35,
                         (false, false) => 0.6,
                     };
-                    let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
+                    let brand = terminal.map(|(brand, _)| brand).or_else(|| {
+                        harness
+                            .last()
+                            .copied()
+                            .map(crate::pickers::harness_brand_icon)
+                    });
                     let select_id = id.clone();
                     let middle_id = id.clone();
                     let menu_id = id.clone();
@@ -1329,41 +1372,54 @@ impl Shell {
                                 cx.new(|_| TabGhost { title, brand })
                             },
                         )
-                        .map(|el| {
-                            match crate::computer::presence::chat_glyph(
-                                "session-tab",
-                                &id,
-                                14.0,
-                                glyph_alpha,
-                                &theme,
-                                cx,
-                            ) {
-                                Some(glyph) => el.child(glyph),
-                                None => el.when(!harness.is_empty(), |el| {
-                                    let selector = format!("session-tab-harness-{id}");
-                                    el.child(
-                                        crate::pickers::harness_mark_stack(
-                                            &harness,
-                                            14.0,
-                                            theme.text_muted,
-                                            glyph_alpha,
+                        .when_some(terminal, |el, ((path, tint), _)| {
+                            el.child(
+                                icon(path).size(px(14.0)).flex_none().text_color(
+                                    tint.unwrap_or(theme.text_muted).opacity(glyph_alpha),
+                                ),
+                            )
+                        })
+                        .when(terminal.is_none(), |el| {
+                            el.map(|el| {
+                                match crate::computer::presence::chat_glyph(
+                                    "session-tab",
+                                    &id,
+                                    14.0,
+                                    glyph_alpha,
+                                    &theme,
+                                    cx,
+                                ) {
+                                    Some(glyph) => el.child(glyph),
+                                    None => el.when(!harness.is_empty(), |el| {
+                                        let selector = format!("session-tab-harness-{id}");
+                                        el.child(
+                                            crate::pickers::harness_mark_stack(
+                                                &harness,
+                                                14.0,
+                                                theme.text_muted,
+                                                glyph_alpha,
+                                            )
+                                            .debug_selector(move || selector),
                                         )
-                                        .debug_selector(move || selector),
-                                    )
-                                }),
-                            }
+                                    }),
+                                }
+                            })
                         })
                         // A draft wears the amber pen where a session wears
                         // its harness brand (d18); a session with unsent
                         // composer text wears both, like its sidebar row.
-                        .when(is_draft || crate::draft_store::has_content(&id, cx), |el| {
-                            el.child(
-                                icon(icons::PEN)
-                                    .size(px(13.0))
-                                    .flex_none()
-                                    .text_color(theme.warning.opacity(glyph_alpha)),
-                            )
-                        })
+                        .when(
+                            terminal.is_none()
+                                && (is_draft || crate::draft_store::has_content(&id, cx)),
+                            |el| {
+                                el.child(
+                                    icon(icons::PEN)
+                                        .size(px(13.0))
+                                        .flex_none()
+                                        .text_color(theme.warning.opacity(glyph_alpha)),
+                                )
+                            },
+                        )
                         .child(div().flex_1().min_w_0().truncate().child(title))
                         .child(trailing);
 
@@ -1968,6 +2024,103 @@ mod strip_regressions {
         });
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         (shell, cx)
+    }
+
+    fn add_terminal(shell: &mut Shell, terminal_id: &str, cx: &mut Context<Shell>) {
+        let panel = shell.main_terminal_panel(cx);
+        panel.update(cx, |panel, cx| {
+            panel.reserve_attached_for_test("term", terminal_id, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_tab_takes_the_main_column_without_selecting_a_chat(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.open_chat("b".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            add_terminal(shell, "t1", cx);
+
+            shell.navigate_to(Some("term:t1".into()), true, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.route, Route::Terminal);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("b"));
+            assert_eq!(shell.selected_tab_id(cx).as_deref(), Some("term:t1"));
+            assert_eq!(shell.open_tab_ids(cx), ["a", "b", "term:t1"]);
+
+            shell.navigate_to(Some("b".into()), true, cx);
+            assert_eq!(shell.route, Route::Chat);
+            assert_eq!(shell.selected_tab_id(cx).as_deref(), Some("b"));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("session-tab-term:t1").is_some());
+    }
+
+    #[gpui::test]
+    fn closing_a_terminal_tab_detaches_and_the_sidebar_kill_drops_it(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            add_terminal(shell, "t1", cx);
+            shell.show_terminal_tab("term:t1".into(), cx);
+
+            assert!(shell.close_focused_tab(cx));
+            assert_eq!(shell.route, Route::Chat);
+            assert_eq!(shell.open_tab_ids(cx), ["a"]);
+            assert_eq!(shell.terminal_tab_rows(cx).len(), 1);
+
+            shell.show_terminal_tab("term:t1".into(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a", "term:t1"]);
+            shell.kill_terminal_tab("term:t1", cx);
+            assert_eq!(shell.route, Route::Chat);
+            assert!(shell.terminal_tab_rows(cx).is_empty());
+            assert_eq!(shell.open_tab_ids(cx), ["a"]);
+        });
+    }
+
+    #[gpui::test]
+    fn stored_terminal_tabs_wait_for_the_engine_list(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.settings.open_tabs = Some(vec!["a".into(), "term:gone".into(), "term:t1".into()]);
+            shell.settings.open_tabs_stable = true;
+            add_terminal(shell, "t1", cx);
+            shell.sync_open_tabs(cx);
+            assert_eq!(
+                shell.settings.open_tabs.as_deref().unwrap(),
+                ["a", "term:gone", "term:t1"]
+            );
+            assert_eq!(shell.open_tab_ids(cx), ["a", "term:t1"]);
+
+            shell.terminals_synced = true;
+            shell.sync_open_tabs(cx);
+            assert_eq!(
+                shell.settings.open_tabs.as_deref().unwrap(),
+                ["a", "term:t1"]
+            );
+        });
     }
 
     #[gpui::test]
