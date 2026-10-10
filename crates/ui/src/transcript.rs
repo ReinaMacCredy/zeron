@@ -474,6 +474,10 @@ pub(crate) struct SubagentSummary {
     pub title: SharedString,
     pub status: Option<SubagentStatus>,
     pub delegated: bool,
+    pub harness: Option<zeron_proto::HarnessId>,
+    pub model: Option<SharedString>,
+    /// Epoch ms; a native subagent's is known only once its doc is loaded.
+    pub started_at: Option<i64>,
 }
 
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
@@ -5415,6 +5419,13 @@ impl Transcript {
     /// spawn chips are the only index (no listing endpoint).
     pub(crate) fn subagent_summaries(&self, cx: &gpui::App) -> Vec<SubagentSummary> {
         let chat_id = self.chat_id.clone().unwrap_or_default();
+        let state = self.state.read(cx);
+        let chats = &state.chats;
+        let harness = chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness);
         let mut seen = std::collections::HashSet::new();
         self.rows
             .iter()
@@ -5431,16 +5442,21 @@ impl Transcript {
                         if !tool.call.is_delegate_task() {
                             return Some(SubagentSummary {
                                 chat_id: chat_id.clone(),
-                                doc_id,
                                 title: subagent_tab_title(&tool.call),
                                 status: tool.subagent_status,
                                 delegated: false,
+                                harness,
+                                model: None,
+                                started_at: state
+                                    .sub_transcript(&doc_id)
+                                    .first()
+                                    .map(|entry| entry.created_at),
+                                doc_id,
                             });
                         }
-                        let view = delegate_view(&self.state.read(cx).chats, &doc_id);
+                        let view = delegate_view(chats, &doc_id);
                         Some(SubagentSummary {
                             chat_id: chat_id.clone(),
-                            doc_id,
                             title: view.title,
                             status: view.status.map(|status| match status {
                                 zeron_proto::DelegationStatus::Running => SubagentStatus::Running,
@@ -5448,6 +5464,14 @@ impl Transcript {
                                 _ => SubagentStatus::Failed,
                             }),
                             delegated: true,
+                            harness: view.harness,
+                            model: view.model,
+                            started_at: chats
+                                .iter()
+                                .find(|chat| chat.id == doc_id)
+                                .and_then(|chat| chat.delegation.as_ref())
+                                .map(|delegation| delegation.started_at.timestamp_millis()),
+                            doc_id,
                         })
                     })
                     .collect::<Vec<_>>()
@@ -12580,10 +12604,7 @@ fn delegate_chip(
     use zeron_proto::DelegationStatus;
     let running = view.status == Some(DelegationStatus::Running);
     let failed = view.status == Some(DelegationStatus::Failed);
-    let (glyph, tint) = view
-        .harness
-        .map(crate::pickers::harness_brand_icon)
-        .unwrap_or((crate::icons::BOT, None));
+    let (glyph, tint) = crate::pickers::agent_brand_icon(view.harness, view.model.as_deref());
     let label: SharedString = view
         .harness
         .map(crate::composer::harness_display_name)

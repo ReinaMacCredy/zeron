@@ -42,6 +42,8 @@ struct SidecarEntry {
     key: &'static str,
     ix: usize,
     icon: &'static str,
+    tint: Option<gpui::Hsla>,
+    badge: Option<gpui::Hsla>,
     label: SharedString,
     value: Option<SidecarValue>,
     action: Option<SidecarAction>,
@@ -59,11 +61,23 @@ impl SidecarEntry {
             key,
             ix,
             icon,
+            tint: None,
+            badge: None,
             label: label.into(),
             value: None,
             action: None,
             thumbnail: None,
         }
+    }
+
+    fn tint(mut self, tint: Option<gpui::Hsla>) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    fn badge(mut self, badge: Option<gpui::Hsla>) -> Self {
+        self.badge = badge;
+        self
     }
 
     fn value(mut self, value: Option<SidecarValue>) -> Self {
@@ -94,6 +108,14 @@ impl SidecarEntry {
 
 struct SidecarSection {
     heading: SharedString,
+    entries: Vec<SidecarEntry>,
+    fold: Option<SidecarFold>,
+}
+
+struct SidecarFold {
+    label: SharedString,
+    failed: usize,
+    open: bool,
     entries: Vec<SidecarEntry>,
 }
 
@@ -541,6 +563,7 @@ impl Shell {
         sections.push(SidecarSection {
             heading: format!("On {}", project.as_deref().unwrap_or("this session")).into(),
             entries: on,
+            fold: None,
         });
 
         let mut workspace = vec![
@@ -568,6 +591,7 @@ impl Shell {
         sections.push(SidecarSection {
             heading: "Workspace".into(),
             entries: workspace,
+            fold: None,
         });
 
         if !browsers.is_empty() {
@@ -584,6 +608,7 @@ impl Shell {
                             .action(move |this, _, cx| this.focus_right_surface(surface, cx))
                     })
                     .collect(),
+                fold: None,
             });
         }
 
@@ -612,43 +637,91 @@ impl Shell {
             sections.push(SidecarSection {
                 heading: "Side chats".into(),
                 entries,
+                fold: None,
             });
         }
 
         if !subagents.is_empty() {
+            let (running, previous) = split_subagents(subagents);
+            let failed = previous
+                .iter()
+                .filter(|agent| agent.status == Some(zeron_doc::SubagentStatus::Failed))
+                .count();
+            let now = Utc::now().timestamp_millis();
+            let next_tick = running
+                .iter()
+                .filter_map(|agent| agent.started_at)
+                .map(|started| elapsed_next_change((now - started) / 1000))
+                .min();
+            if let Some(secs) = next_tick
+                && self.sidecar_clock.is_none()
+            {
+                self.sidecar_clock = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_secs(secs as u64))
+                        .await;
+                    this.update(cx, |this, cx| {
+                        this.sidecar_clock = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+            let entry =
+                |key: &'static str, ix: usize, agent: crate::transcript::SubagentSummary| {
+                    let running = agent.status == Some(zeron_doc::SubagentStatus::Running);
+                    let badge = match agent.status {
+                        Some(zeron_doc::SubagentStatus::Running) => Some(theme.busy),
+                        Some(zeron_doc::SubagentStatus::Failed) => Some(theme.danger),
+                        _ => None,
+                    };
+                    let elapsed = agent
+                        .started_at
+                        .filter(|_| running)
+                        .map(|started| short_elapsed((now - started) / 1000));
+                    let (mark, tint) =
+                        crate::pickers::agent_brand_icon(agent.harness, agent.model.as_deref());
+                    SidecarEntry::new(key, ix, mark, agent.title.clone())
+                        .tint(tint)
+                        .badge(badge)
+                        .value(elapsed.map(|text| SidecarValue::Text(text.into())))
+                        .action(move |this, _, cx| {
+                            if agent.delegated {
+                                this.open_child_chat_tab(&agent.doc_id, cx);
+                                return;
+                            }
+                            this.add_subagent_surface(
+                                agent.chat_id.clone(),
+                                agent.doc_id.clone(),
+                                agent.title.to_string(),
+                                !running,
+                                cx,
+                            )
+                        })
+                };
+            let heading = match running.len() {
+                0 => "Subagents".to_string(),
+                n => format!("Subagents · {n} running"),
+            };
+            let fold = (!previous.is_empty()).then(|| SidecarFold {
+                label: format!("Previous agents ({})", previous.len()).into(),
+                failed,
+                open: self.sidecar_previous_agents_open,
+                entries: previous
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, agent)| entry("previous-agent", ix, agent))
+                    .collect(),
+            });
             sections.push(SidecarSection {
-                heading: "Subagents".into(),
-                entries: subagents
+                heading: heading.into(),
+                entries: running
                     .into_iter()
                     .take(SECTION_CAP)
                     .enumerate()
-                    .map(|(ix, agent)| {
-                        let (status, tone) = match agent.status {
-                            Some(zeron_doc::SubagentStatus::Running) => ("working", theme.warning),
-                            Some(zeron_doc::SubagentStatus::Failed) => ("failed", theme.danger),
-                            Some(zeron_doc::SubagentStatus::Done) | None => {
-                                ("done", theme.text_faint)
-                            }
-                        };
-                        let frozen =
-                            !matches!(agent.status, Some(zeron_doc::SubagentStatus::Running));
-                        SidecarEntry::new("subagent", ix, icons::ASTRA_AGENT, agent.title.clone())
-                            .value(Some(SidecarValue::Tone(status.into(), tone)))
-                            .action(move |this, _, cx| {
-                                if agent.delegated {
-                                    this.open_child_chat_tab(&agent.doc_id, cx);
-                                    return;
-                                }
-                                this.add_subagent_surface(
-                                    agent.chat_id.clone(),
-                                    agent.doc_id.clone(),
-                                    agent.title.to_string(),
-                                    frozen,
-                                    cx,
-                                )
-                            })
-                    })
+                    .map(|(ix, agent)| entry("subagent", ix, agent))
                     .collect(),
+                fold,
             });
         }
 
@@ -668,6 +741,7 @@ impl Shell {
                             })
                     })
                     .collect(),
+                fold: None,
             });
         }
 
@@ -690,6 +764,7 @@ impl Shell {
         sections.push(SidecarSection {
             heading: "Usage".into(),
             entries: vec![usage_entry],
+            fold: None,
         });
 
         let mut project_entries = vec![SidecarEntry::new(
@@ -718,6 +793,7 @@ impl Shell {
         sections.push(SidecarSection {
             heading: "Project".into(),
             entries: project_entries,
+            fold: None,
         });
 
         sections
@@ -889,6 +965,71 @@ impl Shell {
                 std::iter::once(self.sidecar_row(theme, entry, surface, interactive, cx))
                     .chain(thumbnail)
             }))
+            .when_some(section.fold.as_ref(), |el, fold| {
+                el.child(self.sidecar_fold_footer(theme, fold, surface, interactive, cx))
+                    .when(fold.open, |el| {
+                        el.children(
+                            fold.entries.iter().map(|entry| {
+                                self.sidecar_row(theme, entry, surface, interactive, cx)
+                            }),
+                        )
+                    })
+            })
+            .into_any_element()
+    }
+
+    fn sidecar_fold_footer(
+        &self,
+        theme: &Theme,
+        fold: &SidecarFold,
+        surface: SidecarSurface,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("sidecar-{}-fold", surface.tag());
+        let selector = id.clone();
+        let open = fold.open;
+        div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector.clone())
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(8.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_faint)
+            .whitespace_nowrap()
+            .child(div().flex_none().child(fold.label.clone()))
+            .child(div().flex_1().h(px(1.0)).bg(crate::theme::hairline(0.08)))
+            .when(fold.failed > 0, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.danger)
+                        .child(SharedString::from(format!("{} failed", fold.failed))),
+                )
+            })
+            .child(
+                icon(icons::LUCIDE_CHEVRON_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_faint)
+                    .when(open, |el| {
+                        el.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
+                    }),
+            )
+            .when(interactive, |el| {
+                el.cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::wash(0.06)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.sidecar_previous_agents_open = !open;
+                        cx.notify();
+                    }))
+            })
             .into_any_element()
     }
 
@@ -923,11 +1064,28 @@ impl Shell {
             .text_color(theme.text_muted)
             .whitespace_nowrap()
             .child(
-                icon(entry.icon)
+                div()
+                    .relative()
+                    .flex_none()
                     .size(px(14.0))
-                    .text_color(theme.text_muted)
-                    .when(interactive, |el| {
-                        el.group_hover(group.clone(), |s| s.text_color(theme.text))
+                    .child(
+                        icon(entry.icon)
+                            .size(px(14.0))
+                            .text_color(entry.tint.unwrap_or(theme.text_muted))
+                            .when(interactive && entry.tint.is_none(), |el| {
+                                el.group_hover(group.clone(), |s| s.text_color(theme.text))
+                            }),
+                    )
+                    .when_some(entry.badge, |el, color| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .right(px(-2.0))
+                                .bottom(px(-2.0))
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(color),
+                        )
                     }),
             )
             .child(
@@ -975,32 +1133,37 @@ impl Shell {
         } else {
             theme.text
         };
-        let rail_icon = |key: String, glyph: &'static str, tooltip: SharedString| {
-            let selector = key.clone();
-            div()
-                .id(SharedString::from(key))
-                .debug_selector(move || selector.clone())
-                .size(px(24.0))
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .rounded(px(8.0))
-                .when(interactive, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| s.bg(crate::theme::wash(0.06)))
-                })
-                .when(interactive, |el| {
-                    el.tooltip(move |_, cx| {
-                        cx.new(|_| SurfaceTabTooltip {
-                            text: tooltip.clone(),
-                        })
-                        .into()
+        let rail_icon =
+            |key: String, glyph: &'static str, tint: Option<gpui::Hsla>, tooltip: SharedString| {
+                let selector = key.clone();
+                div()
+                    .id(SharedString::from(key))
+                    .debug_selector(move || selector.clone())
+                    .size(px(24.0))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .when(interactive, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::wash(0.06)))
                     })
-                    .tooltip_show_delay(Duration::from_millis(260))
-                })
-                .child(icon(glyph).size(px(16.0)).text_color(glyph_color))
-        };
+                    .when(interactive, |el| {
+                        el.tooltip(move |_, cx| {
+                            cx.new(|_| SurfaceTabTooltip {
+                                text: tooltip.clone(),
+                            })
+                            .into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(260))
+                    })
+                    .child(
+                        icon(glyph)
+                            .size(px(16.0))
+                            .text_color(tint.unwrap_or(glyph_color)),
+                    )
+            };
         let mut pill = div()
             .id("sidecar-pill")
             .flex()
@@ -1011,7 +1174,11 @@ impl Shell {
             .rounded(px(10.0))
             .max_h(px((self.viewport_height - SIDECAR_TOP - 16.0).max(64.0)))
             .overflow_y_scroll();
-        for (ix, section) in sections.iter().enumerate() {
+        for (ix, section) in sections
+            .iter()
+            .filter(|section| !section.entries.is_empty())
+            .enumerate()
+        {
             let mut group = div()
                 .flex()
                 .flex_col()
@@ -1025,7 +1192,7 @@ impl Shell {
                 });
             for entry in &section.entries {
                 let key = format!("sidecar-rail-{}-{}", entry.key, entry.ix);
-                let mut button = rail_icon(key, entry.icon, entry.tooltip());
+                let mut button = rail_icon(key, entry.icon, entry.tint, entry.tooltip());
                 if interactive {
                     let action = entry.action.clone();
                     button = button.on_click(cx.listener(move |this, _, window, cx| {
@@ -1049,6 +1216,7 @@ impl Shell {
         let mut expand = rail_icon(
             "sidecar-expand".into(),
             icons::ASTRA_CHEVRONS_LEFT,
+            None,
             expand_tooltip,
         );
         if interactive {
@@ -1240,6 +1408,38 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
                 .into_any_element()
         }
     }
+}
+
+fn split_subagents(
+    mut agents: Vec<crate::transcript::SubagentSummary>,
+) -> (
+    Vec<crate::transcript::SubagentSummary>,
+    Vec<crate::transcript::SubagentSummary>,
+) {
+    agents.reverse();
+    agents
+        .into_iter()
+        .partition(|agent| agent.status == Some(zeron_doc::SubagentStatus::Running))
+}
+
+fn short_elapsed(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3_600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
+fn elapsed_next_change(secs: i64) -> i64 {
+    let secs = secs.max(0);
+    let unit = match secs {
+        s if s < 60 => 1,
+        s if s < 3_600 => 60,
+        s if s < 86_400 => 3_600,
+        _ => 86_400,
+    };
+    unit - secs % unit
 }
 
 fn basename(path: &str) -> String {
@@ -1706,5 +1906,156 @@ mod sidecar_regressions {
             assert_eq!(shell.sidecar_layout(900.0, true, cx), 0.0);
             assert_eq!(shell.sidecar_layout(20.0, false, cx), 20.0);
         });
+    }
+
+    #[gpui::test]
+    fn subagents_wear_their_brand_and_fold_the_finished_ones(cx: &mut TestAppContext) {
+        use zeron_doc::{MessagePart, MessageStatus, SessionMessageEntry, SubagentStatus};
+        let (shell, cx) = setup(cx);
+        let spawn = |id: &str, call: zeron_proto::ToolCall, sub: &str, status| MessagePart::Tool {
+            id: id.into(),
+            call,
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some(sub.into()),
+            subagent_status: status,
+            subagent_tail: None,
+            html_render: None,
+        };
+        let agent = |id: &str, status| {
+            spawn(
+                id,
+                zeron_proto::ToolCall::Unknown {
+                    name: format!("Agent: task {id}"),
+                    input: None,
+                },
+                &format!("parent--sub--{id}"),
+                Some(status),
+            )
+        };
+        let delegate = spawn(
+            "d",
+            zeron_proto::ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: None,
+            },
+            "kid",
+            None,
+        );
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let config = serde_json::json!({
+                    "harness": "codex", "model": null, "reasoning": null,
+                    "sandbox": "workspace-write"
+                });
+                let parent = state.chats.iter_mut().find(|c| c.id == "parent").unwrap();
+                parent.config = Some(serde_json::from_value(config).unwrap());
+                let kid: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": "kid", "deviceId": "dev", "title": "Kid",
+                    "archived": false, "createdAt": "2026-09-18T00:00:00Z",
+                    "config": {
+                        "harness": "opencode", "model": "anthropic/claude-opus-5",
+                        "reasoning": null, "sandbox": "workspace-write"
+                    },
+                    "delegation": {
+                        "delegatedByChatId": "parent", "depth": 1, "anchor": "m",
+                        "wake": "always", "status": "running",
+                        "startedAt": "2026-09-18T00:00:00Z"
+                    }
+                }))
+                .unwrap();
+                state.chats.push(kid);
+                state.apply_transcript(vec![SessionMessageEntry {
+                    id: "m1".into(),
+                    role: zeron_doc::MessageRole::Assistant,
+                    parts: vec![
+                        agent("a", SubagentStatus::Running),
+                        agent("b", SubagentStatus::Done),
+                        agent("c", SubagentStatus::Failed),
+                        delegate,
+                    ],
+                    created_at: 0,
+                    device_id: "dev".into(),
+                    status: Some(MessageStatus::Complete),
+                    continuation_of: None,
+                    from_chat_id: None,
+                    fork_import: false,
+                    answers_request_id: None,
+                    duration_ms: None,
+                }]);
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.update(cx, |shell, cx| {
+            let theme = Theme::of(cx).clone();
+            let sections = shell.sidecar_sections(&theme, cx);
+            let section = sections
+                .iter()
+                .find(|section| section.heading.starts_with("Subagents"))
+                .expect("subagents section");
+            assert_eq!(section.heading.as_ref(), "Subagents · 2 running");
+            let marks: Vec<_> = section.entries.iter().map(|e| e.icon).collect();
+            assert_eq!(marks, [icons::CLAUDE_MARK, icons::OPENAI_MARK]);
+            assert!(section.entries.iter().all(|e| e.badge == Some(theme.busy)));
+            let fold = section.fold.as_ref().expect("previous agents fold");
+            assert_eq!(fold.label.as_ref(), "Previous agents (2)");
+            assert_eq!(fold.failed, 1);
+            assert_eq!(fold.entries[0].badge, Some(theme.danger));
+            assert_eq!(fold.entries[1].badge, None);
+        });
+        assert!(cx.debug_bounds("sidecar-panel-subagent-1").is_some());
+        assert!(cx.debug_bounds("sidecar-panel-previous-agent-0").is_none());
+        click(cx, "sidecar-panel-fold");
+        assert!(cx.debug_bounds("sidecar-panel-previous-agent-1").is_some());
+        click(cx, "sidecar-panel-fold");
+        assert!(cx.debug_bounds("sidecar-panel-previous-agent-0").is_none());
+    }
+
+    #[test]
+    fn subagents_split_running_from_previous_newest_first() {
+        use zeron_doc::SubagentStatus::{Done, Failed, Running};
+        let agent = |id: &str, status| crate::transcript::SubagentSummary {
+            chat_id: "parent".into(),
+            doc_id: id.into(),
+            title: id.to_string().into(),
+            status,
+            delegated: false,
+            harness: None,
+            model: None,
+            started_at: None,
+        };
+        let (running, previous) = split_subagents(vec![
+            agent("a", Some(Done)),
+            agent("b", Some(Running)),
+            agent("c", Some(Failed)),
+            agent("d", Some(Running)),
+            agent("e", None),
+        ]);
+        let ids = |agents: &[crate::transcript::SubagentSummary]| {
+            agents.iter().map(|a| a.doc_id.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&running), ["d", "b"]);
+        assert_eq!(ids(&previous), ["e", "c", "a"]);
+    }
+
+    #[test]
+    fn subagent_elapsed_keeps_one_unit() {
+        assert_eq!(short_elapsed(-5), "0s");
+        assert_eq!(short_elapsed(59), "59s");
+        assert_eq!(short_elapsed(21 * 60 + 14), "21m");
+        assert_eq!(short_elapsed(3 * 3_600 + 59 * 60), "3h");
+        assert_eq!(short_elapsed(2 * 86_400 + 5), "2d");
+        assert_eq!(elapsed_next_change(-5), 1);
+        assert_eq!(elapsed_next_change(59), 1);
+        assert_eq!(elapsed_next_change(21 * 60 + 14), 46);
+        assert_eq!(elapsed_next_change(3 * 3_600 + 59 * 60), 60);
     }
 }

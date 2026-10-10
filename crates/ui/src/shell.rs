@@ -2087,6 +2087,7 @@ struct OrgGateUi {
 struct SubagentTab {
     doc_id: String,
     title: SharedString,
+    harness: Option<zeron_proto::HarnessId>,
     transcript: Entity<Transcript>,
     /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
     _fetch: Option<Task<()>>,
@@ -2232,6 +2233,8 @@ pub struct Shell {
     sidecar_collapsed_now: Option<bool>,
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
+    sidecar_previous_agents_open: bool,
+    sidecar_clock: Option<Task<()>>,
     sidecar_press_found_popover: bool,
     computer_thumbnail: Option<Entity<crate::computer::thumbnail::ComputerThumbnail>>,
     /// Per chat: the instructions file found at the checkout root (`AGENTS.md`
@@ -2879,6 +2882,8 @@ impl Shell {
             sidecar_collapsed_now: None,
             sidecar_flip: None,
             sidecar_popover: None,
+            sidecar_previous_agents_open: false,
+            sidecar_clock: None,
             sidecar_press_found_popover: false,
             computer_thumbnail: crate::computer::preview::store(cx).map(|store| {
                 cx.new(|cx| crate::computer::thumbnail::ComputerThumbnail::new(store, cx))
@@ -5103,6 +5108,14 @@ impl Shell {
             transcript.set_workspace_link_handler(links)
         });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
+        let harness = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness);
         let fetch = if frozen {
             self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
         } else {
@@ -5115,6 +5128,7 @@ impl Shell {
             SubagentTab {
                 doc_id,
                 title: title.into(),
+                harness,
                 transcript,
                 _fetch: fetch,
                 _events: events,
@@ -13775,6 +13789,7 @@ impl Shell {
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
+            let mut icon_tint = None;
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(id) => self
@@ -13788,8 +13803,33 @@ impl Shell {
                         }
                     })
                     .unwrap_or(icons::LIST),
-                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
-                RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::SideChat(id) => {
+                    let delegated = self.side_chats.get(&id).and_then(|tab| {
+                        let state = tab.state.read(cx);
+                        let chat = state.selected_chat_row()?;
+                        chat.delegation.as_ref()?;
+                        let config = chat.config.as_ref();
+                        Some(crate::pickers::agent_brand_icon(
+                            config.map(|c| c.harness),
+                            config.and_then(|c| c.model.as_deref()),
+                        ))
+                    });
+                    match delegated {
+                        Some((mark, tint)) => {
+                            icon_tint = tint;
+                            mark
+                        }
+                        None => icons::CHAT_ROUND_LINE,
+                    }
+                }
+                RightSurface::Subagent(id) => {
+                    let (mark, tint) = crate::pickers::agent_brand_icon(
+                        self.subagent_tabs.get(&id).and_then(|tab| tab.harness),
+                        None,
+                    );
+                    icon_tint = tint;
+                    mark
+                }
                 RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
@@ -13983,13 +14023,10 @@ impl Shell {
                             .when(!is_active, |icon| icon.opacity(0.78))
                             .into_any_element()
                         } else {
+                            let color = icon_tint.unwrap_or(theme.text_muted);
                             icon(icon_path)
                                 .size(px(12.0))
-                                .text_color(if is_active {
-                                    theme.text_muted
-                                } else {
-                                    theme.text_muted.opacity(0.7)
-                                })
+                                .text_color(if is_active { color } else { color.opacity(0.7) })
                                 .into_any_element()
                         }),
                 )

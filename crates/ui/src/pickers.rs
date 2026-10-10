@@ -7462,6 +7462,29 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
     }
 }
 
+pub(crate) fn agent_brand_icon(
+    harness: Option<HarnessId>,
+    model: Option<&str>,
+) -> (&'static str, Option<gpui::Hsla>) {
+    let model = model
+        .map(|m| m.split('[').next().unwrap_or(m).trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let (provider, id) = model.split_once('/').unwrap_or(("", &model));
+    let maker = match provider {
+        "anthropic" => Some(HarnessId::ClaudeCode),
+        "openai" => Some(HarnessId::Codex),
+        "xai" => Some(HarnessId::Grok),
+        _ if id.starts_with("claude") => Some(HarnessId::ClaudeCode),
+        _ if id.starts_with("gpt") || id.contains("codex") => Some(HarnessId::Codex),
+        _ if id.starts_with("grok") => Some(HarnessId::Grok),
+        _ => None,
+    };
+    maker
+        .or(harness)
+        .map(harness_brand_icon)
+        .unwrap_or((crate::icons::BOT, None))
+}
+
 /// `ZERON_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
 /// production launches never set it, so the mock never surfaces there.
 fn mock_harness_enabled() -> bool {
@@ -8065,6 +8088,34 @@ mod tests {
         assert!(needs_switch_warning(true, None, "opus"));
         assert!(!needs_switch_warning(true, Some("opus"), "opus"));
         assert!(!needs_switch_warning(false, Some("fable"), "opus"));
+    }
+
+    #[test]
+    fn agent_mark_follows_the_model_maker_then_the_harness() {
+        let mark = |harness, model| agent_brand_icon(harness, model).0;
+        let opencode = Some(HarnessId::Opencode);
+        assert_eq!(
+            mark(opencode, Some("anthropic/claude-opus-5")),
+            crate::icons::CLAUDE_MARK
+        );
+        assert_eq!(mark(opencode, Some("xai/grok-4")), crate::icons::GROK_MARK);
+        assert_eq!(
+            mark(Some(HarnessId::Cursor), Some("gpt-5.6-sol")),
+            crate::icons::OPENAI_MARK
+        );
+        assert_eq!(
+            mark(Some(HarnessId::ClaudeCode), Some("opus[1m]")),
+            crate::icons::CLAUDE_MARK
+        );
+        assert_eq!(
+            mark(opencode, Some("google/gemini-3")),
+            crate::icons::OPENCODE_MARK
+        );
+        assert_eq!(
+            mark(Some(HarnessId::Codex), None),
+            crate::icons::OPENAI_MARK
+        );
+        assert_eq!(mark(None, None), crate::icons::BOT);
     }
 
     #[test]
