@@ -19789,6 +19789,13 @@ mod tests {
             }),
             ("Advisor", String::new())
         );
+        assert_eq!(
+            tool_chip_content(&ToolCall::Unknown {
+                name: "Skill".into(),
+                input: Some(serde_json::json!({ "skill": "code-review", "args": "high" })),
+            }),
+            ("Skill", "code-review".to_string())
+        );
         assert!(
             call_block(&ToolCall::Unknown {
                 name: zeron_proto::ADVISOR_TOOL_NAME.into(),
