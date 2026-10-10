@@ -7358,7 +7358,7 @@ impl Pickers {
                     .truncate()
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.warning)
-                    .child(SharedString::from(format!("{}: {warning}", choice.label))),
+                    .child(SharedString::from(warning.clone())),
             )
         });
 
@@ -7775,6 +7775,7 @@ fn stepped_track(
 fn context_window_warning(
     option_id: &str,
     choice_id: &str,
+    selected: bool,
     usage: Option<zeron_proto::ContextUsage>,
 ) -> Option<String> {
     if option_id != "contextWindow" {
@@ -7782,11 +7783,16 @@ fn context_window_warning(
     }
     let capacity = zeron_harness::claude::catalog::context_window_tokens(choice_id)?;
     let tokens = usage?.tokens?;
+    let in_use = compact_tokens(tokens);
     (tokens > capacity).then(|| {
-        format!(
-            "~{} in use; the next message compacts it",
-            compact_tokens(tokens)
-        )
+        if selected {
+            format!("~{in_use} in use; the next message compacts it")
+        } else {
+            format!(
+                "Switching to {} compacts this chat (~{in_use} in use)",
+                compact_tokens(capacity)
+            )
+        }
     })
 }
 
@@ -7848,7 +7854,12 @@ fn build_setting_groups(
                     reasoning: None,
                     selected: selected == choice.id,
                     default: option.default_choice == choice.id,
-                    warning: context_window_warning(&option.id, &choice.id, usage),
+                    warning: context_window_warning(
+                        &option.id,
+                        &choice.id,
+                        selected == choice.id,
+                        usage,
+                    ),
                 })
                 .collect(),
         });
@@ -12212,24 +12223,31 @@ mod tests {
             })
         };
         assert_eq!(
-            context_window_warning("contextWindow", "200k", usage(Some(230_412))).as_deref(),
+            context_window_warning("contextWindow", "200k", true, usage(Some(230_412))).as_deref(),
             Some("~230K in use; the next message compacts it")
         );
         assert_eq!(
-            context_window_warning("contextWindow", "200k", usage(Some(200_000))),
+            context_window_warning("contextWindow", "200k", false, usage(Some(230_412))).as_deref(),
+            Some("Switching to 200K compacts this chat (~230K in use)")
+        );
+        assert_eq!(
+            context_window_warning("contextWindow", "200k", false, usage(Some(200_000))),
             None
         );
         assert_eq!(
-            context_window_warning("contextWindow", "1m", usage(Some(230_412))),
+            context_window_warning("contextWindow", "1m", true, usage(Some(230_412))),
             None
         );
         assert_eq!(
-            context_window_warning("contextWindow", "200k", usage(None)),
+            context_window_warning("contextWindow", "200k", false, usage(None)),
             None
         );
-        assert_eq!(context_window_warning("contextWindow", "200k", None), None);
         assert_eq!(
-            context_window_warning("serviceTier", "200k", usage(Some(230_412))),
+            context_window_warning("contextWindow", "200k", false, None),
+            None
+        );
+        assert_eq!(
+            context_window_warning("serviceTier", "200k", false, usage(Some(230_412))),
             None
         );
         assert_eq!(compact_tokens(200_001), "200K");
