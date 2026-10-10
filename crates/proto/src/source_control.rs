@@ -321,32 +321,6 @@ pub struct GeneratedCommitMessage {
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateChangeRequestRequest {
-    #[serde(flatten)]
-    pub target: WorkspaceTarget,
-    pub host: String,
-    pub repository: String,
-    pub head: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub draft: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreatedChangeRequest {
-    pub host: String,
-    pub repository: String,
-    pub number: u64,
-    pub url: String,
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -748,28 +722,6 @@ mod tests {
             message: "Fix the thing".into(),
             harness: HarnessId::Codex,
             model: "gpt-5".into(),
-        });
-    }
-
-    #[test]
-    fn change_request_creation_round_trips() {
-        let json = round_trip(&CreateChangeRequestRequest {
-            target: space_target(),
-            host: "github.com".into(),
-            repository: "acme/zeron".into(),
-            head: "feature/x".into(),
-            base: None,
-            title: "Title".into(),
-            body: "Body".into(),
-            draft: true,
-        });
-        assert!(json.get("base").is_none());
-        assert_eq!(json["draft"], true);
-        round_trip(&CreatedChangeRequest {
-            host: "github.com".into(),
-            repository: "acme/zeron".into(),
-            number: 7,
-            url: "https://github.com/acme/zeron/pull/7".into(),
         });
     }
 }

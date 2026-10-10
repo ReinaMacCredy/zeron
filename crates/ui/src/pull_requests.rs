@@ -1,2960 +1,5416 @@
-mod actions;
-mod activity;
-mod chat;
-mod code;
-mod detail;
-mod devices;
-mod filters;
-mod git;
-mod handoff;
-mod paging;
-mod review;
-mod tabs;
-
-pub use chat::{
-    ACTION_NOTE as CHAT_ACTION_NOTE, CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall,
-    ContextChip, GithubWrite, PrChatContext, Suggestion, chat_shortcut,
-    extract_badge as extract_chat_context_badge, failure_text as chat_write_failure,
-    first_prompt as first_chat_prompt, latest_reply as latest_chat_reply,
-    live_sessions as live_chat_sessions,
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    time::Instant,
 };
-pub use filters::PullRequestListPrefs;
-
-use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, Hsla,
-    IntoElement, MouseButton, MouseMoveEvent, ParentElement, Render, SharedString, Styled,
-    Subscription, Task, Window, div, percentage, prelude::*, px,
+    AnyElement, Context, Entity, Focusable, IntoElement, ListOffset, ListState, Render,
+    ScrollHandle, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestInvolvement,
-    ChangeRequestListItem, ChangeRequestListing, ChangeRequestMergeability, ChangeRequestRef,
-    ChangeRequestReviewDecision, ChangeRequestState, ChangeRequestStats,
-    ListChangeRequestStatsRequest,
+    ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestPage,
+    ChangeRequestReviewDecision, Device,
 };
-use zeron_rpc::methods;
+use zeron_rpc::{RpcError, capability_errors, methods};
+
+use zeron_proto::change_request_assessment::{Blocker, CiState, Facts};
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
-use crate::popover::Loadable;
+use crate::popover;
+use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::{Appearance, Theme, oklch};
+use crate::theme::Theme;
 
-const CONTAINER_MAX_WIDTH: f32 = 1152.0;
-const CONTAINER_PAD_X: f32 = 24.0;
-const GHOST_ROWS: usize = 7;
-const NARROW_TOPBAR_WIDTH: f32 = 1000.0;
-const COMPACT_WIDTH: f32 = 760.0;
-const TOPBAR_HEIGHT: f32 = 44.0;
-const ROW_HEIGHT_HINT: f32 = 74.0;
-const TAB_GAP: f32 = 2.0;
-const TAB_BODY_SHIFT: f32 = 8.0;
+const PR_PAGE_MAX_WIDTH: f32 = 760.0;
+const PR_PAGE_HORIZONTAL_PADDING: f32 = 40.0;
+const PR_TABLE_ROW_HEIGHT: f32 = 64.0;
+const PR_SCROLL_FADE_BAND: f32 = 24.0;
+/// A stored first page younger than this is shown as is; an older one is
+/// shown and refreshed from GitHub behind it.
+const STORED_PAGE_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// Every control in the board's header and filter rows shares one height.
+const HEADER_CONTROL_HEIGHT: f32 = 32.0;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PageTab {
-    #[default]
-    PullRequests,
-    Git,
+/// Where the loaded listing stands relative to everything GitHub matched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Paging {
+    next_cursor: Option<String>,
+    total: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PullRequestsPageError {
+    CliUnavailable,
+    Authentication,
+    RateLimited,
+    Network,
+    RemoteOffline(String),
+    UpdateRequired(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PullRequestsLoadState {
+    Idle,
+    Loading,
+    Ready,
+    Failed(PullRequestsPageError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PullRequestGroup {
-    Authored,
-    ReviewRequested,
-    Others,
+enum PullRequestSortField {
+    Changes,
+    Opened,
+    Updated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PullRequestSort {
+    field: PullRequestSortField,
+    direction: SortDirection,
+}
+
+/// One row of the virtualized board: a group's header, one pull request in
+/// it, or the paging footer. Only rows on screen are built each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoardRow {
+    Group {
+        group: PullRequestGroup,
+        count: usize,
+        closed: bool,
+        first: bool,
+    },
+    /// `index` into [`Board::items`]; `first`/`last` round the group's card.
+    Item {
+        index: usize,
+        first: bool,
+        last: bool,
+    },
+    Footer,
+}
+
+/// The board's rows, rebuilt only when what they show changes.
+struct Board {
+    /// The sorted, searched list this board was built from. Held so its
+    /// identity can't be reused by a later list while the board lives.
+    sorted: Rc<Vec<ChangeRequestListItem>>,
+    personal_view: PersonalView,
+    stars: Vec<String>,
+    collapsed: Vec<PullRequestGroup>,
+    footer: bool,
+    /// The pull requests shown after the personal view's filter.
+    items: Rc<Vec<ChangeRequestListItem>>,
+    rows: Vec<BoardRow>,
+}
+
+impl Board {
+    /// What identifies a row across rebuilds, so scrolling keeps its place
+    /// when pages arrive or groups collapse.
+    fn row_key(&self, row: &BoardRow) -> Option<String> {
+        Some(match row {
+            BoardRow::Group { group, .. } => format!("group:{}", group.key()),
+            BoardRow::Item { index, .. } => format!("item:{}", self.items.get(*index)?.url),
+            BoardRow::Footer => "footer".into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PullRequestGroup {
+    Attention,
+    Review,
+    Approved,
+    Drafts,
 }
 
 impl PullRequestGroup {
+    const ALL: [Self; 4] = [Self::Attention, Self::Review, Self::Approved, Self::Drafts];
     fn label(self) -> &'static str {
         match self {
-            Self::Authored => "Authored",
-            Self::ReviewRequested => "Review requested",
-            Self::Others => "Others",
+            Self::Attention => "Needs attention",
+            Self::Review => "Awaiting review",
+            Self::Approved => "Approved",
+            Self::Drafts => "Drafts",
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Self::Attention => "attention",
+            Self::Review => "review",
+            Self::Approved => "approved",
+            Self::Drafts => "drafts",
         }
     }
 }
 
-fn authored_by_viewer(item: &ChangeRequestListItem, viewers: &BTreeMap<String, String>) -> bool {
-    let (Some(author), Some(viewer)) = (
-        item.author.as_ref(),
-        viewers.get(&devices::viewer_key(item)),
-    ) else {
-        return false;
-    };
-    author.login.eq_ignore_ascii_case(viewer)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum ListEntry {
-    Controls,
-    Ghost(usize, Option<String>),
-    State {
-        title: String,
-        description: String,
-        with_mark: bool,
-        clear_search: bool,
-    },
-    Header {
-        group: PullRequestGroup,
-        first: bool,
-    },
-    Row {
-        index: usize,
-        gap: bool,
-    },
-    Notice(ChangeRequestFailure),
-    More,
-}
-
-#[derive(Default)]
-struct ListFrame {
-    row_width: f32,
-    search_text: String,
-    search_busy: bool,
-    devices: Vec<devices::ListDevice>,
-}
-
-#[derive(Clone, Copy)]
-struct Indexed<'a> {
-    index: usize,
-    item: &'a ChangeRequestListItem,
-}
-
-impl std::ops::Deref for Indexed<'_> {
-    type Target = ChangeRequestListItem;
-
-    fn deref(&self) -> &ChangeRequestListItem {
-        self.item
-    }
-}
-
-pub(crate) fn group_items<T: Copy + std::ops::Deref<Target = ChangeRequestListItem>>(
-    items: &[T],
-    viewers: &BTreeMap<String, String>,
-) -> Vec<(PullRequestGroup, Vec<T>)> {
-    let mut authored = Vec::new();
-    let mut review_requested = Vec::new();
-    let mut others = Vec::new();
-    for item in items {
-        if authored_by_viewer(item, viewers) {
-            authored.push(*item);
-        } else if item.viewer_review_requested {
-            review_requested.push(*item);
-        } else {
-            others.push(*item);
-        }
-    }
-    [
-        (PullRequestGroup::Authored, authored),
-        (PullRequestGroup::ReviewRequested, review_requested),
-        (PullRequestGroup::Others, others),
-    ]
-    .into_iter()
-    .filter(|(_, items)| !items.is_empty())
-    .collect()
-}
-
-fn readiness_tier(item: &ChangeRequestListItem) -> u8 {
-    if item.mergeability == ChangeRequestMergeability::Conflicting {
-        4
-    } else if item.state != ChangeRequestState::Open {
-        3
-    } else if item.is_draft {
-        2
-    } else if item.checks_state == Some(ChangeRequestChecksState::Passing)
-        && item.review_decision == Some(ChangeRequestReviewDecision::Approved)
-    {
-        0
-    } else if item.checks_state == Some(ChangeRequestChecksState::Passing) {
-        1
+fn request_group(item: &ChangeRequestListItem) -> PullRequestGroup {
+    let assessment = Facts::from_item(item).assess();
+    if item.is_draft {
+        PullRequestGroup::Drafts
+    } else if !assessment.blockers.is_empty() || !assessment.attention.is_empty() {
+        PullRequestGroup::Attention
+    } else if item.review_decision == ChangeRequestReviewDecision::Approved {
+        PullRequestGroup::Approved
     } else {
-        2
+        PullRequestGroup::Review
     }
 }
 
-pub(crate) fn change_size(item: &ChangeRequestListItem) -> u64 {
-    item.additions + item.deletions
-}
-
-pub(crate) fn rank_by_merge_readiness<T: std::ops::Deref<Target = ChangeRequestListItem>>(
-    items: &mut [T],
-) {
-    items.sort_by(|left, right| {
-        let size = change_size;
-        readiness_tier(left)
-            .cmp(&readiness_tier(right))
-            .then_with(|| (size(right) > 0).cmp(&(size(left) > 0)))
-            .then_with(|| size(left).cmp(&size(right)))
-            .then_with(|| right.updated_at.cmp(&left.updated_at))
-    });
-}
-
-pub(crate) fn matches_query(item: &ChangeRequestListItem, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return true;
+fn request_glyph(item: &ChangeRequestListItem) -> &'static str {
+    if item.is_draft {
+        icons::PULL_REQUEST_DRAFT
+    } else {
+        icons::PULL_REQUEST
     }
-    let haystack = format!(
-        "#{} {} {} {} {}",
-        item.number,
+}
+
+fn request_color(item: &ChangeRequestListItem, theme: &Theme) -> gpui::Hsla {
+    if item.is_draft {
+        theme.text_muted
+    } else if item.mergeability == ChangeRequestMergeability::Conflicting {
+        theme.danger
+    } else if item.review_decision == ChangeRequestReviewDecision::ChangesRequested {
+        theme.warning
+    } else {
+        theme.success
+    }
+}
+
+fn matches_query(item: &ChangeRequestListItem, query: &str) -> bool {
+    let text = format!(
+        "{} {} #{} {} {}",
         item.title,
         item.repository,
-        item.head_ref,
-        item.author
-            .as_ref()
-            .map(|author| author.login.as_str())
-            .unwrap_or_default(),
+        item.number,
+        status_description(item),
+        item.author.login
     )
     .to_lowercase();
-    haystack.contains(&query)
+    query
+        .split_whitespace()
+        .all(|word| text.contains(&word.to_lowercase()))
 }
 
-pub(crate) fn relative_time(now: DateTime<Utc>, at: DateTime<Utc>) -> String {
-    let seconds = (now - at).num_seconds();
-    if seconds < 60 {
-        return "just now".into();
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return format!("{minutes}m ago");
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-    format!("{}d ago", hours / 24)
+impl PullRequestSort {
+    const DEFAULT: Self = Self {
+        field: PullRequestSortField::Updated,
+        direction: SortDirection::Descending,
+    };
 }
 
-pub(crate) fn failure_message(failure: ChangeRequestFailure) -> &'static str {
-    match failure {
-        ChangeRequestFailure::CliUnavailable => {
-            "GitHub CLI (`gh`) is required to browse pull requests. Install it from https://cli.github.com/ and reload."
-        }
-        ChangeRequestFailure::Authentication => {
-            "GitHub CLI is not authenticated. Run `gh auth login` and retry."
-        }
-        ChangeRequestFailure::RateLimited => "GitHub's rate limit was reached. Try again shortly.",
-        ChangeRequestFailure::Timeout => "GitHub took too long to answer.",
-        ChangeRequestFailure::Decode => "GitHub returned a response that could not be read.",
-        ChangeRequestFailure::CommandFailed => "GitHub CLI could not list pull requests.",
-        ChangeRequestFailure::RepositoryUnavailable => "This folder is not a Git checkout.",
-        ChangeRequestFailure::UnsupportedRepository => {
-            "Change requests cannot be browsed for this project's host yet."
-        }
-    }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PersonalView {
+    #[default]
+    Everything,
+    NeedsYou,
+    Starred,
 }
 
-fn shown_failure(failure: ChangeRequestFailure) -> bool {
-    !matches!(
-        failure,
-        ChangeRequestFailure::RepositoryUnavailable | ChangeRequestFailure::UnsupportedRepository
-    )
+/// Stable across devices and remote spellings; stars are local preferences.
+pub(crate) fn star_key(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.trim_end_matches('/').to_ascii_lowercase();
+    };
+    parsed.set_fragment(None);
+    parsed.set_query(None);
+    let path = parsed.path().trim_end_matches('/').to_owned();
+    parsed.set_path(&path);
+    parsed.to_string().to_ascii_lowercase()
 }
 
-#[derive(Clone, Copy)]
-struct Tones {
-    open: Hsla,
-    merged: Hsla,
-    closed: Hsla,
-    draft: Hsla,
-    conflict: Hsla,
-    pending: Hsla,
-    approved_text: Hsla,
-    changes_text: Hsla,
-}
-
-impl Tones {
-    fn of(theme: &Theme) -> Self {
-        let dark = theme.appearance == Appearance::Dark;
-        let alpha = |color: Hsla, a: f32| Hsla { a, ..color };
-        if dark {
-            Self {
-                open: alpha(oklch(0.845, 0.143, 164.978), 0.9),
-                merged: alpha(oklch(0.811, 0.111, 293.571), 0.9),
-                closed: alpha(oklch(0.808, 0.114, 19.571), 0.9),
-                draft: alpha(oklch(0.705, 0.015, 286.067), 0.8),
-                conflict: theme.danger,
-                pending: alpha(oklch(0.828, 0.189, 84.429), 0.9),
-                approved_text: alpha(oklch(0.765, 0.177, 163.223), 0.8),
-                changes_text: alpha(oklch(0.828, 0.189, 84.429), 0.8),
-            }
+pub(crate) fn star_button(url: &str, theme: &Theme, cx: &gpui::App) -> gpui::Stateful<gpui::Div> {
+    let key = star_key(url);
+    let starred = crate::settings::current(cx)
+        .pull_request_stars
+        .contains(&key);
+    let label = if starred {
+        "Unstar pull request"
+    } else {
+        "Star pull request"
+    };
+    div()
+        .id(SharedString::from(format!("pr-star-{key}")))
+        .debug_selector(|| "pr-star".into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .aria_toggled(if starred {
+            gpui::Toggled::True
         } else {
-            Self {
-                open: oklch(0.596, 0.145, 163.225),
-                merged: oklch(0.541, 0.281, 293.009),
-                closed: oklch(0.577, 0.245, 27.325),
-                draft: oklch(0.552, 0.016, 285.938),
-                conflict: theme.danger,
-                pending: oklch(0.666, 0.179, 58.318),
-                approved_text: alpha(oklch(0.596, 0.145, 163.225), 0.9),
-                changes_text: alpha(oklch(0.666, 0.179, 58.318), 0.9),
+            gpui::Toggled::False
+        })
+        .tab_index(0)
+        .size(px(28.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.glass_hover()))
+        .tooltip(widgets::text_tooltip(label))
+        .child(
+            icon(if starred {
+                icons::STAR_BOLD
+            } else {
+                icons::STAR
+            })
+            .size(px(14.0))
+            .text_color(if starred {
+                theme.warning
+            } else {
+                theme.text_muted
+            }),
+        )
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            if crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                if settings.pull_request_stars.contains(&key) {
+                    settings.pull_request_stars.retain(|value| value != &key);
+                } else {
+                    settings.pull_request_stars.push(key.clone());
+                }
+            }) {
+                cx.refresh_windows();
             }
-        }
-    }
-
-    fn glyph(self, item: &ChangeRequestListItem) -> (&'static str, Hsla, String) {
-        match item.state {
-            ChangeRequestState::Merged => (icons::LUCIDE_GIT_MERGE, self.merged, "Merged".into()),
-            ChangeRequestState::Closed => (
-                icons::LUCIDE_GIT_PULL_REQUEST_CLOSED,
-                self.closed,
-                "Closed".into(),
-            ),
-            ChangeRequestState::Open if item.is_draft => (
-                icons::LUCIDE_GIT_PULL_REQUEST_DRAFT,
-                self.draft,
-                "Draft".into(),
-            ),
-            ChangeRequestState::Open
-                if item.mergeability == ChangeRequestMergeability::Conflicting =>
-            {
-                (
-                    icons::LUCIDE_TRIANGLE_ALERT,
-                    self.conflict,
-                    format!("Conflicts with {}", item.base_ref),
-                )
-            }
-            ChangeRequestState::Open => (icons::LUCIDE_GIT_PULL_REQUEST, self.open, "Open".into()),
-        }
-    }
-
-    fn checks(self, state: ChangeRequestChecksState) -> (&'static str, Hsla) {
-        match state {
-            ChangeRequestChecksState::Passing => (icons::LUCIDE_CIRCLE_CHECK, self.open),
-            ChangeRequestChecksState::Failing => (icons::LUCIDE_CIRCLE_X, self.conflict),
-            ChangeRequestChecksState::Pending => (icons::LUCIDE_CIRCLE_DOT, self.pending),
-        }
-    }
+        })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PullRequestKey {
-    host: String,
-    repository: String,
-    number: u64,
-    device: Option<String>,
-}
-
-impl PullRequestKey {
-    fn of(item: &ChangeRequestListItem) -> Self {
-        Self {
-            host: item.host.clone(),
-            repository: item.repository.clone(),
-            number: item.number,
-            device: item.device_id.clone(),
-        }
-    }
-
-    fn route(&self, params: serde_json::Value) -> serde_json::Value {
-        routed(params, self.device.as_deref())
-    }
-}
-
-fn routed(mut params: serde_json::Value, device: Option<&str>) -> serde_json::Value {
-    if let (Some(device), Some(map)) = (device, params.as_object_mut()) {
-        map.insert("targetDeviceId".into(), device.into());
-    }
-    params
-}
-
-pub use handoff::ChatHandoff;
-
-pub(crate) fn parse_pull_request_url(url: &str) -> Option<(String, String, u64)> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let rest = rest.split(['?', '#']).next()?;
-    let mut parts = rest.split('/');
-    let host = parts.next()?.to_ascii_lowercase();
-    if !(host == "github.com" || host.starts_with("github.") || host.ends_with(".github.com")) {
-        return None;
-    }
-    let owner = parts.next().filter(|part| !part.is_empty())?;
-    let name = parts.next().filter(|part| !part.is_empty())?;
-    if parts.next()? != "pull" {
-        return None;
-    }
-    let number = parts.next()?.parse::<u64>().ok().filter(|n| *n > 0)?;
-    Some((host, format!("{owner}/{name}").to_ascii_lowercase(), number))
-}
-
-pub(crate) fn link_targets(state: &AppState) -> Vec<Option<String>> {
-    devices::list_devices(
-        state.local_device_id.as_deref(),
-        &state.devices,
-        &state.spaces,
-        Utc::now(),
-    )
-    .iter()
-    .map(devices::ListDevice::target)
-    .collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageMode {
-    Page,
-    Surface(PageTab),
-}
-
-pub enum PullRequestsEvent {
-    OpenInPage(PageTab),
-    OpenChat(ChatHandoff),
-    ToggleChat,
-    OpenSettings(crate::shell::SettingsSection),
-}
-
+/// Repository-scoped dashboard with lazy, cached relationship filters.
 pub struct PullRequestsPage {
     state: Entity<AppState>,
     search: Entity<ComposerInput>,
-    _search_sub: Subscription,
-    listing: Loadable<ChangeRequestListing>,
-    listed_repository: Option<String>,
-    refreshing: bool,
-    load_task: Option<Task<()>>,
-    list_state: gpui::ListState,
-    entries: Vec<ListEntry>,
-    frame: ListFrame,
-    tabs: Vec<PullRequestKey>,
-    active: Option<PullRequestKey>,
-    details: HashMap<PullRequestKey, detail::DetailState>,
-    hovered_tab: Option<PullRequestKey>,
-    panel_width: Option<f32>,
-    resize_from: Option<(f32, f32)>,
-    stats_task: Option<Task<()>>,
-    checks_popover: Option<detail::ChecksPopover>,
-    prefs: PullRequestListPrefs,
-    menu: crate::popover::Popup<filters::ListMenu>,
-    author_search: Entity<ComposerInput>,
-    _author_search_sub: Subscription,
-    sent_query: String,
-    sent: (String, zeron_proto::ChangeRequestListFilters),
-    debounce_task: Option<Task<()>>,
-    toasts: Vec<(u64, SharedString, Option<SharedString>)>,
-    confirm: Option<actions::Confirm>,
-    handoff: Option<(PullRequestKey, handoff::Handoff)>,
-    limit: u32,
-    paged_key: String,
-    last_read: std::time::Instant,
-    last_interaction: std::time::Instant,
-    window_active: bool,
+    query: String,
+    repository_input: Entity<ComposerInput>,
+    repository: Option<String>,
+    initial_scope_attempted: bool,
+    initial_scope_task: Option<Task<()>>,
+    resolving_project: Option<ProjectRef>,
+    project_repositories: HashMap<ProjectRef, String>,
+    project_icons: crate::shell::project_icon::ProjectIcons,
+    /// The project the board was last opened from. Opening it from another
+    /// project follows that project; an explicit choice stands until then.
+    seen_context: Option<ProjectRef>,
+    _repository_events: Subscription,
+    snapshots: Vec<(
+        (Option<String>, String, ChangeRequestFilter),
+        Vec<ChangeRequestListItem>,
+        Instant,
+        Paging,
+    )>,
+    paging: Paging,
+    /// The next page, while it loads; `None` when idle.
+    more_task: Option<Task<()>>,
+    more_error: Option<PullRequestsPageError>,
+    /// The current refresh failure was already toasted.
+    refresh_error_shown: bool,
+    selected_url: Option<String>,
+    collapsed_groups: HashSet<PullRequestGroup>,
+    /// The virtualized results list and the rows it shows.
+    board_list: ListState,
+    board: Option<Rc<Board>>,
+    /// The results render through `board_list` this frame (not an empty,
+    /// error or skeleton state), so the rail reads the list's geometry.
+    board_list_active: bool,
+    _search_events: Subscription,
+    /// `None` keeps local calls direct; a value is forwarded by the relay.
+    target_device: Option<String>,
+    items: Vec<ChangeRequestListItem>,
+    view_items: Option<Rc<Vec<ChangeRequestListItem>>>,
+    sort: PullRequestSort,
+    filter: ChangeRequestFilter,
+    personal_view: PersonalView,
+    /// A new repository starts on Authored; only this automatic choice may
+    /// fall back to All. Explicit choices and settled defaults survive visits.
+    automatic_filter: bool,
+    scope_filters: Vec<((Option<String>, String), ChangeRequestFilter)>,
+    filter_fades: crate::motion::HoverFades,
+    load_state: PullRequestsLoadState,
+    last_loaded_at: Option<Instant>,
+    /// Whether the first page bypassed the engine's cache.
+    refreshed: bool,
+    generation: u64,
+    request_task: Option<Task<()>>,
     visible: bool,
-    poll_task: Option<Task<()>>,
-    checkout_menu: Option<(PullRequestKey, crate::popover::Popup<()>)>,
-    toast_seq: u64,
-    tab_menu: crate::popover::Popup<(PullRequestKey, gpui::Point<gpui::Pixels>)>,
-    git_view: Option<Entity<git::GitTab>>,
-    git_events: Vec<Subscription>,
-    open_when_listed: Option<zeron_proto::CreatedChangeRequest>,
-    chat_open: bool,
-    mode: PageMode,
-    layout_width: Option<f32>,
-    shown_tab: PageTab,
-    tab_widths: std::rc::Rc<std::cell::Cell<[f32; 2]>>,
-    tab_slide: Option<TabSlide>,
+    scroll: widgets::PageScroll,
+    content_width: Option<f32>,
+    device_menu: popover::Popup<()>,
+    sort_menu: popover::Popup<()>,
+    repository_menu: popover::Popup<()>,
+    repository_scroll: widgets::PageScroll,
+    /// Menu triggers, so a menu closed from the keyboard hands focus back.
+    repository_focus: gpui::FocusHandle,
+    sort_focus: gpui::FocusHandle,
+    device_focus: gpui::FocusHandle,
+    /// The current option of an open sort or device menu, so a menu opened
+    /// from the keyboard starts there and Tab walks its options.
+    option_focus: gpui::FocusHandle,
+    return_focus: Option<gpui::FocusHandle>,
+    _observe: Subscription,
 }
-
-struct TabSlide {
-    from: (f32, f32),
-    started: std::time::Instant,
-}
-
-impl TabSlide {
-    fn progress(&self, now: std::time::Instant) -> f32 {
-        let spec = crate::motion::SEGMENT_SLIDE;
-        let total = spec.total().mul_f32(crate::motion::speed_scale());
-        spec.progress(
-            now.saturating_duration_since(self.started).as_secs_f32() / total.as_secs_f32(),
-        )
-    }
-}
-
-fn pill_target(tab: PageTab, widths: [f32; 2]) -> (f32, f32) {
-    match tab {
-        PageTab::PullRequests => (0.0, widths[0]),
-        PageTab::Git => (widths[0] + TAB_GAP, widths[1]),
-    }
-}
-
-impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
 
 impl PullRequestsPage {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::with_mode(state, PageMode::Page, cx)
+    pub(crate) fn preview(&self, url: &str) -> Option<ChangeRequestListItem> {
+        self.items.iter().find(|item| item.url == url).cloned()
     }
 
-    pub fn with_mode(state: Entity<AppState>, mode: PageMode, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| {
-            ComposerInput::with_context("Search pull requests, or label:bug", "PaletteSearch", cx)
-        });
-        let search_sub = cx.subscribe(&search, |page: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                page.schedule_search(cx);
-                cx.notify();
-            }
-        });
-        let author_search =
-            cx.new(|cx| ComposerInput::with_context("Search authors", "PaletteSearch", cx));
-        let author_search_sub = cx.subscribe(&author_search, |_, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                cx.notify();
-            }
-        });
-        let mut prefs = crate::settings::current(cx).pull_requests_list.clone();
-        if let PageMode::Surface(tab) = mode {
-            prefs.tab = tab;
+    pub(crate) fn select_url(&mut self, url: Option<String>, cx: &mut Context<Self>) {
+        self.selected_url = url;
+        cx.notify();
+    }
+    pub(crate) fn target_device(&self) -> Option<String> {
+        self.target_device.clone()
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll.scroll.set_offset(gpui::Point::default());
+        self.board_list.scroll_to(ListOffset::default());
+    }
+
+    /// How far the results list is scrolled, in pixels from the top.
+    #[cfg(test)]
+    fn board_scroll_offset(&self) -> gpui::Pixels {
+        -self.board_list.scroll_px_offset_for_scrollbar().y
+    }
+
+    /// The board's rows for the current list, view, stars and collapsed
+    /// groups. Rebuilt only when one of those changes; the list state is
+    /// spliced so the row at the top of the viewport stays put.
+    fn board(&mut self, cx: &mut Context<Self>) -> Rc<Board> {
+        let sorted = self
+            .view_items
+            .get_or_insert_with(|| {
+                let mut items: Vec<_> = self
+                    .items
+                    .iter()
+                    .filter(|item| matches_query(item, &self.query))
+                    .cloned()
+                    .collect();
+                sort_pull_requests(&mut items, self.sort);
+                Rc::new(items)
+            })
+            .clone();
+        let stars = crate::settings::current(cx).pull_request_stars;
+        let mut collapsed: Vec<_> = self.collapsed_groups.iter().copied().collect();
+        collapsed.sort_by_key(|group| group.key());
+        let footer = self.paging.next_cursor.is_some();
+        if let Some(board) = &self.board
+            && Rc::ptr_eq(&board.sorted, &sorted)
+            && board.personal_view == self.personal_view
+            && board.stars == stars
+            && board.collapsed == collapsed
+            && board.footer == footer
+        {
+            return board.clone();
         }
-        let listed_repository = prefs.repository.clone();
-        let shown_tab = prefs.tab;
-        let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(240.0));
-        list_state.splice_focusable(
-            0..0,
-            [Some(gpui::Focusable::focus_handle(search.read(cx), cx))],
-        );
+        let items: Vec<_> = sorted
+            .iter()
+            .filter(|item| match self.personal_view {
+                PersonalView::Everything => true,
+                PersonalView::NeedsYou => !Facts::from_item(item).assess().attention.is_empty(),
+                PersonalView::Starred => stars.contains(&star_key(&item.url)),
+            })
+            .cloned()
+            .collect();
+        let groups: Vec<_> = items.iter().map(request_group).collect();
+        let mut rows = Vec::new();
+        for group in PullRequestGroup::ALL {
+            let members: Vec<_> = (0..items.len())
+                .filter(|index| groups[*index] == group)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let closed = collapsed.contains(&group);
+            rows.push(BoardRow::Group {
+                group,
+                count: members.len(),
+                closed,
+                first: rows.is_empty(),
+            });
+            if !closed {
+                let last = members.len() - 1;
+                rows.extend(
+                    members
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, index)| BoardRow::Item {
+                            index,
+                            first: n == 0,
+                            last: n == last,
+                        }),
+                );
+            }
+        }
+        if footer && !rows.is_empty() {
+            rows.push(BoardRow::Footer);
+        }
+        let board = Rc::new(Board {
+            sorted,
+            personal_view: self.personal_view,
+            stars,
+            collapsed,
+            footer,
+            items: Rc::new(items),
+            rows,
+        });
+        let previous = self.board.replace(board.clone());
+        let unchanged = previous.as_ref().is_some_and(|previous| {
+            previous.rows.len() == board.rows.len()
+                && previous
+                    .rows
+                    .iter()
+                    .zip(&board.rows)
+                    .all(|(old, new)| previous.row_key(old) == board.row_key(new) && old == new)
+        });
+        if !unchanged {
+            let top = self.board_list.logical_scroll_top();
+            let anchor = previous
+                .as_ref()
+                .and_then(|previous| previous.rows.get(top.item_ix).map(|row| (previous, row)))
+                .and_then(|(previous, row)| previous.row_key(row));
+            self.board_list
+                .splice(0..self.board_list.item_count(), board.rows.len());
+            // Always land explicitly: a splice shifts a scroll position at or
+            // past the replaced range by the rows it inserts, so a list that
+            // was empty (position 0) would otherwise jump to its end.
+            let landing = anchor
+                .and_then(|anchor| {
+                    board
+                        .rows
+                        .iter()
+                        .position(|row| board.row_key(row).as_ref() == Some(&anchor))
+                })
+                .map_or(ListOffset::default(), |index| ListOffset {
+                    item_ix: index,
+                    offset_in_item: top.offset_in_item,
+                });
+            self.board_list.scroll_to(landing);
+        }
+        board
+    }
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        // The transcript's pattern: a virtualized list that tells the view
+        // when it scrolls, so the floating rail can follow.
+        let board_list = ListState::new(0, gpui::ListAlignment::Top, px(800.0))
+            .with_uniform_item_height(px(PR_TABLE_ROW_HEIGHT));
+        let weak = cx.entity().downgrade();
+        board_list.set_scroll_handler(move |_, _, cx| {
+            weak.update(cx, |_: &mut Self, cx| cx.notify()).ok();
+        });
+        let search = cx.new(|cx| {
+            ComposerInput::with_context("Search pull requests", "PaletteSearch", cx)
+                .with_text_metrics(12.0, 16.0)
+                .with_accessibility_role(gpui::Role::SearchInput)
+                .with_single_line()
+                .with_tab_stop()
+        });
+        let search_events = cx.subscribe(&search, |page: &mut Self, input, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                page.query = input.read(cx).text().to_string();
+                page.view_items = None;
+                page.scroll_to_top();
+                page.collapsed_groups.clear();
+                cx.notify();
+            }
+        });
+        let repository_input = cx.new(|cx| {
+            // The pickers' search metrics: no override, so the text and
+            // placeholder match every other search row.
+            ComposerInput::with_context("owner/repository", "PaletteSearch", cx)
+                .with_single_line()
+                .with_tab_stop()
+        });
+        let repository_events =
+            cx.subscribe(
+                &repository_input,
+                |page: &mut Self, _, event, cx| match event {
+                    ComposerInputEvent::Submitted => {
+                        page.return_focus = Some(page.repository_focus.clone());
+                        page.select_repository(cx);
+                    }
+                    ComposerInputEvent::Edited => {
+                        page.cancel_project_detection();
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            );
+        let observe = cx.observe(&state, |page, _, cx| {
+            if page.visible {
+                page.reconcile_target_device(cx);
+                page.initialize_repository(cx);
+                cx.notify();
+            }
+        });
+        let mut filter_fades = crate::motion::HoverFades::default();
+        filter_fades.set_at("pr-filter-authored", true, true, Instant::now());
         let mut page = Self {
             state,
             search,
-            _search_sub: search_sub,
-            listing: Loadable::Idle,
-            listed_repository,
-            refreshing: false,
-            load_task: None,
-            list_state,
-            entries: vec![ListEntry::Controls],
-            frame: ListFrame::default(),
-            tabs: Vec::new(),
-            active: None,
-            details: HashMap::new(),
-            hovered_tab: None,
-            panel_width: None,
-            resize_from: None,
-            stats_task: None,
-            checks_popover: None,
-            prefs,
-            menu: Default::default(),
-            author_search,
-            _author_search_sub: author_search_sub,
-            sent_query: String::new(),
-            sent: Default::default(),
-            debounce_task: None,
-            toasts: Vec::new(),
-            confirm: None,
-            handoff: None,
-            limit: paging::PAGE_SIZE,
-            paged_key: String::new(),
-            last_read: std::time::Instant::now(),
-            last_interaction: std::time::Instant::now(),
-            window_active: true,
+            query: String::new(),
+            repository_input,
+            repository: None,
+            initial_scope_attempted: false,
+            initial_scope_task: None,
+            resolving_project: None,
+            project_repositories: HashMap::new(),
+            project_icons: Default::default(),
+            seen_context: None,
+            _repository_events: repository_events,
+            snapshots: Vec::new(),
+            paging: Paging::default(),
+            more_task: None,
+            more_error: None,
+            refresh_error_shown: false,
+            selected_url: None,
+            collapsed_groups: HashSet::new(),
+            board_list,
+            board: None,
+            board_list_active: false,
+            _search_events: search_events,
+            target_device: None,
+            items: Vec::new(),
+            view_items: None,
+            sort: PullRequestSort::DEFAULT,
+            filter: ChangeRequestFilter::Authored,
+            personal_view: PersonalView::Everything,
+            automatic_filter: true,
+            scope_filters: Vec::new(),
+            filter_fades,
+            load_state: PullRequestsLoadState::Idle,
+            last_loaded_at: None,
+            refreshed: false,
+            generation: 0,
+            request_task: None,
+            // The entity is created lazily only while this route is active.
             visible: true,
-            poll_task: None,
-            checkout_menu: None,
-            toast_seq: 0,
-            tab_menu: Default::default(),
-            git_view: None,
-            git_events: Vec::new(),
-            open_when_listed: None,
-            chat_open: false,
-            mode,
-            layout_width: None,
-            shown_tab,
-            tab_widths: Default::default(),
-            tab_slide: None,
+            scroll: widgets::PageScroll::default(),
+            content_width: None,
+            device_menu: popover::Popup::default(),
+            sort_menu: popover::Popup::default(),
+            repository_menu: popover::Popup::default(),
+            repository_scroll: widgets::PageScroll::default(),
+            repository_focus: cx.focus_handle().tab_stop(true),
+            sort_focus: cx.focus_handle().tab_stop(true),
+            device_focus: cx.focus_handle().tab_stop(true),
+            option_focus: cx.focus_handle().tab_stop(true),
+            return_focus: None,
+            _observe: observe,
         };
-        if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
-            page.listing = Loadable::Ready(listing);
-        }
-        page.refresh(cx);
-        page.start_live_refresh(cx);
+        page.initialize_repository(cx);
         page
     }
 
-    pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        if matches!(self.listing, Loadable::Ready(_)) {
-            self.refreshing = true;
-        } else {
-            self.listing = Loadable::Loading;
-        }
-        let (text, typed) = &self.sent;
-        let mut request = filters::list_request(&self.prefs, text, typed);
-        let paged_key = serde_json::to_string(&request).unwrap_or_default();
-        if paged_key != self.paged_key {
-            self.paged_key = paged_key;
-            self.limit = paging::PAGE_SIZE;
-        }
-        request.limit = Some(self.limit);
-        let unsearched = request.query.is_none();
-        let searched = request.filters.repository.clone();
-        self.last_read = std::time::Instant::now();
-        let params = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
-        let devices = devices::chosen_devices(self.list_devices(cx), self.prefs.device.as_deref());
-        self.load_task = Some(cx.spawn(async move |this, cx| {
-            let answers = futures::future::join_all(devices.iter().map(|device| {
-                let params = routed(params.clone(), device.target().as_deref());
-                let engine = engine.clone();
-                async move {
-                    engine
-                        .client()
-                        .call(methods::LIST_CHANGE_REQUESTS, params)
-                        .await
-                        .map_err(|error| error.to_string())
-                        .and_then(|value| {
-                            serde_json::from_value::<ChangeRequestListing>(value)
-                                .map_err(|error| error.to_string())
-                        })
-                }
-            }))
-            .await;
-            let parsed = devices::merge_listings(devices.iter().zip(answers).collect());
-            this.update(cx, |page, cx| {
-                page.refreshing = false;
-                match parsed {
-                    Ok(mut listing) => {
-                        if let Loadable::Ready(previous) = &page.listing {
-                            for item in &mut listing.items {
-                                if let Some(known) = previous.items.iter().find(|known| {
-                                    PullRequestKey::of(known) == PullRequestKey::of(item)
-                                }) && change_size(item) == 0
-                                {
-                                    item.additions = known.additions;
-                                    item.deletions = known.deletions;
-                                }
-                            }
-                        }
-                        if unsearched
-                            && listing.errors.is_empty()
-                            && let Some(dir) = paging::snapshot_dir(cx)
-                        {
-                            paging::save_list(&dir, &listing);
-                        }
-                        let created = page.open_when_listed.take().and_then(|wanted| {
-                            listing
-                                .items
-                                .iter()
-                                .find(|item| {
-                                    item.number == wanted.number
-                                        && item.host.eq_ignore_ascii_case(&wanted.host)
-                                        && item.repository.eq_ignore_ascii_case(&wanted.repository)
-                                })
-                                .cloned()
-                        });
-                        page.listing = Loadable::Ready(listing);
-                        page.listed_repository = searched;
-                        page.load_stats(cx);
-                        if let Some(item) = created {
-                            page.open_pull_request(&item, cx);
-                        }
-                    }
-                    Err(error) if !matches!(page.listing, Loadable::Ready(_)) => {
-                        page.listing = Loadable::Error(error)
-                    }
-                    Err(_) => {}
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn load_stats(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Loadable::Ready(listing) = &self.listing else {
-            return;
-        };
-        let mut by_device: BTreeMap<Option<String>, Vec<ChangeRequestRef>> = BTreeMap::new();
-        for item in listing
-            .items
-            .iter()
-            .filter(|item| item.additions + item.deletions == 0)
-        {
-            by_device
-                .entry(item.device_id.clone())
-                .or_default()
-                .push(ChangeRequestRef {
-                    host: item.host.clone(),
-                    repository: item.repository.clone(),
-                    number: item.number,
-                });
-        }
-        if by_device.is_empty() {
+    /// Pick the board's repository without asking: the project it was opened
+    /// from (sidebar project, else the open session's), else the repository
+    /// viewed last, else the most recently active local Git project.
+    fn initialize_repository(&mut self, cx: &mut Context<Self>) {
+        if self.repository.is_some() || self.initial_scope_attempted || !self.visible {
             return;
         }
-        self.stats_task = Some(cx.spawn(async move |this, cx| {
-            let answers = futures::future::join_all(by_device.into_iter().map(|(device, refs)| {
-                let params = routed(
-                    serde_json::to_value(ListChangeRequestStatsRequest { refs })
-                        .unwrap_or(serde_json::Value::Null),
-                    device.as_deref(),
-                );
-                let engine = engine.clone();
-                async move {
-                    let stats = engine
-                        .client()
-                        .call(methods::LIST_CHANGE_REQUEST_STATS, params)
-                        .await
-                        .ok()
-                        .and_then(|value| serde_json::from_value::<ChangeRequestStats>(value).ok());
-                    (device, stats)
-                }
-            }))
-            .await;
-            this.update(cx, |page, cx| {
-                if let Loadable::Ready(listing) = &mut page.listing {
-                    for (device, stats) in answers {
-                        for stat in stats.map(|stats| stats.stats).unwrap_or_default() {
-                            if let Some(item) = listing.items.iter_mut().find(|item| {
-                                item.number == stat.reference.number
-                                    && item.repository == stat.reference.repository
-                                    && item.host == stat.reference.host
-                                    && item.device_id == device
-                            }) {
-                                item.additions = stat.additions;
-                                item.deletions = stat.deletions;
-                            }
-                        }
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn list_devices(&self, cx: &App) -> Vec<devices::ListDevice> {
         let state = self.state.read(cx);
-        devices::list_devices(
-            state.local_device_id.as_deref(),
-            &state.devices,
-            &state.spaces,
-            Utc::now(),
-        )
-    }
-
-    fn query(&self, cx: &App) -> String {
-        self.search.read(cx).text().to_string()
-    }
-
-    fn schedule_search(&mut self, cx: &mut Context<Self>) {
-        self.debounce_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(250))
-                .await;
-            this.update(cx, |page, cx| {
-                let query = page.query(cx).trim().to_string();
-                let parsed = filters::parse_query(&query);
-                page.sent_query = query;
-                if parsed != page.sent {
-                    page.sent = parsed;
-                    page.refresh(cx);
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
+        let saved = crate::settings::current(cx);
+        let context = match context_project(state, saved.space_filter.as_deref()) {
+            // Wait for the project's first frame, rather than pinning a stale scope.
+            ContextProject::Waiting => return,
+            ContextProject::Project(project) => Some(project),
+            ContextProject::None => None,
+        };
+        let local = state
+            .local_device_id
+            .clone()
+            .unwrap_or_else(|| engine.engine_info().device_id.clone());
+        let fallback = saved
+            .last_pull_request_repository
+            .filter(|repo| valid_repository_filter(repo))
+            .map(|repo| (repo, saved.last_pull_request_device));
+        let candidates =
+            match &context {
+                Some(project) => {
+                    let mut candidates = vec![project.clone()];
+                    if let Some(space) = state.spaces.iter().find(|space| {
+                        space.path == project.path && space.device_id == project.device
+                    }) {
+                        candidates.extend(
+                            state
+                                .project_members(space)
+                                .into_iter()
+                                .filter(|space| space.git_detected)
+                                .map(|space| ProjectRef {
+                                    path: space.path.clone(),
+                                    device: space.device_id.clone(),
+                                })
+                                .filter(|candidate| candidate != project),
+                        );
+                    }
+                    candidates.truncate(4);
+                    candidates
+                }
+                None if fallback.is_some() => Vec::new(),
+                None => recent_git_projects(state, &local),
+            };
+        self.seen_context = context;
+        if candidates.is_empty() {
+            if let Some((repo, target)) = fallback {
+                self.apply_initial_repository(repo, target, cx);
+            }
+            return;
+        }
+        let explicit_context = self.seen_context.is_some();
+        self.initial_scope_attempted = true;
+        self.load_state = PullRequestsLoadState::Loading;
+        self.initial_scope_task = Some(cx.spawn(async move |this, cx| {
+            let mut discovery_failed = false;
+            let mut found = None;
+            for project in candidates {
+                let target = (project.device != local).then(|| project.device.clone());
+                let mut params = params_for_target(target.as_deref());
+                params["cwd"] = project.path.clone().into();
+                let request = engine.client().call(methods::GET_CHANGE_REQUEST_REPOSITORY, params);
+                let deadline = cx.background_executor().timer(std::time::Duration::from_secs(3));
+                futures::pin_mut!(request, deadline);
+                let result = match futures::future::select(request, deadline).await {
+                    futures::future::Either::Left((result, _)) => result,
+                    futures::future::Either::Right(_) => Err(RpcError::Failed("Repository detection timed out".into())),
+                };
+                discovery_failed |= result.is_err();
+                if let Some(repository) = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<Option<String>>(value).ok())
+                    .flatten()
+                    .filter(|repo| valid_repository_filter(repo))
+                {
+                    found = Some((repository, target, project));
+                    break;
+                }
+            }
+            let _ = this.update(cx, |page, cx| {
+                page.initial_scope_task = None;
+                // User selection cancels this task; never override their scope.
+                if page.repository.is_some() {
+                    return;
+                }
+                page.load_state = PullRequestsLoadState::Idle;
+                let found = found.map(|(repo, target, project)| {
+                    page.project_repositories.insert(project, repo.clone());
+                    (repo, target)
+                });
+                if let Some((repo, target)) = found.or(fallback) {
+                    page.apply_initial_repository(repo, target, cx);
+                } else if discovery_failed && explicit_context {
+                    crate::toast::error(cx, "Couldn’t detect this project’s repository. Choose a repository to continue.");
                 }
                 cx.notify();
-            })
-            .ok();
+            });
         }));
     }
 
-    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.prefs.tab != PageTab::PullRequests {
+    /// Opened from a different project than last time: show that project's
+    /// pull requests instead of whatever the board held.
+    fn follow_context(&mut self, cx: &mut Context<Self>) {
+        if self.repository.is_none() {
             return;
         }
-        self.list_state.scroll_to(gpui::ListOffset::default());
-        let handle = gpui::Focusable::focus_handle(self.search.read(cx), cx);
-        window.focus(&handle, cx);
-        self.search
-            .update(cx, |input, cx| input.select_all_text(cx));
+        let saved = crate::settings::current(cx);
+        let ContextProject::Project(project) =
+            context_project(self.state.read(cx), saved.space_filter.as_deref())
+        else {
+            return;
+        };
+        if self.seen_context.as_ref() == Some(&project) {
+            return;
+        }
+        self.cancel_project_detection();
+        self.repository = None;
+        self.automatic_filter = true;
+        self.initial_scope_task = None;
+        self.initial_scope_attempted = false;
+        self.reset_for_target(self.target_device.clone(), cx);
+    }
+
+    fn apply_initial_repository(
+        &mut self,
+        repository: String,
+        target: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.target_device = target;
+        self.repository_input
+            .update(cx, |input, cx| input.set_text(&repository, cx));
+        self.select_repository(cx);
+    }
+
+    pub(crate) fn on_project_scope_changed(&mut self, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
+        if self.visible {
+            self.follow_context(cx);
+        }
+        if self.repository.is_none() {
+            self.initial_scope_task = None;
+            self.initial_scope_attempted = false;
+            self.load_state = PullRequestsLoadState::Idle;
+            self.initialize_repository(cx);
+            cx.notify();
+        }
+    }
+
+    /// Called whenever shell navigation makes the already-owned entity visible again.
+    pub fn on_visible(&mut self, cx: &mut Context<Self>) {
+        self.visible = true;
+        self.reconcile_target_device(cx);
+        // Returning from the same project reuses the board as it was.
+        self.follow_context(cx);
+        self.initialize_repository(cx);
         cx.notify();
     }
 
-    fn search_busy(&self, cx: &App) -> bool {
-        self.query(cx).trim() != self.sent_query || (self.refreshing && !self.sent_query.is_empty())
-    }
-
-    pub fn mode(&self) -> PageMode {
-        self.mode
-    }
-
-    pub fn set_layout_width(&mut self, width: f32) {
-        self.layout_width = Some(width);
-    }
-
-    fn layout_width(&self, window: &Window) -> f32 {
-        self.layout_width
-            .unwrap_or_else(|| f32::from(window.viewport_size().width))
-    }
-
-    fn render_topbar(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let width = self.layout_width(window);
-        let surface = matches!(self.mode, PageMode::Surface(_));
-        let condensed =
-            !surface && self.prefs.tab == PageTab::PullRequests && self.list_condensed();
-        let narrow = width < NARROW_TOPBAR_WIDTH;
-        let compact = width < COMPACT_WIDTH;
-        div()
-            .h(px(if surface {
-                crate::surface_chrome::HEADER_HEIGHT
-            } else {
-                TOPBAR_HEIGHT
-            }))
-            .flex_none()
-            .flex()
-            .items_center()
-            .when(surface, |el| el.border_b_1().border_color(theme.border))
-            .gap(px(if compact { 6.0 } else { 12.0 }))
-            .px(px(if surface { 8.0 } else { 12.0 }))
-            .when(!surface, |el| {
-                el.child(self.render_page_tabs(condensed || narrow, compact, theme, cx))
-            })
-            .map(|el| {
-                if self.prefs.tab == PageTab::Git {
-                    el.child(self.render_git_project_control(theme, cx))
-                        .children(self.render_git_checkout_control(theme, cx))
-                        .children(self.render_git_sync_controls(compact, theme, cx))
-                } else {
-                    el.child(self.render_project_control(theme, cx))
-                }
-            })
-            .when(condensed, |el| {
-                let compact = |id: &'static str, label: &'static str| {
-                    div()
-                        .id(id)
-                        .debug_selector(move || id.into())
-                        .role(gpui::Role::Button)
-                        .aria_label(label)
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .h(px(28.0))
-                        .px(px(6.0))
-                        .rounded(px(8.0))
-                        .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.ink(0.06)).text_color(theme.text))
-                        .child(label)
-                        .child(
-                            icon(icons::ALT_ARROW_DOWN)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted.opacity(0.7)),
-                        )
-                };
-                el.child(div().text_color(theme.text_muted.opacity(0.5)).child("/"))
-                    .child(self.menu_trigger(
-                        filters::MenuKind::State,
-                        compact(
-                            "pull-requests-compact-state",
-                            filters::state_label(self.prefs.state),
-                        ),
-                        theme,
-                        cx,
-                    ))
-                    .child(self.menu_trigger(
-                        filters::MenuKind::Involvement,
-                        compact(
-                            "pull-requests-compact-involvement",
-                            filters::involvement_label(self.prefs.involvement),
-                        ),
-                        theme,
-                        cx,
-                    ))
-            })
-            .child(div().flex_1())
-            .when(condensed, |el| {
-                el.child(
-                    div()
-                        .id("pull-requests-compact-search")
-                        .role(gpui::Role::Button)
-                        .aria_label("Search pull requests")
-                        .size(px(28.0))
-                        .rounded(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.ink(0.06)))
-                        .on_click(cx.listener(|page, _, window, cx| page.focus_search(window, cx)))
-                        .child(
-                            icon(icons::MAGNIFER)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-            })
-            .map(|el| {
-                if surface {
-                    el.child(
-                        top_chip("pull-requests-open-page", "Open as page", theme)
-                            .debug_selector(|| "pull-requests-open-page".into())
-                            .w(px(28.0))
-                            .px_0()
-                            .justify_center()
-                            .tooltip(crate::settings::widgets::text_tooltip("Open as page"))
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                cx.emit(PullRequestsEvent::OpenInPage(page.prefs.tab))
-                            }))
-                            .child(
-                                icon(icons::EXPAND_ARROWS)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    )
-                } else {
-                    el.child(self.render_chat_button(compact, theme, cx))
-                }
-            })
-            .into_any_element()
-    }
-
-    fn list_condensed(&self) -> bool {
-        let top = self.list_state.logical_scroll_top();
-        top.item_ix > 0 || top.offset_in_item > px(64.0)
-    }
-
-    pub fn show_page_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
-        if self.mode == PageMode::Page {
-            self.set_tab(tab, cx);
+    /// Keep the retained route entity dormant while another outlet is active.
+    pub fn on_hidden(&mut self) {
+        self.cancel_project_detection();
+        self.visible = false;
+        self.sort_menu = popover::Popup::default();
+        self.repository_menu = popover::Popup::default();
+        if self.initial_scope_task.take().is_some() {
+            self.initial_scope_attempted = false;
+            self.load_state = PullRequestsLoadState::Idle;
         }
     }
 
-    fn set_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
-        self.close_menu(cx);
-        self.update_prefs(false, cx, |prefs| prefs.tab = tab);
+    fn close_device_menu(&mut self, cx: &mut Context<Self>) {
+        if self.device_menu.begin_close() {
+            popover::reap_popup(cx, |page: &mut Self| &mut page.device_menu);
+            cx.notify();
+        }
     }
 
-    fn pill(&self, now: std::time::Instant) -> Option<(f32, f32)> {
-        let widths = self.tab_widths.get();
-        if widths.iter().any(|width| *width <= 0.0) {
-            return None;
+    fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
+        self.close_device_menu(cx);
+        if self.target_device == target {
+            return;
         }
-        let (left, width) = pill_target(self.shown_tab, widths);
-        Some(match &self.tab_slide {
-            Some(slide) => {
-                let t = slide.progress(now);
-                (
-                    crate::motion::lerp(slide.from.0, left, t),
-                    crate::motion::lerp(slide.from.1, width, t),
-                )
-            }
-            None => (left, width),
-        })
+
+        self.initial_scope_task = None;
+        self.initial_scope_attempted = true;
+        self.reset_for_target(target, cx);
+        cx.notify();
     }
 
-    fn sync_tab_slide(&mut self, now: std::time::Instant, cx: &App) -> Option<f32> {
-        if self.shown_tab != self.prefs.tab {
-            let from = self.pill(now).filter(|_| !cx.reduce_motion());
-            self.tab_slide = from.map(|from| TabSlide { from, started: now });
-            self.shown_tab = self.prefs.tab;
-        }
-        let progress = self.tab_slide.as_ref()?.progress(now);
-        if progress >= 1.0 {
-            self.tab_slide = None;
-            return None;
-        }
-        Some(progress)
-    }
-
-    fn tab_count(&self, tab: PageTab, cx: &App) -> Option<usize> {
-        match tab {
-            PageTab::PullRequests => self.listing.ready().map(|listing| {
-                listing
-                    .items
-                    .iter()
-                    .filter(|item| self.lists_item(item))
-                    .count()
-            }),
-            PageTab::Git => self
-                .git_view
-                .as_ref()
-                .and_then(|view| view.read(cx).tree().map(|tree| tree.files.len())),
-        }
-        .filter(|count| *count > 0)
-    }
-
-    fn render_page_tabs(
-        &self,
-        compact: bool,
-        tight: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let widths = self.tab_widths.get();
-        let pill = self.pill(std::time::Instant::now());
-        let view = cx.entity_id();
-        let tabs = [
-            (
-                PageTab::PullRequests,
-                "Pull Requests",
-                if tight { "PRs" } else { "Pull Requests" },
-                icons::PULL_REQUEST,
-            ),
-            (PageTab::Git, "Git", "Git", icons::FORK),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(ix, (tab, label, text, glyph))| {
-            let active = self.prefs.tab == tab;
-            let lit = match pill {
-                Some((left, width)) => {
-                    let (tab_left, tab_width) = pill_target(tab, widths);
-                    let overlap = (left + width).min(tab_left + tab_width) - left.max(tab_left);
-                    (overlap / tab_width).clamp(0.0, 1.0)
-                }
-                None => f32::from(u8::from(active)),
-            };
-            let tone = crate::motion::mix(theme.text_muted, theme.text, lit);
-            let measured = self.tab_widths.clone();
-            let selector = format!("pull-requests-tab-{tab:?}");
-            let count = (!compact)
-                .then(|| self.tab_count(tab, cx))
-                .flatten()
-                .map(|count| {
-                    let selector = format!("pull-requests-tab-count-{tab:?}");
-                    div()
-                        .debug_selector(move || selector.clone())
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child(count.to_string())
-                });
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .role(gpui::Role::Tab)
-                .aria_label(label)
-                .relative()
-                .h(px(24.0))
-                .px(px(if tight { 8.0 } else { 10.0 }))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .rounded(px(7.0))
-                .text_size(px(13.0))
-                .whitespace_nowrap()
-                .text_color(tone)
-                .when(active && pill.is_none(), |el| el.bg(theme.ink(0.08)))
-                .when(!active, |el| {
-                    el.cursor_pointer()
-                        .hover(|style| style.text_color(theme.text))
-                        .on_click(cx.listener(move |page, _, _, cx| page.set_tab(tab, cx)))
+    fn reset_for_target(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.request_task = None;
+        self.target_device = target;
+        let remembered = self.repository.as_ref().and_then(|repository| {
+            self.scope_filters
+                .iter()
+                .find(|((target, repo), _)| {
+                    target == &self.target_device && repo.eq_ignore_ascii_case(repository)
                 })
-                .child(icon(glyph).size(px(14.0)).flex_none().text_color(tone))
-                .child(text)
-                .children(count)
-                .child(
-                    gpui::canvas(
-                        move |bounds, window, _| {
-                            let mut widths = measured.get();
-                            let width = f32::from(bounds.size.width);
-                            if (widths[ix] - width).abs() > 0.5 {
-                                widths[ix] = width;
-                                measured.set(widths);
-                                window.on_next_frame(move |_, cx| cx.notify(view));
-                            }
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
+                .map(|(_, filter)| *filter)
         });
-        div()
-            .id("pull-requests-page-tabs")
-            .role(gpui::Role::TabList)
-            .flex_none()
-            .p(px(2.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(theme.hairline(0.09))
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .gap(px(TAB_GAP))
-                    .children(pill.map(|(left, width)| {
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(px(left))
-                            .w(px(width))
-                            .h(px(24.0))
-                            .rounded(px(7.0))
-                            .bg(theme.ink(0.08))
-                    }))
-                    .children(tabs),
-            )
-            .into_any_element()
+        self.automatic_filter = remembered.is_none();
+        self.set_filter(remembered.unwrap_or(ChangeRequestFilter::Authored), cx);
+        self.collapsed_groups.clear();
+        self.items.clear();
+        self.paging = Paging::default();
+        self.more_task = None;
+        self.more_error = None;
+        self.view_items = None;
+        self.load_state = PullRequestsLoadState::Idle;
+        self.last_loaded_at = None;
+        self.scroll_to_top();
+        self.restore_snapshot();
     }
 
-    fn render_project_control(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let label = self
-            .prefs
+    fn restore_snapshot(&mut self) {
+        let Some(repository) = &self.repository else {
+            return;
+        };
+        if let Some(index) = self
+            .snapshots
+            .iter()
+            .position(|((target, repo, filter), ..)| {
+                target == &self.target_device
+                    && repo.eq_ignore_ascii_case(repository)
+                    && filter == &self.filter
+            })
+        {
+            let snapshot = self.snapshots.remove(index);
+            self.items = snapshot.1.clone();
+            self.last_loaded_at = Some(snapshot.2);
+            self.paging = snapshot.3.clone();
+            self.load_state = PullRequestsLoadState::Ready;
+            self.snapshots.push(snapshot);
+        }
+    }
+
+    fn select_repository(&mut self, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
+        let repository = self
+            .repository_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_ascii_lowercase();
+        if !valid_repository_filter(&repository) {
+            crate::toast::error(cx, "Enter a repository as owner/name.");
+            cx.notify();
+            return;
+        }
+        self.close_repository_menu(cx);
+        self.initial_scope_task = None;
+        self.initial_scope_attempted = true;
+        let saved_repository = repository.clone();
+        let saved_device = self.target_device.clone();
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+            settings.last_pull_request_repository = Some(saved_repository);
+            settings.last_pull_request_device = saved_device;
+        });
+        // GitHub's casing, adopted after a load, names the same repository.
+        if !self
             .repository
-            .clone()
-            .unwrap_or_else(|| "All projects".into());
-        self.render_project_chip(
-            filters::MenuKind::Project,
-            "pull-requests-project",
-            label.into(),
-            self.prefs.repository.is_some(),
-            theme,
-            cx,
-        )
+            .as_deref()
+            .is_some_and(|current| current.eq_ignore_ascii_case(&repository))
+        {
+            let unscoped_choice = self.repository.is_none() && !self.automatic_filter;
+            self.repository = Some(repository);
+            if unscoped_choice {
+                self.remember_filter(self.filter);
+            }
+            self.reset_for_target(self.target_device.clone(), cx);
+        }
+        if self.last_loaded_at.is_none() {
+            self.load(false, cx);
+        }
+        cx.notify();
     }
 
-    fn render_project_chip(
-        &self,
-        kind: filters::MenuKind,
-        id: &'static str,
-        label: SharedString,
-        picked: bool,
+    /// Heal a selected remote that is no longer present in an authoritative
+    /// device frame. The local row proves the frame has landed, so the empty
+    /// pre-sync list cannot accidentally discard a valid remote selection.
+    fn reconcile_target_device(&mut self, cx: &mut Context<Self>) -> bool {
+        let normalized = {
+            let state = self.state.read(cx);
+            normalized_target_device(
+                self.target_device.as_deref(),
+                &state.devices,
+                state.local_device_id.as_deref(),
+            )
+        };
+        if normalized == self.target_device {
+            return false;
+        }
+        self.cancel_project_detection();
+        self.close_device_menu(cx);
+        self.reset_for_target(normalized, cx);
+        true
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.repository.is_none() && self.initial_scope_task.is_none() {
+            self.initial_scope_attempted = false;
+            self.initialize_repository(cx);
+        }
+        if !matches!(self.load_state, PullRequestsLoadState::Loading) {
+            self.load(true, cx);
+        }
+    }
+
+    fn select_filter(&mut self, filter: ChangeRequestFilter, cx: &mut Context<Self>) {
+        self.close_sort_menu(cx);
+        self.automatic_filter = false;
+        self.remember_filter(filter);
+        if self.filter == filter {
+            return;
+        }
+        self.set_filter(filter, cx);
+        if self.repository.is_none() {
+            cx.notify();
+            return;
+        }
+        self.reset_for_target(self.target_device.clone(), cx);
+        if self.last_loaded_at.is_none() {
+            self.load(false, cx);
+        }
+        cx.notify();
+    }
+
+    fn remember_filter(&mut self, filter: ChangeRequestFilter) {
+        let Some(repository) = self.repository.clone() else {
+            return;
+        };
+        self.scope_filters.retain(|((target, repo), _)| {
+            target != &self.target_device || !repo.eq_ignore_ascii_case(&repository)
+        });
+        self.scope_filters
+            .push(((self.target_device.clone(), repository), filter));
+        if self.scope_filters.len() > 12 {
+            self.scope_filters.remove(0);
+        }
+    }
+
+    fn set_filter(&mut self, filter: ChangeRequestFilter, cx: &mut Context<Self>) {
+        for (candidate, key) in [
+            (ChangeRequestFilter::Authored, "pr-filter-authored"),
+            (ChangeRequestFilter::Reviewing, "pr-filter-reviewing"),
+            (ChangeRequestFilter::All, "pr-filter-all"),
+        ] {
+            self.filter_fades.set_at(
+                key,
+                candidate == filter,
+                crate::motion::reduced_motion(cx),
+                Instant::now(),
+            );
+        }
+        self.filter = filter;
+    }
+
+    fn close_repository_menu(&mut self, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
+        if self.repository_menu.begin_close() {
+            popover::reap_popup(cx, |page: &mut Self| &mut page.repository_menu);
+            cx.notify();
+        }
+    }
+
+    fn cancel_project_detection(&mut self) {
+        if self.resolving_project.take().is_some() {
+            self.initial_scope_task = None;
+            if self.repository.is_none() {
+                self.load_state = PullRequestsLoadState::Idle;
+            }
+        }
+    }
+
+    fn select_project(&mut self, path: String, device: String, cx: &mut Context<Self>) {
+        self.cancel_project_detection();
+        let state = self.state.read(cx);
+        let Some(engine) = state.engine().cloned() else {
+            crate::toast::error(cx, "Connect to a device to open its project repository.");
+            cx.notify();
+            return;
+        };
+        if !state.device_online(&device, Utc::now()) {
+            crate::toast::error(cx, "This device is offline. Reconnect it to open the project.");
+            cx.notify();
+            return;
+        }
+        let local = state
+            .local_device_id
+            .as_deref()
+            .unwrap_or(&engine.engine_info().device_id);
+        let target = (device != local).then(|| device.clone());
+        let project = ProjectRef { path, device };
+        let mut params = params_for_target(target.as_deref());
+        params["cwd"] = project.path.clone().into();
+        self.initial_scope_attempted = true;
+        self.project_repositories.remove(&project);
+        self.resolving_project = Some(project.clone());
+        self.initial_scope_task = Some(cx.spawn(async move |this, cx| {
+            let request = engine
+                .client()
+                .call(methods::GET_CHANGE_REQUEST_REPOSITORY, params);
+            let deadline = cx
+                .background_executor()
+                .timer(std::time::Duration::from_secs(3));
+            futures::pin_mut!(request, deadline);
+            let repository = match futures::future::select(request, deadline).await {
+                futures::future::Either::Left((Ok(value), _)) => {
+                    serde_json::from_value::<Option<String>>(value)
+                        .map_err(|_| "The device returned an unreadable repository. Try again.")
+                        .and_then(|repo| repo.filter(|repo| valid_repository_filter(repo))
+                            .ok_or("This project has no GitHub remote. Enter owner/repository to open it directly."))
+                }
+                futures::future::Either::Left((Err(_), _)) => Err("Couldn’t read this project’s repository. Check the device connection and try again."),
+                futures::future::Either::Right(_) => Err("Repository detection timed out. Try again or enter owner/repository."),
+            };
+            let _ = this.update(cx, |page, cx| {
+                if page.resolving_project.as_ref() != Some(&project) {
+                    return;
+                }
+                page.initial_scope_task = None;
+                page.resolving_project = None;
+                match repository {
+                    Ok(repository) => {
+                        page.project_repositories.insert(project, repository.clone());
+                        if page.target_device != target {
+                            page.reset_for_target(target.clone(), cx);
+                        }
+                        page.return_focus = Some(page.repository_focus.clone());
+                        page.apply_initial_repository(repository, target, cx);
+                    }
+                    Err(error) => crate::toast::error(cx, error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn project_is_selected(&self, project: &ProjectRef, local: Option<&str>) -> bool {
+        self.target_device.as_deref().or(local) == Some(project.device.as_str())
+            && self.project_repositories.get(project).is_some_and(|repo| {
+                self.repository
+                    .as_ref()
+                    .is_some_and(|current| current.eq_ignore_ascii_case(repo))
+            })
+    }
+
+    fn recent_repositories(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.repository
+            .iter()
+            .chain(
+                self.snapshots
+                    .iter()
+                    .rev()
+                    .filter(|((target, _, _), ..)| target == &self.target_device)
+                    .map(|((_, repo, _), ..)| repo),
+            )
+            .filter(|repo| seen.insert(repo.to_ascii_lowercase()))
+            .take(5)
+            .cloned()
+            .collect()
+    }
+
+    fn render_repository_menu(
+        &mut self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.menu_trigger(
-            kind,
-            top_chip(id, "Project", theme)
-                .debug_selector(move || id.into())
-                .flex_shrink(1.0)
+        let label = self.repository.clone().unwrap_or_else(|| {
+            if self.initial_scope_task.is_some() {
+                "Detecting repository…".into()
+            } else {
+                "Choose repository".into()
+            }
+        });
+        let (projects, local, profile, selected_space) = {
+            let state = self.state.read(cx);
+            let local = state.local_device_id.clone().or_else(|| {
+                state
+                    .engine()
+                    .map(|engine| engine.engine_info().device_id.clone())
+            });
+            let projects: Vec<_> = if self.repository_menu.get().is_some() {
+                state.projects()
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .filter_map(|members| {
+                let name = state
+                    .representative_space(members[0])
+                    .display_name()
+                    .to_owned();
+                let checkouts: Vec<_> = members
+                    .into_iter()
+                    .filter(|space| space.git_detected)
+                    .map(|space| {
+                        (
+                            space.clone(),
+                            state
+                                .device_name(&space.device_id)
+                                .unwrap_or("This device")
+                                .to_owned(),
+                            state.device_online(&space.device_id, Utc::now()),
+                        )
+                    })
+                    .collect();
+                (!checkouts.is_empty()).then_some((name, checkouts))
+            })
+            .collect();
+            let profile = match &state.auth {
+                Some(zeron_proto::AuthState::SignedIn { user, org_id }) => {
+                    Some(format!("{}:{org_id:?}", user.id))
+                }
+                _ => None,
+            };
+            let selected_space = state
+                .spaces
+                .iter()
+                .find(|space| {
+                    space.git_detected
+                        && self.project_is_selected(
+                            &ProjectRef {
+                                path: space.path.clone(),
+                                device: space.device_id.clone(),
+                            },
+                            local.as_deref(),
+                        )
+                })
+                .cloned();
+            (projects, local, profile, selected_space)
+        };
+        let trigger_icon = match selected_space.as_ref() {
+            Some(space) => div()
+                .size(px(16.0))
+                .flex_none()
+                .child(self.project_icons.render(
+                    &self.state,
+                    Some(space),
+                    profile.clone(),
+                    false,
+                    cx,
+                ))
+                .into_any_element(),
+            None => icon(icons::FOLDER_WITH_FILES)
+                .size(px(14.0))
+                .text_color(theme.text_muted)
+                .into_any_element(),
+        };
+        let mut trigger =
+            crate::surface_chrome::tab("pr-repository", self.repository_menu.is_open(), theme)
+                .debug_selector(|| "pr-repository".into())
+                .h(px(HEADER_CONTROL_HEIGHT))
+                .px(px(8.0))
+                .max_w(px(220.0))
                 .min_w_0()
-                .max_w(px(240.0))
-                .child(
-                    icon(icons::FOLDER)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(if picked { theme.text } else { theme.text_muted }),
+                .text_size(crate::typography::ui_rems(12.0))
+                .aria_label(format!("Repository: {label}"))
+                .aria_expanded(self.repository_menu.is_open())
+                .track_focus(&self.repository_focus)
+                .tooltip(widgets::text_tooltip(label.clone()))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|page, _, _, _| page.repository_menu.note_trigger_press()),
                 )
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(label),
-                )
+                .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" && page.repository_menu.is_open() {
+                        cx.stop_propagation();
+                        page.return_focus = Some(page.repository_focus.clone());
+                        page.close_repository_menu(cx);
+                    }
+                }))
+                .on_click(cx.listener(|page, event, window, cx| {
+                    cx.stop_propagation();
+                    let open = if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                        page.repository_menu.is_open()
+                    } else {
+                        page.repository_menu.take_press_was_open()
+                    };
+                    if open {
+                        page.close_repository_menu(cx);
+                    } else {
+                        page.repository_scroll.reset();
+                        page.repository_menu.open(());
+                        window.focus(&page.repository_input.read(cx).focus_handle(cx), cx);
+                    }
+                    cx.notify();
+                }))
+                .child(trigger_icon)
+                .child(div().min_w_0().truncate().child(label))
                 .child(
                     icon(icons::ALT_ARROW_DOWN)
                         .size(px(12.0))
-                        .flex_none()
-                        .text_color(theme.text_muted.opacity(0.7)),
-                ),
-            theme,
-            cx,
-        )
-        .into_any_element()
-    }
-
-    fn render_controls(
-        &self,
-        theme: &Theme,
-        search_busy: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let busy = self.refreshing || matches!(self.listing, Loadable::Loading);
-        let refresh_icon = icon(icons::LUCIDE_REFRESH_CW)
-            .size(px(16.0))
-            .text_color(theme.text);
-        let refresh_icon: AnyElement = if busy {
-            refresh_icon
-                .with_animation(
-                    "pull-requests-refresh-spin",
-                    Animation::new(Duration::from_millis(800)).repeat(),
-                    |svg, delta| {
-                        svg.with_transformation(gpui::Transformation::rotate(percentage(delta)))
-                    },
-                )
-                .into_any_element()
-        } else {
-            refresh_icon.into_any_element()
-        };
-        let outline = |el: gpui::Stateful<gpui::Div>| {
-            el.h(px(32.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.hairline(0.09))
-                .bg(theme.surface_raised)
-                .hover(|style| style.bg(theme.ink(0.06)))
-        };
-        let menu_button = |id: &'static str, label: &'static str| {
-            outline(div().id(id))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(11.0))
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .cursor_pointer()
-                .text_size(px(14.0))
-                .text_color(theme.text)
-        };
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                outline(div().id("pull-requests-search"))
-                    .flex_1()
-                    .min_w(px(160.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(10.0))
-                    .child(if search_busy {
-                        icon(icons::LUCIDE_REFRESH_CW)
-                            .size(px(16.0))
-                            .text_color(theme.text_muted)
-                            .with_animation(
-                                "pull-requests-search-spin",
-                                Animation::new(Duration::from_millis(800)).repeat(),
-                                |svg, delta| {
-                                    svg.with_transformation(gpui::Transformation::rotate(
-                                        percentage(delta),
-                                    ))
-                                },
-                            )
-                            .into_any_element()
-                    } else {
-                        icon(icons::LUCIDE_SEARCH)
-                            .size(px(16.0))
-                            .text_color(theme.text_muted)
-                            .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(14.0))
-                            .child(self.search.clone()),
-                    ),
-            )
-            .child(
-                self.menu_trigger(
-                    filters::MenuKind::Sort,
-                    menu_button("pull-requests-sort", "Sort pull requests")
-                        .child(
-                            icon(icons::LUCIDE_ARROW_DOWN_UP)
-                                .size(px(16.0))
-                                .text_color(theme.text),
-                        )
-                        .child("Sort"),
-                    theme,
-                    cx,
-                ),
-            )
-            .child({
-                let count = filters::filter_count(&self.prefs);
-                self.menu_trigger(
-                    filters::MenuKind::Filters,
-                    menu_button("pull-requests-filters", "Filters")
-                        .child(icon(icons::LUCIDE_LIST_FILTER).size(px(16.0)).text_color(
-                            if count > 0 {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            },
-                        ))
-                        .child("Filters")
-                        .when(count > 0, |el| {
-                            el.child(
-                                div()
-                                    .rounded_full()
-                                    .bg(theme.ink(0.06))
-                                    .px(px(6.0))
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(count.to_string()),
-                            )
-                        }),
-                    theme,
-                    cx,
-                )
-            })
-            .child(
-                outline(div().id("pull-requests-refresh"))
-                    .w(px(32.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .role(gpui::Role::Button)
-                    .aria_label("Refresh pull requests")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        if !page.refreshing {
-                            page.hard_refresh(cx);
-                        }
-                    }))
-                    .child(refresh_icon),
-            )
-            .into_any_element()
-    }
-
-    fn render_ghost_rows(&self, theme: &Theme, rows: usize, caption: Option<String>) -> AnyElement {
-        let title = [0.6, 0.4, 0.5, 0.66, 0.4, 0.6, 0.5];
-        let meta = [0.4, 0.33, 0.4, 0.25, 0.33, 0.4, 0.33];
-        let bar = theme.text_muted.opacity(0.15);
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .children(caption.map(|caption| {
-                div()
-                    .px(px(12.0))
-                    .pb(px(4.0))
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(caption)
-            }))
-            .children((0..rows).map(|index| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .child(div().size(px(16.0)).rounded_full().bg(bar).flex_none())
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .h(px(14.0))
-                                    .w(gpui::relative(title[index % 7]))
-                                    .rounded(px(4.0))
-                                    .bg(bar),
-                            )
-                            .child(
-                                div()
-                                    .h(px(12.0))
-                                    .w(gpui::relative(meta[index % 7]))
-                                    .rounded(px(4.0))
-                                    .bg(bar),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap(px(8.0))
-                            .child(div().h(px(12.0)).w(px(48.0)).rounded(px(4.0)).bg(bar))
-                            .child(div().h(px(12.0)).w(px(64.0)).rounded(px(4.0)).bg(bar)),
-                    )
-            }))
-            .with_animation(
-                "pull-requests-ghost-pulse",
-                Animation::new(Duration::from_millis(1600)).repeat(),
-                |el, delta| el.opacity(1.0 - 0.45 * (delta * std::f32::consts::PI).sin()),
-            )
-            .into_any_element()
-    }
-
-    fn render_state(
-        &self,
-        theme: &Theme,
-        title: String,
-        description: String,
-        with_mark: bool,
-        clear_search: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mark: AnyElement = if with_mark {
-            branch_mark(theme)
-        } else {
-            div()
-                .size(px(36.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.hairline(0.09))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    icon(icons::LUCIDE_GIT_PULL_REQUEST)
-                        .size(px(16.0))
-                        .text_color(theme.text),
-                )
-                .into_any_element()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(24.0))
-            .px(px(16.0))
-            .py(px(64.0))
-            .child(mark)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(6.0))
-                    .max_w(px(420.0))
-                    .child(
-                        div()
-                            .text_size(px(20.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .text_color(theme.text_muted)
-                            .text_center()
-                            .child(description),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .when(clear_search, |row| {
-                        row.child(
-                            state_button(
-                                "pull-requests-clear-search",
-                                icons::LUCIDE_SEARCH,
-                                "Clear search",
-                                theme,
-                            )
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                page.search.update(cx, |input, cx| input.set_text("", cx));
-                                cx.notify();
-                            })),
-                        )
-                    })
-                    .child(
-                        state_button(
-                            "pull-requests-retry",
-                            icons::LUCIDE_REFRESH_CW,
-                            if with_mark { "Check again" } else { "Retry" },
-                            theme,
-                        )
-                        .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_row(
-        &self,
-        item: &ChangeRequestListItem,
-        theme: &Theme,
-        tones: Tones,
-        row_width: f32,
-        now: DateTime<Utc>,
-        search: &str,
-        device_label: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        #[cfg(test)]
-        tests::ROWS_RENDERED.with(|rows| rows.set(rows.get() + 1));
-        let (glyph, glyph_tone, _) = tones.glyph(item);
-        let matched_elsewhere =
-            !search.trim().is_empty() && filters::score_match(item, search) <= 10;
-        let key = PullRequestKey::of(item);
-        let selected = self.active.as_ref() == Some(&key);
-        let muted70 = theme.text_muted.opacity(0.7);
-        let muted50 = theme.text_muted.opacity(0.5);
-        let meta_width = (row_width - 24.0 - 28.0 - 160.0).max(0.0);
-        let separator = || div().flex_none().text_color(muted50).child("·");
-        let mut meta = div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(px(12.0))
-            .text_color(muted70)
-            .whitespace_nowrap()
-            .when(matched_elsewhere, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.hairline(0.06))
-                        .px(px(4.0))
-                        .text_size(px(10.0))
-                        .child(
-                            icon(icons::LUCIDE_SEARCH)
-                                .size(px(12.0))
-                                .text_color(muted70),
-                        )
-                        .when(meta_width >= 320.0, |el| {
-                            el.child("matched in the description")
-                        }),
-                )
-                .child(separator())
-            })
-            .child(div().flex_none().child(format!("#{}", item.number)))
-            .child(separator())
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(item.repository.clone()),
-            );
-        if let Some(device) = device_label {
-            meta = meta.child(separator()).child(
-                div()
-                    .max_w(px(128.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .flex_none()
-                    .child(device),
-            );
-        }
-        if let Some(author) = &item.author {
-            meta = meta.child(separator()).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .flex_none()
-                    .child(avatar(&author.login, theme))
-                    .when(meta_width >= 320.0, |el| el.child(author.login.clone())),
-            );
-        }
-        let visible_labels = if meta_width >= 768.0 {
-            3
-        } else if meta_width >= 576.0 {
-            2
-        } else {
-            1
-        }
-        .min(item.labels.len());
-        if visible_labels > 0 {
-            meta = meta.child(separator());
-            for (index, label) in item.labels.iter().take(visible_labels).enumerate() {
-                let rest = item.labels.len() - visible_labels;
-                let suffix = if index + 1 == visible_labels && rest > 0 {
-                    format!(" +{rest}")
-                } else {
-                    String::new()
-                };
-                meta = meta.child(label_pill(
-                    &label.name,
-                    label.color.as_deref(),
-                    &suffix,
-                    theme,
-                ));
-            }
-        }
-
-        let mut right_top = div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap(px(8.0))
-            .max_w(px(144.0))
-            .text_size(px(12.0))
-            .children(chat::row_badge(&key, &self.state.read(cx).chats, theme, cx));
-        if row_width >= 448.0 {
-            match item.review_decision {
-                Some(ChangeRequestReviewDecision::Approved) => {
-                    right_top = right_top.child(
-                        div()
-                            .text_color(tones.approved_text)
-                            .whitespace_nowrap()
-                            .child("Approved"),
-                    )
-                }
-                Some(ChangeRequestReviewDecision::ChangesRequested) => {
-                    right_top = right_top.child(
-                        div()
-                            .text_color(tones.changes_text)
-                            .whitespace_nowrap()
-                            .child("Changes requested"),
-                    )
-                }
-                _ => {}
-            }
-        }
-        if let Some(checks) = item.checks_state {
-            let (glyph, tone) = tones.checks(checks);
-            let popover_item = item.clone();
-            right_top = right_top.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "pull-request-checks-{}-{}-{}-{}",
-                        item.device_id.as_deref().unwrap_or_default(),
-                        item.host,
-                        item.repository,
-                        item.number
-                    )))
-                    .role(gpui::Role::Button)
-                    .aria_label(SharedString::from(format!(
-                        "Checks: {}",
-                        detail::checks_verdict_label(checks)
-                    )))
-                    .rounded(px(4.0))
-                    .hover(|style| style.bg(theme.ink(0.06)))
-                    .on_click(cx.listener(move |page, event: &gpui::ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        page.toggle_checks_popover(&popover_item, event.position(), false, cx);
-                    }))
-                    .child(icon(glyph).size(px(16.0)).text_color(tone)),
-            );
-        }
-
-        let mut right_bottom = div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap(px(12.0))
-            .whitespace_nowrap()
-            .text_size(px(11.0))
-            .text_color(muted70);
-        if item.additions + item.deletions > 0 {
-            right_bottom =
-                right_bottom.child(diff_stat(item.additions, item.deletions, tones, theme));
-        }
-        if row_width >= 384.0 {
-            right_bottom = right_bottom.child(relative_time(now, item.updated_at));
-        }
-
-        let url = item.url.clone();
-        let opened = item.clone();
-        div()
-            .id(SharedString::from(format!(
-                "pull-request-row-{}-{}-{}-{}",
-                item.device_id.as_deref().unwrap_or_default(),
-                item.host,
-                item.repository,
-                item.number
-            )))
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(item.title.clone()))
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .p(px(12.0))
-            .rounded(px(10.0))
-            .cursor_pointer()
-            .when(selected, |el| el.bg(theme.ink(0.055)))
-            .when(!selected, |el| el.hover(|style| style.bg(theme.ink(0.035))))
-            .on_click(cx.listener(move |page, event: &gpui::ClickEvent, _, cx| {
-                if event.modifiers().platform {
-                    cx.open_url(&url);
-                } else {
-                    page.open_pull_request(&opened, cx);
-                }
-            }))
-            .child(
-                icon(glyph)
-                    .size(px(16.0))
-                    .text_color(glyph_tone)
-                    .flex_none(),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.0))
+                        .text_color(theme.text_muted),
+                );
+        if self.repository_menu.get().is_some() {
+            let recent: Vec<_> = self
+                .recent_repositories()
+                .into_iter()
+                .filter(|repo| {
+                    !projects
+                        .iter()
+                        .flat_map(|(_, members)| members)
+                        .any(|(space, _, _)| {
+                            let project = ProjectRef {
+                                path: space.path.clone(),
+                                device: space.device_id.clone(),
+                            };
+                            Some(space.device_id.as_str())
+                                == self.target_device.as_deref().or(local.as_deref())
+                                && self
+                                    .project_repositories
+                                    .get(&project)
+                                    .is_some_and(|known| known.eq_ignore_ascii_case(repo))
+                        })
+                })
+                .collect();
+            // The project picker's rows: one 32pt line each, artwork and
+            // name. Only checkouts that share a name say where they live.
+            let mut options: Vec<AnyElement> = Vec::new();
+            if !projects.is_empty() {
+                options.push(popover::menu_heading(theme, "Projects").into_any_element());
+                for (name, members) in projects {
+                    let multiple = members.len() > 1;
+                    for (space, device, online) in members {
+                        let project = ProjectRef {
+                            path: space.path.clone(),
+                            device: space.device_id.clone(),
+                        };
+                        let selected = self.project_is_selected(&project, local.as_deref());
+                        let loading = self.resolving_project.as_ref() == Some(&project);
+                        let detail: Option<SharedString> = if loading {
+                            Some("Finding repository…".into())
+                        } else if multiple {
+                            Some(device.clone().into())
+                        } else {
+                            None
+                        };
+                        let artwork = self.project_icons.render(
+                            &self.state,
+                            Some(&space),
+                            profile.clone(),
+                            selected,
+                            cx,
+                        );
+                        let id = format!("pr-project-{}", space.id);
+                        let selector = id.clone();
+                        let row = popover::picker_row(theme, selected, false, id.clone())
+                            .id(SharedString::from(id))
+                            .debug_selector(move || selector.clone())
+                            .role(gpui::Role::Button)
+                            .aria_selected(selected)
+                            .tab_index(0)
+                            .aria_label(format!(
+                                "Open {name} repository on {device}: {}{}",
+                                space.path,
+                                if online { "" } else { ", offline" }
+                            ))
+                            .focus_visible(|style| style.border_color(theme.accent))
+                            .tooltip(widgets::text_tooltip(format!(
+                                "{name}\n{device}\n{}",
+                                space.path
+                            )))
+                            .child(popover::picker_icon_slot(artwork))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .text_size(px(14.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(item.title.clone()),
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(6.0))
+                                    .child(div().flex_none().max_w_full().truncate().child(name.clone()))
+                                    .when_some(detail, |el, detail| {
+                                        el.child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(crate::typography::ui_rems(11.0))
+                                                .text_color(theme.text_muted)
+                                                .child(detail),
+                                        )
+                                    }),
                             )
-                            .child(right_top),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.0))
-                            .child(meta)
-                            .child(right_bottom),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn lists_item(&self, item: &ChangeRequestListItem) -> bool {
-        let repository = self
-            .sent
-            .1
-            .repository
-            .as_ref()
-            .or(self.prefs.repository.as_ref());
-        repository.is_none_or(|repository| item.repository.eq_ignore_ascii_case(repository))
-            && self
-                .prefs
-                .host
-                .as_deref()
-                .is_none_or(|host| item.host == host)
-    }
-
-    fn list_entries(&self, busy: bool, cx: &App) -> (Vec<ListEntry>, String) {
-        let mut entries = vec![ListEntry::Controls];
-        let state = |title: String, description: String, with_mark: bool, clear_search: bool| {
-            ListEntry::State {
-                title,
-                description,
-                with_mark,
-                clear_search,
+                            .when(loading, |el| {
+                                el.child(crate::loaders::mini_glyph_spinner(
+                                    "pr-project-resolving",
+                                    1.5,
+                                    theme.glyph,
+                                    cx.entity_id(),
+                                    cx,
+                                ))
+                            })
+                            // Disconnected glyph, as the device picker shows it.
+                            .when(!loading && !online, |el| {
+                                el.child(
+                                    icon(icons::WIFI_OFF)
+                                        .size(px(12.0))
+                                        .flex_none()
+                                        .text_color(theme.warning.opacity(0.8)),
+                                )
+                            })
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                cx.stop_propagation();
+                                page.select_project(
+                                    project.path.clone(),
+                                    project.device.clone(),
+                                    cx,
+                                );
+                            }));
+                        options.push(row.into_any_element());
+                    }
+                }
             }
-        };
-        let listing = match &self.listing {
-            Loadable::Idle | Loadable::Loading => {
-                entries.push(ListEntry::Ghost(GHOST_ROWS, None));
-                return (entries, String::new());
+            if !recent.is_empty() {
+                options.push(
+                    popover::menu_heading(theme, "Recent repositories")
+                        .when(!options.is_empty(), |el| el.pt(px(10.0)))
+                        .into_any_element(),
+                );
+                for repo in recent {
+                    let selected = self
+                        .repository
+                        .as_ref()
+                        .is_some_and(|current| current.eq_ignore_ascii_case(&repo));
+                    options.push(
+                        popover::picker_row(theme, selected, false, format!("pr-recent-{repo}"))
+                            .id(SharedString::from(format!("pr-recent-{repo}")))
+                            .debug_selector(|| "pr-recent-option".into())
+                            .role(gpui::Role::Button)
+                            .aria_selected(selected)
+                            .tab_index(0)
+                            .aria_label(format!("Open {repo}"))
+                            .focus_visible(|style| style.border_color(theme.accent))
+                            .child(popover::picker_icon_slot(
+                                icon(icons::FOLDER)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted)
+                                    .into_any_element(),
+                            ))
+                            .child(div().flex_1().min_w_0().truncate().child(repo.clone()))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                cx.stop_propagation();
+                                page.return_focus = Some(page.repository_focus.clone());
+                                page.repository_input
+                                    .update(cx, |input, cx| input.set_text(&repo, cx));
+                                page.select_repository(cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
             }
-            Loadable::Error(error) => {
-                entries.push(state(
-                    "Could not load pull requests".into(),
-                    error.clone(),
-                    false,
-                    false,
-                ));
-                return (entries, String::new());
-            }
-            Loadable::Ready(listing) => listing,
-        };
-        let first_error = listing
-            .errors
-            .iter()
-            .map(|error| error.failure)
-            .find(|failure| shown_failure(*failure));
-        if listing.items.is_empty()
-            && let Some(failure) = first_error
-        {
-            entries.push(state(
-                "Could not load pull requests".into(),
-                failure_message(failure).into(),
-                false,
-                false,
-            ));
-            return (entries, String::new());
-        }
-        let query = self.query(cx);
-        let trimmed = query.trim();
-        let search_text = if busy {
-            filters::parse_query(trimmed).0
-        } else {
-            self.sent.0.clone()
-        };
-        let items: Vec<Indexed> = listing
-            .items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| Indexed { index, item })
-            .filter(|item| self.lists_item(item))
-            .filter(|item| !busy || matches_query(item, &search_text))
-            .collect();
-        let shown = crate::rail::truncate_preview(trimmed, 49);
-        if items.is_empty() && busy && !search_text.trim().is_empty() {
-            entries.push(ListEntry::Ghost(
-                5,
-                Some(format!("Searching every host for “{shown}”")),
-            ));
-            return (entries, search_text);
-        }
-        if items.is_empty() {
-            let (title, description) = if !trimmed.is_empty() {
-                (
-                    format!("Nothing matches “{shown}”"),
-                    "The hosts were searched for it. Try fewer words, or search by number, author or branch."
-                        .to_string(),
-                )
-            } else if filters::filter_count(&self.prefs) > 0 {
-                (
-                    "Nothing under these filters".to_string(),
-                    "Widen the state, involvement or project filter to see more.".to_string(),
-                )
-            } else {
-                (
-                    "No pull requests".to_string(),
-                    "Pull requests from every project in this workspace appear here.".to_string(),
-                )
-            };
-            entries.push(state(title, description, true, !trimmed.is_empty()));
-            return (entries, search_text);
-        }
-        let groups: Vec<(Option<PullRequestGroup>, Vec<Indexed>)> =
-            if self.prefs.involvement == ChangeRequestInvolvement::All {
-                group_items(&items, &listing.viewers)
-                    .into_iter()
-                    .map(|(group, items)| (Some(group), items))
-                    .collect()
-            } else {
-                vec![(None, items)]
-            };
-        for (position, (group, mut group_items)) in groups.into_iter().enumerate() {
-            filters::sort_items(&mut group_items, self.prefs.sort, &search_text);
-            if let Some(group) = group {
-                entries.push(ListEntry::Header {
-                    group,
-                    first: position == 0,
-                });
-            }
-            let count = group_items.len();
-            entries.extend(
-                group_items
-                    .into_iter()
-                    .enumerate()
-                    .map(|(n, item)| ListEntry::Row {
-                        index: item.index,
-                        gap: n + 1 < count,
-                    }),
+            let scrollbar = widgets::rail(
+                &mut self.repository_scroll,
+                "pr-repository-scrollbar",
+                theme,
+                cx,
+                |page| &mut page.repository_scroll,
             );
+            let menu = popover::popover_card(theme)
+                .id("pr-repository-card")
+                .debug_selector(|| "pr-repository-card".into())
+                .w(px((f32::from(window.viewport_size().width) - 16.0)
+                    .min(320.0)
+                    .max(240.0)))
+                .flex()
+                .flex_col()
+                .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_repository_menu(cx)))
+                .child(
+                    popover::search_row(theme)
+                        // The trailing button sits one card inset from the
+                        // edge, like the row's own text.
+                        .pr(px(popover::CARD_INSET + 2.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .child(self.repository_input.clone()),
+                        )
+                        .child(
+                            crate::surface_chrome::tab("pr-repository-load", false, theme)
+                                .debug_selector(|| "pr-repository-load".into())
+                                .h(px(28.0))
+                                .px(px(10.0))
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .aria_label("Open repository")
+                                .child("Open")
+                                .on_click(cx.listener(|page, _, _, cx| {
+                                    cx.stop_propagation();
+                                    page.return_focus = Some(page.repository_focus.clone());
+                                    page.select_repository(cx);
+                                })),
+                        ),
+                )
+
+                .when(!options.is_empty(), |el| {
+                    el.child(
+                        popover::menu_scroll_host("pr-repository-list-host")
+                            .on_hover(cx.listener(|page, hovered: &bool, _, cx| {
+                                if page.repository_scroll.set_list_hovered(*hovered) {
+                                    cx.notify();
+                                }
+                            }))
+                            .child(popover::faded_menu_list(
+                                &self.repository_scroll.scroll,
+                                popover::menu_scroll_list(
+                                    "pr-repository-options",
+                                    &self.repository_scroll.scroll,
+                                )
+                                .debug_selector(|| "pr-repository-options".into())
+                                .min_w_0()
+                                .max_h(px((f32::from(window.viewport_size().height) - 240.0)
+                                    .clamp(96.0, 360.0)))
+                                .flex()
+                                .flex_col()
+                                .gap(px(popover::MENU_GAP))
+                                .children(options),
+                            ))
+                            .children(scrollbar),
+                    )
+                });
+            trigger = trigger.child(popover::anchored_menu_below_end(
+                "pr-repository-menu",
+                menu.into_any_element(),
+                self.repository_menu.closing_since(),
+            ));
         }
-        if let Some(failure) = first_error {
-            entries.push(ListEntry::Notice(failure));
-        }
-        if listing.truncated {
-            entries.push(ListEntry::More);
-        }
-        (entries, search_text)
+        trigger.into_any_element()
     }
 
-    fn sync_entries(&mut self, entries: Vec<ListEntry>, cx: &App) {
-        if entries == self.entries {
+    fn close_sort_menu(&mut self, cx: &mut Context<Self>) {
+        if self.sort_menu.begin_close() {
+            popover::reap_popup(cx, |page: &mut Self| &mut page.sort_menu);
+            cx.notify();
+        }
+    }
+
+    fn render_sort_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let options = [
+            (
+                PullRequestSortField::Updated,
+                SortDirection::Descending,
+                "Recently updated",
+                "pull-requests-sort-updated",
+            ),
+            (
+                PullRequestSortField::Updated,
+                SortDirection::Ascending,
+                "Least recently updated",
+                "pr-sort-updated-asc",
+            ),
+            (
+                PullRequestSortField::Opened,
+                SortDirection::Descending,
+                "Newest first",
+                "pull-requests-sort-opened",
+            ),
+            (
+                PullRequestSortField::Opened,
+                SortDirection::Ascending,
+                "Oldest first",
+                "pr-sort-opened-asc",
+            ),
+            (
+                PullRequestSortField::Changes,
+                SortDirection::Descending,
+                "Largest changes",
+                "pull-requests-sort-changes",
+            ),
+            (
+                PullRequestSortField::Changes,
+                SortDirection::Ascending,
+                "Smallest changes",
+                "pr-sort-changes-asc",
+            ),
+        ];
+        let label = options
+            .iter()
+            .find(|(field, direction, _, _)| {
+                *field == self.sort.field && *direction == self.sort.direction
+            })
+            .unwrap()
+            .2;
+        let mut trigger = crate::surface_chrome::tab("pr-sort", self.sort_menu.is_open(), theme)
+            .debug_selector(|| "pr-sort".into())
+            .h(px(32.0))
+            .w(px(32.0))
+            .justify_center()
+            .aria_label(format!("Sort pull requests: {label}"))
+            .aria_expanded(self.sort_menu.is_open())
+            .track_focus(&self.sort_focus)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|page, _, _, _| page.sort_menu.note_trigger_press()),
+            )
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && page.sort_menu.is_open() {
+                    page.return_focus = Some(page.sort_focus.clone());
+                    page.close_sort_menu(cx);
+                }
+            }))
+            .on_click(cx.listener(|page, event, window, cx| {
+                cx.stop_propagation();
+                let keyboard = matches!(event, gpui::ClickEvent::Keyboard(_));
+                let open = if keyboard {
+                    page.sort_menu.is_open()
+                } else {
+                    page.sort_menu.take_press_was_open()
+                };
+                if open {
+                    page.close_sort_menu(cx);
+                } else {
+                    page.sort_menu.open(());
+                    if keyboard {
+                        window.focus(&page.option_focus, cx);
+                    }
+                }
+                cx.notify();
+            }))
+            .child(
+                icon(if self.sort.direction == SortDirection::Ascending {
+                    icons::ARROW_UP
+                } else {
+                    icons::ARROW_DOWN
+                })
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+            )
+            .tooltip(widgets::text_tooltip(label));
+        if self.sort_menu.get().is_some() {
+            let menu = popover::popover_card(theme)
+                .w(px(220.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_sort_menu(cx)))
+                .children(options.into_iter().map(|(field, direction, label, id)| {
+                    let active = self.sort.field == field && self.sort.direction == direction;
+                    popover::menu_row(theme, active, id)
+                        .id(id)
+                        .when(active, |row| row.track_focus(&self.option_focus))
+                        .debug_selector(move || id.into())
+                        .role(gpui::Role::Button)
+                        .tab_index(0)
+                        .aria_selected(active)
+                        .aria_label(label)
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
+                        .child(label)
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            cx.stop_propagation();
+                            page.sort = PullRequestSort { field, direction };
+                            page.return_focus = Some(page.sort_focus.clone());
+                            page.view_items = None;
+                            page.scroll_to_top();
+                            page.close_sort_menu(cx);
+                            cx.notify();
+                        }))
+                }));
+            trigger = trigger.child(popover::anchored_menu_below_end(
+                "pr-sort-menu",
+                menu.into_any_element(),
+                self.sort_menu.closing_since(),
+            ));
+        }
+        trigger.into_any_element()
+    }
+
+    fn load(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        // An ordinary load shows the engine's stored copy at once; Refresh
+        // always reaches GitHub.
+        self.load_with(refresh, !refresh, cx);
+    }
+
+    /// `cached` accepts the engine's on-disk first page, whatever its age. A
+    /// stored page older than [`STORED_PAGE_FRESH`] is shown and then
+    /// replaced by a GitHub read in the background.
+    fn load_with(&mut self, refresh: bool, cached: bool, cx: &mut Context<Self>) {
+        if self.repository.is_none() || matches!(self.load_state, PullRequestsLoadState::Loading) {
             return;
         }
-        let top = self.list_state.logical_scroll_top();
-        // Unmeasured rows need a height hint, or one scroll event cannot pass the overdraw.
-        self.list_state
-            .reset_with_uniform_height(entries.len(), px(ROW_HEIGHT_HINT));
-        self.list_state.splice_focusable(
-            0..1,
-            [Some(gpui::Focusable::focus_handle(
-                self.search.read(cx),
-                cx,
-            ))],
-        );
-        self.list_state.scroll_to(gpui::ListOffset {
-            item_ix: top.item_ix.min(entries.len() - 1),
-            offset_in_item: top.offset_in_item,
-        });
-        self.entries = entries;
-    }
-
-    fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(entry) = self.entries.get(ix).cloned() else {
-            return div().into_any_element();
+        self.reconcile_target_device(cx);
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.load_state = PullRequestsLoadState::Failed(PullRequestsPageError::Network);
+            cx.notify();
+            return;
         };
-        let theme = Theme::of(cx).clone();
-        let tones = Tones::of(&theme);
-        let content = match entry {
-            ListEntry::Controls => self.render_controls(&theme, self.frame.search_busy, cx),
-            ListEntry::Ghost(rows, caption) => self.render_ghost_rows(&theme, rows, caption),
-            ListEntry::State {
-                title,
-                description,
-                with_mark,
-                clear_search,
-            } => self.render_state(&theme, title, description, with_mark, clear_search, cx),
-            ListEntry::Header { group, first } => div()
-                .when(!first, |el| el.pt(px(12.0)))
-                .px(px(12.0))
-                .pb(px(4.0))
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted.opacity(0.7))
-                .child(group.label())
-                .into_any_element(),
-            ListEntry::Row { index, gap } => {
-                let Some(item) = self
-                    .listing
-                    .ready()
-                    .and_then(|listing| listing.items.get(index))
-                else {
-                    return div().into_any_element();
-                };
-                let devices = &self.frame.devices;
-                let device_label = (devices.len() >= 2)
-                    .then(|| {
-                        devices
-                            .iter()
-                            .find(|device| device.target() == item.device_id)
-                            .map(|device| device.name.clone())
-                    })
-                    .flatten();
-                let row = self.render_row(
-                    item,
-                    &theme,
-                    tones,
-                    self.frame.row_width,
-                    Utc::now(),
-                    &self.frame.search_text,
-                    device_label,
-                    cx,
-                );
-                div()
-                    .when(gap, |el| el.pb(px(2.0)))
-                    .child(row)
-                    .into_any_element()
-            }
-            ListEntry::Notice(failure) => div()
-                .pt(px(12.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(tones.pending.opacity(0.3))
-                        .bg(tones.pending.opacity(0.05))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.text)
-                        .child(format!(
-                            "{} Showing the last pull requests loaded.",
-                            failure_message(failure)
-                        )),
-                )
-                .into_any_element(),
-            ListEntry::More => div()
-                .pt(px(12.0))
-                .child(self.render_more(&theme, cx))
-                .into_any_element(),
-        };
-        div()
-            .w_full()
-            .child(
-                div()
-                    .mx_auto()
-                    .w_full()
-                    .max_w(px(CONTAINER_MAX_WIDTH))
-                    .px(px(CONTAINER_PAD_X))
-                    .when(ix == 0, |el| el.pt(px(24.0)).pb(px(16.0)))
-                    .when(ix + 1 == self.entries.len(), |el| el.pb(px(48.0)))
-                    .child(content),
-            )
-            .into_any_element()
-    }
-}
 
-fn avatar(login: &str, theme: &Theme) -> AnyElement {
-    avatar_sized(login, 16.0, theme)
-}
-
-fn avatar_sized(login: &str, size: f32, theme: &Theme) -> AnyElement {
-    let initial = login
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    div()
-        .size(px(size))
-        .flex_none()
-        .rounded_full()
-        .bg(theme.ink(0.08))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px((size / 2.0).max(8.0).min(10.0)))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text_muted)
-        .child(initial)
-        .into_any_element()
-}
-
-fn label_color(color: Option<&str>, theme: &Theme) -> Hsla {
-    color
-        .filter(|hex| hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))
-        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-        .map(|rgb| gpui::rgb(rgb).into())
-        .unwrap_or(theme.text_muted)
-}
-
-fn label_pill(name: &str, color: Option<&str>, suffix: &str, theme: &Theme) -> AnyElement {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .max_w(px(160.0))
-        .rounded_full()
-        .border_1()
-        .border_color(theme.hairline(0.08))
-        .bg(theme.ink(0.025))
-        .pl(px(4.0))
-        .pr(px(6.0))
-        .text_size(px(10.0))
-        .line_height(px(14.0))
-        .text_color(theme.text_muted)
-        .child(
-            div()
-                .size(px(8.0))
-                .flex_none()
-                .rounded_full()
-                .bg(label_color(color, theme)),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(format!("{name}{suffix}")),
-        )
-        .into_any_element()
-}
-
-fn diff_stat(additions: u64, deletions: u64, tones: Tones, theme: &Theme) -> AnyElement {
-    div()
-        .flex()
-        .items_baseline()
-        .gap(px(4.0))
-        .child(
-            div()
-                .text_color(tones.open)
-                .child(format!("+{}", group_thousands(additions))),
-        )
-        .child(
-            div()
-                .text_color(theme.danger)
-                .child(format!("-{}", group_thousands(deletions))),
-        )
-        .into_any_element()
-}
-
-pub(crate) fn group_thousands(value: u64) -> String {
-    let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            out.push(',');
+        let target_name = selected_device_name(&self.state.read(cx), self.target_device.as_deref());
+        if let Some(target) = self.target_device.as_deref()
+            && !self.state.read(cx).device_online(target, Utc::now())
+        {
+            self.load_state =
+                PullRequestsLoadState::Failed(PullRequestsPageError::RemoteOffline(target_name));
+            cx.notify();
+            return;
         }
-        out.push(digit);
-    }
-    out
-}
 
-fn state_button(
-    id: &'static str,
-    glyph: &'static str,
-    label: &'static str,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .h(px(28.0))
-        .px(px(9.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(theme.hairline(0.09))
-        .text_size(px(13.0))
-        .text_color(theme.text)
-        .cursor_pointer()
-        .hover(|style| style.bg(theme.ink(0.06)))
-        .child(icon(glyph).size(px(14.0)).text_color(theme.text))
-        .child(label)
-}
-
-fn top_chip(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .h(px(28.0))
-        .px(px(10.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(theme.hairline(0.09))
-        .text_size(px(13.0))
-        .text_color(theme.text)
-        .cursor_pointer()
-        .hover(|style| style.bg(theme.ink(0.06)))
-}
-
-fn branch_mark(theme: &Theme) -> AnyElement {
-    icon(icons::PR_BRANCH_MARK)
-        .w(px(128.0))
-        .h(px(80.0))
-        .text_color(theme.text_muted.opacity(0.6))
-        .into_any_element()
-}
-
-const TOAST_FOR: Duration = Duration::from_secs(4);
-
-impl PullRequestsPage {
-    /// t3code's error toasts, kept on the page because no app-wide toast surface exists.
-    fn toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.push_toast(text.into(), None, cx);
-    }
-
-    fn toast_with(
-        &mut self,
-        title: impl Into<SharedString>,
-        description: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        self.push_toast(title.into(), Some(description.into()), cx);
-    }
-
-    fn push_toast(
-        &mut self,
-        title: SharedString,
-        description: Option<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        self.toast_seq += 1;
-        let id = self.toast_seq;
-        self.toasts.push((id, title, description));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_FOR).await;
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        let mut params = params_for_target(self.target_device.as_deref());
+        params["repository"] = self.repository.clone().unwrap().into();
+        params["refresh"] = refresh.into();
+        params["cached"] = cached.into();
+        params["filter"] = serde_json::to_value(self.filter).unwrap();
+        self.refreshed = refresh;
+        self.load_state = PullRequestsLoadState::Loading;
+        // A reload starts over from the first page.
+        self.more_task = None;
+        self.more_error = None;
+        self.request_task = Some(cx.spawn(async move |this, cx| {
+            let mut result = fetch_page(&engine, params.clone()).await;
+            if result.as_ref().is_ok_and(|page| page.items.is_empty()) && !refresh {
+                let fallback = this
+                    .update(cx, |page, cx| {
+                        if page.generation != generation
+                            || !page.automatic_filter
+                            || page.filter != ChangeRequestFilter::Authored
+                        {
+                            return false;
+                        }
+                        page.set_filter(ChangeRequestFilter::All, cx);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if fallback {
+                    params["filter"] = serde_json::to_value(ChangeRequestFilter::All).unwrap();
+                    result = fetch_page(&engine, params).await;
+                }
+            }
             this.update(cx, |page, cx| {
-                page.toasts.retain(|(toast, _, _)| *toast != id);
+                if page.generation != generation {
+                    return;
+                }
+
+                page.request_task = None;
+                // How old the page is: a stored copy keeps its fetch time.
+                let age = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|page| page.fetched_at)
+                    .and_then(|at| (Utc::now() - at).to_std().ok())
+                    .unwrap_or_default();
+                let loaded = result.map_err(|error| map_rpc_error(&error, &target_name));
+                let paging = loaded.as_ref().ok().map(|page| Paging {
+                    next_cursor: page.next_cursor.clone(),
+                    total: page.total_count,
+                });
+                let succeeded = loaded.is_ok();
+                page.load_state = settle_snapshot(&mut page.items, loaded.map(|page| page.items));
+                page.view_items = None;
+                if let Some(paging) = paging {
+                    page.paging = paging;
+                }
+                if succeeded {
+                    if let Some(first) = page.items.first()
+                        && valid_repository_filter(&first.repository)
+                        && page
+                            .items
+                            .iter()
+                            .all(|item| item.repository == first.repository)
+                        && page.repository.as_deref() != Some(first.repository.as_str())
+                    {
+                        let canonical = first.repository.clone();
+                        page.repository = Some(canonical.clone());
+                        page.repository_input
+                            .update(cx, |input, cx| input.set_text(&canonical, cx));
+                        let device = page.target_device.clone();
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Debounced,
+                            cx,
+                            |settings| {
+                                settings.last_pull_request_repository = Some(canonical);
+                                settings.last_pull_request_device = device;
+                            },
+                        );
+                    }
+                    page.automatic_filter = false;
+                    page.remember_filter(page.filter);
+                    let now = Instant::now();
+                    let loaded_at = now.checked_sub(age).unwrap_or(now);
+                    page.last_loaded_at = Some(loaded_at);
+                    page.store_snapshot(loaded_at);
+                    if cached && age > STORED_PAGE_FRESH {
+                        page.load_with(false, false, cx);
+                    }
+                }
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        }));
         cx.notify();
     }
 
-    fn render_toasts(&self, theme: &Theme) -> Option<AnyElement> {
-        (!self.toasts.is_empty()).then(|| {
-            let popup = theme.for_popup();
-            let stack = div()
-                .absolute()
-                .right(px(16.0))
-                .bottom(px(16.0))
+    fn store_snapshot(&mut self, at: Instant) {
+        let Some(repository) = self.repository.clone() else {
+            return;
+        };
+        let key = (self.target_device.clone(), repository, self.filter);
+        self.snapshots.retain(|((target, repo, filter), ..)| {
+            !(target == &key.0 && repo.eq_ignore_ascii_case(&key.1) && filter == &key.2)
+        });
+        self.snapshots
+            .push((key, self.items.clone(), at, self.paging.clone()));
+        if self.snapshots.len() > 12 {
+            self.snapshots.remove(0);
+        }
+    }
+
+    /// Append the next page. Items already on the board keep their place;
+    /// a PR that moved between pages since the first load is not repeated.
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        let Some(cursor) = self.paging.next_cursor.clone() else {
+            return;
+        };
+        if self.more_task.is_some()
+            || self.repository.is_none()
+            || matches!(self.load_state, PullRequestsLoadState::Loading)
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.more_error = Some(PullRequestsPageError::Network);
+            toast_page_error(&PullRequestsPageError::Network, None, cx);
+            cx.notify();
+            return;
+        };
+        let target_name = selected_device_name(&self.state.read(cx), self.target_device.as_deref());
+        let generation = self.generation;
+        let mut params = params_for_target(self.target_device.as_deref());
+        params["repository"] = self.repository.clone().unwrap().into();
+        params["filter"] = serde_json::to_value(self.filter).unwrap();
+        params["after"] = cursor.into();
+        // Pages after a refreshed first page must be as fresh as it is.
+        params["refresh"] = self.refreshed.into();
+        self.more_error = None;
+        self.more_task = Some(cx.spawn(async move |this, cx| {
+            let result = fetch_page(&engine, params).await;
+            this.update(cx, |page, cx| {
+                if page.generation != generation {
+                    return;
+                }
+                page.more_task = None;
+                match result {
+                    Ok(next) => {
+                        let known: HashSet<String> =
+                            page.items.iter().map(|item| item.url.clone()).collect();
+                        page.items.extend(
+                            next.items
+                                .into_iter()
+                                .filter(|item| !known.contains(&item.url)),
+                        );
+                        page.paging = Paging {
+                            next_cursor: next.next_cursor,
+                            total: next.total_count.or(page.paging.total),
+                        };
+                        page.view_items = None;
+                        page.store_snapshot(page.last_loaded_at.unwrap_or_else(Instant::now));
+                    }
+                    Err(error) => {
+                        let error = map_rpc_error(&error, &target_name);
+                        toast_page_error(&error, None, cx);
+                        page.more_error = Some(error);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// "Load more" beneath the last group, with the remaining count when
+    /// GitHub reports it. Pages load only on request, sparing the user's
+    /// GitHub rate limit.
+    fn render_load_more(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.paging.next_cursor.as_ref()?;
+        let loading = self.more_task.is_some();
+        let remaining = self
+            .paging
+            .total
+            .map(|total| total.saturating_sub(self.items.len() as u64))
+            .filter(|remaining| *remaining > 0);
+        let label = match (loading, &self.more_error, remaining) {
+            (true, ..) => "Loading more…".to_owned(),
+            (false, Some(_), _) => "Try again".to_owned(),
+            (false, None, Some(remaining)) => format!("Load {} more", remaining.min(50)),
+            (false, None, None) => "Load more".to_owned(),
+        };
+        Some(
+            div()
+                .mt(px(Theme::SPACE_LG))
                 .flex()
                 .flex_col()
-                .items_end()
-                .gap(px(8.0))
-                .children(self.toasts.iter().map(|(id, text, description)| {
-                    crate::popover::popover_card(&popup)
-                        .bg(popup.surface_dialog)
-                        .id(("pull-requests-toast", *id as usize))
-                        .role(gpui::Role::Alert)
-                        .aria_label(text.clone())
-                        .max_w(px(360.0))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .text_size(px(12.0))
-                        .text_color(popup.text)
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .child(
+                    // A filled, borderless button: the list's own material.
+                    widgets::action_button(theme, widgets::ActionTone::Filled)
+                        .id("pull-requests-load-more")
+                        .debug_selector(|| "pull-requests-load-more".to_string())
+                        .role(gpui::Role::Button)
+                        .aria_label(label.clone())
+                        .tab_index(0)
+                        .h(px(HEADER_CONTROL_HEIGHT))
+                        .px(px(14.0))
+                        .gap(px(8.0))
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
+                        .when(loading, |el| {
+                            el.opacity(0.7).child(crate::loaders::mini_glyph_spinner(
+                                "pull-requests-more-spinner",
+                                1.5,
+                                theme.glyph,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                        })
+                        .child(label)
+                        .on_click(cx.listener(|page, _, _, cx| {
+                            page.more_error = None;
+                            page.load_more(cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (devices, local_id) = {
+            let state = self.state.read(cx);
+            (
+                eligible_desktop_devices(&state.devices),
+                state.local_device_id.clone(),
+            )
+        };
+        if devices.len() <= 1 {
+            return div().into_any_element();
+        }
+
+        let effective = self.target_device.clone().or_else(|| local_id.clone());
+        let selected = devices
+            .iter()
+            .find(|device| Some(device.id.as_str()) == effective.as_deref());
+        let label: SharedString = selected
+            .map(|device| device.name.clone().into())
+            .unwrap_or_else(|| SharedString::from("This device"));
+        let glyph = selected
+            .map(|device| platform_icon(&device.platform))
+            .unwrap_or(icons::LAPTOP);
+        let open = self.device_menu.is_open();
+
+        let mut trigger = div()
+            .id("pull-requests-device-switcher")
+            .role(gpui::Role::Button)
+            .aria_label(format!("Desktop device: {label}"))
+            .aria_expanded(open)
+            .track_focus(&self.device_focus)
+            .tab_index(0)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
+            .flex_none()
+            .h(px(HEADER_CONTROL_HEIGHT))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .bg(if open {
+                crate::theme::ink(0.06)
+            } else {
+                gpui::transparent_black()
+            })
+            .when(!open, |element| {
+                element.hover(|style| style.bg(crate::theme::ink(0.04)))
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|page, _, _, _| page.device_menu.note_trigger_press()),
+            )
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && page.device_menu.is_open() {
+                    cx.stop_propagation();
+                    page.return_focus = Some(page.device_focus.clone());
+                    page.close_device_menu(cx);
+                }
+            }))
+            .on_click(cx.listener(|page, event, window, cx| {
+                let keyboard = matches!(event, gpui::ClickEvent::Keyboard(_));
+                let was_open = if keyboard {
+                    page.device_menu.is_open()
+                } else {
+                    page.device_menu.take_press_was_open()
+                };
+                if was_open {
+                    page.close_device_menu(cx);
+                } else {
+                    page.device_menu.open(());
+                    if keyboard {
+                        window.focus(&page.option_focus, cx);
+                    }
+                }
+                cx.notify();
+            }))
+            .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
+            .child(
+                div()
+                    .max_w(px(130.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(label),
+            )
+            .child(
+                icon(icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted.opacity(0.5)),
+            );
+
+        if self.device_menu.get().is_some() {
+            let closing = self.device_menu.closing_since();
+            let menu = popover::popover_card(theme)
+                .w(px(240.0))
+                .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_device_menu(cx)))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(repository_menu_label(theme, "Desktop devices"))
+                .children(devices.into_iter().enumerate().map(|(index, device)| {
+                    let active = effective.as_deref() == Some(device.id.as_str());
+                    let local = local_id.as_deref() == Some(device.id.as_str());
+                    let device_id = device.id.clone();
+                    let name: SharedString = device.name.clone().into();
+                    let online = self.state.read(cx).device_online(&device.id, Utc::now());
+                    popover::menu_row(theme, active, format!("pull-requests-device-row-{index}"))
+                        .id(("pull-requests-device-row", index))
+                        .when(active, |row| row.track_focus(&self.option_focus))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!(
+                            "{}{}",
+                            device.name,
+                            if online { "" } else { ", offline" }
+                        ))
+                        .aria_selected(active)
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            page.return_focus = Some(page.device_focus.clone());
+                            page.set_target_device((!local).then(|| device_id.clone()), cx);
+                        }))
                         .child(
-                            div()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(text.clone()),
+                            icon(platform_icon(&device.platform))
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
                         )
-                        .children(description.clone().map(|description| {
-                            div().text_color(popup.text_muted).child(description)
+                        .child(div().flex_1().min_w_0().truncate().child(name))
+                        .when(local, |element| {
+                            element.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .text_color(theme.text_muted)
+                                    .child("This device"),
+                            )
+                        })
+                        .when(!online, |element| {
+                            element.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .text_color(theme.text_muted)
+                                    .child("Offline"),
+                            )
+                        })
+                        .child(div().size(px(6.0)).rounded_full().bg(if online {
+                            theme.success
+                        } else {
+                            crate::theme::ink(0.2)
                         }))
                 }));
-            gpui::deferred(stack).with_priority(3).into_any_element()
-        })
+            trigger = trigger.child(popover::anchored_menu(
+                "pull-requests-device-menu",
+                menu.into_any_element(),
+                closing,
+            ));
+        }
+
+        trigger.into_any_element()
+    }
+
+    fn render_empty_or_error(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let glyph = match &self.load_state {
+            PullRequestsLoadState::Failed(PullRequestsPageError::Authentication) => {
+                icons::KEY_MINIMALISTIC
+            }
+            PullRequestsLoadState::Failed(PullRequestsPageError::RemoteOffline(_)) => {
+                icons::WIFI_OFF
+            }
+            PullRequestsLoadState::Failed(_) => icons::INFO_CIRCLE,
+            _ => icons::PULL_REQUEST,
+        };
+        let (title, body) = match &self.load_state {
+            PullRequestsLoadState::Failed(error) => error_copy(error),
+            _ if self.repository.is_none() => (
+                "Choose a repository".into(),
+                "No GitHub repository was found for this project. Choose one to load your open pull requests.".into(),
+            ),
+            PullRequestsLoadState::Idle => (
+                "Ready when you are".into(),
+                "Refresh to load this repository on the selected device.".into(),
+            ),
+            _ => match self.filter {
+                ChangeRequestFilter::Authored => (
+                    "No pull requests authored by you".into(),
+                    "Your open pull requests in this repository will appear here.".into(),
+                ),
+                ChangeRequestFilter::Reviewing => (
+                    "No reviews requested".into(),
+                    "Pull requests waiting for your review will appear here.".into(),
+                ),
+                ChangeRequestFilter::All => (
+                    "No open pull requests".into(),
+                    "This repository has no open pull requests. New ones will appear here.".into(),
+                ),
+            },
+        };
+        div()
+            .mt(px(72.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .text_center()
+            .child(
+                div()
+                    .mb(px(Theme::SPACE_LG))
+                    .child(icon(glyph).size(px(24.0)).text_color(theme.text_muted)),
+            )
+            .child(
+                div()
+                    .w(px(420.0))
+                    .max_w_full()
+                    .text_size(crate::typography::ui_rems(15.0))
+                    .line_height(crate::typography::ui_rems(22.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(title)),
+            )
+            .child(
+                div()
+                    .mt(px(6.0))
+                    // A definite width: wrapped text measured against an
+                    // unresolved one lays out a line short, and the second
+                    // line paints over the gap to the action below.
+                    .w(px(420.0))
+                    .max_w_full()
+                    .debug_selector(|| "pr-empty-description".into())
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .line_height(crate::typography::ui_rems(20.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(body)),
+            )
+            .when(
+                self.repository.is_none()
+                    && !matches!(self.load_state, PullRequestsLoadState::Failed(_)),
+                |el| {
+                    el.child(
+                        empty_action("pr-empty-choose-repository", "Choose repository", theme)
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.repository_menu.open(());
+                                window.focus(&page.repository_input.read(cx).focus_handle(cx), cx);
+                                cx.notify();
+                            })),
+                    )
+                },
+            )
+            .when(
+                matches!(self.load_state, PullRequestsLoadState::Ready)
+                    && self.filter != ChangeRequestFilter::All,
+                |el| {
+                    el.child(
+                        empty_action("pr-empty-show-all", "Show all pull requests", theme)
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.select_filter(ChangeRequestFilter::All, cx)
+                            })),
+                    )
+                },
+            )
+            .when(
+                self.repository.is_some() && matches!(self.load_state, PullRequestsLoadState::Idle),
+                |el| {
+                    el.child(
+                        empty_action("pr-empty-load", "Load pull requests", theme)
+                            .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                    )
+                },
+            )
+            .when(
+                matches!(
+                    self.load_state,
+                    PullRequestsLoadState::Failed(ref error)
+                        if *error != PullRequestsPageError::RateLimited
+                ),
+                |el| {
+                    el.child(
+                        empty_action("pull-requests-retry", "Try again", theme)
+                            .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+}
+
+fn empty_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    widgets::ghost_action(theme)
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Button)
+        .tab_index(0)
+        .mt(px(20.0))
+        .flex_none()
+        .min_h(px(32.0))
+        .line_height(crate::typography::ui_rems(18.0))
+        .px(px(14.0))
+        .border_1()
+        .border_color(theme.border)
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .child(label)
+}
+
+/// The results list's rail geometry, read from the list state itself (the
+/// file tree's approach): viewport, content extent, and the offset as a
+/// positive distance from the top.
+fn board_rail_geometry(list: &ListState) -> Option<(popover::MenuScrollbarMetrics, gpui::Pixels)> {
+    let bounds = list.viewport_bounds();
+    let viewport = f32::from(bounds.size.height);
+    let max_scroll = f32::from(list.max_offset_for_scrollbar().y);
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let metrics =
+        popover::MenuScrollbarMetrics::from_parts(viewport, viewport + max_scroll, offset)?;
+    Some((metrics, bounds.top()))
+}
+
+fn board_scroll_overflow(list: &ListState) -> (bool, bool) {
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let max = f32::from(list.max_offset_for_scrollbar().y);
+    (offset > 0.5, offset < max - 0.5)
+}
+
+impl PullRequestsPage {
+    fn apply_board_rail_target(
+        &mut self,
+        metrics: &popover::MenuScrollbarMetrics,
+        track_top: gpui::Pixels,
+        pointer_y: gpui::Pixels,
+    ) -> bool {
+        let Some(fraction) =
+            popover::ScrollRailHost::rail_bar(self).drag_target_in(metrics, track_top, pointer_y)
+        else {
+            return false;
+        };
+        self.board_list.set_offset_from_scrollbar(gpui::Point::new(
+            px(0.0),
+            px(-fraction * metrics.max_scroll),
+        ));
+        true
+    }
+}
+
+/// The results scroll through the virtualized list; empty, error and
+/// skeleton states scroll through the page's handle.
+impl popover::ScrollRailHost for PullRequestsPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+    fn rail_scroll(&self) -> Option<ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
+    fn rail_metrics(&mut self) -> Option<popover::MenuScrollbarMetrics> {
+        if !self.board_list_active {
+            let scroll = self.scroll.rail_scroll()?;
+            self.rail_bar().note_scroll(&scroll);
+            return self.rail_bar().metrics(&scroll);
+        }
+        let (metrics, _) = board_rail_geometry(&self.board_list)?;
+        let offset = -f32::from(self.board_list.scroll_px_offset_for_scrollbar().y);
+        self.rail_bar().note_scroll_offset(offset);
+        Some(metrics)
+    }
+    fn rail_press(&mut self, pointer_y: gpui::Pixels) -> bool {
+        if !self.board_list_active {
+            let Some(scroll) = self.scroll.rail_scroll() else {
+                return false;
+            };
+            return self.rail_bar().begin_press(&scroll, pointer_y);
+        }
+        let Some((metrics, track_top)) = board_rail_geometry(&self.board_list) else {
+            return false;
+        };
+        self.rail_bar()
+            .begin_press_in(&metrics, track_top, pointer_y);
+        self.apply_board_rail_target(&metrics, track_top, pointer_y)
+    }
+    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels) -> bool {
+        if !self.board_list_active {
+            let Some(scroll) = self.scroll.rail_scroll() else {
+                return false;
+            };
+            return self.rail_bar().drag_to(&scroll, pointer_y);
+        }
+        let Some((metrics, track_top)) = board_rail_geometry(&self.board_list) else {
+            return false;
+        };
+        self.apply_board_rail_target(&metrics, track_top, pointer_y)
     }
 }
 
 impl Render for PullRequestsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if matches!(self.listing, Loadable::Idle) {
-            self.refresh(cx);
-        }
-        self.note_focus(window, cx);
-        let slide = self.sync_tab_slide(std::time::Instant::now(), cx);
-        if slide.is_some() {
-            window.request_animation_frame();
+        if let Some(focus) = self.return_focus.take() {
+            window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
-        let viewport = self.layout_width(window);
-        let compact = viewport < COMPACT_WIDTH;
-        let on_list = self.prefs.tab == PageTab::PullRequests;
-        let panel_width = (on_list && self.active.is_some()).then(|| {
-            if compact {
-                viewport
-            } else {
-                self.panel_width(viewport, cx)
+        let initial_loading =
+            self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Loading);
+        let refreshing =
+            !self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Loading);
+        let refresh_error =
+            !self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Failed(_));
+        // A failed refresh keeps the last results on screen and says so
+        // once, as a toast.
+        if refresh_error && !self.refresh_error_shown {
+            if let PullRequestsLoadState::Failed(error) = &self.load_state {
+                let error = error.clone();
+                cx.defer(move |cx| {
+                    toast_page_error(&error, Some("Showing the last loaded results."), cx)
+                });
             }
-        });
-        let git_view = (!on_list).then(|| self.sync_git_tab(cx));
-        let topbar = self.render_topbar(&theme, window, cx);
-        let compact_detail = compact && panel_width.is_some();
-        let body: AnyElement = if let Some(git_view) = git_view {
-            git_view.update(cx, |tab, cx| tab.set_compact(compact, cx));
-            div().flex_1().min_h_0().child(git_view).into_any_element()
-        } else if compact_detail {
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .child(self.render_panel(&theme, viewport, window, cx))
-                .into_any_element()
-        } else {
-            let list_width = viewport - panel_width.map_or(0.0, |width| width + 1.0);
-            let container = list_width.min(CONTAINER_MAX_WIDTH);
-            let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
-            let search_busy = self.search_busy(cx);
-            let (entries, search_text) = self.list_entries(search_busy, cx);
-            self.sync_entries(entries, cx);
-            self.frame = ListFrame {
-                row_width,
-                search_text,
-                search_busy,
-                devices: self.list_devices(cx),
-            };
-            gpui::list(
-                self.list_state.clone(),
-                cx.processor(|page, ix, _, cx| page.render_entry(ix, cx)),
-            )
-            .flex_1()
-            .min_h_0()
-            .into_any_element()
-        };
-        let body = div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .when_some(slide, |el, t| {
-                let side = if on_list { -1.0 } else { 1.0 };
-                el.left(px(side * (1.0 - t) * TAB_BODY_SHIFT)).opacity(t)
+        }
+        self.refresh_error_shown = refresh_error;
+        let count = (!initial_loading
+            && !matches!(self.load_state, PullRequestsLoadState::Failed(_))
+            || !self.items.is_empty())
+        .then(|| {
+            self.paging.total.map_or(self.items.len(), |total| {
+                (total as usize).max(self.items.len())
             })
-            .child(body);
-        let list = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(topbar)
-            .child(body);
-        let panel = panel_width.filter(|_| !compact_detail).map(|width| {
-            let resizer = div()
-                .id("pull-requests-panel-resizer")
-                .w(px(1.0))
-                .h_full()
-                .flex_none()
-                .relative()
-                .bg(if self.resize_from.is_some() {
-                    theme.hairline(0.22)
-                } else {
-                    theme.hairline(0.07)
-                })
-                .child(
-                    div()
-                        .id("pull-requests-panel-resize-handle")
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(px(-4.0))
-                        .w(px(9.0))
-                        .cursor_col_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |page, event: &gpui::MouseDownEvent, _, cx| {
-                                page.resize_from = Some((f32::from(event.position.x), width));
-                                cx.notify();
-                            }),
-                        ),
-                );
-            let panel = self.render_panel(&theme, width, window, cx);
-            (resizer, panel)
         });
+        let board = self.board(cx);
+        let items = board.items.clone();
+        let layout = self
+            .content_width
+            .map(table_layout)
+            .unwrap_or(PullRequestTableLayout::Narrow);
+        let scroll = self.scroll.scroll.clone();
+        let width_probe = {
+            let page = cx.weak_entity();
+            gpui::canvas(
+                move |bounds, window, cx| {
+                    let width = table_content_width(f32::from(bounds.size.width));
+                    // Notify after layout completes so the next frame uses the
+                    // new outlet width even when resizing across a breakpoint.
+                    window.defer(cx, move |_, cx| {
+                        page.update(cx, |page, cx| {
+                            if page
+                                .content_width
+                                .is_none_or(|current| (current - width).abs() > 0.5)
+                            {
+                                page.content_width = Some(width);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+
+        let loading = initial_loading || refreshing;
+        let freshness: SharedString = match self.last_loaded_at {
+            Some(at) if at.elapsed().as_secs() < 60 => {
+                "Loaded just now · Refresh pull requests".into()
+            }
+            Some(at) => format!(
+                "Loaded {}m ago · Refresh pull requests",
+                at.elapsed().as_secs() / 60
+            )
+            .into(),
+            None => "Refresh pull requests".into(),
+        };
+
+        let header = widgets::page_column()
+            .id("pull-requests-column")
+            .debug_selector(|| "pull-requests-column".to_owned())
+            .max_w(px(PR_PAGE_MAX_WIDTH))
+            .pt_0()
+            .pb(px(Theme::SPACE_LG))
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(12.0))
+                    .child(widgets::page_header(&theme, "Pull requests", count))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .id("pull-requests-refresh")
+                                    .debug_selector(|| "pull-requests-refresh".to_string())
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Refresh pull requests")
+                                    .aria_description(if loading {
+                                        "Loading pull requests"
+                                    } else {
+                                        "Fetch the latest results from GitHub"
+                                    })
+                                    .tab_index(0)
+                                    .size(px(HEADER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(gpui::transparent_black())
+                                    .hover(|style| style.bg(crate::theme::ink(0.04)))
+                                    .focus_visible(|style| {
+                                        style.border_2().border_color(theme.accent)
+                                    })
+                                    .when(loading, |el| el.opacity(0.5))
+                                    .on_click(cx.listener(|page, _, _, cx| page.refresh(cx)))
+                                    .child(if refreshing {
+                                        crate::loaders::mini_glyph_spinner(
+                                            "pull-requests-refresh-spinner",
+                                            1.75,
+                                            theme.glyph,
+                                            cx.entity_id(),
+                                            cx,
+                                        )
+                                        .into_any_element()
+                                    } else {
+                                        icon(icons::REFRESH)
+                                            .size(px(16.0))
+                                            .text_color(theme.text_muted)
+                                            .into_any_element()
+                                    })
+                                    .tooltip(widgets::text_tooltip(freshness)),
+                            )
+                            .child(self.render_repository_menu(&theme, window, cx))
+                            .child(self.render_device_switcher(&theme, cx)),
+                    ),
+            )
+
+
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        // A segmented control: the tray reads as one control
+                        // and each segment as one of its choices.
+                        div()
+                            .id("pr-filter-tray")
+                            .role(gpui::Role::TabList)
+                            .aria_label("Pull requests to show")
+                            .h(px(HEADER_CONTROL_HEIGHT))
+                            .flex_none()
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(crate::theme::ink(0.035))
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .children(
+                                [
+                                    (
+                                        ChangeRequestFilter::Authored,
+                                        "Authored",
+                                        "pr-filter-authored",
+                                    ),
+                                    (
+                                        ChangeRequestFilter::Reviewing,
+                                        "Reviewing",
+                                        "pr-filter-reviewing",
+                                    ),
+                                    (ChangeRequestFilter::All, "All", "pr-filter-all"),
+                                ]
+                                .into_iter()
+                                .map(|(filter, label, id)| {
+                                    let chosen = self.filter == filter;
+                                    let selected = self.filter_fades.value_at(id, Instant::now());
+                                    let hover_key = format!("pr-filter-{}-{id}", cx.entity_id());
+                                    let hover = crate::motion::hover_t(&hover_key);
+                                    let fill = move || {
+                                        crate::theme::wash(
+                                            0.12 * selected + 0.06 * hover * (1.0 - selected),
+                                        )
+                                    };
+                                    crate::surface_chrome::tab_frame(id, chosen, &theme)
+                                        .role(gpui::Role::Tab)
+                                        .h(px(HEADER_CONTROL_HEIGHT - 4.0))
+                                        .bg(fill())
+                                        .when(chosen, |el| {
+                                            el.shadow(crate::theme::card_selected_shadows())
+                                        })
+                                        .text_color(crate::motion::mix(
+                                            theme.text_muted,
+                                            theme.text,
+                                            selected.max(hover),
+                                        ))
+                                        .on_hover(crate::motion::hover_listener(hover_key))
+                                        .hover(move |style| style.bg(fill()))
+                                        .debug_selector(move || id.into())
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .px(px(12.0))
+                                        .child(label)
+                                        .on_click(cx.listener(move |page, _, _, cx| {
+                                            page.select_filter(filter, cx)
+                                        }))
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(180.0))
+                            .items_center()
+                            .gap(px(Theme::SPACE_SM))
+                            .child(
+                                crate::surface_chrome::input()
+                                    .h(px(HEADER_CONTROL_HEIGHT))
+                                    .rounded(px(8.0))
+                                    .min_w(px(160.0))
+                                    .child(
+                                        icon(icons::MAGNIFER)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h(px(16.0))
+                                            .overflow_hidden()
+                                            .child(self.search.clone()),
+                                    )
+                                    .when(!self.query.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .id("pull-requests-clear-search")
+                                                .role(gpui::Role::Button)
+                                                .aria_label("Clear search")
+                                                .tab_index(0)
+                                                .size(px(24.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(4.0))
+                                                .focus_visible(|style| {
+                                                    style.border_2().border_color(theme.accent)
+                                                })
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|page, _, _, cx| {
+                                                    page.search.update(cx, |input, cx| {
+                                                        input.set_text("", cx)
+                                                    });
+                                                    page.query.clear();
+                                                    page.view_items = None;
+                                                    page.scroll_to_top();
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    icon(icons::CLOSE)
+                                                        .size(px(12.0))
+                                                        .text_color(theme.text_muted),
+                                                ),
+                                        )
+                                    }),
+                            )
+                            .child(self.render_sort_menu(&theme, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(
+                        [
+                            (
+                                PersonalView::NeedsYou,
+                                "Needs you",
+                                "pr-view-needs-you",
+                                icons::BELL,
+                                icons::BELL,
+                            ),
+                            (
+                                PersonalView::Starred,
+                                "Starred",
+                                "pr-view-starred",
+                                icons::STAR,
+                                icons::STAR_BOLD,
+                            ),
+                        ]
+                        .into_iter()
+                        .map(|(view, label, id, glyph, selected_glyph)| {
+                            let selected = self.personal_view == view;
+                            // Toggle pills in the tray's material: filled, no
+                            // outline, glyph and label centered together.
+                            let color = if selected {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            };
+                            div()
+                                .id(id)
+                                .debug_selector(move || id.into())
+                                .role(gpui::Role::Button)
+                                .aria_label(label)
+                                .aria_selected(selected)
+                                .tab_index(0)
+                                .h(px(HEADER_CONTROL_HEIGHT - 4.0))
+                                .pl(px(10.0))
+                                .pr(px(12.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(6.0))
+                                .rounded_full()
+                                .cursor_pointer()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .line_height(crate::typography::ui_rems(16.0))
+                                .text_color(color)
+                                .when(selected, |el| {
+                                    el.bg(crate::theme::wash(0.12))
+                                        .shadow(crate::theme::card_selected_shadows())
+                                })
+                                .when(!selected, |el| {
+                                    el.bg(crate::theme::ink(0.035)).hover(|style| {
+                                        style.bg(crate::theme::ink(0.07)).text_color(theme.text)
+                                    })
+                                })
+                                .focus_visible(|style| style.border_2().border_color(theme.accent))
+                                .child(
+                                    icon(if selected { selected_glyph } else { glyph })
+                                        .size(px(13.0))
+                                        .flex_none()
+                                        .text_color(color),
+                                )
+                                .child(label)
+                                .on_click(cx.listener(move |page, _, _, cx| {
+                                    page.personal_view = if selected {
+                                        PersonalView::Everything
+                                    } else {
+                                        view
+                                    };
+                                    page.scroll_to_top();
+                                    if !selected {
+                                        page.select_filter(ChangeRequestFilter::All, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                        }),
+                    ),
+            )
+            .when(!self.query.is_empty(), |el| {
+                el.child(
+                    div()
+                        .mt(px(Theme::SPACE_SM))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(format!(
+                            "{} of {} pull requests",
+                            items.len(),
+                            self.items.len()
+                        )),
+                )
+            });
+        // Results render through the virtualized list; every other state is
+        // a short page in an ordinary scroll view.
+        let board_list_active = !initial_loading && !self.items.is_empty() && !items.is_empty();
+        self.board_list_active = board_list_active;
+        let content = if board_list_active {
+            None
+        } else if initial_loading {
+            Some(crate::pull_request_skeleton::board(
+                layout,
+                cx.entity_id(),
+                &theme,
+                cx,
+            ))
+        } else if self.items.is_empty() {
+            Some(self.render_empty_or_error(&theme, cx))
+        } else {
+            Some(
+                div()
+                    .id("pull-requests-no-results")
+                    .debug_selector(|| "pull-requests-no-results".to_string())
+                    .py(px(48.0))
+                    .text_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text_muted)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(match self.personal_view {
+                        PersonalView::NeedsYou => "Nothing needs your attention",
+                        PersonalView::Starred => "No starred pull requests",
+                        PersonalView::Everything => "No matching pull requests",
+                    })
+                    .child(
+                        empty_action("pr-empty-clear-search", "Show all pull requests", &theme)
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.search.update(cx, |input, cx| input.set_text("", cx));
+                                page.query.clear();
+                                page.personal_view = PersonalView::Everything;
+                                page.view_items = None;
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        };
+        let load_more = (!board_list_active && !initial_loading && !self.items.is_empty())
+            .then(|| self.render_load_more(&theme, cx))
+            .flatten();
+        let scrollbar = popover::rail(self, "pull-requests-scrollbar", &theme, cx);
+        if self.filter_fades.tick_at(Instant::now()) {
+            window.request_animation_frame();
+        }
+        let results = match content {
+            None => {
+                let overflow = self.board_list.clone();
+                crate::edge_fade::edge_faded(
+                    PR_SCROLL_FADE_BAND,
+                    true,
+                    true,
+                    div()
+                        .id("pull-requests-scroll")
+                        .debug_selector(|| "pull-requests-scroll".into())
+                        .size_full()
+                        .child(
+                            list(
+                                self.board_list.clone(),
+                                cx.processor(Self::render_board_row),
+                            )
+                            .size_full(),
+                        ),
+                )
+                .fade_overflow_y_with(move |_| board_scroll_overflow(&overflow))
+                .into_any_element()
+            }
+            Some(content) => crate::edge_fade::edge_faded(
+                PR_SCROLL_FADE_BAND,
+                true,
+                true,
+                div()
+                    .id("pull-requests-scroll")
+                    .debug_selector(|| "pull-requests-scroll".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(PR_PAGE_MAX_WIDTH))
+                            .mx_auto()
+                            .px(px(PR_PAGE_HORIZONTAL_PADDING))
+                            .pt(px(8.0))
+                            .pb(px(32.0))
+                            .child(content)
+                            .children(load_more),
+                    ),
+            )
+            .fade_overflow_y(&scroll)
+            .into_any_element(),
+        };
+        // Keep the page actions reachable while browsing a long list. Only the
+        // results scroll; the shared edges remain identical in every layout.
         div()
             .id("pull-requests-page")
-            .on_mouse_move(cx.listener(|page, _: &MouseMoveEvent, _, _| {
-                page.last_interaction = std::time::Instant::now();
-            }))
-            .on_key_down(cx.listener(|page, _: &gpui::KeyDownEvent, _, _| {
-                page.last_interaction = std::time::Instant::now();
-            }))
-            .role(gpui::Role::Group)
-            .aria_label("Pull Requests")
             .size_full()
             .flex()
-            .flex_row()
-            .bg(theme.bg)
-            .on_mouse_move(cx.listener(move |page, event: &MouseMoveEvent, _, cx| {
-                if let Some((start_x, start_width)) = page.resize_from {
-                    let width = detail::clamp_panel_width(
-                        start_width - (f32::from(event.position.x) - start_x),
-                        viewport,
-                    );
-                    page.panel_width = Some(width);
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|page, _, _, cx| {
-                    if page.resize_from.take().is_some() {
-                        if let Some(width) = page.panel_width {
-                            crate::settings::update(
-                                crate::settings::SavePolicy::Debounced,
-                                cx,
-                                |settings| settings.pull_requests_panel_width = Some(width),
-                            );
-                        }
-                        cx.notify();
-                    }
-                }),
-            )
-            .relative()
-            .child(list)
-            .children(self.render_checks_popover(&theme, Tones::of(&theme), cx))
-            .children(panel.map(|(resizer, panel)| {
+            .flex_col()
+            .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
+            .child(header)
+            .child(
                 div()
-                    .h_full()
+                    .id("pull-requests-scroll-host")
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .on_hover(cx.listener(|page, hovered: &bool, _, cx| {
+                        if page.scroll.set_list_hovered(*hovered) {
+                            cx.notify();
+                        }
+                    }))
+                    .child(width_probe)
+                    .child(results)
+                    .children(scrollbar),
+            )
+    }
+}
+
+impl PullRequestsPage {
+    /// One row of the virtualized board, framed in the page column. Built
+    /// only while on screen.
+    fn render_board_row(
+        &mut self,
+        index: usize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(board) = self.board.clone() else {
+            return div().into_any_element();
+        };
+        let Some(row) = board.rows.get(index).copied() else {
+            return div().into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        let content = match row {
+            BoardRow::Group {
+                group,
+                count,
+                closed,
+                first,
+            } => self
+                .render_group_header(group, count, closed, &theme, cx)
+                .when(!first, |el| el.pt(px(32.0)))
+                .pb(px(8.0))
+                .into_any_element(),
+            BoardRow::Item { index, first, last } => {
+                let Some(item) = board.items.get(index) else {
+                    return div().into_any_element();
+                };
+                let layout = self
+                    .content_width
+                    .map(table_layout)
+                    .unwrap_or(PullRequestTableLayout::Narrow);
+                // Each row paints its slice of the group's card.
+                div()
+                    .w_full()
+                    .bg(widgets::block_fill(&theme))
+                    .when(first, |el| el.rounded_t(px(12.0)))
+                    .when(last, |el| el.rounded_b(px(12.0)))
+                    .child(render_table_row(
+                        item,
+                        layout,
+                        self.sort.field,
+                        first,
+                        last,
+                        self.selected_url.as_deref() == Some(item.url.as_str()),
+                        &theme,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+            BoardRow::Footer => self
+                .render_load_more(&theme, cx)
+                .unwrap_or_else(|| div().into_any_element()),
+        };
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .when(index == 0, |el| el.pt(px(8.0)))
+            .when(index + 1 == board.rows.len(), |el| el.pb(px(32.0)))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(PR_PAGE_MAX_WIDTH))
+                    .px(px(PR_PAGE_HORIZONTAL_PADDING))
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
+    fn render_group_header(
+        &mut self,
+        group: PullRequestGroup,
+        count: usize,
+        closed: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let reveal = crate::motion::state_t(
+            &format!("pr-group-{}-{}", cx.entity_id(), group.key()),
+            !closed,
+            crate::motion::GLYPH_STATE,
+            crate::motion::reduced_motion(cx),
+        );
+        div().w_full().child(
+            div()
+                .id(SharedString::from(format!(
+                    "pull-requests-group-{}",
+                    group.key()
+                )))
+                .debug_selector(move || format!("pull-requests-group-{}", group.key()))
+                .role(gpui::Role::Button)
+                .aria_label(format!("{}, {count} pull requests", group.label()))
+                .aria_expanded(!closed)
+                .tab_index(0)
+                .min_h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
+                .cursor_pointer()
+                .hover(|style| style.bg(crate::theme::ink(0.025)))
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    if !page.collapsed_groups.remove(&group) {
+                        page.collapsed_groups.insert(group);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted)
+                        .with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                            reveal * 0.25,
+                        ))),
+                )
+                .child(widgets::section_label(theme, group.label()).px_0())
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(count.to_string()),
+                ),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PullRequestTableLayout {
+    Narrow,
+    Compact,
+    Wide,
+}
+
+fn table_layout(width: f32) -> PullRequestTableLayout {
+    if width < 640.0 {
+        PullRequestTableLayout::Narrow
+    } else if width < 900.0 {
+        PullRequestTableLayout::Compact
+    } else {
+        PullRequestTableLayout::Wide
+    }
+}
+
+fn table_content_width(container_width: f32) -> f32 {
+    (container_width - PR_PAGE_HORIZONTAL_PADDING * 2.0)
+        .max(0.0)
+        .min(PR_PAGE_MAX_WIDTH - PR_PAGE_HORIZONTAL_PADDING * 2.0)
+}
+
+fn sort_pull_requests(items: &mut [ChangeRequestListItem], sort: PullRequestSort) {
+    items.sort_by(|left, right| {
+        let primary = match sort.field {
+            PullRequestSortField::Changes => left
+                .additions
+                .saturating_add(left.deletions)
+                .cmp(&right.additions.saturating_add(right.deletions)),
+            PullRequestSortField::Opened => left.created_at.cmp(&right.created_at),
+            PullRequestSortField::Updated => left.updated_at.cmp(&right.updated_at),
+        };
+        let primary = match sort.direction {
+            SortDirection::Ascending => primary,
+            SortDirection::Descending => primary.reverse(),
+        };
+        primary
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.repository.cmp(&right.repository))
+            .then_with(|| left.number.cmp(&right.number))
+    });
+}
+
+fn pull_request_key(item: &ChangeRequestListItem) -> String {
+    format!("{}#{}", item.repository, item.number)
+}
+
+pub(crate) fn table_row_shell(
+    layout: PullRequestTableLayout,
+    first: bool,
+    last: bool,
+    theme: &Theme,
+) -> gpui::Div {
+    widgets::card_row(theme, first)
+        .mx_0()
+        .px(px(16.0))
+        .when(first, |row| row.rounded_t(px(12.0)))
+        .when(last, |row| row.rounded_b(px(12.0)))
+        .flex_nowrap()
+        .min_w_0()
+        .min_h(px(PR_TABLE_ROW_HEIGHT))
+        .flex_none()
+        .flex()
+        .when(layout == PullRequestTableLayout::Narrow, |row| {
+            row.flex_col().items_stretch().gap(px(Theme::SPACE_SM))
+        })
+        .when(layout != PullRequestTableLayout::Narrow, |row| {
+            row.items_center().gap(px(Theme::SPACE_LG))
+        })
+}
+
+fn render_table_row(
+    item: &ChangeRequestListItem,
+    layout: PullRequestTableLayout,
+    sort_field: PullRequestSortField,
+    first: bool,
+    last: bool,
+    selected: bool,
+    theme: &Theme,
+    cx: &gpui::App,
+) -> AnyElement {
+    let star = star_button(&item.url, theme, cx);
+    let url = item.url.clone();
+    let row = table_row_shell(layout, first, last, theme)
+        .id(SharedString::from(format!(
+            "pull-request-row-{}",
+            pull_request_key(item)
+        )))
+        .debug_selector(|| "pull-request-row".to_string())
+        .role(gpui::Role::Link)
+        .aria_label(format!(
+            "{}: {} #{}. {}. Open pull request",
+            item.title,
+            item.repository,
+            item.number,
+            status_description(item)
+        ))
+        .tab_index(0)
+        .when(selected, |el| el.bg(theme.glass_hover()))
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.glass_hover()))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            crate::pull_request_detail::open(&url, window, cx);
+        });
+    let (date_label, timestamp) = if sort_field == PullRequestSortField::Opened {
+        ("Opened", item.created_at)
+    } else {
+        ("Updated", item.updated_at)
+    };
+    let updated = || {
+        let exact = SharedString::from(format!(
+            "{date_label} {} · {}",
+            relative_time(timestamp, Utc::now()),
+            timestamp.format("%b %d, %Y at %H:%M UTC")
+        ));
+        div()
+            .id(SharedString::from(format!(
+                "board-pr-date-{}",
+                pull_request_key(item)
+            )))
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .tooltip(widgets::text_tooltip(exact))
+            .child(SharedString::from(
+                if sort_field == PullRequestSortField::Opened {
+                    format!("Opened {}", compact_relative_time(timestamp, Utc::now()))
+                } else {
+                    compact_relative_time(timestamp, Utc::now())
+                },
+            ))
+    };
+    if layout == PullRequestTableLayout::Narrow {
+        row.child(render_pr_identity(item, theme))
+            .child(
+                div()
+                    .pl(px(22.0))
                     .flex()
-                    .flex_row()
+                    .items_center()
+                    .gap(px(Theme::SPACE_SM))
+                    .child(render_diff_stats(item, theme))
+                    .child(div().flex_1())
+                    .child(updated())
+                    .child(star),
+            )
+            .into_any_element()
+    } else {
+        row.child(render_pr_identity(item, theme))
+            .child(
+                div()
+                    .w(px(112.0))
                     .flex_none()
-                    .when_some(slide, |el, t| el.opacity(t))
-                    .child(resizer)
-                    .child(panel)
-            }))
-            .children(self.render_confirm(&theme, cx))
-            .children(self.render_toasts(&theme))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(Theme::SPACE_XS))
+                    .child(updated())
+                    .child(render_diff_stats(item, theme)),
+            )
+            .child(star)
+            .into_any_element()
+    }
+}
+
+fn status_description(item: &ChangeRequestListItem) -> String {
+    let assessment = Facts::from_item(item).assess();
+    let mut labels = vec![if item.is_draft { "Draft" } else { "Open" }];
+    labels.extend(assessment.blockers.iter().map(|blocker| blocker.label()));
+    if item.review_decision == ChangeRequestReviewDecision::Approved {
+        labels.push("Approved");
+    }
+    labels.extend(
+        assessment
+            .attention
+            .iter()
+            .filter(|reason| {
+                **reason != zeron_proto::change_request_assessment::AttentionReason::FailingCi
+            })
+            .map(|reason| reason.label()),
+    );
+    labels.join(" · ")
+}
+
+fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement {
+    let title = SharedString::from(single_line(&item.title));
+    let full_title = title.clone();
+    let assessment = Facts::from_item(item).assess();
+    let mut labels: Vec<_> = assessment
+        .blockers
+        .iter()
+        .filter(|blocker| **blocker != Blocker::FailingCi)
+        .map(|blocker| blocker.label())
+        .collect();
+    if item.is_draft {
+        labels.insert(0, "Draft");
+    }
+    if item.review_decision == ChangeRequestReviewDecision::Approved {
+        labels.push("Approved");
+    }
+    labels.extend(
+        assessment
+            .attention
+            .iter()
+            .filter(|reason| {
+                **reason != zeron_proto::change_request_assessment::AttentionReason::FailingCi
+            })
+            .map(|reason| reason.label()),
+    );
+    let status = labels.join(" · ");
+    let tone = if item.mergeability == ChangeRequestMergeability::Conflicting {
+        theme.danger_muted
+    } else if item.review_decision == ChangeRequestReviewDecision::ChangesRequested {
+        theme.warning
+    } else {
+        theme.text_muted
+    };
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(Theme::SPACE_XS))
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "pull-request-title-{}",
+                    pull_request_key(item)
+                )))
+                .debug_selector(|| "pull-request-title".to_string())
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
+                .text_color(theme.text)
+                .tooltip(widgets::text_tooltip(full_title))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    icon(request_glyph(item))
+                        .size(px(14.0))
+                        .text_color(request_color(item, theme)),
+                )
+                .child(div().min_w_0().truncate().child(title)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .pl(px(22.0))
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .min_w_0()
+                        .max_w(px(150.0))
+                        .child(super::pull_request_media::avatar(
+                            &item.author.login,
+                            format!("pr-list-author-{}", pull_request_key(item)).into(),
+                            16.0,
+                            theme,
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(if item.author.login.is_empty() {
+                                    "Unknown author".to_owned()
+                                } else {
+                                    item.author.login.clone()
+                                }),
+                        ),
+                )
+                .child(crate::change_requests::pull_request_list_badge(
+                    SharedString::from(format!("board-pr-badge-{}", pull_request_key(item))),
+                    item,
+                    theme,
+                ))
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "pr-ci-{}",
+                            pull_request_key(item)
+                        )))
+                        .debug_selector(|| "pr-row-ci".into())
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(match item.ci.state {
+                            CiState::Failed => theme.danger_muted,
+                            CiState::Passed => theme.success_muted,
+                            _ => theme.text_muted,
+                        })
+                        .tooltip(widgets::text_tooltip(format!(
+                            "{} · Commit: {}\n{}",
+                            item.ci.state.label(),
+                            if item.head_ref_oid.is_empty() {
+                                "unavailable"
+                            } else {
+                                &item.head_ref_oid
+                            },
+                            format!(
+                                "{}\nNext: {}",
+                                assessment
+                                    .missing
+                                    .iter()
+                                    .map(|missing| missing.label())
+                                    .collect::<Vec<_>>()
+                                    .join(" · "),
+                                assessment
+                                    .actions
+                                    .first()
+                                    .map_or("No action suggested", |action| action.label())
+                            )
+                        )))
+                        .child(format!(
+                            "{}{}",
+                            item.ci.state.label(),
+                            if item.head_ref_oid.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    " · {}",
+                                    item.head_ref_oid.chars().take(7).collect::<String>()
+                                )
+                            }
+                        )),
+                )
+                .when(!status.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(tone)
+                            .child(status.trim_start_matches("Open · ").to_string()),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_diff_stats(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement {
+    let exact = SharedString::from(format!(
+        "{} additions, {} deletions",
+        item.additions, item.deletions
+    ));
+    div()
+        .id(SharedString::from(format!(
+            "pull-request-diff-{}",
+            pull_request_key(item)
+        )))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .font_family(theme.font_mono.clone())
+        .text_size(crate::typography::ui_rems(11.0))
+        .tooltip(widgets::text_tooltip(exact))
+        .child(
+            div()
+                .text_color(theme.success_muted)
+                .child(SharedString::from(format!(
+                    "+{}",
+                    format_compact_count(item.additions)
+                ))),
+        )
+        .child(
+            div()
+                .text_color(theme.danger_muted)
+                .child(SharedString::from(format!(
+                    "−{}",
+                    format_compact_count(item.deletions)
+                ))),
+        )
+        .into_any_element()
+}
+
+fn eligible_desktop_devices(devices: &[Device]) -> Vec<Device> {
+    let mut devices: Vec<_> = devices
+        .iter()
+        .filter(|device| !matches!(device.platform.as_str(), "ios" | "android"))
+        .cloned()
+        .collect();
+    devices.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    devices
+}
+
+fn normalized_target_device(
+    target: Option<&str>,
+    devices: &[Device],
+    local_id: Option<&str>,
+) -> Option<String> {
+    let target = target?;
+    if local_id == Some(target) {
+        return None;
+    }
+
+    // The local row is inserted before the first device snapshot is emitted.
+    // Until it arrives, keep the selection instead of judging an empty or
+    // partial pre-sync list as authoritative.
+    let local_is_present = local_id
+        .is_some_and(|local_id| devices.iter().any(|device| device.id.as_str() == local_id));
+    if !local_is_present
+        || devices.iter().any(|device| {
+            device.id == target && !matches!(device.platform.as_str(), "ios" | "android")
+        })
+    {
+        Some(target.to_string())
+    } else {
+        None
+    }
+}
+
+/// A project folder on a device.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectRef {
+    path: String,
+    device: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContextProject {
+    /// The sidebar names a project whose row has not synced yet.
+    Waiting,
+    Project(ProjectRef),
+    None,
+}
+
+/// Where the board is opened from: the sidebar's project, else the open
+/// session's project.
+fn context_project(state: &AppState, space_filter: Option<&str>) -> ContextProject {
+    let project = |id: &str| {
+        state
+            .spaces
+            .iter()
+            .find(|space| space.id == id)
+            .map(|space| ProjectRef {
+                path: space.path.clone(),
+                device: space.device_id.clone(),
+            })
+    };
+    if let Some(id) = space_filter {
+        let Some(space) = state.spaces.iter().find(|space| space.id == id) else {
+            return ContextProject::Waiting;
+        };
+        let members = state.project_members(space);
+        let local = state.local_device_id.as_deref().or_else(|| {
+            state
+                .engine()
+                .map(|engine| engine.engine_info().device_id.as_str())
+        });
+        let selected = state
+            .selected_chat_row()
+            .and_then(|chat| chat.space_id.as_deref())
+            .and_then(|id| members.iter().find(|member| member.id == id).copied());
+        let preferred = selected
+            .or_else(|| {
+                members
+                    .iter()
+                    .copied()
+                    .find(|member| local == Some(member.device_id.as_str()) && member.git_detected)
+            })
+            .unwrap_or(space);
+        return ContextProject::Project(ProjectRef {
+            path: preferred.path.clone(),
+            device: preferred.device_id.clone(),
+        });
+    }
+    state
+        .selected_chat_row()
+        .and_then(|chat| chat.space_id.as_deref())
+        .and_then(project)
+        .map_or(ContextProject::None, ContextProject::Project)
+}
+
+/// Git projects to try when nothing points at one: this device's first,
+/// most recent session activity first. Bounded: each costs a lookup.
+fn recent_git_projects(state: &AppState, local: &str) -> Vec<ProjectRef> {
+    let mut projects: Vec<_> = state
+        .spaces
+        .iter()
+        .filter(|space| space.git_detected)
+        .map(|space| {
+            let active = state
+                .chats
+                .iter()
+                .filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str()))
+                .filter_map(|chat| chat.last_message_at)
+                .max()
+                .unwrap_or(space.created_at);
+            (
+                space.device_id != local,
+                space.device_id != local && !state.device_online(&space.device_id, Utc::now()),
+                std::cmp::Reverse(active),
+                space,
+            )
+        })
+        .collect();
+    projects.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+    let mut seen = HashSet::new();
+    let (primary, alternatives): (Vec<_>, Vec<_>) = projects
+        .into_iter()
+        .partition(|(.., space)| seen.insert(zeron_proto::view::project_key(space)));
+    primary
+        .into_iter()
+        .chain(alternatives)
+        .take(4)
+        .map(|(.., space)| ProjectRef {
+            path: space.path.clone(),
+            device: space.device_id.clone(),
+        })
+        .collect()
+}
+
+fn repository_menu_label(theme: &Theme, label: &str) -> gpui::Div {
+    widgets::section_label(theme, label.to_owned())
+        .py(px(4.0))
+        .text_size(crate::typography::ui_rems(11.0))
+}
+
+/// A page-level failure as a toast: its title and explanation.
+fn toast_page_error(error: &PullRequestsPageError, suffix: Option<&str>, cx: &mut gpui::App) {
+    let (title, body) = error_copy(error);
+    let message = match suffix {
+        Some(suffix) => format!("{title}. {body} {suffix}"),
+        None => format!("{title}. {body}"),
+    };
+    crate::toast::error(cx, message);
+}
+
+fn valid_repository_filter(value: &str) -> bool {
+    let parts: Vec<_> = value.split('/').collect();
+    parts.len() == 2
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        })
+}
+
+fn params_for_target(target: Option<&str>) -> serde_json::Value {
+    match target {
+        Some(target) => serde_json::json!({ "targetDeviceId": target }),
+        None => serde_json::json!({}),
+    }
+}
+
+fn selected_device_name(state: &AppState, target: Option<&str>) -> String {
+    target
+        .or(state.local_device_id.as_deref())
+        .and_then(|id| state.device_name(id))
+        .map(single_line)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "This device".to_string())
+}
+
+pub(crate) fn map_rpc_error(error: &RpcError, target_name: &str) -> PullRequestsPageError {
+    match error {
+        RpcError::Capability(code) if code == capability_errors::PULL_REQUESTS_CLI_UNAVAILABLE => {
+            PullRequestsPageError::CliUnavailable
+        }
+        RpcError::Capability(code) if code == capability_errors::PULL_REQUESTS_AUTHENTICATION => {
+            PullRequestsPageError::Authentication
+        }
+        RpcError::Capability(code) if code == capability_errors::PULL_REQUESTS_RATE_LIMITED => {
+            PullRequestsPageError::RateLimited
+        }
+        RpcError::UnknownMethod(_) => {
+            PullRequestsPageError::UpdateRequired(target_name.to_string())
+        }
+        RpcError::Capability(_)
+        | RpcError::BadParams(_)
+        | RpcError::Failed(_)
+        | RpcError::Transport(_)
+        | RpcError::Closed => PullRequestsPageError::Network,
+    }
+}
+
+pub(crate) fn error_copy(error: &PullRequestsPageError) -> (String, String) {
+    match error {
+        PullRequestsPageError::CliUnavailable => (
+            "GitHub CLI isn’t available on this device".into(),
+            "Install gh and sign in to view your pull requests.".into(),
+        ),
+        PullRequestsPageError::Authentication => (
+            "Sign in to GitHub on this device".into(),
+            "Run gh auth login, then refresh this page.".into(),
+        ),
+        PullRequestsPageError::RateLimited => (
+            "GitHub’s rate limit was reached".into(),
+            "Requests are paused for 15 minutes. Your loaded results stay available.".into(),
+        ),
+        PullRequestsPageError::Network => (
+            "Couldn’t load pull requests".into(),
+            "Check the repository name and your connection, then try again.".into(),
+        ),
+        PullRequestsPageError::RemoteOffline(name) => (
+            format!("{name} is offline"),
+            "Reconnect the device and try again.".into(),
+        ),
+        PullRequestsPageError::UpdateRequired(name) => (
+            format!("Update Zeron on {name}"),
+            "This device doesn’t support pull requests yet.".into(),
+        ),
+    }
+}
+
+fn platform_icon(platform: &str) -> &'static str {
+    match platform {
+        "macos" | "darwin" => icons::LAPTOP,
+        _ => icons::MONITOR,
+    }
+}
+
+pub(crate) fn relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
+    let (amount, unit) = if seconds < 60 {
+        return "just now".into();
+    } else if seconds < 3_600 {
+        (seconds / 60, "minute")
+    } else if seconds < 86_400 {
+        (seconds / 3_600, "hour")
+    } else if seconds < 604_800 {
+        (seconds / 86_400, "day")
+    } else if seconds < 2_592_000 {
+        (seconds / 604_800, "week")
+    } else if seconds < 31_536_000 {
+        (seconds / 2_592_000, "month")
+    } else {
+        (seconds / 31_536_000, "year")
+    };
+    format!("{amount} {unit}{} ago", if amount == 1 { "" } else { "s" })
+}
+
+fn compact_relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
+    if seconds < 60 {
+        "now".into()
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else if seconds < 604_800 {
+        format!("{}d ago", seconds / 86_400)
+    } else if seconds < 2_592_000 {
+        format!("{}w ago", seconds / 604_800)
+    } else {
+        format!("{}mo ago", seconds / 2_592_000)
+    }
+}
+
+fn format_compact_count(value: u64) -> String {
+    if value < 1_000 {
+        value.to_string()
+    } else if value < 1_000_000 {
+        let tenths = value / 100;
+        if tenths % 10 == 0 {
+            format!("{}k", value / 1_000)
+        } else {
+            format!("{}.{:01}k", value / 1_000, tenths % 10)
+        }
+    } else {
+        let tenths = value / 100_000;
+        if tenths % 10 == 0 {
+            format!("{}m", value / 1_000_000)
+        } else {
+            format!("{}.{:01}m", value / 1_000_000, tenths % 10)
+        }
+    }
+}
+
+fn single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+async fn fetch_page(
+    engine: &crate::state::EngineHandle,
+    params: serde_json::Value,
+) -> Result<ChangeRequestPage, RpcError> {
+    let value = engine
+        .client()
+        .call(methods::LIST_CHANGE_REQUEST_PAGE, params)
+        .await?;
+    serde_json::from_value(value).map_err(|error| RpcError::Failed(error.to_string()))
+}
+
+fn settle_snapshot<T>(
+    snapshot: &mut Vec<T>,
+    result: Result<Vec<T>, PullRequestsPageError>,
+) -> PullRequestsLoadState {
+    match result {
+        Ok(items) => {
+            *snapshot = items;
+            PullRequestsLoadState::Ready
+        }
+        Err(error) => PullRequestsLoadState::Failed(error),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-    use zeron_proto::{ChangeRequestActor, ChangeRequestLabel};
-
     use super::*;
+    use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+    use chrono::{TimeDelta, TimeZone};
 
-    thread_local! {
-        pub(super) static ROWS_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
-    fn synthetic_listing(rows: usize) -> ChangeRequestListing {
-        let repositories = ["ReinaMacCredy/maestro", "getpaseo/paseo", "zeronsh/zeron"];
-        let checks = [
-            Some(ChangeRequestChecksState::Passing),
-            Some(ChangeRequestChecksState::Failing),
-            Some(ChangeRequestChecksState::Pending),
-            None,
-        ];
-        let items = (1..=rows as u64)
-            .map(|number| {
-                let mut row = item(
-                    number,
-                    ["alice", "bob", "carol", "paseo-bot"][number as usize % 4],
-                );
-                row.repository = repositories[number as usize % 3].into();
-                row.title = format!("Synthetic pull request {number} with a reasonably long title");
-                row.viewer_review_requested = number % 5 == 0;
-                row.checks_state = checks[number as usize % 4];
-                row.additions = number * 7;
-                row.deletions = number * 3;
-                row.labels = (0..number % 4)
-                    .map(|index| ChangeRequestLabel {
-                        name: format!("label-{index}"),
-                        color: Some("d73a4a".into()),
-                    })
-                    .collect();
-                row.updated_at = Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap()
-                    + chrono::Duration::minutes(number as i64);
-                row
-            })
-            .collect();
-        ChangeRequestListing {
-            viewers: BTreeMap::from([("github.com".to_string(), "alice".to_string())]),
-            items,
-            truncated: true,
-            ..Default::default()
+    fn device(id: &str, platform: &str) -> Device {
+        Device {
+            id: id.into(),
+            name: id.into(),
+            platform: platform.into(),
+            last_seen_at: None,
+            created_at: None,
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: Vec::new(),
         }
     }
 
-    fn scroll_fixture(
+    fn pull_request(
+        repository: &str,
+        number: u64,
+        changes: u64,
+        opened_day: u32,
+        updated_hour: u32,
+    ) -> ChangeRequestListItem {
+        ChangeRequestListItem {
+            provider: "github".into(),
+            author: Default::default(),
+            head_ref_oid: String::new(),
+            ci: Default::default(),
+            viewer_did_author: None,
+            viewer_review_requested: None,
+            repository: repository.into(),
+            number,
+            title: format!("Pull request {number}"),
+            url: format!("https://github.com/{repository}/pull/{number}"),
+            state: zeron_proto::ChangeRequestState::Open,
+            is_draft: false,
+            review_decision: ChangeRequestReviewDecision::Unknown,
+            additions: changes,
+            deletions: 0,
+            mergeability: ChangeRequestMergeability::Mergeable,
+            created_at: Utc.with_ymd_and_hms(2026, 8, opened_day, 8, 0, 0).unwrap(),
+            updated_at: Utc
+                .with_ymd_and_hms(2026, 8, 19, updated_hour, 0, 0)
+                .unwrap(),
+        }
+    }
+
+    struct RowLayoutFixture {
+        item: ChangeRequestListItem,
+    }
+
+    impl Render for RowLayoutFixture {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let width = f32::from(window.viewport_size().width);
+            div().w_full().child(render_table_row(
+                &self.item,
+                table_layout(width),
+                PullRequestSortField::Updated,
+                true,
+                true,
+                false,
+                Theme::of(cx),
+                cx,
+            ))
+        }
+    }
+
+    fn space(id: &str, device: &str, git: bool, created_minutes_ago: i64) -> zeron_proto::Space {
+        zeron_proto::Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: format!("/{id}"),
+            name: None,
+            git_detected: git,
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: None,
+            created_at: Utc::now() - TimeDelta::minutes(created_minutes_ago),
+        }
+    }
+
+    fn session(space: &str, last_message_at: Option<DateTime<Utc>>) -> zeron_proto::Chat {
+        zeron_proto::Chat {
+            id: "chat".into(),
+            device_id: "local".into(),
+            title: None,
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: Some(space.into()),
+            last_seen_at: None,
+            room_gen: None,
+            sidechat_source_chat_id: None,
+            created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
+            delegation: None,
+        }
+    }
+
+    fn project(id: &str, device: &str) -> ProjectRef {
+        ProjectRef {
+            path: format!("/{id}"),
+            device: device.into(),
+        }
+    }
+
+    #[test]
+    fn pull_request_board_opens_on_the_sidebar_or_session_project() {
+        let mut state = AppState::new();
+        state.spaces = vec![
+            space("comet", "local", true, 60),
+            space("other", "local", true, 60),
+        ];
+        let mut chat = session("comet", None);
+        state.chats = vec![chat.clone()];
+        state.selected_chat = Some("chat".into());
+        assert_eq!(
+            context_project(&state, None),
+            ContextProject::Project(project("comet", "local")),
+            "the open session's project"
+        );
+        assert_eq!(
+            context_project(&state, Some("other")),
+            ContextProject::Project(project("other", "local")),
+            "the sidebar's project wins"
+        );
+        assert_eq!(
+            context_project(&state, Some("unsynced")),
+            ContextProject::Waiting
+        );
+        chat.space_id = None;
+        state.chats = vec![chat];
+        assert_eq!(context_project(&state, None), ContextProject::None);
+        state.local_device_id = Some("local".into());
+        state.spaces[0].repository_id = Some("commit:shared".into());
+        let mut representative = space("representative", "remote", true, 900);
+        representative.repository_id = Some("commit:shared".into());
+        state.spaces.push(representative);
+        assert_eq!(
+            context_project(&state, Some("representative")),
+            ContextProject::Project(project("comet", "local"))
+        );
+    }
+
+    #[test]
+    fn pull_request_board_first_run_tries_recent_local_git_projects() {
+        let mut state = AppState::new();
+        state.spaces = vec![
+            space("old", "local", true, 600),
+            space("remote", "remote", true, 1),
+            space("notes", "local", false, 1),
+            space("active", "local", true, 900),
+            space("new", "local", true, 5),
+        ];
+        state.chats = vec![session("active", Some(Utc::now()))];
+        state
+            .spaces
+            .iter_mut()
+            .find(|space| space.id == "active")
+            .unwrap()
+            .repository_id = Some("commit:shared".into());
+        for id in ["clone-a", "clone-b", "worktree"] {
+            let mut duplicate = space(id, "local", true, 1);
+            duplicate.repository_id = Some("commit:shared".into());
+            state.spaces.push(duplicate);
+        }
+        assert_eq!(
+            recent_git_projects(&state, "local"),
+            [
+                project("active", "local"),
+                project("new", "local"),
+                project("old", "local"),
+                project("remote", "remote"),
+            ],
+            "session activity first, this device before others, Git only"
+        );
+    }
+
+    #[gpui::test]
+    fn pull_request_board_defaults_to_useful_results_and_respects_explicit_filters(
         cx: &mut gpui::TestAppContext,
-        rows: usize,
+    ) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let delayed = release.clone();
+        let rpc = ScriptedRpc::new(move |method, params| {
+            let recorded = recorded.clone();
+            let delayed = delayed.clone();
+            async move {
+                assert_eq!(method, methods::LIST_CHANGE_REQUEST_PAGE);
+                let filter = params["filter"].as_str().unwrap().to_owned();
+                recorded.lock().unwrap().push(filter.clone());
+                let repository = params["repository"].as_str().unwrap();
+                if repository == "failed/repo" {
+                    return Err(RpcError::Capability(
+                        capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
+                    ));
+                }
+                if repository == "slow/repo" {
+                    delayed.notified().await;
+                }
+                zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                    items: if repository == "authored/repo"
+                        || (filter == "all" && repository != "empty/repo")
+                    {
+                        vec![pull_request(repository, 7, 1, 1, 1)]
+                    } else {
+                        Vec::new()
+                    },
+                    next_cursor: None,
+                    total_count: None,
+                    fetched_at: None,
+                })
+            }
+        });
+        let client = rpc.client();
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, Some(client));
+            PullRequestsPage::new(state, cx)
+        });
+        page.update(cx, |page, cx| {
+            page.apply_initial_repository("owner/repo".into(), None, cx)
+        });
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.filter, ChangeRequestFilter::All);
+            assert_eq!(page.items[0].number, 7);
+        });
+        assert_eq!(*calls.lock().unwrap(), ["authored", "all"]);
+        page.update(cx, |page, cx| {
+            page.select_filter(ChangeRequestFilter::Authored, cx)
+        });
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        page.update(cx, |page, cx| {
+            assert_eq!(page.filter, ChangeRequestFilter::Authored);
+            assert!(page.items.is_empty());
+            page.refresh(cx);
+        });
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["authored", "all", "authored", "authored"]
+        );
+        page.update(cx, |page, cx| {
+            page.apply_initial_repository("other/repo".into(), None, cx);
+            page.apply_initial_repository("owner/repo".into(), None, cx);
+            assert_eq!(page.filter, ChangeRequestFilter::Authored);
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            assert!(page.items.is_empty());
+        });
+        calls.lock().unwrap().clear();
+        for repository in ["authored/repo", "failed/repo", "empty/repo"] {
+            page.update(cx, |page, cx| {
+                page.apply_initial_repository(repository.into(), None, cx)
+            });
+            settle(
+                cx,
+                &runtime,
+                |page| !matches!(page.load_state, PullRequestsLoadState::Loading),
+                &page,
+                &rpc,
+            );
+            page.read_with(cx, |page, _| match repository {
+                "authored/repo" => {
+                    assert_eq!(page.filter, ChangeRequestFilter::Authored);
+                    assert_eq!(page.items.len(), 1);
+                }
+                "failed/repo" => {
+                    assert_eq!(page.filter, ChangeRequestFilter::Authored);
+                    assert_eq!(
+                        page.load_state,
+                        PullRequestsLoadState::Failed(PullRequestsPageError::Authentication)
+                    );
+                }
+                _ => {
+                    assert_eq!(page.filter, ChangeRequestFilter::All);
+                    assert!(page.items.is_empty());
+                }
+            });
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["authored", "authored", "authored", "all"]
+        );
+        calls.lock().unwrap().clear();
+        page.update(cx, |page, cx| {
+            page.apply_initial_repository("slow/repo".into(), None, cx)
+        });
+        rpc.settle(cx, &runtime, |_| !calls.lock().unwrap().is_empty());
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Loading);
+            // Clicking the already selected Authored filter is still an explicit choice.
+            page.select_filter(ChangeRequestFilter::Authored, cx);
+        });
+        release.notify_one();
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.filter, ChangeRequestFilter::Authored);
+            assert!(page.items.is_empty());
+        });
+        assert_eq!(*calls.lock().unwrap(), ["authored"]);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-empty-show-all").is_some());
+        for scale in [16.0, 20.0] {
+            cx.update(|window, _| window.set_rem_size(px(scale)));
+            for width in [320.0, 900.0] {
+                cx.simulate_resize(gpui::size(px(width), px(800.0)));
+                cx.run_until_parked();
+                let description = cx.debug_bounds("pr-empty-description").unwrap();
+                let action = cx.debug_bounds("pr-empty-show-all").unwrap();
+                assert!(action.top() - description.bottom() >= px(20.0));
+                assert!(action.size.height >= px(32.0));
+                assert!(action.left() >= px(0.0) && action.right() <= px(width));
+                if width == 900.0 {
+                    let needs_you = cx.debug_bounds("pr-view-needs-you").unwrap();
+                    let starred = cx.debug_bounds("pr-view-starred").unwrap();
+                    assert!((needs_you.center().y - starred.center().y).abs() < px(1.0));
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn pull_request_default_scope_reuses_cache_and_persists_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            PullRequestsPage::new(state, cx)
+        });
+        page.update(cx, |page, cx| {
+            page.snapshots.push((
+                (
+                    Some("remote".into()),
+                    "saved/repo".into(),
+                    ChangeRequestFilter::Authored,
+                ),
+                vec![pull_request("saved/repo", 10, 1, 1, 1)],
+                Instant::now(),
+                Paging::default(),
+            ));
+            page.apply_initial_repository("saved/repo".into(), Some("remote".into()), cx);
+            assert_eq!(page.items[0].number, 10);
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            let settings = crate::settings::current(cx);
+            let restored: crate::settings::UiSettings =
+                serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+            assert_eq!(
+                restored.last_pull_request_repository.as_deref(),
+                Some("saved/repo")
+            );
+            assert_eq!(restored.last_pull_request_device.as_deref(), Some("remote"));
+        });
+    }
+
+    #[gpui::test]
+    fn pull_request_board_restores_the_selected_repository_cache(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        fixture::init(cx);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            PullRequestsPage::new(state, cx)
+        });
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Idle);
+            assert_eq!(page.filter, ChangeRequestFilter::Authored);
+            page.on_hidden();
+            page.on_visible(cx);
+            assert_eq!(page.load_state, PullRequestsLoadState::Idle);
+            // No engine exists. Any accidental request would produce Network.
+            page.snapshots.push((
+                (None, "acme/zeron".into(), ChangeRequestFilter::Authored),
+                vec![pull_request("acme/zeron", 10, 1, 1, 1)],
+                Instant::now(),
+                Paging::default(),
+            ));
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("ACME/ZERON", cx));
+            page.select_repository(cx);
+            assert_eq!(page.items[0].number, 10);
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            page.on_visible(cx);
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            page.reset_for_target(Some("other-device".into()), cx);
+            assert!(page.items.is_empty());
+            assert_eq!(page.load_state, PullRequestsLoadState::Idle);
+            page.reset_for_target(None, cx);
+            assert_eq!(page.items[0].number, 10);
+            page.repository_input.update(cx, |input, cx| {
+                input.set_text("acme/zeron repo:other/repo", cx)
+            });
+            page.select_repository(cx);
+            assert!(
+                crate::toast::messages(cx)
+                    .iter()
+                    .any(|message| message.contains("owner/name"))
+            );
+            assert_eq!(page.repository.as_deref(), Some("acme/zeron"));
+        });
+    }
+
+    fn initial_repository_rpc(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        stalled: bool,
+    ) -> std::sync::Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(method.clone());
+                assert!(
+                    params.get("targetDeviceId").is_none(),
+                    "local identity comes from engine before device frames"
+                );
+                match method.as_str() {
+                    methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                        assert_eq!(params["cwd"], "/checkout");
+                        if stalled {
+                            return futures::future::pending().await;
+                        }
+                        zeron_rpc::RpcReply::value(&Some("owner/repo"))
+                    }
+                    methods::LIST_CHANGE_REQUEST_PAGE => {
+                        assert_eq!(params["repository"], "owner/repo");
+                        assert_eq!(params["filter"], "authored");
+                        zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                            items: vec![pull_request("owner/canonical", 7, 1, 1, 1)],
+                            next_cursor: None,
+                            total_count: Some(1),
+                            fetched_at: None,
+                        })
+                    }
+                    _ => panic!("unexpected request {method}"),
+                }
+            }
+        })
+    }
+
+    #[gpui::test]
+    fn pull_request_repository_picker_keeps_selection_and_cancels_detection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let rpc = ScriptedRpc::new({
+            let calls = calls.clone();
+            let release = release.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                let release = release.clone();
+                async move {
+                    match method.as_str() {
+                        methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                            let path = params["cwd"].as_str().unwrap().to_owned();
+                            calls.lock().unwrap().push(path.clone());
+                            if path == "/slow" {
+                                release.notified().await;
+                            }
+                            zeron_rpc::RpcReply::value(
+                                &(path != "/scratch").then(|| format!("owner{}", path)),
+                            )
+                        }
+                        methods::LIST_CHANGE_REQUEST_PAGE => {
+                            zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                                items: vec![pull_request(
+                                    params["repository"].as_str().unwrap(),
+                                    7,
+                                    1,
+                                    1,
+                                    1,
+                                )],
+                                next_cursor: None,
+                                total_count: Some(1),
+                                fetched_at: None,
+                            })
+                        }
+                        other => panic!("unexpected request {other}"),
+                    }
+                }
+            }
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, None);
+            let mut page = PullRequestsPage::new(state.clone(), cx);
+            page.repository = Some("owner/current".into());
+            page.load_state = PullRequestsLoadState::Ready;
+            state.update(cx, |state, _| {
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
+                state.local_device_id = Some("local".into());
+                state.spaces = vec![
+                    space("slow", "local", true, 1),
+                    space("next", "local", true, 1),
+                    space("scratch", "local", true, 1),
+                    space("next-worktree", "local", true, 1),
+                ];
+                state.spaces[1].repository_id = Some("next-repository".into());
+                state.spaces[3].repository_id = Some("next-repository".into());
+            });
+            page.snapshots.push((
+                (None, "OWNER/CURRENT".into(), ChangeRequestFilter::All),
+                Vec::new(),
+                Instant::now(),
+                Paging::default(),
+            ));
+            page.snapshots.push((
+                (
+                    Some("remote".into()),
+                    "remote/repo".into(),
+                    ChangeRequestFilter::All,
+                ),
+                Vec::new(),
+                Instant::now(),
+                Paging::default(),
+            ));
+            assert_eq!(page.recent_repositories(), ["owner/current"]);
+            page
+        });
+        let click = |selector: &'static str, cx: &mut gpui::VisualTestContext| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_mouse_down(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+        };
+        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        click("pr-repository", cx);
+        for width in [320.0, 900.0] {
+            cx.simulate_resize(gpui::size(px(width), px(700.0)));
+            cx.run_until_parked();
+            let menu = cx.debug_bounds("pr-repository-card").unwrap();
+            assert!(menu.left() >= px(0.0) && menu.right() <= px(width));
+            for selector in ["pr-project-slow", "pr-project-next", "pr-repository-load"] {
+                let row = cx.debug_bounds(selector).unwrap();
+                assert!(row.left() >= menu.left() && row.right() <= menu.right());
+                assert!(row.bottom() <= menu.bottom());
+            }
+        }
+        click("pr-project-slow", cx);
+        rpc.settle(cx, &runtime, |_| !calls.lock().unwrap().is_empty());
+        page.read_with(cx, |page, _| assert!(page.resolving_project.is_some()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert!(!page.repository_menu.is_open());
+            assert!(page.resolving_project.is_none());
+            assert!(page.initial_scope_task.is_none());
+            assert_eq!(page.repository.as_deref(), Some("owner/current"));
+        });
+        let focus = page.read_with(cx, |page, _| page.repository_focus.clone());
+        cx.update(|window, _| assert!(focus.is_focused(window)));
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| assert!(page.repository_menu.is_open()));
+        click("pr-project-next", cx);
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.repository.as_deref() == Some("owner/next")
+                    && page.load_state == PullRequestsLoadState::Ready
+            })
+        });
+        release.notify_one();
+        // The host may finish its bounded read after the UI task is cancelled;
+        // that old result must never replace the later selection.
+        rpc.settle(cx, &runtime, |_| rpc.completed() >= 3);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("owner/next"))
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        click("pr-project-scratch", cx);
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |_, cx| !crate::toast::messages(cx).is_empty())
+        });
+        page.read_with(cx, |page, cx| {
+            assert!(page.repository_menu.is_open());
+            assert!(
+                crate::toast::messages(cx)
+                    .iter()
+                    .any(|message| message.contains("no GitHub remote"))
+            );
+            assert_eq!(page.repository.as_deref(), Some("owner/next"));
+        });
+        page.update(cx, |page, cx| {
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("owner/typed", cx))
+        });
+        // The production menu tracks overflow independently of the board.
+        page.update(cx, |page, cx| {
+            page.state.update(cx, |state, cx| {
+                state.spaces = (0..30)
+                    .map(|index| space(&format!("overflow-{index:02}"), "local", true, 1))
+                    .collect();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let scroll = page.read_with(cx, |page, _| page.repository_scroll.scroll.clone());
+        assert!(scroll.max_offset().y > px(0.0));
+        let input = cx.debug_bounds("pr-repository-load").unwrap();
+        scroll.set_offset(gpui::point(px(0.0), -scroll.max_offset().y));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_eq!(
+            cx.debug_bounds("pr-repository-load").unwrap(),
+            input,
+            "the input stays above the scroll region"
+        );
+        page.update(cx, |page, cx| {
+            page.state.update(cx, |state, cx| {
+                state.spaces = vec![space("next", "local", true, 1)];
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(scroll.max_offset().y, px(0.0));
+        assert_eq!(scroll.offset().y, px(0.0));
+    }
+
+    #[gpui::test]
+    fn pull_request_initial_load_waits_for_engine_and_project(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, {
+            let mut settings = crate::settings::UiSettings::default();
+            settings.space_filter = Some("project".into());
+            settings
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = initial_repository_rpc(calls.clone(), false);
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
+            state.spaces = vec![zeron_proto::Space {
+                id: "project".into(),
+                device_id: "local".into(),
+                path: "/checkout".into(),
+                name: None,
+                git_detected: true,
+                git_checked_at: None,
+                checkout_id: None,
+                repository_id: None,
+                created_at: Utc::now(),
+            }];
+            state.selected_space = Some("project".into());
+            state.no_project = false;
+            cx.notify();
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.load_state == PullRequestsLoadState::Ready
+            })
+        });
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            assert_eq!(page.items[0].number, 7);
+            assert_eq!(page.repository.as_deref(), Some("owner/canonical"));
+            assert_eq!(
+                crate::settings::current(cx)
+                    .last_pull_request_repository
+                    .as_deref(),
+                Some("owner/canonical")
+            );
+            assert_eq!(page.snapshots.last().unwrap().0.1, "owner/canonical");
+            page.on_hidden();
+            page.on_visible(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                methods::LIST_CHANGE_REQUEST_PAGE
+            ]
+        );
+        calls.lock().unwrap().clear();
+        page.update(cx, |page, cx| {
+            page.select_project("/checkout".into(), "local".into(), cx);
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.initial_scope_task.is_none() && page.load_state == PullRequestsLoadState::Ready
+            })
+        });
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.repository.as_deref(), Some("owner/canonical"));
+            assert!(crate::toast::messages(cx).is_empty());
+            assert!(page.target_device.is_none());
+        });
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                methods::LIST_CHANGE_REQUEST_PAGE
+            ]
+        );
+    }
+
+    /// `/<name>` checkouts belong to `owner/<name>`, except `/scratch`.
+    fn project_repository_rpc(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::sync::Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            async move {
+                match method.as_str() {
+                    methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                        let cwd = params["cwd"].as_str().unwrap().to_owned();
+                        calls.lock().unwrap().push(cwd.clone());
+                        let name = cwd.trim_start_matches('/');
+                        zeron_rpc::RpcReply::value(
+                            &(name != "scratch").then(|| format!("owner/{name}")),
+                        )
+                    }
+                    methods::LIST_CHANGE_REQUEST_PAGE => {
+                        let repository = params["repository"].as_str().unwrap();
+                        zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                            items: vec![pull_request(repository, 7, 1, 1, 1)],
+                            next_cursor: None,
+                            total_count: Some(1),
+                            fetched_at: None,
+                        })
+                    }
+                    _ => panic!("unexpected request {method}"),
+                }
+            }
+        })
+    }
+
+    #[gpui::test]
+    fn pull_request_board_finds_and_follows_the_repository_it_is_opened_from(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let lookups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = project_repository_rpc(lookups.clone());
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
+            state.local_device_id = Some("local".into());
+            state.spaces = vec![
+                space("comet", "local", true, 60),
+                space("scratch", "local", true, 1),
+                space("docs", "local", true, 120),
+            ];
+        });
+        let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
+        let page_ready = {
+            let page = page.clone();
+            move |cx: &mut gpui::TestAppContext| {
+                page.read_with(cx, |page, _| {
+                    page.initial_scope_task.is_none()
+                        && page.load_state == PullRequestsLoadState::Ready
+                })
+            }
+        };
+        let settle = |cx: &mut gpui::TestAppContext| {
+            rpc.settle(cx, &runtime, &page_ready);
+        };
+        settle(cx);
+        // First run, All projects, nothing saved: the newest Git project that
+        // is on GitHub, without asking.
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.repository.as_deref(), Some("owner/comet"));
+            assert!(crate::toast::messages(cx).is_empty());
+        });
+        assert_eq!(*lookups.lock().unwrap(), ["/scratch", "/comet"]);
+
+        // Opened from a session in another project: that project's PRs.
+        page.update(cx, |page, _| page.on_hidden());
+        state.update(cx, |state, _| {
+            state.chats = vec![session("docs", None)];
+            state.selected_chat = Some("chat".into());
+        });
+        page.update(cx, |page, cx| page.on_visible(cx));
+        settle(cx);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("owner/docs"))
+        });
+
+        // An explicit choice stands while the board reopens from the same project.
+        page.update(cx, |page, cx| {
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("elsewhere/repo", cx));
+            page.select_repository(cx);
+        });
+        settle(cx);
+        page.update(cx, |page, cx| {
+            page.on_hidden();
+            page.on_visible(cx);
+        });
+        settle(cx);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("elsewhere/repo"))
+        });
+        assert_eq!(*lookups.lock().unwrap(), ["/scratch", "/comet", "/docs"]);
+    }
+
+    #[gpui::test]
+    fn pull_request_stalled_discovery_falls_back_once(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, {
+            let mut settings = crate::settings::UiSettings::default();
+            settings.space_filter = Some("project".into());
+            settings.last_pull_request_repository = Some("owner/repo".into());
+            settings
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = initial_repository_rpc(calls.clone(), true);
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
+            state.spaces = vec![zeron_proto::Space {
+                id: "project".into(),
+                device_id: "local".into(),
+                path: "/checkout".into(),
+                name: None,
+                git_detected: true,
+                git_checked_at: None,
+                checkout_id: None,
+                repository_id: None,
+                created_at: Utc::now(),
+            }];
+            state.selected_space = Some("project".into());
+            state.no_project = false;
+            cx.notify();
+        });
+        rpc.settle(cx, &runtime, |_| !calls.lock().unwrap().is_empty());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(4));
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.load_state == PullRequestsLoadState::Ready
+            })
+        });
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            assert_eq!(page.items[0].number, 7);
+            assert_eq!(page.repository.as_deref(), Some("owner/canonical"));
+            assert_eq!(
+                crate::settings::current(cx)
+                    .last_pull_request_repository
+                    .as_deref(),
+                Some("owner/canonical")
+            );
+            assert_eq!(page.snapshots.last().unwrap().0.1, "owner/canonical");
+            page.on_hidden();
+            page.on_visible(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                methods::LIST_CHANGE_REQUEST_PAGE
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn pull_request_all_projects_loads_last_repo_without_discovery(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, {
+            let mut settings = crate::settings::UiSettings::default();
+            settings.last_pull_request_repository = Some("owner/repo".into());
+            settings
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = initial_repository_rpc(calls.clone(), false);
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(rpc.client()));
+            state.spaces = vec![zeron_proto::Space {
+                id: "project".into(),
+                device_id: "local".into(),
+                path: "/checkout".into(),
+                name: None,
+                git_detected: true,
+                git_checked_at: None,
+                checkout_id: None,
+                repository_id: None,
+                created_at: Utc::now(),
+            }];
+            state.selected_space = Some("project".into());
+            state.no_project = false;
+            cx.notify();
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| {
+                page.load_state == PullRequestsLoadState::Ready
+            })
+        });
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            assert_eq!(page.items[0].number, 7);
+            assert_eq!(page.repository.as_deref(), Some("owner/canonical"));
+            assert_eq!(
+                crate::settings::current(cx)
+                    .last_pull_request_repository
+                    .as_deref(),
+                Some("owner/canonical")
+            );
+            assert_eq!(page.snapshots.last().unwrap().0.1, "owner/canonical");
+            page.on_hidden();
+            page.on_visible(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(*calls.lock().unwrap(), [methods::LIST_CHANGE_REQUEST_PAGE]);
+    }
+
+    #[gpui::test]
+    fn pull_request_filter_switches_restore_only_matching_snapshots(cx: &mut gpui::TestAppContext) {
+        fixture::init(cx);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            PullRequestsPage::new(state, cx)
+        });
+        page.update(cx, |page, cx| {
+            page.repository = Some("owner/repo".into());
+            for (filter, number) in [
+                (ChangeRequestFilter::All, 1),
+                (ChangeRequestFilter::Authored, 2),
+                (ChangeRequestFilter::Reviewing, 3),
+            ] {
+                page.snapshots.push((
+                    (None, "owner/repo".into(), filter),
+                    vec![pull_request("owner/repo", number, 1, 1, 1)],
+                    Instant::now(),
+                    Paging::default(),
+                ));
+            }
+            for (filter, number) in [
+                (ChangeRequestFilter::Reviewing, 3),
+                (ChangeRequestFilter::All, 1),
+                (ChangeRequestFilter::Authored, 2),
+            ] {
+                page.select_filter(filter, cx);
+                assert_eq!(page.items[0].number, number);
+                // No engine is attached: a request would fail with Network.
+                assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn long_rows_fit_at_every_layout_and_do_not_resize_on_hover(cx: &mut gpui::TestAppContext) {
+        fixture::init(cx);
+        let mut item = pull_request(
+            "a-very-long-organization/a-very-long-repository-name",
+            181,
+            123456,
+            1,
+            1,
+        );
+        item.title =
+            "A long pull request title that must remain readable beside every possible status "
+                .repeat(3);
+        item.is_draft = true;
+        item.mergeability = ChangeRequestMergeability::Conflicting;
+        item.review_decision = ChangeRequestReviewDecision::ChangesRequested;
+        let (_, cx) = cx.add_window_view(|_, _| RowLayoutFixture { item });
+        for width in [272.0, 639.0, 640.0, 899.0, 900.0, 1072.0] {
+            cx.simulate_resize(gpui::size(px(width), px(480.0)));
+            cx.run_until_parked();
+            let row = cx.debug_bounds("pull-request-row").expect("row rendered");
+            let title = cx
+                .debug_bounds("pull-request-title")
+                .expect("title rendered");
+            assert!(row.size.width <= px(width), "row overflow at {width}");
+            assert!(
+                title.size.width > px(120.0),
+                "statuses squeezed title at {width}"
+            );
+            assert!(
+                title.right() <= row.right(),
+                "title overflow at {width}: row={row:?}, title={title:?}"
+            );
+            cx.simulate_mouse_move(title.center(), None, gpui::Modifiers::default());
+            cx.run_until_parked();
+            assert_eq!(
+                cx.debug_bounds("pull-request-title").unwrap(),
+                title,
+                "hover changed text geometry"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn pull_request_personal_views_star_locally_without_opening_a_pull_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        assert_eq!(
+            star_key("https://github.com/Owner/Repo/pull/1/?tab=checks#discussion"),
+            star_key("https://github.com/owner/repo/pull/1")
+        );
+        let directory = fixture::settings(cx, crate::settings::UiSettings::default());
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, None);
+            let mut page = PullRequestsPage::new(state, cx);
+            let mut mine = pull_request("owner/repo", 1, 1, 1, 1);
+            mine.head_ref_oid = "a".repeat(40);
+            mine.ci = zeron_proto::change_request_assessment::ChangeRequestCi {
+                state: CiState::Failed,
+                total_count: 3,
+            };
+            mine.viewer_did_author = Some(true);
+            mine.viewer_review_requested = Some(false);
+            let mut theirs = mine.clone();
+            theirs.number = 2;
+            theirs.url = "https://github.com/owner/repo/pull/2".into();
+            theirs.viewer_did_author = Some(false);
+            page.items = vec![mine, theirs];
+            page.filter = ChangeRequestFilter::All;
+            page.load_state = PullRequestsLoadState::Ready;
+            page
+        });
+        let click = |selector: &'static str, cx: &mut gpui::VisualTestContext| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_mouse_down(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                bounds.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+        };
+        cx.simulate_resize(gpui::size(px(320.0), px(600.0)));
+        cx.run_until_parked();
+        click("pr-view-starred", cx);
+        assert!(cx.debug_bounds("pull-requests-no-results").is_some());
+        click("pr-view-starred", cx);
+        click("pr-view-needs-you", cx);
+        assert!(cx.debug_bounds("pull-requests-no-results").is_none());
+        let star = cx.debug_bounds("pr-star").unwrap();
+        let row = cx.debug_bounds("pull-request-row").unwrap();
+        assert!(row.contains(&star.center()));
+        click("pr-star", cx);
+        cx.update(|_, cx| {
+            assert_eq!(
+                crate::settings::current(cx).pull_request_stars,
+                ["https://github.com/owner/repo/pull/1"]
+            );
+            crate::settings::flush(cx);
+        });
+        assert_eq!(
+            crate::settings::UiSettings::load(directory.path()).pull_request_stars,
+            ["https://github.com/owner/repo/pull/1"]
+        );
+        click("pr-view-starred", cx);
+        assert!(cx.debug_bounds("pull-request-row").is_some());
+        for width in [320.0, 900.0, 1200.0] {
+            cx.simulate_resize(gpui::size(px(width), px(600.0)));
+            cx.run_until_parked();
+            let row = cx.debug_bounds("pull-request-row").unwrap();
+            let star = cx.debug_bounds("pr-star").unwrap();
+            let ci = cx.debug_bounds("pr-row-ci").unwrap();
+            assert!(star.left() >= row.left() && star.right() <= row.right());
+            assert!(ci.left() >= row.left() && ci.right() <= row.right());
+            assert!(ci.bottom() <= row.bottom());
+        }
+        click("pr-star", cx);
+        assert!(cx.debug_bounds("pull-requests-no-results").is_some());
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 2, "local views keep the fetched snapshot")
+        });
+    }
+
+    #[gpui::test]
+    fn narrow_sorting_and_refresh_stay_reachable(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        fixture::init(cx);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = PullRequestsPage::new(state, cx);
+            page.items = (1..=50)
+                .map(|n| pull_request("owner/repo", n, n, 1, 1))
+                .collect();
+            page.load_state = PullRequestsLoadState::Ready;
+            page
+        });
+        cx.simulate_resize(gpui::size(px(320.0), px(480.0)));
+        cx.run_until_parked();
+        let refresh = cx
+            .debug_bounds("pull-requests-refresh")
+            .expect("refresh rendered");
+        let sort = cx.debug_bounds("pr-sort").unwrap();
+        cx.simulate_mouse_down(
+            sort.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            sort.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        for selector in [
+            "pull-requests-sort-changes",
+            "pull-requests-sort-opened",
+            "pull-requests-sort-updated",
+        ] {
+            let bounds = cx.debug_bounds(selector).expect("sort rendered");
+            assert!(
+                bounds.left() >= px(0.0) && bounds.right() <= px(320.0),
+                "{selector}: {bounds:?}"
+            );
+        }
+        let changes = cx.debug_bounds("pull-requests-sort-changes").unwrap();
+        cx.simulate_mouse_down(
+            changes.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            changes.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.sort.field, PullRequestSortField::Changes)
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            page.sort_menu = Default::default();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let viewport = cx.debug_bounds("pull-requests-scroll").unwrap();
+        assert!(
+            viewport.size.height > px(100.0),
+            "the filter must leave room for results: {viewport:?}"
+        );
+        page.read_with(cx, |page, _| assert!(page.sort_menu.get().is_none()));
+        cx.simulate_mouse_move(viewport.center(), None, gpui::Modifiers::default());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-800.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| assert!(page.board_scroll_offset() > px(0.0)));
+        assert_eq!(cx.debug_bounds("pull-requests-refresh").unwrap(), refresh);
+        let repository = cx.debug_bounds("pr-repository").unwrap();
+        cx.simulate_mouse_down(
+            repository.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            repository.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let open = cx.debug_bounds("pr-repository-load").unwrap();
+        assert!(open.left() >= px(0.0) && open.right() <= px(320.0));
+        page.update(cx, |page, cx| {
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("another/repo", cx))
+        });
+        cx.simulate_mouse_down(
+            open.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            open.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("another/repo"))
+        });
+    }
+
+    #[test]
+    fn groups_prioritize_attention_without_claiming_merge_readiness() {
+        let mut item = pull_request("owner/repo", 181, 1, 1, 1);
+        item.review_decision = ChangeRequestReviewDecision::Unknown;
+        assert_eq!(request_group(&item), PullRequestGroup::Review);
+        item.review_decision = ChangeRequestReviewDecision::Approved;
+        assert_eq!(request_group(&item), PullRequestGroup::Approved);
+        item.mergeability = ChangeRequestMergeability::Conflicting;
+        assert_eq!(request_group(&item), PullRequestGroup::Attention);
+        item.is_draft = true;
+        assert_eq!(request_group(&item), PullRequestGroup::Drafts);
+        item.is_draft = false;
+        item.mergeability = ChangeRequestMergeability::Unknown;
+        item.review_decision = ChangeRequestReviewDecision::ChangesRequested;
+        assert_eq!(request_group(&item), PullRequestGroup::Attention);
+    }
+
+    #[test]
+    fn search_matches_all_words_across_title_repo_number_and_status() {
+        let mut item = pull_request("ZeronSH/Zeron", 181, 1, 1, 1);
+        item.title = "Add a pull request dashboard".into();
+        item.is_draft = true;
+        assert!(matches_query(&item, "ZERON dashboard #181 draft"));
+        assert!(matches_query(&item, "  "));
+        assert!(!matches_query(&item, "dashboard approved"));
+    }
+
+    #[gpui::test]
+    fn searching_reveals_collapsed_matches_and_handles_no_results(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        fixture::init(cx);
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = PullRequestsPage::new(state, cx);
+            page.items = vec![pull_request("owner/repo", 181, 1, 1, 1)];
+            page.load_state = PullRequestsLoadState::Ready;
+            page
+        });
+        cx.run_until_parked();
+        let group = cx.debug_bounds("pull-requests-group-review").unwrap();
+        cx.simulate_mouse_down(
+            group.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            group.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert!(page.collapsed_groups.contains(&PullRequestGroup::Review));
+        });
+        assert!(
+            cx.debug_bounds("pull-request-title").is_none(),
+            "a collapsed group drops its rows from the list"
+        );
+        page.update(cx, |page, cx| {
+            page.search
+                .update(cx, |input, cx| input.set_text("#181", cx))
+        });
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.query, "#181");
+            assert!(page.collapsed_groups.is_empty());
+        });
+        assert!(cx.debug_bounds("pull-request-title").is_some());
+        page.update(cx, |page, cx| {
+            page.search
+                .update(cx, |input, cx| input.set_text("no matches", cx))
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pull-requests-no-results").is_some());
+        assert!(cx.debug_bounds("pull-requests-refresh").is_some());
+    }
+
+    #[test]
+    fn status_description_preserves_simultaneous_states() {
+        let mut item = pull_request("owner/repo", 181, 10, 1, 1);
+        item.is_draft = true;
+        item.mergeability = ChangeRequestMergeability::Conflicting;
+        item.review_decision = ChangeRequestReviewDecision::ChangesRequested;
+        assert_eq!(
+            status_description(&item),
+            "Draft · Changes requested · Merge conflicts"
+        );
+        item.is_draft = false;
+        item.mergeability = ChangeRequestMergeability::Unknown;
+        item.review_decision = ChangeRequestReviewDecision::Approved;
+        assert_eq!(status_description(&item), "Open · Approved");
+    }
+
+    fn numbers(items: &[ChangeRequestListItem]) -> Vec<u64> {
+        items.iter().map(|item| item.number).collect()
+    }
+
+    #[test]
+    fn only_desktop_devices_are_eligible_targets() {
+        let eligible = eligible_desktop_devices(&[
+            device("mac", "macos"),
+            device("linux", "linux"),
+            device("phone", "ios"),
+            device("tablet", "android"),
+        ]);
+        assert_eq!(
+            eligible.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            ["linux", "mac"]
+        );
+    }
+
+    #[test]
+    fn target_params_keep_local_calls_direct() {
+        assert_eq!(params_for_target(None), serde_json::json!({}));
+        assert_eq!(
+            params_for_target(Some("host")),
+            serde_json::json!({ "targetDeviceId": "host" })
+        );
+    }
+
+    #[test]
+    fn missing_remote_target_falls_back_only_after_an_authoritative_device_frame() {
+        let local = device("local", "macos");
+        let remote = device("remote", "linux");
+
+        assert_eq!(
+            normalized_target_device(Some("remote"), &[local.clone(), remote], Some("local")),
+            Some("remote".into())
+        );
+        assert_eq!(
+            normalized_target_device(Some("remote"), &[local], Some("local")),
+            None
+        );
+        assert_eq!(
+            normalized_target_device(Some("remote"), &[], Some("local")),
+            Some("remote".into()),
+            "the empty pre-sync list must not discard the selection"
+        );
+        assert_eq!(
+            normalized_target_device(Some("local"), &[], Some("local")),
+            None,
+            "local calls stay direct even before the device frame"
+        );
+    }
+
+    #[test]
+    fn table_sorting_uses_changes_opened_and_updated_values() {
+        let original = vec![
+            pull_request("beta/repo", 2, 30, 3, 9),
+            pull_request("alpha/repo", 1, 10, 1, 10),
+            pull_request("alpha/repo", 3, 30, 2, 11),
+        ];
+
+        let mut items = original.clone();
+        sort_pull_requests(&mut items, PullRequestSort::DEFAULT);
+        assert_eq!(numbers(&items), [3, 1, 2]);
+
+        let mut items = original.clone();
+        sort_pull_requests(
+            &mut items,
+            PullRequestSort {
+                field: PullRequestSortField::Changes,
+                direction: SortDirection::Descending,
+            },
+        );
+        assert_eq!(numbers(&items), [3, 2, 1]);
+
+        let mut items = original.clone();
+        sort_pull_requests(
+            &mut items,
+            PullRequestSort {
+                field: PullRequestSortField::Opened,
+                direction: SortDirection::Ascending,
+            },
+        );
+        assert_eq!(numbers(&items), [1, 3, 2]);
+
+        let mut items = original;
+        sort_pull_requests(
+            &mut items,
+            PullRequestSort {
+                field: PullRequestSortField::Updated,
+                direction: SortDirection::Ascending,
+            },
+        );
+        assert_eq!(numbers(&items), [2, 1, 3]);
+    }
+
+    #[test]
+    fn table_sorting_breaks_ties_by_repository_and_number() {
+        let mut items = vec![
+            pull_request("zeta/repo", 2, 10, 1, 10),
+            pull_request("alpha/repo", 3, 10, 1, 10),
+            pull_request("alpha/repo", 1, 10, 1, 10),
+        ];
+        sort_pull_requests(
+            &mut items,
+            PullRequestSort {
+                field: PullRequestSortField::Changes,
+                direction: SortDirection::Descending,
+            },
+        );
+        assert_eq!(numbers(&items), [1, 3, 2]);
+    }
+
+    #[test]
+    fn relative_dates_are_readable_and_pluralized() {
+        let now = Utc::now();
+        assert_eq!(relative_time(now, now), "just now");
+        assert_eq!(relative_time(now - TimeDelta::hours(1), now), "1 hour ago");
+        assert_eq!(relative_time(now - TimeDelta::days(2), now), "2 days ago");
+        assert_eq!(
+            compact_relative_time(now - TimeDelta::hours(2), now),
+            "2h ago"
+        );
+        assert_eq!(compact_relative_time(now + TimeDelta::hours(2), now), "now");
+    }
+
+    #[test]
+    fn diff_counts_stay_compact_without_losing_scale() {
+        assert_eq!(format_compact_count(999), "999");
+        assert_eq!(format_compact_count(1_000), "1k");
+        assert_eq!(format_compact_count(13_223), "13.2k");
+        assert_eq!(format_compact_count(1_250_000), "1.2m");
+    }
+
+    #[test]
+    fn successful_empty_refresh_replaces_the_previous_snapshot() {
+        let mut snapshot = vec![1, 2];
+        let state = settle_snapshot(&mut snapshot, Ok(Vec::new()));
+        assert!(snapshot.is_empty());
+        assert_eq!(state, PullRequestsLoadState::Ready);
+    }
+
+    #[test]
+    fn failed_refresh_preserves_the_previous_snapshot() {
+        let mut snapshot = vec![1, 2];
+        let state = settle_snapshot(&mut snapshot, Err(PullRequestsPageError::Authentication));
+        assert_eq!(snapshot, [1, 2]);
+        assert_eq!(
+            state,
+            PullRequestsLoadState::Failed(PullRequestsPageError::Authentication)
+        );
+    }
+
+    #[test]
+    fn error_mapping_uses_stable_codes_and_hides_transport_details() {
+        assert_eq!(
+            map_rpc_error(
+                &RpcError::Capability(capability_errors::PULL_REQUESTS_AUTHENTICATION.into()),
+                "Studio Mac",
+            ),
+            PullRequestsPageError::Authentication
+        );
+        assert_eq!(
+            map_rpc_error(
+                &RpcError::UnknownMethod(methods::LIST_CHANGE_REQUEST_PAGE.into()),
+                "Studio Mac"
+            ),
+            PullRequestsPageError::UpdateRequired("Studio Mac".into())
+        );
+        assert_eq!(
+            map_rpc_error(&RpcError::Transport("secret detail".into()), "Studio Mac"),
+            PullRequestsPageError::Network
+        );
+    }
+
+    #[test]
+    fn visible_device_names_and_titles_are_sanitized() {
+        assert_eq!(single_line("MacBook\n Pro"), "MacBook Pro");
+        assert_eq!(single_line(&"a".repeat(200)), "a".repeat(200));
+    }
+
+    /// Serves two pages and records each request's cursor and `refresh` flag.
+    /// The `reviewing` filter never answers until `release` fires.
+    fn paged_rpc(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    ) -> std::sync::Arc<ScriptedRpc> {
+        ScriptedRpc::new(move |method, params| {
+            let calls = calls.clone();
+            let release = release.clone();
+            async move {
+                assert_eq!(method.as_str(), methods::LIST_CHANGE_REQUEST_PAGE);
+                let after = params["after"].as_str().map(str::to_owned);
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((after.clone(), params["refresh"] == true));
+                if params["filter"] == "reviewing" {
+                    release.notified().await;
+                    return zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: vec![pull_request("owner/repo", 99, 1, 1, 1)],
+                        next_cursor: None,
+                        total_count: Some(1),
+                        fetched_at: None,
+                    });
+                }
+                match after.as_deref() {
+                    None => zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: (1..=50)
+                            .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
+                            .collect(),
+                        next_cursor: Some("Y3Vyc29yOjUw".into()),
+                        total_count: Some(52),
+                        fetched_at: None,
+                    }),
+                    Some("Y3Vyc29yOjUw") => zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        // #50 moved onto the second page; it must not repeat.
+                        items: [50, 51, 52]
+                            .map(|n| pull_request("Owner/Repo", n, 1, 1, 1))
+                            .into(),
+                        next_cursor: None,
+                        total_count: Some(52),
+                        fetched_at: None,
+                    }),
+                    other => panic!("unexpected cursor {other:?}"),
+                }
+            }
+        })
+    }
+
+    fn paged_page(
+        cx: &mut gpui::TestAppContext,
     ) -> (
         Entity<PullRequestsPage>,
         &mut gpui::VisualTestContext,
-        tempfile::TempDir,
+        std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>,
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<ScriptedRpc>,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        fixture::init(cx);
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let rpc = paged_rpc(calls.clone(), release.clone());
+        let client = rpc.client();
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, Some(client));
+            PullRequestsPage::new(state, cx)
         });
-        let state = cx.new(|_| AppState::new());
-        let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
-        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
         page.update(cx, |page, cx| {
-            page.listing = Loadable::Ready(synthetic_listing(rows));
-            cx.notify();
+            page.repository = Some("owner/repo".into());
+            page.load(false, cx);
         });
-        cx.run_until_parked();
-        (page, cx, dir)
+        (page, cx, calls, release, rpc)
     }
 
-    fn scroll_step(cx: &mut gpui::VisualTestContext, delta: f32) -> (Duration, usize) {
-        ROWS_RENDERED.with(|rows| rows.set(0));
-        let started = std::time::Instant::now();
-        cx.simulate_event(gpui::ScrollWheelEvent {
-            position: gpui::point(px(600.0), px(500.0)),
-            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(delta))),
-            ..Default::default()
-        });
-        (started.elapsed(), ROWS_RENDERED.with(|rows| rows.get()))
-    }
-
-    #[gpui::test]
-    fn a_long_list_lays_out_only_the_rows_near_the_viewport(cx: &mut gpui::TestAppContext) {
-        let (page, cx, _dir) = scroll_fixture(cx, 300);
-        let (_, rows) = scroll_step(cx, -600.0);
-        assert!(
-            rows > 0 && rows < 40,
-            "{rows} rows laid out for one scroll step"
-        );
-        page.update(cx, |page, _| {
-            assert!(page.list_condensed());
-            let row = page.list_state.logical_scroll_top().item_ix + 1;
-            assert!(matches!(
-                page.entries[row],
-                ListEntry::Row { gap: true, .. }
-            ));
-            let height = f32::from(page.list_state.bounds_for_item(row).unwrap().size.height);
-            assert!((height - ROW_HEIGHT_HINT).abs() < 1.0, "row is {height}px");
-        });
-        for _ in 0..60 {
-            scroll_step(cx, -2000.0);
-        }
-        page.update(cx, |page, _| {
-            let top = page.list_state.logical_scroll_top().item_ix;
-            assert!(
-                top + 20 > page.entries.len(),
-                "{top} of {}",
-                page.entries.len()
-            );
-            assert_eq!(page.entries.last(), Some(&ListEntry::More));
-        });
-        cx.update(|window, cx| page.update(cx, |page, cx| page.focus_search(window, cx)));
-        cx.run_until_parked();
-        page.update(cx, |page, _| {
-            assert_eq!(page.list_state.logical_scroll_top().item_ix, 0);
-            assert!(!page.list_condensed());
-        });
-    }
-
-    #[gpui::test]
-    fn the_condensed_bar_drops_the_tab_counts_and_fits_a_narrow_window(
-        cx: &mut gpui::TestAppContext,
+    fn settle(
+        cx: &mut gpui::VisualTestContext,
+        runtime: &tokio::runtime::Runtime,
+        done: impl Fn(&PullRequestsPage) -> bool,
+        page: &Entity<PullRequestsPage>,
+        rpc: &ScriptedRpc,
     ) {
-        let (page, cx, _dir) = scroll_fixture(cx, 300);
-        page.read_with(cx, |page, cx| {
-            assert_eq!(page.tab_count(PageTab::PullRequests, cx), Some(300));
-            assert_eq!(page.tab_count(PageTab::Git, cx), None);
-        });
-        assert!(
-            cx.debug_bounds("pull-requests-tab-count-PullRequests")
-                .is_some()
-        );
-        let wide_tab = cx.debug_bounds("pull-requests-tab-PullRequests").unwrap();
-        scroll_step(cx, -600.0);
-        cx.run_until_parked();
-        page.read_with(cx, |page, _| assert!(page.list_condensed()));
-        assert!(
-            cx.debug_bounds("pull-requests-tab-count-PullRequests")
-                .is_none(),
-            "the condensed bar drops the count"
-        );
-
-        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
-        cx.run_until_parked();
-        let chat = cx.debug_bounds("pull-requests-chat").unwrap();
-        assert!(chat.size.width > px(40.0), "{chat:?}");
-        assert!(chat.right() <= px(900.0), "{chat:?}");
-        let involvement = cx
-            .debug_bounds("pull-requests-compact-involvement")
-            .unwrap();
-        assert!(
-            involvement.right() < chat.left(),
-            "{involvement:?} {chat:?}"
-        );
-
-        cx.simulate_resize(gpui::size(px(700.0), px(700.0)));
-        cx.run_until_parked();
-        let tab = cx.debug_bounds("pull-requests-tab-PullRequests").unwrap();
-        assert!(
-            tab.size.width < wide_tab.size.width,
-            "a compact bar shortens the tab label: {tab:?} {wide_tab:?}"
-        );
-        let chat = cx.debug_bounds("pull-requests-chat").unwrap();
-        assert!(chat.size.width <= px(28.0), "{chat:?}");
+        rpc.settle(cx, runtime, |cx| page.read_with(cx, |page, _| done(page)));
     }
 
     #[gpui::test]
-    fn a_narrow_host_shows_the_open_pull_request_in_place_of_the_list(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (page, cx, _dir) = scroll_fixture(cx, 5);
-        let number = page.update(cx, |page, cx| {
-            let item = page.listing.ready().unwrap().items[0].clone();
-            page.open_pull_request(&item, cx);
-            item.number
-        });
-        cx.run_until_parked();
-        let selector: &'static str =
-            Box::leak(format!("pull-request-tab-{number}").into_boxed_str());
-        let wide = cx.debug_bounds(selector).unwrap();
-        assert!(wide.left() > px(400.0), "{wide:?}");
-
-        page.update(cx, |page, cx| {
-            page.set_layout_width(440.0);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let narrow = cx.debug_bounds(selector).unwrap();
-        assert!(
-            narrow.left() < px(40.0),
-            "the detail takes the whole host: {narrow:?}"
-        );
-        assert!(cx.debug_bounds("pull-requests-project").is_some());
-    }
-
-    #[gpui::test]
-    fn load_more_and_refresh_keep_the_scroll_position(cx: &mut gpui::TestAppContext) {
-        let (page, cx, _dir) = scroll_fixture(cx, 99);
-        scroll_step(cx, -3000.0);
-        let top = |page: &Entity<PullRequestsPage>, cx: &mut gpui::VisualTestContext| {
-            page.update(cx, |page, _| {
-                let top = page.list_state.logical_scroll_top();
-                (top.item_ix, top.offset_in_item)
-            })
-        };
-        let before = top(&page, cx);
-        assert!(before.0 > 10, "{before:?}");
-        for rows in [99, 198] {
-            page.update(cx, |page, cx| {
-                page.listing = Loadable::Ready(synthetic_listing(rows));
-                cx.notify();
-            });
-            cx.run_until_parked();
-            assert_eq!(top(&page, cx), before, "after a {rows}-row listing");
-        }
-        page.update(cx, |page, _| {
-            let rows = page
-                .entries
-                .iter()
-                .filter(|entry| matches!(entry, ListEntry::Row { .. }))
-                .count();
-            assert_eq!(rows, 198);
-        });
-    }
-
-    #[gpui::test]
-    #[ignore = "measurement: cargo test -p zeron-ui --lib scroll_frame_cost -- --ignored --nocapture"]
-    fn scroll_frame_cost(cx: &mut gpui::TestAppContext) {
-        let rows: usize = std::env::var("ZERON_PR_BENCH_ROWS")
-            .ok()
-            .and_then(|rows| rows.parse().ok())
-            .unwrap_or(300);
-        let (_page, cx, _dir) = scroll_fixture(cx, rows);
-        for _ in 0..5 {
-            scroll_step(cx, -40.0);
-        }
-        let mut samples = Vec::new();
-        let mut rendered = Vec::new();
-        for step in 0..120 {
-            let (elapsed, count) = scroll_step(cx, if step < 60 { -60.0 } else { 60.0 });
-            samples.push(elapsed);
-            rendered.push(count);
-        }
-        let mut hovers = Vec::new();
-        for step in 0..60 {
-            let started = std::time::Instant::now();
-            cx.simulate_mouse_move(
-                gpui::point(px(600.0), px(200.0 + (step % 30) as f32 * 17.0)),
-                None,
-                gpui::Modifiers::default(),
-            );
-            hovers.push(started.elapsed());
-        }
-        let stats = |mut samples: Vec<Duration>| {
-            samples.sort();
-            let mean = samples.iter().sum::<Duration>() / samples.len() as u32;
-            (
-                mean,
-                samples[samples.len() / 2],
-                samples[samples.len() * 9 / 10],
-            )
-        };
-        let (mean, median, p90) = stats(samples);
-        let (hover_mean, hover_median, hover_p90) = stats(hovers);
-        rendered.sort();
-        println!(
-            "rows={rows} scroll step: mean={mean:?} median={median:?} p90={p90:?} rows/frame median={} max={}; hover move: mean={hover_mean:?} median={hover_median:?} p90={hover_p90:?}",
-            rendered[rendered.len() / 2],
-            rendered[rendered.len() - 1],
-        );
-    }
-
-    fn item(number: u64, author: &str) -> ChangeRequestListItem {
-        ChangeRequestListItem {
-            provider: "github".into(),
-            host: "github.com".into(),
-            repository: "acme/zeron".into(),
-            number,
-            title: format!("Change {number}"),
-            url: format!("https://github.com/acme/zeron/pull/{number}"),
-            author: Some(ChangeRequestActor {
-                login: author.into(),
-                avatar_url: None,
-            }),
-            head_ref: format!("feature/{number}"),
-            base_ref: "main".into(),
-            state: ChangeRequestState::Open,
-            is_draft: false,
-            mergeability: ChangeRequestMergeability::Mergeable,
-            additions: 0,
-            deletions: 0,
-            created_at: Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
-            updated_at: Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
-            viewer_review_requested: false,
-            labels: Vec::new(),
-            review_decision: None,
-            checks_state: None,
-            device_id: None,
-        }
-    }
-
-    #[test]
-    fn groups_put_authored_before_review_requested_and_drop_empty_groups() {
-        let mine = item(1, "Alice");
-        let mut asked = item(2, "bob");
-        asked.viewer_review_requested = true;
-        let mut mine_and_asked = item(3, "alice");
-        mine_and_asked.viewer_review_requested = true;
-        let viewers = BTreeMap::from([("github.com".to_string(), "alice".to_string())]);
-        let all = [&mine, &asked, &mine_and_asked];
-        let groups = group_items(&all, &viewers);
-        let shape: Vec<(PullRequestGroup, Vec<u64>)> = groups
-            .into_iter()
-            .map(|(group, items)| (group, items.iter().map(|item| item.number).collect()))
-            .collect();
-        assert_eq!(
-            shape,
-            [
-                (PullRequestGroup::Authored, vec![1, 3]),
-                (PullRequestGroup::ReviewRequested, vec![2]),
-            ]
-        );
-        assert!(
-            group_items(&all, &BTreeMap::new())
-                .iter()
-                .all(|(group, _)| *group != PullRequestGroup::Authored)
-        );
-    }
-
-    #[test]
-    fn merge_readiness_orders_tiers_then_measured_size_then_recency() {
-        let mut ready = item(1, "a");
-        ready.checks_state = Some(ChangeRequestChecksState::Passing);
-        ready.review_decision = Some(ChangeRequestReviewDecision::Approved);
-        let mut green = item(2, "a");
-        green.checks_state = Some(ChangeRequestChecksState::Passing);
-        let mut draft = item(3, "a");
-        draft.is_draft = true;
-        draft.checks_state = Some(ChangeRequestChecksState::Passing);
-        draft.review_decision = Some(ChangeRequestReviewDecision::Approved);
-        let mut merged = item(4, "a");
-        merged.state = ChangeRequestState::Merged;
-        let mut conflicting = item(5, "a");
-        conflicting.mergeability = ChangeRequestMergeability::Conflicting;
-        conflicting.checks_state = Some(ChangeRequestChecksState::Passing);
-        conflicting.review_decision = Some(ChangeRequestReviewDecision::Approved);
-        let mut small = item(6, "a");
-        small.additions = 3;
-        let mut large = item(7, "a");
-        large.additions = 300;
-        let mut newer_unmeasured = item(8, "a");
-        newer_unmeasured.updated_at = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();
-
-        let mut items = vec![
-            &conflicting,
-            &merged,
-            &newer_unmeasured,
-            &draft,
-            &large,
-            &green,
-            &small,
-            &ready,
-        ];
-        rank_by_merge_readiness(&mut items);
-        let order: Vec<u64> = items.iter().map(|item| item.number).collect();
-        assert_eq!(order, [1, 2, 6, 7, 8, 3, 4, 5]);
-    }
-
-    #[test]
-    fn pull_request_urls_parse_like_t3code_for_github_hosts_only() {
-        let parsed = |url: &str| parse_pull_request_url(url);
-        assert_eq!(
-            parsed("https://github.com/ReinaMacCredy/Maestro/pull/77?w=1#discussion"),
-            Some(("github.com".into(), "reinamaccredy/maestro".into(), 77))
-        );
-        assert_eq!(
-            parsed("https://github.acme.io/acme/zeron/pull/5/files"),
-            Some(("github.acme.io".into(), "acme/zeron".into(), 5))
-        );
-        assert!(parsed("https://ghe.github.com/acme/zeron/pull/5").is_some());
-        assert_eq!(parsed("https://github.com/acme/zeron/issues/5"), None);
-        assert_eq!(parsed("https://github.com/acme/zeron/pull/0"), None);
-        assert_eq!(parsed("https://gitlab.com/acme/zeron/pull/5"), None);
-        assert_eq!(parsed("https://github.com/acme/pull/5"), None);
-    }
-
-    #[test]
-    fn search_matches_number_title_repository_branch_and_author() {
-        let row = item(42, "Carol");
-        for query in [
-            "#42",
-            "change 42",
-            "ACME/zeron",
-            "feature/42",
-            "carol",
-            "  ",
-        ] {
-            assert!(matches_query(&row, query), "{query}");
-        }
-        assert!(!matches_query(&row, "dave"));
-    }
-
-    #[test]
-    fn relative_time_matches_t3code_buckets() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 4, 12, 0, 0).unwrap();
-        let ago = |seconds: i64| relative_time(now, now - chrono::Duration::seconds(seconds));
-        assert_eq!(ago(-30), "just now");
-        assert_eq!(ago(59), "just now");
-        assert_eq!(ago(60), "1m ago");
-        assert_eq!(ago(3599), "59m ago");
-        assert_eq!(ago(3600), "1h ago");
-        assert_eq!(ago(86_399), "23h ago");
-        assert_eq!(ago(86_400 * 40), "40d ago");
-    }
-
-    #[gpui::test]
-    fn the_project_control_picks_a_known_project_and_persists_it(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+    fn pull_request_board_loads_more_pages_without_repeating_items(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        let (page, cx, calls, _, rpc) = paged_page(cx);
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 50);
+            assert_eq!(page.paging.total, Some(52));
         });
-        let (out, mut frames) = tokio::sync::mpsc::channel::<String>(16);
-        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
-        std::mem::forget(replies);
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::RpcClient::new(out, inbound),
-            ))
-        });
-        let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
         page.update(cx, |page, cx| {
-            page.listing = Loadable::Ready(ChangeRequestListing {
-                items: vec![item(1, "a")],
-                repositories: vec!["ReinaMacCredy/maestro".into(), "acme/zeron".into()],
-                ..Default::default()
+            let last = page.board_list.item_count() - 1;
+            page.board_list.scroll_to(ListOffset {
+                item_ix: last,
+                offset_in_item: px(0.0),
             });
             cx.notify();
         });
         cx.run_until_parked();
-        while frames.try_recv().is_ok() {}
-        let control = cx
-            .debug_bounds("pull-requests-project")
-            .expect("project control drawn");
+        let more = cx.debug_bounds("pull-requests-load-more").unwrap();
         assert!(
-            control.bottom() <= px(Theme::TITLEBAR_HEIGHT),
-            "the project control sits in the top bar: {control:?}"
+            more.bottom() <= px(800.0),
+            "the button is reachable at the end of the list"
         );
-        cx.simulate_click(control.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        let maestro = cx
-            .debug_bounds("pull-requests-project-2")
-            .expect("project menu lists a project with no loaded pull request");
-        cx.simulate_click(maestro.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        page.update(cx, |page, cx| {
+        cx.simulate_mouse_down(
+            more.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            more.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        settle(
+            cx,
+            &runtime,
+            |page| page.more_task.is_none() && page.items.len() > 50,
+            &page,
+            &rpc,
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 52, "the moved #50 appears once");
+            assert_eq!(page.paging.next_cursor, None);
             assert_eq!(
-                page.prefs.repository.as_deref(),
-                Some("ReinaMacCredy/maestro")
-            );
-            assert_eq!(
-                crate::settings::current(cx)
-                    .pull_requests_list
-                    .repository
-                    .as_deref(),
-                Some("ReinaMacCredy/maestro")
-            );
-            let request = filters::list_request(&page.prefs, &page.sent.0, &page.sent.1);
-            assert_eq!(
-                request.filters.repository.as_deref(),
-                Some("ReinaMacCredy/maestro")
+                page.snapshots.last().unwrap().1.len(),
+                52,
+                "snapshots keep every page"
             );
         });
-        let sent: Vec<serde_json::Value> = std::iter::from_fn(|| frames.try_recv().ok())
-            .map(|frame| serde_json::from_str(&frame).unwrap())
-            .filter(|frame: &serde_json::Value| frame["method"] == methods::LIST_CHANGE_REQUESTS)
-            .collect();
-        assert_eq!(sent.len(), 1, "picking a project refetches once: {sent:?}");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pull-requests-load-more").is_none(),
+            "the last page ends the list"
+        );
         assert_eq!(
-            sent[0]["params"]["filters"]["repository"],
-            "ReinaMacCredy/maestro"
+            *calls.lock().unwrap(),
+            [(None, false), (Some("Y3Vyc29yOjUw".to_owned()), false)]
+        );
+
+        // GitHub's casing was adopted; reselecting the repository as typed
+        // reuses the loaded board instead of fetching it again.
+        page.update(cx, |page, cx| {
+            assert_eq!(page.repository.as_deref(), Some("Owner/Repo"));
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("owner/repo", cx));
+            page.select_repository(cx);
+            assert_eq!(page.items.len(), 52);
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+        });
+        cx.run_until_parked();
+        assert_eq!(calls.lock().unwrap().len(), 2);
+
+        // Refresh restarts from the first page, and later pages stay as fresh.
+        page.update(cx, |page, cx| page.refresh(cx));
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        page.update(cx, |page, cx| page.load_more(cx));
+        settle(cx, &runtime, |page| page.more_task.is_none(), &page, &rpc);
+        assert_eq!(
+            calls.lock().unwrap()[2..],
+            [(None, true), (Some("Y3Vyc29yOjUw".to_owned()), true)]
         );
     }
 
     #[gpui::test]
-    fn the_page_tab_persists_and_the_git_tab_replaces_the_list(cx: &mut gpui::TestAppContext) {
-        let (page, cx, _dir) = scroll_fixture(cx, 60);
-        scroll_step(cx, -900.0);
-        let top = |page: &Entity<PullRequestsPage>, cx: &mut gpui::VisualTestContext| {
-            page.update(cx, |page, _| {
-                let top = page.list_state.logical_scroll_top();
-                (top.item_ix, top.offset_in_item)
-            })
-        };
-        let before = top(&page, cx);
-        assert!(before.0 > 0, "{before:?}");
-
-        let git = cx.debug_bounds("pull-requests-tab-Git").expect("Git tab");
-        cx.simulate_click(git.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        page.update(cx, |page, cx| {
-            assert_eq!(page.prefs.tab, PageTab::Git);
-            assert_eq!(
-                crate::settings::current(cx).pull_requests_list.tab,
-                PageTab::Git
-            );
-            assert!(page.git_view.is_some());
-        });
-        ROWS_RENDERED.with(|rows| rows.set(0));
-        page.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        assert_eq!(ROWS_RENDERED.with(|rows| rows.get()), 0);
-        assert!(cx.debug_bounds("pull-requests-git-project").is_some());
-        assert!(cx.debug_bounds("pull-requests-chat").is_some());
-
-        let list = cx
-            .debug_bounds("pull-requests-tab-PullRequests")
-            .expect("Pull Requests tab");
-        cx.simulate_click(list.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        page.update(cx, |page, cx| {
-            assert_eq!(page.prefs.tab, PageTab::PullRequests);
-            assert_eq!(
-                crate::settings::current(cx).pull_requests_list.tab,
-                PageTab::PullRequests
-            );
-        });
-        assert!(ROWS_RENDERED.with(|rows| rows.get()) > 0);
-        assert_eq!(top(&page, cx), before);
-    }
-
-    #[gpui::test]
-    fn switching_tabs_slides_the_selection_pill(cx: &mut gpui::TestAppContext) {
-        let (page, cx, _dir) = scroll_fixture(cx, 3);
-        cx.run_until_parked();
-        let widths = page.update(cx, |page, _| page.tab_widths.get());
-        assert!(widths.iter().all(|width| *width > 0.0), "{widths:?}");
-        let rest = page
-            .update(cx, |page, _| page.pill(std::time::Instant::now()))
-            .expect("pill at rest");
-        assert_eq!(rest, pill_target(PageTab::PullRequests, widths));
-
-        let git = cx.debug_bounds("pull-requests-tab-Git").expect("Git tab");
-        cx.simulate_click(git.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        page.update(cx, |page, _| {
-            let slide = page.tab_slide.as_ref().expect("the switch starts a slide");
-            assert_eq!(slide.from, rest);
-            let target = pill_target(PageTab::Git, widths);
-            let span = crate::motion::SEGMENT_SLIDE
-                .total()
-                .mul_f32(crate::motion::speed_scale());
-            let mid = page.pill(slide.started + span / 4).unwrap();
-            assert!(mid.0 > rest.0 && mid.0 < target.0, "{mid:?} {target:?}");
-            assert_eq!(page.pill(slide.started + span).unwrap(), target);
-        });
-
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        let list = cx
-            .debug_bounds("pull-requests-tab-PullRequests")
-            .expect("Pull Requests tab");
-        cx.simulate_click(list.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        page.update(cx, |page, _| {
-            assert!(page.tab_slide.is_none());
-            assert_eq!(page.pill(std::time::Instant::now()), Some(rest));
-        });
-    }
-
-    #[gpui::test]
-    fn the_chat_button_emits_toggle_chat(cx: &mut gpui::TestAppContext) {
-        let (page, cx, _dir) = scroll_fixture(cx, 3);
-        let toggles = std::rc::Rc::new(std::cell::Cell::new(0));
-        cx.update(|_, cx| {
-            let toggles = toggles.clone();
-            cx.subscribe(&page, move |_, event, _| {
-                if matches!(event, PullRequestsEvent::ToggleChat) {
-                    toggles.set(toggles.get() + 1);
+    fn pull_request_board_shows_a_stored_page_then_refreshes_it(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rpc = {
+            let calls = calls.clone();
+            ScriptedRpc::new(move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    assert_eq!(method.as_str(), methods::LIST_CHANGE_REQUEST_PAGE);
+                    let cached = params["cached"] == true;
+                    calls.lock().unwrap().push(cached);
+                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: vec![pull_request(
+                            "owner/repo",
+                            if cached { 1 } else { 2 },
+                            1,
+                            1,
+                            1,
+                        )],
+                        next_cursor: None,
+                        total_count: Some(1),
+                        // The engine's stored copy is ten minutes old.
+                        fetched_at: Some(if cached {
+                            Utc::now() - chrono::Duration::minutes(10)
+                        } else {
+                            Utc::now()
+                        }),
+                    })
                 }
             })
-            .detach();
+        };
+        let client = rpc.client();
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = fixture::state(cx, Some(client));
+            PullRequestsPage::new(state, cx)
         });
-        let chat = cx.debug_bounds("pull-requests-chat").expect("chat button");
-        assert!(chat.bottom() <= px(Theme::TITLEBAR_HEIGHT), "{chat:?}");
-        cx.simulate_click(chat.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(toggles.get(), 1);
+        page.update(cx, |page, cx| {
+            page.repository = Some("owner/repo".into());
+            page.load(false, cx);
+        });
+        settle(
+            cx,
+            &runtime,
+            |page| {
+                page.load_state == PullRequestsLoadState::Ready
+                    && page.items.first().is_some_and(|item| item.number == 2)
+            },
+            &page,
+            &rpc,
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [true, false],
+            "the stored page first, then GitHub behind it"
+        );
+        page.read_with(cx, |page, _| {
+            assert!(page.last_loaded_at.unwrap().elapsed().as_secs() < 60);
+        });
+
+        // A refresh goes straight to GitHub.
+        page.update(cx, |page, cx| page.refresh(cx));
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        assert_eq!(*calls.lock().unwrap(), [true, false, false]);
     }
 
-    #[test]
-    fn thousands_are_grouped_like_to_locale_string() {
-        assert_eq!(group_thousands(0), "0");
-        assert_eq!(group_thousands(999), "999");
-        assert_eq!(group_thousands(1240), "1,240");
-        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    #[gpui::test]
+    fn pull_request_board_drops_a_reply_for_a_filter_it_has_left(cx: &mut gpui::TestAppContext) {
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let (page, cx, calls, release, rpc) = paged_page(cx);
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+            &rpc,
+        );
+        page.update(cx, |page, cx| {
+            page.select_filter(ChangeRequestFilter::Reviewing, cx)
+        });
+        settle(
+            cx,
+            &runtime,
+            |_| calls.lock().unwrap().len() == 2,
+            &page,
+            &rpc,
+        );
+        page.update(cx, |page, cx| {
+            assert_eq!(page.load_state, PullRequestsLoadState::Loading);
+            page.select_filter(ChangeRequestFilter::Authored, cx);
+            assert_eq!(page.items.len(), 50, "the loaded filter comes back at once");
+        });
+        let completed = rpc.completed();
+        release.notify_one();
+        rpc.settle(cx, &runtime, |_| rpc.completed() > completed);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.filter, ChangeRequestFilter::Authored);
+            assert_eq!(page.items.len(), 50, "the late Reviewing reply is ignored");
+            assert_eq!(page.load_state, PullRequestsLoadState::Ready);
+        });
     }
 }

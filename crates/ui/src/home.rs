@@ -7,10 +7,10 @@ use gpui::{
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task,
     Window, div, prelude::FluentBuilder, px,
 };
+use zeron_proto::change_request_assessment::{CiState, check_failed, check_status};
 use zeron_proto::{
-    ChangeRequestCheckStatus, ChangeRequestChecksState, ChangeRequestDetail, ChangeRequestListItem,
-    ChangeRequestListing, ChangeRequestReviewDecision, Chat, ChatIndicator,
-    GetChangeRequestRequest, GitActivity, GitActivityRequest, ListChangeRequestsRequest,
+    ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
+    ChangeRequestReviewDecision, Chat, ChatIndicator, GitActivity, GitActivityRequest,
     ListeningServices, ListeningServicesRequest, SystemStats,
 };
 use zeron_rpc::methods;
@@ -75,7 +75,7 @@ pub struct HomeView {
     services: Source<ListeningServices>,
     services_all_ports: bool,
     stats: Source<SystemStats>,
-    prs: Source<ChangeRequestListing>,
+    prs: Source<HomePrs>,
     failing_checks: HashMap<String, String>,
     failing_lookups: Vec<Task<()>>,
     last_render: Option<Instant>,
@@ -196,18 +196,11 @@ impl HomeView {
                 source.task = None;
                 source.fetched = Some(Instant::now());
                 source.value = Some(result);
-                this.after_fetch(method, cx);
                 cx.notify();
             })
             .ok();
         });
         slot(self).task = Some(task);
-    }
-
-    fn after_fetch(&mut self, method: &'static str, cx: &mut Context<Self>) {
-        if method == methods::LIST_CHANGE_REQUESTS {
-            self.lookup_failing_checks(cx);
-        }
     }
 
     fn fetch_stats(&mut self, cx: &mut Context<Self>) {
@@ -242,13 +235,22 @@ impl HomeView {
     }
 
     fn fetch_prs(&mut self, cx: &mut Context<Self>) {
-        let params = serde_json::to_value(ListChangeRequestsRequest::default()).unwrap_or_default();
-        self.call(
-            methods::LIST_CHANGE_REQUESTS,
-            params,
-            |this| &mut this.prs,
-            cx,
-        );
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let projects = local_git_project_paths(self.state.read(cx));
+        let task = cx.spawn(async move |this, cx| {
+            let prs = load_home_prs(&engine, projects).await;
+            this.update(cx, |this, cx| {
+                this.prs.task = None;
+                this.prs.fetched = Some(Instant::now());
+                this.prs.value = Some(Ok(prs));
+                this.lookup_failing_checks(cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.prs.task = Some(task);
     }
 
     fn lookup_failing_checks(&mut self, cx: &mut Context<Self>) {
@@ -258,8 +260,8 @@ impl HomeView {
         let failing: Vec<ChangeRequestListItem> = self
             .prs
             .ready()
-            .map(|listing| {
-                failing_prs(listing)
+            .map(|prs| {
+                failing_prs(prs)
                     .into_iter()
                     .filter(|item| !self.failing_checks.contains_key(&item.url))
                     .take(FAILING_CHECK_LOOKUPS)
@@ -271,12 +273,7 @@ impl HomeView {
             .into_iter()
             .map(|item| {
                 let engine = engine.clone();
-                let params = serde_json::to_value(GetChangeRequestRequest {
-                    host: item.host.clone(),
-                    repository: item.repository.clone(),
-                    number: item.number,
-                })
-                .unwrap_or_default();
+                let params = serde_json::json!({ "url": item.url });
                 cx.spawn(async move |this, cx| {
                     let Ok(value) = engine
                         .client()
@@ -288,15 +285,18 @@ impl HomeView {
                     let Ok(detail) = serde_json::from_value::<ChangeRequestDetail>(value) else {
                         return;
                     };
-                    let Some(check) = detail.checks.iter().find(|check| {
-                        matches!(
-                            check.status,
-                            ChangeRequestCheckStatus::Failure | ChangeRequestCheckStatus::Cancelled
-                        )
-                    }) else {
+                    let Some(check) = detail
+                        .status_check_rollup
+                        .iter()
+                        .find(|check| check_failed(&check_status(check)))
+                    else {
                         return;
                     };
-                    let name = check.name.clone();
+                    let name = if check.name.is_empty() {
+                        check.context.clone()
+                    } else {
+                        check.name.clone()
+                    };
                     this.update(cx, |this, cx| {
                         this.failing_checks.insert(item.url.clone(), name);
                         cx.notify();
@@ -336,12 +336,12 @@ impl HomeView {
         if running > 0 {
             parts.push(format!("{running} running"));
         }
-        if let Some(listing) = self.prs.ready() {
-            let review = split_prs(listing).1.len();
+        if let Some(prs) = self.prs.ready() {
+            let review = prs.review.len();
             if review > 0 {
                 parts.push(format!("{review} to review"));
             }
-            let failing = failing_prs(listing).len();
+            let failing = failing_prs(prs).len();
             if failing > 0 {
                 parts.push(format!("{failing} failing"));
             }
@@ -446,10 +446,10 @@ impl HomeView {
             .into_any_element()
     }
 
-    fn pr_scope(&self, listing: &ChangeRequestListing, cx: &App) -> PrScope {
+    fn pr_scope(&self, prs: &HomePrs, cx: &App) -> PrScope {
         self.pr_pick
             .clone()
-            .unwrap_or_else(|| composer_pr_scope(listing, self.state.read(cx)))
+            .unwrap_or_else(|| composer_pr_scope(prs, self.state.read(cx)))
     }
 
     fn close_pr_menu(&mut self, cx: &mut Context<Self>) {
@@ -471,7 +471,6 @@ impl HomeView {
         rows.extend(repos.into_iter().map(|repo| {
             (
                 PrScope::Repo {
-                    host: repo.host,
                     repository: repo.repository,
                 },
                 repo.name,
@@ -528,6 +527,23 @@ pub(crate) fn running_agents(state: &AppState, now: DateTime<Utc>) -> Vec<(&Chat
         .collect()
 }
 
+fn local_git_project_paths(state: &AppState) -> Vec<(String, String, String)> {
+    state
+        .spaces
+        .iter()
+        .filter(|space| {
+            space.git_detected && state.local_device_id.as_ref() == Some(&space.device_id)
+        })
+        .map(|space| {
+            (
+                space.id.clone(),
+                space.path.clone(),
+                state.representative_space(space).display_name().to_owned(),
+            )
+        })
+        .collect()
+}
+
 fn local_git_projects(state: &AppState) -> Vec<String> {
     state
         .spaces
@@ -551,7 +567,7 @@ pub(crate) fn chat_title(chat: &Chat) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrScope {
     All,
-    Repo { host: String, repository: String },
+    Repo { repository: String },
     Unlinked(String),
 }
 
@@ -559,9 +575,7 @@ impl PrScope {
     fn includes(&self, item: &ChangeRequestListItem) -> bool {
         match self {
             PrScope::All => true,
-            PrScope::Repo { host, repository } => {
-                &item.host == host && &item.repository == repository
-            }
+            PrScope::Repo { repository } => item.repository.eq_ignore_ascii_case(repository),
             PrScope::Unlinked(_) => false,
         }
     }
@@ -569,41 +583,91 @@ impl PrScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrRepo {
-    pub host: String,
     pub repository: String,
     pub name: String,
+    pub spaces: Vec<String>,
 }
 
-pub(crate) fn pr_repos(listing: &ChangeRequestListing, state: &AppState) -> Vec<PrRepo> {
-    let mut repos: Vec<PrRepo> = Vec::new();
-    for project in &listing.projects {
-        if repos
-            .iter()
-            .any(|r| r.host == project.host && r.repository == project.repository)
-        {
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct HomePrs {
+    pub repos: Vec<PrRepo>,
+    pub mine: Vec<ChangeRequestListItem>,
+    pub review: Vec<ChangeRequestListItem>,
+    pub error: Option<String>,
+}
+
+async fn load_home_prs(
+    engine: &crate::state::EngineHandle,
+    projects: Vec<(String, String, String)>,
+) -> HomePrs {
+    let mut prs = HomePrs::default();
+    for (space_id, path, name) in projects {
+        let Ok(value) = engine
+            .client()
+            .call(
+                methods::GET_CHANGE_REQUEST_REPOSITORY,
+                serde_json::json!({ "cwd": path }),
+            )
+            .await
+        else {
             continue;
+        };
+        let Some(repository) = serde_json::from_value::<Option<String>>(value)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        match prs
+            .repos
+            .iter_mut()
+            .find(|repo| repo.repository.eq_ignore_ascii_case(&repository))
+        {
+            Some(repo) => repo.spaces.push(space_id),
+            None => prs.repos.push(PrRepo {
+                repository,
+                name,
+                spaces: vec![space_id],
+            }),
         }
-        let name = state
-            .space_row(&project.space_id)
-            .map(|space| state.representative_space(space).display_name().to_owned())
-            .unwrap_or_else(|| {
-                project
-                    .repository
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&project.repository)
-                    .to_owned()
-            });
-        repos.push(PrRepo {
-            host: project.host.clone(),
-            repository: project.repository.clone(),
-            name,
-        });
     }
-    repos
+    for repo in &prs.repos {
+        for filter in [
+            ChangeRequestFilter::Authored,
+            ChangeRequestFilter::Reviewing,
+        ] {
+            let params = serde_json::json!({
+                "repository": repo.repository,
+                "filter": filter,
+            });
+            let page = match engine
+                .client()
+                .call(methods::LIST_CHANGE_REQUEST_PAGE, params)
+                .await
+            {
+                Ok(value) => serde_json::from_value::<ChangeRequestPage>(value)
+                    .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string())),
+                Err(error) => Err(error),
+            };
+            match page {
+                Ok(page) if filter == ChangeRequestFilter::Authored => prs.mine.extend(page.items),
+                Ok(page) => prs.review.extend(page.items),
+                Err(error) => {
+                    prs.error.get_or_insert_with(|| {
+                        let error = crate::pull_requests::map_rpc_error(&error, "This device");
+                        crate::pull_requests::error_copy(&error).0
+                    });
+                }
+            }
+        }
+    }
+    for items in [&mut prs.mine, &mut prs.review] {
+        items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    }
+    prs
 }
 
-pub(crate) fn composer_pr_scope(listing: &ChangeRequestListing, state: &AppState) -> PrScope {
+pub(crate) fn composer_pr_scope(prs: &HomePrs, state: &AppState) -> PrScope {
     let Some(space) = state.selected_space_row() else {
         return PrScope::All;
     };
@@ -612,38 +676,24 @@ pub(crate) fn composer_pr_scope(listing: &ChangeRequestListing, state: &AppState
             && state.space_row(id).and_then(|s| s.repository_id.as_ref())
                 == space.repository_id.as_ref()
     };
-    listing
-        .projects
+    prs.repos
         .iter()
-        .find(|p| p.space_id == space.id || p.path == space.path || same_repository(&p.space_id))
-        .map(|p| PrScope::Repo {
-            host: p.host.clone(),
-            repository: p.repository.clone(),
+        .find(|repo| {
+            repo.spaces
+                .iter()
+                .any(|id| *id == space.id || same_repository(id))
+        })
+        .map(|repo| PrScope::Repo {
+            repository: repo.repository.clone(),
         })
         .unwrap_or_else(|| PrScope::Unlinked(space.display_name().to_owned()))
 }
 
-fn failing_prs(listing: &ChangeRequestListing) -> Vec<&ChangeRequestListItem> {
-    let (mine, _) = split_prs(listing);
-    mine.into_iter()
-        .filter(|item| item.checks_state == Some(ChangeRequestChecksState::Failing))
+fn failing_prs(prs: &HomePrs) -> Vec<&ChangeRequestListItem> {
+    prs.mine
+        .iter()
+        .filter(|item| item.ci.state == CiState::Failed)
         .collect()
-}
-
-fn split_prs(
-    listing: &ChangeRequestListing,
-) -> (Vec<&ChangeRequestListItem>, Vec<&ChangeRequestListItem>) {
-    let items: Vec<&ChangeRequestListItem> = listing.items.iter().collect();
-    let mut mine = Vec::new();
-    let mut review = Vec::new();
-    for (group, rows) in crate::pull_requests::group_items(&items, &listing.viewers) {
-        match group {
-            crate::pull_requests::PullRequestGroup::Authored => mine = rows,
-            crate::pull_requests::PullRequestGroup::ReviewRequested => review = rows,
-            _ => {}
-        }
-    }
-    (mine, review)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -799,10 +849,7 @@ impl HomeView {
             Widget::PullRequests => self
                 .prs
                 .ready()
-                .map(|listing| {
-                    let (mine, review) = split_prs(listing);
-                    mine.len().min(5) + review.len().min(4) + 2
-                })
+                .map(|prs| prs.mine.len().min(5) + prs.review.len().min(4) + 2)
                 .unwrap_or(2),
             Widget::GitActivity => 4,
             Widget::ThisMac => 2,
@@ -815,7 +862,7 @@ impl HomeView {
             Widget::CiFailures => self
                 .prs
                 .ready()
-                .map(|listing| failing_prs(listing).len().clamp(1, 4))
+                .map(|prs| failing_prs(prs).len().clamp(1, 4))
                 .unwrap_or(1),
         }
     }
@@ -983,17 +1030,17 @@ impl HomeView {
         let listing = self.prs.ready().cloned();
         let scope = listing
             .as_ref()
-            .map(|listing| self.pr_scope(listing, cx))
+            .map(|prs| self.pr_scope(prs, cx))
             .unwrap_or(PrScope::All);
         let repos = listing
             .as_ref()
-            .map(|listing| pr_repos(listing, self.state.read(cx)))
+            .map(|prs| prs.repos.clone())
             .unwrap_or_default();
         let label = match &scope {
             PrScope::All => "All projects".to_owned(),
-            PrScope::Repo { host, repository } => repos
+            PrScope::Repo { repository } => repos
                 .iter()
-                .find(|r| &r.host == host && &r.repository == repository)
+                .find(|r| &r.repository == repository)
                 .map(|r| r.name.clone())
                 .unwrap_or_else(|| repository.clone()),
             PrScope::Unlinked(name) => name.clone(),
@@ -1004,9 +1051,12 @@ impl HomeView {
             (Some(Err(error)), _) => vec![empty_line(theme, error)],
             (_, None) => vec![empty_line(theme, "Loading…")],
             (_, Some(listing)) => {
-                let (mine, review) = split_prs(listing);
-                let mine: Vec<_> = mine.into_iter().filter(|i| scope.includes(i)).collect();
-                let review: Vec<_> = review.into_iter().filter(|i| scope.includes(i)).collect();
+                let mine: Vec<_> = listing.mine.iter().filter(|i| scope.includes(i)).collect();
+                let review: Vec<_> = listing
+                    .review
+                    .iter()
+                    .filter(|i| scope.includes(i))
+                    .collect();
                 review_count = review.len();
                 let mut body = Vec::new();
                 if !review.is_empty() {
@@ -1016,11 +1066,7 @@ impl HomeView {
                         format!("Waiting on your review · {}", review.len()),
                     ));
                     for item in review.iter().take(4) {
-                        let right = item
-                            .author
-                            .as_ref()
-                            .map(|author| author.login.clone())
-                            .unwrap_or_default();
+                        let right = item.author.login.clone();
                         body.push(pr_row(theme, item, right.into(), cx));
                     }
                 }
@@ -1038,11 +1084,9 @@ impl HomeView {
                     let message = match &scope {
                         PrScope::Unlinked(name) => format!("{name} has no GitHub repository"),
                         _ => listing
-                            .errors
-                            .first()
-                            .map(|error| crate::pull_requests::failure_message(error.failure))
-                            .unwrap_or("Nothing waiting on you")
-                            .to_owned(),
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Nothing waiting on you".to_owned()),
                     };
                     body.push(empty_line(theme, &message));
                 }
@@ -1480,8 +1524,8 @@ impl HomeView {
         let body: Vec<AnyElement> = match &self.prs.value {
             None => vec![empty_line(theme, "Loading…")],
             Some(Err(error)) => vec![empty_line(theme, error)],
-            Some(Ok(listing)) => {
-                let failing = failing_prs(listing);
+            Some(Ok(prs)) => {
+                let failing = failing_prs(prs);
                 if failing.is_empty() {
                     vec![empty_line(theme, "All checks passing")]
                 } else {
@@ -1534,7 +1578,7 @@ impl HomeView {
                                             div()
                                                 .ml(px(6.0))
                                                 .text_color(theme.text_faint)
-                                                .child(format!("· {repo} / {}", item.head_ref)),
+                                                .child(format!("· {repo}#{}", item.number)),
                                         )
                                         .flex()
                                         .flex_row(),
@@ -1566,8 +1610,8 @@ fn review_label(item: &ChangeRequestListItem) -> &'static str {
         "Draft"
     } else {
         match item.review_decision {
-            Some(ChangeRequestReviewDecision::Approved) => "Approved",
-            Some(ChangeRequestReviewDecision::ChangesRequested) => "Changes",
+            ChangeRequestReviewDecision::Approved => "Approved",
+            ChangeRequestReviewDecision::ChangesRequested => "Changes",
             _ => "In review",
         }
     }
@@ -1586,13 +1630,11 @@ fn pr_row(
         .next()
         .unwrap_or(&item.repository)
         .to_owned();
-    let check = match item.checks_state {
-        Some(ChangeRequestChecksState::Passing) => Some((icons::LUCIDE_CHECK, theme.success)),
-        Some(ChangeRequestChecksState::Failing) => Some((icons::LUCIDE_CIRCLE_X, theme.danger)),
-        Some(ChangeRequestChecksState::Pending) => {
-            Some((icons::LUCIDE_CIRCLE_DASHED, theme.text_faint))
-        }
-        None => None,
+    let check = match item.ci.state {
+        CiState::Passed => Some((icons::LUCIDE_CHECK, theme.success)),
+        CiState::Failed => Some((icons::LUCIDE_CIRCLE_X, theme.danger)),
+        CiState::Pending => Some((icons::LUCIDE_CIRCLE_DASHED, theme.text_faint)),
+        _ => None,
     };
     div()
         .id(SharedString::from(format!("home-pr-{}", item.url)))
@@ -2172,12 +2214,11 @@ mod tests {
             space("main", "/code/zeron"),
             space("clone", "/code/zeron-2"),
         ];
-        let listing = ChangeRequestListing {
-            projects: vec![zeron_proto::ChangeRequestProject {
+        let listing = HomePrs {
+            repos: vec![PrRepo {
                 repository: "reina/zeron".into(),
-                host: "github.com".into(),
-                space_id: "main".into(),
-                path: "/code/zeron".into(),
+                name: "zeron".into(),
+                spaces: vec!["main".into()],
             }],
             ..Default::default()
         };
@@ -2187,7 +2228,6 @@ mod tests {
         assert_eq!(
             scope,
             PrScope::Repo {
-                host: "github.com".into(),
                 repository: "reina/zeron".into()
             }
         );

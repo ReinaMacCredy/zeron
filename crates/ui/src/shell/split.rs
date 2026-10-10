@@ -848,6 +848,8 @@ impl Shell {
                     move |this, payload: &SidebarSessionDrag, _, cx| {
                         tracing::info!(chat = %payload.chat_id, ?side, "split: row dropped");
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
+                        this.cancel_sidebar_session_transfer(cx);
+                        cx.stop_propagation();
                     },
                 ))
                 .child(card)
@@ -1029,7 +1031,8 @@ mod drag_regressions {
                     .h(px(500.))
                     .child(div().w(px(240.)).child(row))
                     .child(
-                        div()
+                        shell
+                            .chat_dropzone("chat-dropzone", composer.clone(), cx)
                             .relative()
                             .flex_1()
                             .h_full()

@@ -19,6 +19,7 @@ pub mod agent_accounts;
 pub mod agent_profiles;
 pub mod auth;
 mod background_output;
+mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;

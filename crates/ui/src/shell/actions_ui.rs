@@ -41,7 +41,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(error) = setup_error {
-            self.sidebar_notice = Some(format!("Setup action failed: {error}").into());
+            self.show_notice(crate::toast::ToastKind::Error, format!("Setup action failed: {error}"), cx);
         }
         let Some(run) = setup_action else {
             cx.notify();
@@ -57,8 +57,7 @@ impl Shell {
             panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
         });
         if !attached {
-            self.sidebar_notice =
-                Some("Setup action started, but its terminal could not be attached".into());
+            self.show_notice(crate::toast::ToastKind::Error, "Setup action started, but its terminal could not be attached", cx);
         }
 
         let selected = self.active_chat == chat_id;

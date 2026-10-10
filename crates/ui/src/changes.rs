@@ -95,7 +95,7 @@ const DIFF_TEXT_SIZE_RATIO: f32 = DIFF_TEXT_SIZE / crate::typography::CODE_FONT_
 
 /// Size of the painted diff body text, and the size the column measurement in
 /// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise.
-fn diff_text_size(theme: &Theme) -> f32 {
+pub(crate) fn diff_text_size(theme: &Theme) -> f32 {
     crate::typography::clamp_font_size(theme.code_font_size * DIFF_TEXT_SIZE_RATIO)
 }
 
@@ -105,8 +105,8 @@ pub(crate) fn diff_line_height(theme: &Theme) -> f32 {
     diff_text_size(theme) * (DIFF_LINE_HEIGHT / DIFF_TEXT_SIZE)
 }
 
-const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
-const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
+pub(crate) const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
+pub(crate) const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
 /// Breathing room after the widest source line when scrolled fully right.
 const CODE_PADDING_RIGHT: f32 = 24.0;
 
@@ -335,7 +335,7 @@ fn max_shaped_text_width(
 
 /// Count terminal-style display columns, including tab stops and wide
 /// Unicode glyphs. This is only a floor; actual shaped runs determine the extent.
-fn visual_columns(text: &str) -> usize {
+pub(crate) fn visual_columns(text: &str) -> usize {
     text.chars().fold(0usize, |columns, ch| {
         if ch == '\t' {
             columns + (DIFF_TAB_SIZE - columns % DIFF_TAB_SIZE)
@@ -1613,7 +1613,6 @@ struct RefMenu {
     /// Tracked on the card — puts it on the keyboard dispatch path while the
     /// search input holds focus (the structure every working picker uses).
     focus: FocusHandle,
-    list_scroll: gpui::ScrollHandle,
     _search_events: Subscription,
 }
 
@@ -1689,6 +1688,9 @@ pub struct Changes {
     scoped_task: Option<Task<()>>,
     scope_menu: Popup<()>,
     ref_menu: Popup<RefMenu>,
+    /// The ref menu's list scroll and rail. Lives outside [`RefMenu`] so the
+    /// rail can reach it mutably while the card plays its exit.
+    ref_menu_scroll: crate::settings::widgets::PageScroll,
     /// Only ever one: a second `+` moves the card rather than stacking two
     /// half-written notes.
     draft: Option<CommentDraft>,
@@ -1794,6 +1796,7 @@ impl Changes {
             scoped_task: None,
             scope_menu: Popup::default(),
             ref_menu: Popup::default(),
+            ref_menu_scroll: Default::default(),
             draft: None,
             hover: None,
             comment_key: 0,
@@ -3106,9 +3109,9 @@ impl Changes {
             search,
             active,
             focus: cx.focus_handle(),
-            list_scroll: gpui::ScrollHandle::new(),
             _search_events: search_events,
         });
+        self.ref_menu_scroll.reset();
         // Focusable before first paint (the add-space palette's proven order).
         window.focus(&handle, cx);
         cx.notify();
@@ -3147,7 +3150,7 @@ impl Changes {
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(menu) = self.ref_menu.open_mut() {
                     menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
-                    menu.list_scroll.scroll_to_item(menu.active);
+                    self.ref_menu_scroll.scroll.scroll_to_item(menu.active);
                     cx.notify();
                 }
             }
@@ -4300,17 +4303,13 @@ impl Changes {
 
     fn render_ref_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = &theme.for_popup();
-        let (search, active, focus, list_scroll) = {
+        let (search, active, focus) = {
             let Some(menu) = self.ref_menu.get() else {
                 return div().into_any_element();
             };
-            (
-                menu.search.clone(),
-                menu.active,
-                menu.focus.clone(),
-                menu.list_scroll.clone(),
-            )
+            (menu.search.clone(), menu.active, menu.focus.clone())
         };
+        let list_scroll = self.ref_menu_scroll.scroll.clone();
         let rows = self.ref_menu_rows(cx);
         let current = self.base_ref.clone();
         let branches = self.branches.clone();
@@ -4328,19 +4327,23 @@ impl Changes {
                 }))
                 .into_any_element()
         } else {
-            div()
-                .id("changes-ref-list")
+            let rail = crate::settings::widgets::rail(
+                &mut self.ref_menu_scroll,
+                "changes-ref-scrollbar",
+                theme,
+                cx,
+                |changes| &mut changes.ref_menu_scroll,
+            );
+            let list = popover::menu_scroll_list("changes-ref-list", &list_scroll)
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
                 .max_h(px(240.0))
-                .overflow_y_scroll()
-                .track_scroll(&list_scroll)
                 .children(rows.into_iter().enumerate().map(|(row_ix, branch_ix)| {
                     let name = branches[branch_ix].clone();
                     let selected = current.as_deref() == Some(name.as_str());
                     let label = name.clone();
-                    popover::menu_row_nav(
+                    popover::picker_row(
                         theme,
                         selected,
                         row_ix == active,
@@ -4360,7 +4363,15 @@ impl Changes {
                             .text_size(px(12.0))
                             .child(SharedString::from(label)),
                     )
+                }));
+            popover::menu_scroll_host("changes-ref-list-host")
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.ref_menu_scroll.set_list_hovered(*hovered) {
+                        cx.notify();
+                    }
                 }))
+                .child(popover::faded_menu_list(&list_scroll, list))
+                .children(rail)
                 .into_any_element()
         };
 
@@ -4465,7 +4476,7 @@ pub(crate) fn notice_row(notice: String, theme: &Theme) -> AnyElement {
 }
 
 /// One `@@ … @@` hunk-header row on the bluish-grey wash.
-fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+pub(crate) fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
     div()
         .h(px(HUNK_HEADER_HEIGHT))
         .w_full()
@@ -4535,6 +4546,91 @@ fn code_text_viewport(
         }
         None => viewport.into_any_element(),
     }
+}
+
+/// Read-only unified row for PR diffs; reuse the Changes pane's gutters,
+/// source text, font settings, markers and semantic colors. The caller owns
+/// virtualization and the shared horizontal viewport.
+pub(crate) fn readonly_diff_line(
+    line: &DiffLine,
+    spans: &[zeron_syntax::HighlightSpan],
+    theme: &Theme,
+    gutter_px: f32,
+) -> AnyElement {
+    diff_line_row(line, spans, theme, gutter_px, DiffCodeWidth::Clipped, None)
+}
+
+/// Read-only unified row whose code plane scrolls with `scroll` while the
+/// gutters stay put. Every row shares one extent, so a whole multi-file
+/// stream moves as one horizontal plane.
+pub(crate) fn readonly_scrolled_diff_line(
+    line: &DiffLine,
+    spans: &[zeron_syntax::HighlightSpan],
+    theme: &Theme,
+    gutter_px: f32,
+    text_width: f32,
+    scroll: &gpui::ScrollHandle,
+    row: usize,
+) -> AnyElement {
+    diff_line_row(
+        line,
+        spans,
+        theme,
+        gutter_px,
+        DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
+            max_text_width: text_width,
+            max_gutter_width: gutter_px,
+        }),
+        Some(DiffCodeScroll {
+            handle: scroll.clone(),
+            id: format!("pr-code-{row}").into(),
+        }),
+    )
+}
+
+/// Read-only split row using the same cells and divider as the Changes pane.
+pub(crate) fn readonly_split_line(
+    left: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>,
+    right: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>,
+    theme: &Theme,
+    gutter_px: f32,
+    text_width: f32,
+    scroll: &gpui::ScrollHandle,
+    row: usize,
+) -> AnyElement {
+    let width = DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
+        max_text_width: text_width,
+        max_gutter_width: gutter_px,
+    });
+    let cell = |side: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>, old: bool| {
+        let content = side
+            .map(|(line, spans)| {
+                let runs = render::runs_for_syntax_line_with_plain(
+                    &line.text,
+                    spans,
+                    &font(theme.font_mono.clone()),
+                    theme.text.opacity(0.92),
+                    theme,
+                );
+                split_line_cell(
+                    line,
+                    if old { line.old_no } else { line.new_no },
+                    runs,
+                    theme,
+                    gutter_px,
+                    width,
+                    Some(DiffCodeScroll {
+                        handle: scroll.clone(),
+                        id: format!("pr-split-code-{row}-{old}").into(),
+                    }),
+                )
+            })
+            .unwrap_or_else(split_filler);
+        content
+            .debug_selector(move || format!("pr-split-cell-{row}-{old}"))
+            .into_any_element()
+    };
+    split_row(cell(left, true), cell(right, false), false, theme).into_any_element()
 }
 
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number

@@ -10232,6 +10232,13 @@ impl Transcript {
             tool_disclosure_progress(open, fold, now)
         };
 
+        // The summary rolls as the group grows ("Thought 2 times" → "Thought
+        // 3 times · Ran 1 command"), like the working indicator's word.
+        let rolled_summary = crate::roll_text::rolling(
+            format!("tool-group-title-{row_id}"),
+            summary.clone(),
+            reduce_motion,
+        );
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
@@ -10293,7 +10300,9 @@ impl Transcript {
                             shimmer_phase,
                             theme,
                         ),
-                        None => tool_group_title(summary.clone(), shimmer_phase, theme),
+                        None => rolled_summary.unwrap_or_else(|| {
+                            tool_group_title(summary.clone(), shimmer_phase, theme)
+                        }),
                     }),
             )
             .when(worked_secs.is_some(), |header| {

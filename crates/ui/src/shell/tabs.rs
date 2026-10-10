@@ -538,8 +538,9 @@ impl Shell {
         // Opening any session steps the voice stage aside — including the one
         // already selected under it. The call keeps running in the background.
         self.set_voice_stage_open(false, cx);
-        self.route = Route::Chat;
+        self.set_route(Route::Chat, cx);
         self.focus_composer(cx);
+        self.nav.push(NavEntry::Chat(chat_id.clone()));
         self.state
             .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
         cx.notify();
@@ -648,7 +649,7 @@ impl Shell {
         self.snapshot_current_chat(cx);
         self.command_palette = None;
         self.set_voice_stage_open(false, cx);
-        self.route = Route::Chat;
+        self.set_route(Route::Chat, cx);
         self.focus_composer(cx);
         // Pre-hide before the selection flips so the state change can't
         // auto-create a canvas tab (the panel's observer runs on the same
@@ -664,6 +665,7 @@ impl Shell {
                 panel.update(cx, |panel, cx| panel.set_open(false, cx));
             }
         }
+        self.nav.push(NavEntry::Chat(String::new()));
         let target = {
             let state = self.state.read(cx);
             project
@@ -1711,9 +1713,6 @@ impl Shell {
         // In panel takeover the header strip spans the whole band — the tabs
         // would sit UNDER it (both flex_none, the row overflows and paint
         // order stacks them), so they hide for the duration.
-        let page_tab = (!takeover)
-            .then(|| self.render_pull_requests_strip_tab(&theme, cx))
-            .flatten();
         let session_tabs = (!takeover).then(|| self.render_session_tabs(cx));
         // The session's own side-chat controls: "+" mints a fresh side chat
         // under this session, fork copies its history into one. Same pair
@@ -1771,7 +1770,6 @@ impl Shell {
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
-            .children(page_tab)
             .children(session_tabs)
             .child(div().flex_1())
             .children(session_controls)

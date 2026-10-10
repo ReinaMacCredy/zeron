@@ -504,6 +504,24 @@ pub enum SavePolicy {
     Immediate,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PullRequestDestination {
+    #[default]
+    Native,
+    External,
+}
+
+impl PullRequestDestination {
+    pub const ALL: [Self; 2] = [Self::Native, Self::External];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "Pull request view",
+            Self::External => "Default browser",
+        }
+    }
+}
+
 /// The sole in-process owner and writer of `ui-settings.json`.
 ///
 /// Mutations land in `current` before any timer starts. Replacing a pending
@@ -593,17 +611,6 @@ pub fn git_agent_busy_policy(cx: &App) -> GitAgentBusyPolicy {
 pub fn commit_message_model(cx: &App) -> Option<CommitModelChoice> {
     cx.try_global::<SettingsStore>()
         .and_then(|store| store.current.commit_message_model.clone())
-}
-
-pub fn pr_chat_history(cx: &App) -> PrChatHistory {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.current.pr_chat_history)
-        .unwrap_or_default()
-}
-
-pub fn pull_requests_merge_method(cx: &App) -> Option<zeron_proto::ChangeRequestMergeMethod> {
-    cx.try_global::<SettingsStore>()
-        .and_then(|store| store.current.pull_requests_merge_method)
 }
 
 pub fn shortcut_combo(id: ShortcutId, cx: &App) -> String {
@@ -863,24 +870,6 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.transcript_compact_mode)
         .unwrap_or_default()
-}
-
-pub fn pr_chat_session(chat_id: &str, cx: &App) -> Option<PrChatSession> {
-    cx.try_global::<SettingsStore>()
-        .and_then(|store| store.current.pr_chat_session(chat_id).cloned())
-}
-
-pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
-    cx.try_global::<SettingsStore>()
-        .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
-        .and_then(|store| store.current.pr_chat_sessions.get(scope).cloned())
-        .unwrap_or_default()
-}
-
-pub fn pr_chat_idle_limit(cx: &App) -> Option<chrono::Duration> {
-    cx.try_global::<SettingsStore>()
-        .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
-        .and_then(|store| store.current.pr_chat_idle_expiry.limit())
 }
 
 pub fn home_widgets(cx: &App) -> HomeWidgets {
@@ -1248,88 +1237,6 @@ pub struct CommitModelChoice {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PrChatHistory {
-    #[default]
-    KeepPerPr,
-    Fresh,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PrChatIdleExpiry {
-    Never,
-    FiveMinutes,
-    TenMinutes,
-    #[default]
-    ThirtyMinutes,
-    OneHour,
-    OneDay,
-}
-
-impl PrChatIdleExpiry {
-    pub const ALL: [Self; 6] = [
-        Self::Never,
-        Self::FiveMinutes,
-        Self::TenMinutes,
-        Self::ThirtyMinutes,
-        Self::OneHour,
-        Self::OneDay,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Never => "Never",
-            Self::FiveMinutes => "5 min",
-            Self::TenMinutes => "10 min",
-            Self::ThirtyMinutes => "30 min",
-            Self::OneHour => "1 hour",
-            Self::OneDay => "1 day",
-        }
-    }
-
-    pub fn limit(self) -> Option<chrono::Duration> {
-        match self {
-            Self::Never => None,
-            Self::FiveMinutes => Some(chrono::Duration::minutes(5)),
-            Self::TenMinutes => Some(chrono::Duration::minutes(10)),
-            Self::ThirtyMinutes => Some(chrono::Duration::minutes(30)),
-            Self::OneHour => Some(chrono::Duration::hours(1)),
-            Self::OneDay => Some(chrono::Duration::days(1)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrChatSession {
-    pub chat_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub posted: Vec<PrChatPosted>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dismissed: Vec<PrChatCardRef>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub fresh: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrChatCardRef {
-    pub entry_id: String,
-    pub index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrChatPosted {
-    #[serde(flatten)]
-    pub card: PrChatCardRef,
-    pub label: String,
-    pub at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum GitAgentBusyPolicy {
     #[default]
     SafeOnly,
@@ -1395,6 +1302,8 @@ pub struct UiSettings {
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
     pub sidebar_show_pull_request: bool,
+    /// The project filter row at the top of the sidebar.
+    pub sidebar_show_project_filter: bool,
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
@@ -1459,12 +1368,6 @@ pub struct UiSettings {
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
     /// compatibility; no longer read or written by the shell.
     pub right_pane_open: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pull_requests_panel_width: Option<f32>,
-    pub pull_requests_list: crate::pull_requests::PullRequestListPrefs,
-    pub pull_requests_file_tree: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pull_requests_merge_method: Option<zeron_proto::ChangeRequestMergeMethod>,
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
@@ -1531,6 +1434,13 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// Destination shared by PR badges and the pull-request board.
+    pub pull_request_destination: PullRequestDestination,
+    /// Last explicitly selected PR scope, restored when no project is selected.
+    pub last_pull_request_repository: Option<String>,
+    pub last_pull_request_device: Option<String>,
+    /// Device-local bookmarks, keyed by provider/repository/PR, never GitHub mutations.
+    pub pull_request_stars: Vec<String>,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1568,9 +1478,6 @@ pub struct UiSettings {
     pub commit_message_instruction: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_message_model: Option<CommitModelChoice>,
-    pub pr_chat_history: PrChatHistory,
-    pub pr_chat_idle_expiry: PrChatIdleExpiry,
-    pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
     pub git_agent_busy_policy: GitAgentBusyPolicy,
     pub device_auto_float: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1607,6 +1514,7 @@ impl Default for UiSettings {
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
+            sidebar_show_project_filter: true,
             github_star_banner_dismissed: false,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
@@ -1628,10 +1536,6 @@ impl Default for UiSettings {
             right_pane_width: RIGHT_PANE_DEFAULT,
             split_ratio: SPLIT_RATIO_DEFAULT,
             right_pane_open: false,
-            pull_requests_panel_width: None,
-            pull_requests_list: Default::default(),
-            pull_requests_file_tree: false,
-            pull_requests_merge_method: None,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             keymap: KeymapConfig::default(),
@@ -1673,6 +1577,10 @@ impl Default for UiSettings {
             open_web_links_in_zeron: true,
             html_open_app: crate::html_open::HtmlOpenApp::SystemDefault,
             transcript_compact_mode: false,
+            pull_request_destination: PullRequestDestination::Native,
+            last_pull_request_repository: None,
+            last_pull_request_device: None,
+            pull_request_stars: Vec::new(),
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1694,9 +1602,6 @@ impl Default for UiSettings {
             pause_animations_in_background: false,
             commit_message_instruction: DEFAULT_COMMIT_INSTRUCTION.to_string(),
             commit_message_model: None,
-            pr_chat_history: PrChatHistory::default(),
-            pr_chat_idle_expiry: PrChatIdleExpiry::default(),
-            pr_chat_sessions: Default::default(),
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
             device_auto_float: true,
             device_float_frame: None,
@@ -2292,6 +2197,7 @@ impl UiSettings {
             sidebar_show_harness,
             sidebar_show_branch,
             sidebar_show_pull_request,
+            sidebar_show_project_filter,
             github_star_banner_dismissed,
             last_space_id,
             last_project_action_by_space_id,
@@ -2311,10 +2217,6 @@ impl UiSettings {
             agent_update_notifications,
             right_pane_width,
             right_pane_open,
-            pull_requests_panel_width,
-            pull_requests_list,
-            pull_requests_file_tree,
-            pull_requests_merge_method,
             terminal_height,
             terminal_open,
             keymap,
@@ -2378,101 +2280,16 @@ impl UiSettings {
             terminal_background,
             commit_message_instruction,
             commit_message_model,
-            pr_chat_history,
-            pr_chat_idle_expiry,
-            pr_chat_sessions,
             git_agent_busy_policy,
             device_auto_float,
             device_float_frame,
             home_widgets,
+            pull_request_destination,
+            last_pull_request_repository,
+            last_pull_request_device,
+            pull_request_stars,
         );
         current
-    }
-
-    pub fn pr_chat_ids(&self) -> impl Iterator<Item = &str> {
-        self.pr_chat_sessions
-            .values()
-            .flatten()
-            .map(|session| session.chat_id.as_str())
-    }
-
-    pub fn pr_chat_indexed(&self, chat_id: &str) -> bool {
-        self.pr_chat_ids().any(|id| id == chat_id)
-    }
-
-    pub fn pr_chat_fresh(&self, chat_id: &str) -> bool {
-        self.pr_chat_sessions
-            .values()
-            .flatten()
-            .any(|session| session.chat_id == chat_id && session.fresh)
-    }
-
-    pub fn index_pr_chat(&mut self, scope: &str, session: PrChatSession) {
-        if !self.pr_chat_indexed(&session.chat_id) {
-            self.pr_chat_sessions
-                .entry(scope.to_owned())
-                .or_default()
-                .push(session);
-        }
-    }
-
-    pub fn unindex_pr_chat(&mut self, chat_id: &str) {
-        for sessions in self.pr_chat_sessions.values_mut() {
-            sessions.retain(|session| session.chat_id != chat_id);
-        }
-        self.pr_chat_sessions
-            .retain(|_, sessions| !sessions.is_empty());
-    }
-
-    fn pr_chat_session(&self, chat_id: &str) -> Option<&PrChatSession> {
-        self.pr_chat_sessions
-            .values()
-            .flatten()
-            .find(|session| session.chat_id == chat_id)
-    }
-
-    fn pr_chat_session_mut(&mut self, chat_id: &str) -> Option<&mut PrChatSession> {
-        self.pr_chat_sessions
-            .values_mut()
-            .flatten()
-            .find(|session| session.chat_id == chat_id)
-    }
-
-    pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
-        if let Some(session) = self.pr_chat_session_mut(chat_id)
-            && !session.posted.iter().any(|p| p.card == posted.card)
-        {
-            session.posted.push(posted);
-        }
-    }
-
-    pub fn record_pr_chat_dismiss(&mut self, chat_id: &str, card: PrChatCardRef) {
-        if let Some(session) = self.pr_chat_session_mut(chat_id)
-            && !session.dismissed.contains(&card)
-        {
-            session.dismissed.push(card);
-        }
-    }
-
-    pub fn stale_pr_chats(
-        &self,
-        chats: &[zeron_proto::Chat],
-        vanished: &std::collections::HashSet<String>,
-        live: &[&str],
-    ) -> Vec<String> {
-        // A missing row is not proof of deletion: another profile or device may own it.
-        self.pr_chat_sessions
-            .values()
-            .flatten()
-            .filter(|session| !live.contains(&session.chat_id.as_str()))
-            .filter(|session| {
-                vanished.contains(&session.chat_id)
-                    || chats
-                        .iter()
-                        .any(|chat| chat.id == session.chat_id && chat.archived)
-            })
-            .map(|session| session.chat_id.clone())
-            .collect()
     }
 
     pub fn effective_commit_instruction(&self) -> &str {
@@ -2795,30 +2612,10 @@ mod tests {
             "Write a short commit message for this staged diff."
         );
         assert_eq!(legacy.commit_message_model, None);
-        assert_eq!(legacy.pr_chat_history, PrChatHistory::KeepPerPr);
-        assert_eq!(legacy.pr_chat_idle_expiry, PrChatIdleExpiry::ThirtyMinutes);
         assert_eq!(legacy.git_agent_busy_policy, GitAgentBusyPolicy::SafeOnly);
         assert_eq!(legacy, UiSettings::default());
         let saved = serde_json::to_string(&legacy).unwrap();
         assert!(!saved.contains("commitMessageModel"));
-    }
-
-    #[test]
-    fn a_file_with_the_removed_pr_chat_style_still_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"prChatStyle":"bottom-bar","prChatHistory":"fresh","prChatIdleExpiry":"one-hour"}"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.pr_chat_history, PrChatHistory::Fresh);
-        assert_eq!(loaded.pr_chat_idle_expiry, PrChatIdleExpiry::OneHour);
-        assert!(
-            !serde_json::to_string(&loaded)
-                .unwrap()
-                .contains("prChatStyle")
-        );
     }
 
     #[test]
@@ -2835,68 +2632,22 @@ mod tests {
     }
 
     #[test]
-    fn the_pr_chat_index_defaults_empty_and_survives_a_concurrent_merge() {
-        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(legacy.pr_chat_sessions.is_empty());
-        let session = |id: &str| PrChatSession {
-            chat_id: id.into(),
-            created_at: chrono::Utc::now(),
-            posted: Vec::new(),
-            dismissed: Vec::new(),
-            fresh: false,
-        };
-        let base = UiSettings::default();
-        let mut edited = base.clone();
-        edited.index_pr_chat("github.com/acme/zeron#7", session("one"));
-        edited.index_pr_chat("github.com/acme/zeron#7", session("one"));
-        edited.index_pr_chat("list", session("two"));
-        assert_eq!(edited.pr_chat_ids().collect::<Vec<_>>(), ["one", "two"]);
-        let mut current = base.clone();
-        current.sidebar_width = 333.0;
-        let merged = UiSettings::merge_changes(&base, &edited, current);
-        assert_eq!(merged.sidebar_width, 333.0);
-        assert!(merged.pr_chat_indexed("one") && merged.pr_chat_indexed("two"));
-        let mut pruned = merged.clone();
-        pruned.unindex_pr_chat("two");
-        assert!(!pruned.pr_chat_indexed("two"));
-        assert!(!pruned.pr_chat_sessions.contains_key("list"));
-
-        let posted = |index: usize| PrChatPosted {
-            card: PrChatCardRef {
-                entry_id: "m2".into(),
-                index,
-            },
-            label: "Posted comment".into(),
-            at: chrono::Utc::now(),
-        };
-        pruned.record_pr_chat_post("one", posted(0));
-        pruned.record_pr_chat_post("one", posted(0));
-        pruned.record_pr_chat_post("one", posted(1));
-        pruned.record_pr_chat_post("missing", posted(0));
-        let card = |index: usize| PrChatCardRef {
-            entry_id: "m2".into(),
-            index,
-        };
-        pruned.record_pr_chat_dismiss("one", card(1));
-        pruned.record_pr_chat_dismiss("one", card(1));
-        pruned.record_pr_chat_dismiss("missing", card(0));
-        let sessions = &pruned.pr_chat_sessions["github.com/acme/zeron#7"];
-        assert_eq!(sessions[0].posted.len(), 2);
-        assert_eq!(sessions[0].dismissed, [card(1)]);
-    }
-
-    #[test]
-    fn pr_chat_posted_keeps_its_flat_json_shape() {
-        let json = r#"{"entryId":"m2","index":3,"label":"Merged #7","at":"2026-09-21T09:00:00Z"}"#;
-        let posted: PrChatPosted = serde_json::from_str(json).unwrap();
+    fn pull_request_destination_defaults_to_the_native_view_and_round_trips() {
+        let existing: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
         assert_eq!(
-            posted.card,
-            PrChatCardRef {
-                entry_id: "m2".into(),
-                index: 3,
-            }
+            existing.pull_request_destination,
+            PullRequestDestination::Native
         );
-        assert_eq!(serde_json::to_string(&posted).unwrap(), json);
+        for destination in PullRequestDestination::ALL {
+            let settings = UiSettings {
+                pull_request_destination: destination,
+                ..existing.clone()
+            };
+            let loaded: UiSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(loaded.pull_request_destination, destination);
+            assert_eq!(loaded.sidebar_width, 300.0);
+        }
     }
 
     #[test]
@@ -2937,27 +2688,6 @@ mod tests {
             Some("claude-haiku-4-5")
         );
         assert_eq!(merged.git_agent_busy_policy, GitAgentBusyPolicy::AllowAll);
-        assert_eq!(merged.pr_chat_history, PrChatHistory::KeepPerPr);
-
-        let mut stale = base.clone();
-        stale.pr_chat_history = PrChatHistory::Fresh;
-        let merged = UiSettings::merge_changes(&base, &stale, merged);
-        assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
-        assert_eq!(merged.commit_message_instruction, "Conventional please.");
-
-        let mut expiry = base.clone();
-        expiry.pr_chat_idle_expiry = PrChatIdleExpiry::OneDay;
-        let merged = UiSettings::merge_changes(&base, &expiry, merged);
-        assert_eq!(merged.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
-        assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
-        let mut other = base.clone();
-        other.sidebar_width = 280.0;
-        let merged = UiSettings::merge_changes(&base, &other, merged);
-        assert_eq!(merged.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
-        assert_eq!(
-            serde_json::to_value(PrChatIdleExpiry::FiveMinutes).unwrap(),
-            "five-minutes"
-        );
     }
 
     #[test]
@@ -3721,6 +3451,7 @@ mod tests {
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
+            sidebar_show_project_filter: false,
             github_star_banner_dismissed: true,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
@@ -3757,10 +3488,6 @@ mod tests {
             right_pane_width: 700.0,
             split_ratio: 0.35,
             right_pane_open: true,
-            pull_requests_panel_width: Some(520.0),
-            pull_requests_list: Default::default(),
-            pull_requests_file_tree: true,
-            pull_requests_merge_method: Some(zeron_proto::ChangeRequestMergeMethod::Squash),
             terminal_height: 320.0,
             terminal_open: true,
             keymap: KeymapConfig {
@@ -3825,6 +3552,10 @@ mod tests {
                 path: "/Applications/Safari.app".into(),
             },
             transcript_compact_mode: true,
+            pull_request_destination: PullRequestDestination::External,
+            last_pull_request_repository: Some("acme/zeron".into()),
+            last_pull_request_device: Some("remote-device".into()),
+            pull_request_stars: vec!["https://github.com/acme/zeron/pull/123".into()],
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,
@@ -3877,28 +3608,6 @@ mod tests {
                 harness: zeron_proto::HarnessId::Codex,
                 model: "gpt-5.6-luna".into(),
             }),
-            pr_chat_history: PrChatHistory::Fresh,
-            pr_chat_idle_expiry: PrChatIdleExpiry::OneHour,
-            pr_chat_sessions: std::collections::BTreeMap::from([(
-                "github.com/acme/zeron#7".to_string(),
-                vec![PrChatSession {
-                    chat_id: "pr-chat-1".into(),
-                    created_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
-                    posted: vec![PrChatPosted {
-                        card: PrChatCardRef {
-                            entry_id: "m2".into(),
-                            index: 0,
-                        },
-                        label: "Posted comment".into(),
-                        at: chrono::DateTime::from_timestamp(1_790_000_100, 0).unwrap(),
-                    }],
-                    dismissed: vec![PrChatCardRef {
-                        entry_id: "m3".into(),
-                        index: 1,
-                    }],
-                    fresh: true,
-                }],
-            )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
             device_auto_float: false,
             device_float_frame: Some(crate::device_panel::float::DeviceFloatFrame {
@@ -3918,16 +3627,10 @@ mod tests {
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""commitMessageInstruction": "Use the imperative mood.""#));
         assert!(json.contains(r#""harness": "codex""#));
-        assert!(!json.contains("prChatStyle"));
-        assert!(json.contains(r#""prChatHistory": "fresh""#));
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
         assert!(json.contains(r#""deviceAutoFloat": false"#));
         assert!(json.contains(r#""deviceFloatFrame": {"#));
         assert!(json.contains(r#""servicesAllPorts": true"#));
-        assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
-        assert!(json.contains(r#""chatId": "pr-chat-1""#));
-        assert!(json.contains(r#""entryId": "m2""#));
-        assert!(json.contains(r#""dismissed": ["#));
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
@@ -4082,10 +3785,12 @@ mod tests {
         assert!(!settings.sidebar_compact);
         assert!(settings.sidebar_show_project_icon);
         assert!(settings.sidebar_show_project_label);
+        assert!(settings.sidebar_show_project_filter);
         let customized = UiSettings {
             sidebar_compact: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
+            sidebar_show_project_filter: false,
             sidebar_organization: SidebarOrganization::ByProject,
             ..settings
         };

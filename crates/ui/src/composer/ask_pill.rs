@@ -64,7 +64,6 @@ impl Composer {
             .sessions
             .iter()
             .filter(|session| session.status == SessionStatus::AwaitingInput)
-            .filter(|session| !state.is_hidden_chat(&session.chat_id))
             .map(|session| session.chat_id.clone())
             .collect();
         if awaiting == self.ask.awaiting {
@@ -803,51 +802,5 @@ mod tests {
             "the question landed"
         );
         assert!(cx.debug_bounds("ask-pill").is_none());
-    }
-
-    #[gpui::test]
-    fn a_pr_chats_question_shows_in_the_mini_composer_not_as_a_main_pill(cx: &mut TestAppContext) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let (composer, mut engine, cx) = mount(cx, "a");
-        engine.take(cx, methods::WATCH_DOC_MESSAGES);
-        let state = cx.update(|_, cx| composer.read(cx).state.clone());
-        state.update(cx, |state, cx| {
-            state.sessions.clear();
-            cx.notify();
-        });
-        cx.run_until_parked();
-        state.update(cx, |state, cx| {
-            state.set_hidden_chats(["b".to_string()].into(), cx);
-            state.sessions = vec![awaiting("b")];
-            cx.notify();
-        });
-        assert!(engine.take(cx, methods::WATCH_DOC_MESSAGES).is_empty());
-        land(cx, &composer, "b", "req-b");
-        assert!(cx.debug_bounds("ask-pill").is_none());
-        assert!(cx.update(|_, cx| composer.read(cx).ask.entries.is_empty()));
-
-        let mini_state = cx.new(|_| AppState::new());
-        mini_state.update(cx, |state, cx| {
-            state.chats = vec![chat("b")];
-            state.selected_chat = Some("b".into());
-            state.transcript = asking("req-b");
-            cx.notify();
-        });
-        let mini = cx.new(|cx| {
-            let mut composer = Composer::new(mini_state.clone(), cx);
-            composer.set_pr_chat("Ask or hand off work for this PR...", cx);
-            composer
-        });
-        mini_state.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        mini.read_with(cx, |mini, _| {
-            let wizard = mini
-                .wizard
-                .as_ref()
-                .expect("the question is answered in the panel");
-            assert_eq!(wizard.request_id, "req-b");
-            assert_eq!(wizard.questions[0].options, ["Fork", "Upstream"]);
-        });
     }
 }

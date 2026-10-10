@@ -66,7 +66,9 @@ use zeron_proto::{
     AgentProfileDraft, ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId,
     HarnessUpdatePolicy, ProjectActionDraft, Space, ToolCall, WorkspaceScope,
 };
-use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
+use zeron_rpc::{
+    LinkCache, RpcError, RpcReply, RpcService, capability_errors, methods, parse_params,
+};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::agent_profiles::AgentProfilesStore;
@@ -79,6 +81,7 @@ use crate::project_actions::ProjectActionsStore;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, session_home_dir};
 use crate::sessions::SessionsEngine;
+use crate::source_control::{ChangeRequestError, GitHubCli};
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
@@ -817,6 +820,7 @@ pub struct EngineRpc {
     agent_profiles: Option<AgentProfilesStore>,
     previews: Option<zeron_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
+    github: GitHubCli,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
     agent_accounts: AgentAccounts,
@@ -854,6 +858,7 @@ impl EngineRpc {
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
         };
+        let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
             voice: sessions.voice_manager(),
             sessions,
@@ -867,6 +872,7 @@ impl EngineRpc {
             agent_profiles: None,
             previews: None,
             change_requests,
+            github,
             diff_sync,
             uploads,
             agent_accounts,
@@ -964,6 +970,12 @@ impl EngineRpc {
         self.computer
             .as_ref()
             .ok_or_else(|| RpcError::Failed("computer use unavailable".into()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_github(mut self, github: GitHubCli) -> Self {
+        self.github = github;
+        self
     }
 
     fn auth(&self) -> Result<&Auth, RpcError> {
@@ -1074,24 +1086,6 @@ impl EngineRpc {
         self.file_search_root(p).await
     }
 
-    /// The local project a repository root belongs to. Paths are compared canonically:
-    /// git reports `/private/tmp/...` for a space saved as `/tmp/...`.
-    fn change_request_space_id(&self, root: &str) -> Option<String> {
-        let local_device = self.doc_host.device_id();
-        let spaces = self.workspace.watch_spaces().borrow().clone();
-        let canonical = |path: &str| {
-            std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
-        };
-        let root = canonical(root);
-        spaces
-            .iter()
-            .filter(|space| space.device_id == local_device && space.git_detected)
-            .map(|space| (space, canonical(&space.path)))
-            .filter(|(_, path)| path.starts_with(&root) || root.starts_with(path))
-            .max_by_key(|(_, path)| path.as_os_str().len())
-            .map(|(space, _)| space.id.clone())
-    }
-
     async fn source_control_checkout(
         &self,
         target: &zeron_proto::WorkspaceTarget,
@@ -1182,24 +1176,6 @@ impl EngineRpc {
             }
         }
         false
-    }
-
-    fn change_request_space_roots(&self) -> Vec<std::path::PathBuf> {
-        self.change_request_spaces()
-            .into_iter()
-            .map(|(_, path)| path)
-            .collect()
-    }
-
-    fn change_request_spaces(&self) -> Vec<(String, std::path::PathBuf)> {
-        let local_device = self.doc_host.device_id();
-        self.workspace
-            .watch_spaces()
-            .borrow()
-            .iter()
-            .filter(|space| space.device_id == local_device && space.git_detected)
-            .map(|space| (space.id.clone(), std::path::PathBuf::from(&space.path)))
-            .collect()
     }
 
     /// Accept only a checkout already named by a local chat or contained in a
@@ -1737,6 +1713,20 @@ fn should_invalidate_link(error: &RpcError) -> bool {
     matches!(error, RpcError::Closed | RpcError::Transport(_))
 }
 
+fn change_request_rpc_error(error: ChangeRequestError) -> RpcError {
+    let code = match error {
+        ChangeRequestError::CliUnavailable => capability_errors::PULL_REQUESTS_CLI_UNAVAILABLE,
+        ChangeRequestError::Authentication => capability_errors::PULL_REQUESTS_AUTHENTICATION,
+        ChangeRequestError::RateLimited => capability_errors::PULL_REQUESTS_RATE_LIMITED,
+        ChangeRequestError::Timeout => capability_errors::PULL_REQUESTS_TIMEOUT,
+        ChangeRequestError::Decode => capability_errors::PULL_REQUESTS_DECODE,
+        ChangeRequestError::RepositoryUnavailable
+        | ChangeRequestError::UnsupportedRepository
+        | ChangeRequestError::CommandFailed => capability_errors::PULL_REQUESTS_COMMAND_FAILED,
+    };
+    RpcError::Capability(code.into())
+}
+
 /// Reply deadline for a relay-forwarded unary call. The relay is WebSocket
 /// frames through a DO: a dropped frame (host socket replaced mid-call, DO
 /// restart) loses the reply SILENTLY — the DO's auto-pong keeps the client
@@ -1843,11 +1833,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
     use std::time::Duration;
     match method {
-        methods::CLONE_REPO
-        | methods::FETCH_ALL
-        | methods::APPLY_UPDATE
-        | methods::SYNC_BRANCH
-        | methods::CREATE_CHANGE_REQUEST => Duration::from_secs(15 * 60),
+        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE | methods::SYNC_BRANCH => {
+            Duration::from_secs(15 * 60)
+        }
         methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
@@ -1935,23 +1923,6 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
-/// Words for a refusal go through as plain text; a host failure stays a classified failure.
-fn action_failure(error: crate::source_control::ActionError) -> RpcError {
-    match error {
-        crate::source_control::ActionError::Refused(message) => RpcError::Failed(message),
-        crate::source_control::ActionError::Host(error) => change_request_failure(error),
-    }
-}
-
-const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
-const DETAIL_CACHE_TTL: Duration = Duration::from_secs(15);
-
-fn change_request_failure(error: crate::source_control::ChangeRequestError) -> RpcError {
-    RpcError::Failed(
-        serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error)).unwrap_or_default(),
-    )
-}
-
 fn forwardable(method: &str) -> bool {
     if voice_remote::handles(method) {
         return true;
@@ -2038,25 +2009,11 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
-            | methods::LIST_CHANGE_REQUESTS
+            | methods::LIST_CHANGE_REQUEST_PAGE
+            | methods::GET_CHANGE_REQUEST_REPOSITORY
             | methods::GET_CHANGE_REQUEST
-            | methods::LIST_CHANGE_REQUEST_STATS
             | methods::GET_CHANGE_REQUEST_DIFF
-            | methods::GET_CHANGE_REQUEST_ACTIVITY
             | methods::POST_CHANGE_REQUEST_COMMENT
-            | methods::SET_CHANGE_REQUEST_REACTION
-            | methods::GET_CHANGE_REQUEST_PERMISSIONS
-            | methods::RUN_CHANGE_REQUEST_ACTION
-            | methods::UPDATE_CHANGE_REQUEST
-            | methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES
-            | methods::SET_CHANGE_REQUEST_LABEL
-            | methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES
-            | methods::SET_CHANGE_REQUEST_REVIEWER
-            | methods::SUBMIT_CHANGE_REQUEST_REVIEW
-            | methods::REPLY_TO_CHANGE_REQUEST_THREAD
-            | methods::SET_CHANGE_REQUEST_THREAD_RESOLVED
-            | methods::PREPARE_CHANGE_REQUEST_CHAT
-            | methods::INVALIDATE_CHANGE_REQUESTS
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2065,7 +2022,6 @@ fn forwardable(method: &str) -> bool {
             | methods::RUN_WORKING_TREE_ACTION
             | methods::SYNC_BRANCH
             | methods::GENERATE_COMMIT_MESSAGE
-            | methods::CREATE_CHANGE_REQUEST
             // Terminals live on the chat's host device.
             | methods::OPEN_TERMINAL
             | methods::SUBSCRIBE_TERMINAL
@@ -3412,45 +3368,6 @@ impl RpcService for EngineRpc {
                     .filter_map(|status| async move { serde_json::to_value(status).ok() });
                 Ok(RpcReply::Stream(stream.boxed()))
             }
-            methods::LIST_CHANGE_REQUESTS => {
-                let key = format!("list:{params}");
-                if let Some(hit) = crate::source_control::cached_response(&key, LIST_CACHE_TTL) {
-                    return Ok(RpcReply::Value(hit));
-                }
-                let p: zeron_proto::ListChangeRequestsRequest = parse_params(params)?;
-                let spaces = self.change_request_spaces();
-                let roots: Vec<_> = spaces.iter().map(|(_, path)| path.clone()).collect();
-                let mut listing = crate::source_control::ChangeRequestResolver::new()
-                    .list_change_requests(&roots, &p)
-                    .await;
-                for project in &mut listing.projects {
-                    if let Some((space_id, _)) = spaces
-                        .iter()
-                        .find(|(_, path)| path.to_string_lossy() == project.path.as_str())
-                    {
-                        project.space_id = space_id.clone();
-                    }
-                }
-                let value =
-                    serde_json::to_value(&listing).map_err(|e| RpcError::Failed(e.to_string()))?;
-                if listing.errors.is_empty() {
-                    crate::source_control::remember_response(key, &value);
-                }
-                Ok(RpcReply::Value(value))
-            }
-            methods::INVALIDATE_CHANGE_REQUESTS => {
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::LIST_CHANGE_REQUEST_STATS => {
-                let p: zeron_proto::ListChangeRequestStatsRequest = parse_params(params)?;
-                let stats = crate::source_control::ChangeRequestResolver::new()
-                    .list_change_request_stats(&self.change_request_space_roots(), &p)
-                    .await;
-                Ok(RpcReply::Value(
-                    serde_json::to_value(stats).map_err(|e| RpcError::Failed(e.to_string()))?,
-                ))
-            }
             methods::GET_GIT_ACTIVITY => {
                 let p: zeron_proto::GitActivityRequest = parse_params(params)?;
                 let spaces = self.workspace.watch_spaces().borrow().clone();
@@ -3481,173 +3398,110 @@ impl RpcService for EngineRpc {
             methods::GET_SYSTEM_STATS => {
                 RpcReply::value(&crate::home_widgets::system_stats().await)
             }
-            methods::GET_CHANGE_REQUEST => {
-                let key = format!("detail:{params}");
-                if let Some(hit) = crate::source_control::cached_response(&key, DETAIL_CACHE_TTL) {
-                    return Ok(RpcReply::Value(hit));
+            methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                #[derive(Deserialize)]
+                struct P {
+                    cwd: String,
+                    #[serde(default)]
+                    repository: Option<String>,
                 }
-                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
-                let detail = crate::source_control::ChangeRequestResolver::new()
-                    .get_change_request(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(|error| {
-                        RpcError::Failed(
-                            serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error))
-                                .unwrap_or_default(),
-                        )
-                    })?;
-                let value =
-                    serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?;
-                crate::source_control::remember_response(key, &value);
-                Ok(RpcReply::Value(value))
+                let p: P = parse_params(params)?;
+                // Only a chat or project checkout on this device: a caller
+                // never probes arbitrary directories for their remotes.
+                let cwd = self.change_request_root(&p.cwd).await?;
+                let cwd = cwd.as_path();
+                let resolver = crate::source_control::ChangeRequestResolver::new();
+                let repository = match p.repository {
+                    Some(repository) => {
+                        resolver
+                            .matching_repository_for_checkout(cwd, &repository, &self.github)
+                            .await
+                    }
+                    None => resolver.repository_for_checkout(cwd).await,
+                };
+                RpcReply::value(&repository)
             }
-            methods::PREPARE_CHANGE_REQUEST_CHAT => {
-                let p: zeron_proto::PrepareChangeRequestChatRequest = parse_params(params)?;
-                let mut chat = crate::source_control::ChangeRequestResolver::new()
-                    .prepare_change_request_chat(
-                        &self.change_request_space_roots(),
-                        &crate::repos::default_worktrees_root(),
-                        &p,
+            methods::LIST_CHANGE_REQUEST_PAGE => {
+                #[derive(Deserialize)]
+                struct P {
+                    repository: String,
+                    #[serde(default)]
+                    filter: zeron_proto::ChangeRequestFilter,
+                    #[serde(default)]
+                    after: Option<String>,
+                    #[serde(default)]
+                    refresh: bool,
+                    /// Serve the first page's on-disk copy when there is one.
+                    #[serde(default)]
+                    cached: bool,
+                }
+                let p: P = parse_params(params)?;
+                if !crate::source_control::valid_pr_repository(&p.repository) {
+                    return Err(RpcError::BadParams("repository must be owner/repo".into()));
+                }
+                if p.after
+                    .as_deref()
+                    .is_some_and(|cursor| !crate::source_control::valid_page_cursor(cursor))
+                {
+                    return Err(RpcError::BadParams("invalid page cursor".into()));
+                }
+                let page = self
+                    .github
+                    .list_page(
+                        &p.repository,
+                        p.filter,
+                        p.after.as_deref(),
+                        p.refresh,
+                        p.cached,
                     )
                     .await
-                    .map_err(action_failure)?;
-                chat.space_id = self.change_request_space_id(&chat.root);
-                RpcReply::value(&chat)
-            }
-            methods::SUBMIT_CHANGE_REQUEST_REVIEW => {
-                let p: zeron_proto::SubmitChangeRequestReviewRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .submit_change_request_review(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::REPLY_TO_CHANGE_REQUEST_THREAD => {
-                let p: zeron_proto::ReplyToChangeRequestThreadRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .reply_to_change_request_thread(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::SET_CHANGE_REQUEST_THREAD_RESOLVED => {
-                let p: zeron_proto::SetChangeRequestThreadResolvedRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .set_change_request_thread_resolved(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::GET_CHANGE_REQUEST_PERMISSIONS => {
-                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
-                let permissions = crate::source_control::ChangeRequestResolver::new()
-                    .get_change_request_permissions(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(change_request_failure)?;
-                RpcReply::value(&permissions)
-            }
-            methods::RUN_CHANGE_REQUEST_ACTION => {
-                let p: zeron_proto::RunChangeRequestActionRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .run_change_request_action(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::UPDATE_CHANGE_REQUEST => {
-                let p: zeron_proto::UpdateChangeRequestRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .update_change_request(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES => {
-                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
-                let candidates = crate::source_control::ChangeRequestResolver::new()
-                    .list_change_request_label_candidates(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(change_request_failure)?;
-                RpcReply::value(&candidates)
-            }
-            methods::SET_CHANGE_REQUEST_LABEL => {
-                let p: zeron_proto::SetChangeRequestLabelRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .set_change_request_label(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES => {
-                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
-                let candidates = crate::source_control::ChangeRequestResolver::new()
-                    .list_change_request_reviewer_candidates(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(change_request_failure)?;
-                RpcReply::value(&candidates)
-            }
-            methods::SET_CHANGE_REQUEST_REVIEWER => {
-                let p: zeron_proto::SetChangeRequestReviewerRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .set_change_request_reviewer(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(action_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::GET_CHANGE_REQUEST_ACTIVITY => {
-                let key = format!("activity:{params}");
-                if let Some(hit) = crate::source_control::cached_response(&key, DETAIL_CACHE_TTL) {
-                    return Ok(RpcReply::Value(hit));
-                }
-                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
-                let activity = crate::source_control::ChangeRequestResolver::new()
-                    .get_change_request_activity(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(change_request_failure)?;
-                let value =
-                    serde_json::to_value(activity).map_err(|e| RpcError::Failed(e.to_string()))?;
-                crate::source_control::remember_response(key, &value);
-                Ok(RpcReply::Value(value))
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&page)
             }
             methods::POST_CHANGE_REQUEST_COMMENT => {
-                let p: zeron_proto::PostChangeRequestCommentRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .post_change_request_comment(&self.change_request_space_roots(), &p)
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    body: String,
+                }
+                let p: P = parse_params(params)?;
+                if p.body.trim().is_empty() || p.body.len() > 60_000 {
+                    return Err(RpcError::BadParams(
+                        "Comment must contain 1–60000 bytes".into(),
+                    ));
+                }
+                let comment = self
+                    .github
+                    .post_comment(&p.url, &p.body)
                     .await
-                    .map_err(change_request_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&comment)
             }
-            methods::SET_CHANGE_REQUEST_REACTION => {
-                let p: zeron_proto::SetChangeRequestReactionRequest = parse_params(params)?;
-                crate::source_control::ChangeRequestResolver::new()
-                    .set_change_request_reaction(&self.change_request_space_roots(), &p)
+            methods::GET_CHANGE_REQUEST | methods::GET_CHANGE_REQUEST_DIFF => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    url: String,
+                    #[serde(default)]
+                    refresh: bool,
+                    #[serde(default)]
+                    head_ref_oid: Option<String>,
+                    #[serde(default)]
+                    base_ref_oid: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let value = self
+                    .github
+                    .detail_request(
+                        &p.url,
+                        method == methods::GET_CHANGE_REQUEST_DIFF,
+                        p.refresh,
+                        p.head_ref_oid.as_deref(),
+                        p.base_ref_oid.as_deref(),
+                    )
                     .await
-                    .map_err(change_request_failure)?;
-                crate::source_control::invalidate_responses();
-                RpcReply::value(&serde_json::json!({}))
-            }
-            methods::GET_CHANGE_REQUEST_DIFF => {
-                let p: zeron_proto::GetChangeRequestDiffRequest = parse_params(params)?;
-                let slice = crate::source_control::ChangeRequestResolver::new()
-                    .get_change_request_diff(&self.change_request_space_roots(), &p)
-                    .await
-                    .map_err(|error| {
-                        RpcError::Failed(
-                            serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error))
-                                .unwrap_or_default(),
-                        )
-                    })?;
-                Ok(RpcReply::Value(
-                    serde_json::to_value(slice).map_err(|e| RpcError::Failed(e.to_string()))?,
-                ))
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&value)
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the
@@ -4272,19 +4126,6 @@ impl RpcService for EngineRpc {
                         behind: after.behind,
                         commits,
                     })
-                })
-                .await
-            }
-            methods::CREATE_CHANGE_REQUEST => {
-                Box::pin(async move {
-                    let request: zeron_proto::CreateChangeRequestRequest = parse_params(params)?;
-                    let workspace = self.source_control_checkout(&request.target).await?;
-                    let created = crate::source_control::ChangeRequestResolver::new()
-                        .create_change_request(&workspace.root, &request)
-                        .await
-                        .map_err(action_failure)?;
-                    crate::source_control::invalidate_responses();
-                    RpcReply::value(&created)
                 })
                 .await
             }
@@ -5836,30 +5677,6 @@ mod tests {
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
-        assert!(forwardable(methods::LIST_CHANGE_REQUESTS));
-        assert!(!is_stream_method(methods::LIST_CHANGE_REQUESTS));
-        assert!(forwardable(methods::GET_CHANGE_REQUEST));
-        assert!(forwardable(methods::LIST_CHANGE_REQUEST_STATS));
-        assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
-        assert!(forwardable(methods::GET_CHANGE_REQUEST_ACTIVITY));
-        assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
-        assert!(forwardable(methods::SET_CHANGE_REQUEST_REACTION));
-        for method in [
-            methods::GET_CHANGE_REQUEST_PERMISSIONS,
-            methods::RUN_CHANGE_REQUEST_ACTION,
-            methods::UPDATE_CHANGE_REQUEST,
-            methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES,
-            methods::SET_CHANGE_REQUEST_LABEL,
-            methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES,
-            methods::SET_CHANGE_REQUEST_REVIEWER,
-            methods::SUBMIT_CHANGE_REQUEST_REVIEW,
-            methods::REPLY_TO_CHANGE_REQUEST_THREAD,
-            methods::SET_CHANGE_REQUEST_THREAD_RESOLVED,
-            methods::PREPARE_CHANGE_REQUEST_CHAT,
-            methods::INVALIDATE_CHANGE_REQUESTS,
-        ] {
-            assert!(forwardable(method), "{method}");
-        }
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         for method in [
             methods::GET_WORKING_TREE,
@@ -5867,7 +5684,6 @@ mod tests {
             methods::RUN_WORKING_TREE_ACTION,
             methods::SYNC_BRANCH,
             methods::GENERATE_COMMIT_MESSAGE,
-            methods::CREATE_CHANGE_REQUEST,
         ] {
             assert!(forwardable(method), "{method}");
             assert!(!is_stream_method(method), "{method}");
@@ -5891,34 +5707,15 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
-    }
-
-    #[tokio::test]
-    async fn invalidate_change_requests_reply_survives_the_wire() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble(
-            dir.path(),
-            std::sync::Arc::new(HarnessRegistry::new()),
-            HarnessId::Mock,
-            None,
-        )
-        .unwrap();
-        let reply = core
-            .rpc_service()
-            .handle(methods::INVALIDATE_CHANGE_REQUESTS, serde_json::json!({}))
-            .await
-            .unwrap();
-        let RpcReply::Value(value) = reply else {
-            panic!("unary reply expected");
-        };
-        let frame = zeron_rpc::ServerFrame {
-            id: 1,
-            ok: Some(value),
-            ..Default::default()
-        };
-        let received: zeron_rpc::ServerFrame =
-            serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
-        assert!(received.ok.is_some(), "a null `ok` reads back as no reply");
+        assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
+        assert!(!is_stream_method(methods::LIST_CHANGE_REQUEST_PAGE));
+        assert!(forwardable(methods::GET_CHANGE_REQUEST_REPOSITORY));
+        assert!(forwardable(methods::GET_CHANGE_REQUEST));
+        assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
+        assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
+        assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
+        assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
+        assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
     }
 
     #[tokio::test]
@@ -7367,63 +7164,6 @@ mod tests {
         core.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn create_change_request_refuses_before_gh_when_the_request_cannot_be_right() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let repo = root.join("repo");
-        let data = root.join("data");
-        for path in [&repo, &data] {
-            std::fs::create_dir(path).unwrap();
-        }
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["init", "-q", "-b", "feature/x"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let core = crate::EngineCore::assemble(
-            &data,
-            std::sync::Arc::new(HarnessRegistry::new()),
-            HarnessId::Mock,
-            None,
-        )
-        .unwrap();
-        let rpc = core.rpc_service();
-        rpc.handle(
-            methods::MUTATE,
-            serde_json::json!({
-                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
-                "path": repo, "gitDetected": true,
-            }),
-        )
-        .await
-        .unwrap();
-        let request = |title: &str| {
-            serde_json::json!({
-                "spaceId": "space-repo", "host": "github.com", "repository": "acme/zeron",
-                "head": "feature/x", "title": title, "body": "", "draft": true,
-            })
-        };
-        let mut chat = request("T");
-        chat.as_object_mut().unwrap().remove("spaceId");
-        chat["chatId"] = "chat-1".into();
-        for (params, expected) in [
-            (request("  "), "title"),
-            (chat, "spaceId"),
-            (request("No GitHub remote here"), "unsupportedRepository"),
-        ] {
-            let error = rpc
-                .handle(methods::CREATE_CHANGE_REQUEST, params.clone())
-                .await
-                .err()
-                .unwrap_or_else(|| panic!("{params} must be refused"));
-            assert!(error.to_string().contains(expected), "{params}: {error}");
-        }
-        core.shutdown().await;
-    }
-
     /// Every forwardable unary method gets a bounded reply deadline —
     /// interactive calls fail fast, network-bound git/update calls get the
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
@@ -7473,7 +7213,6 @@ mod tests {
             methods::CLONE_REPO,
             methods::FETCH_ALL,
             methods::SYNC_BRANCH,
-            methods::CREATE_CHANGE_REQUEST,
         ] {
             assert_eq!(forward_deadline(method), Duration::from_secs(15 * 60));
         }
@@ -7499,6 +7238,45 @@ mod tests {
             forward_deadline(methods::QUEUE_COMMAND),
             Duration::from_secs(30)
         );
+        assert_eq!(
+            forward_deadline(methods::LIST_CHANGE_REQUEST_PAGE),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn pull_request_errors_are_stable_and_sanitized() {
+        for (error, expected) in [
+            (
+                ChangeRequestError::CliUnavailable,
+                capability_errors::PULL_REQUESTS_CLI_UNAVAILABLE,
+            ),
+            (
+                ChangeRequestError::Authentication,
+                capability_errors::PULL_REQUESTS_AUTHENTICATION,
+            ),
+            (
+                ChangeRequestError::RateLimited,
+                capability_errors::PULL_REQUESTS_RATE_LIMITED,
+            ),
+            (
+                ChangeRequestError::Timeout,
+                capability_errors::PULL_REQUESTS_TIMEOUT,
+            ),
+            (
+                ChangeRequestError::Decode,
+                capability_errors::PULL_REQUESTS_DECODE,
+            ),
+            (
+                ChangeRequestError::CommandFailed,
+                capability_errors::PULL_REQUESTS_COMMAND_FAILED,
+            ),
+        ] {
+            assert!(matches!(
+                change_request_rpc_error(error),
+                RpcError::Capability(code) if code == expected
+            ));
+        }
     }
 
     #[test]

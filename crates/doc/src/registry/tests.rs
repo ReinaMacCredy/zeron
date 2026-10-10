@@ -1393,6 +1393,68 @@ fn section_change(doc: &mut RegistryDoc, change: zeron_proto::SidebarSectionChan
 }
 
 #[test]
+fn sidebar_sections_keep_placed_order_across_devices() {
+    use zeron_proto::SidebarSectionChange::*;
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    for id in ["one", "two", "three", "legacy"] {
+        a.upsert_chat(&chat(id, "desktop")).unwrap();
+    }
+    section_change(
+        &mut a,
+        Create {
+            id: "focus".into(),
+            name: "Focus".into(),
+        },
+    );
+    let place = |doc: &mut RegistryDoc, id: &str, after: Option<&str>, before: Option<&str>| {
+        section_change(
+            doc,
+            Assign {
+                session_id: id.into(),
+                section_id: Some("focus".into()),
+                after: after.map(Into::into),
+                before: before.map(Into::into),
+            },
+        )
+    };
+    let order = |doc: &RegistryDoc| {
+        doc.sidebar_preferences().unwrap().sections[0]
+            .session_ids
+            .clone()
+    };
+    // Anchorless assigns append, so membership no longer sorts by id.
+    place(&mut a, "two", None, None);
+    place(&mut a, "one", None, None);
+    assert_eq!(order(&a), ["two", "one"]);
+    // An engine that predates ordering writes a keyless member: it follows
+    // the placed ones until the next placement keys it in place.
+    a.write_sidebar_location("legacy", "focus");
+    assert_eq!(order(&a), ["two", "one", "legacy"]);
+    place(&mut a, "three", Some("two"), Some("one"));
+    assert_eq!(order(&a), ["two", "three", "one", "legacy"]);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(order(&b), ["two", "three", "one", "legacy"]);
+    // A reorder on the other device converges back.
+    place(&mut b, "legacy", None, Some("two"));
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    assert_eq!(order(&a), ["legacy", "two", "three", "one"]);
+    assert_eq!(order(&a), order(&b));
+    // A keyless move into another section never inherits the old key.
+    section_change(
+        &mut a,
+        Create {
+            id: "later".into(),
+            name: "Later".into(),
+        },
+    );
+    a.write_sidebar_location("one", "later");
+    assert_eq!(order(&a), ["legacy", "two", "three"]);
+}
+
+#[test]
 fn sidebar_sections_sync_metadata_membership_and_delete_without_deleting_sessions() {
     use zeron_proto::SidebarSectionChange::*;
     let mut a = RegistryDoc::new("a");
@@ -1412,6 +1474,8 @@ fn sidebar_sections_sync_metadata_membership_and_delete_without_deleting_session
         Assign {
             session_id: "session".into(),
             section_id: Some("focus".into()),
+            after: None,
+            before: None,
         },
     );
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
@@ -1475,6 +1539,8 @@ fn sidebar_sections_concurrent_pin_and_section_moves_converge() {
             Assign {
                 session_id: "session".into(),
                 section_id: Some("focus".into()),
+                after: None,
+                before: None,
             },
         );
         section_change(
@@ -1482,6 +1548,8 @@ fn sidebar_sections_concurrent_pin_and_section_moves_converge() {
             Assign {
                 session_id: "session".into(),
                 section_id: Some("later".into()),
+                after: None,
+                before: None,
             },
         );
         if reverse {
@@ -1510,6 +1578,8 @@ fn sidebar_sections_concurrent_pin_and_section_moves_converge() {
             Assign {
                 session_id: "session".into(),
                 section_id: Some("focus".into()),
+                after: None,
+                before: None,
             },
         );
         if reverse {
@@ -1557,6 +1627,8 @@ fn sidebar_sections_migration_is_replay_safe_and_preserves_newer_remote_intent()
         Assign {
             session_id: "session".into(),
             section_id: None,
+            after: None,
+            before: None,
         },
     );
     section_change(
@@ -1598,6 +1670,8 @@ fn sidebar_sections_honor_pin_toggles_from_older_clients() {
         Assign {
             session_id: "session".into(),
             section_id: Some("focus".into()),
+            after: None,
+            before: None,
         },
     );
     assert!(
@@ -1630,6 +1704,8 @@ fn sidebar_sections_honor_pin_toggles_from_older_clients() {
         Assign {
             session_id: "session".into(),
             section_id: Some("focus".into()),
+            after: None,
+            before: None,
         },
     );
     assert_eq!(

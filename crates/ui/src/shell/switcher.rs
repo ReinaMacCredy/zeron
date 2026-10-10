@@ -290,7 +290,7 @@ impl Shell {
             self.close_settings(cx);
         }
         if matches!(self.route, Route::PullRequests) {
-            self.close_pull_requests(cx);
+            self.set_route(Route::Chat, cx);
         }
         if !matches!(self.route, Route::Chat | Route::Terminal) {
             return;

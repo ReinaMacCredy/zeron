@@ -325,18 +325,6 @@ pub fn comment_strip_height(count: usize) -> f32 {
     STRIP_PAD_TOP + crate::badges::BADGE_HEIGHT
 }
 
-pub const PR_CHIP_HEIGHT: f32 = 22.0;
-pub const PR_CHIP_PAD_TOP: f32 = 10.0;
-
-pub fn pr_chip_strip_height(count: usize) -> f32 {
-    if count == 0 {
-        return 0.0;
-    }
-    PR_CHIP_PAD_TOP + PR_CHIP_HEIGHT
-}
-
-type PrChipRemove = Rc<dyn Fn(crate::pull_requests::ContextChip, &mut App)>;
-
 /// Compact↔expanded flip morph (round 9): the flip used to snap between the
 /// two pill layouts. The original has no height transition (its shell carries
 /// only `transition-colors`), so this is a native nicety: ONE committed flip
@@ -1498,6 +1486,17 @@ impl TextProjection {
                 }),
         );
         links.extend(
+            zeron_proto::chat_mentions::chat_mention_links(raw)
+                .into_iter()
+                .map(|link| FileMentionLink {
+                    range: link.range,
+                    basename: link.title,
+                    path: link.chat_id,
+                    kind: ChipKind::Chat,
+                    attachment: None,
+                }),
+        );
+        links.extend(
             zeron_proto::attachment_mentions::attachment_mentions(raw)
                 .into_iter()
                 .map(|mention| FileMentionLink {
@@ -1680,7 +1679,8 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
                         .iter()
                         .filter(|other| other.path != link.path)
                         .collect();
-                    if duplicates.is_empty() {
+                    // A chat's "path" is its id: always show its title.
+                    if duplicates.is_empty() || link.kind == ChipKind::Chat {
                         return link.basename.clone();
                     }
                     let parts: Vec<_> = link.path.split('/').collect();
@@ -1735,6 +1735,7 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
+        || raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1776,7 +1777,7 @@ enum EditKind {
 }
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
-const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
+pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2403,6 +2404,14 @@ impl ComposerInput {
     }
 
     /// Keep compact fields on one row and reveal the caret horizontally.
+    /// Bound a standalone multiline composer while preserving caret scrolling.
+    pub(crate) fn with_viewport_height(mut self, height: f32) -> Self {
+        let height = height.max(self.configured_line_height);
+        self.viewport_height = Some(height);
+        self.settled_viewport_height = Some(height);
+        self
+    }
+
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
@@ -2420,6 +2429,12 @@ impl ComposerInput {
             self.settled_viewport_height = Some(height);
             cx.notify();
         }
+    }
+
+    /// Join the window's Tab order, for a field the keyboard must reach.
+    pub(crate) fn with_tab_stop(mut self) -> Self {
+        self.focus_handle = self.focus_handle.tab_stop(true);
+        self
     }
 
     fn set_key_context(&mut self, key_context: &'static str, cx: &mut Context<Self>) {
@@ -5806,9 +5821,9 @@ pub enum ComposerEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MentionToken {
-    range: Range<usize>,
-    query: String,
+pub(crate) struct MentionToken {
+    pub(crate) range: Range<usize>,
+    pub(crate) query: String,
 }
 
 /// Refine a locally identified token using Markdown source ranges. This is
@@ -5928,7 +5943,7 @@ fn completion_markdown_end(
 
 /// The `@` must begin a token. This intentionally excludes `name@example.com`
 /// and ordinary words while allowing punctuation such as `(@src`.
-fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
+pub(crate) fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
         return None;
     }
@@ -6564,7 +6579,9 @@ fn mention_error_message(err: &RpcError) -> SharedString {
             "The session's device runs an older zeron — update it to search its files".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
+        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
+            "File search failed".into()
+        }
     }
 }
 
@@ -6722,7 +6739,7 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => {
+        RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
             if skill {
                 "Couldn't load this agent's skills".into()
             } else {
@@ -6949,10 +6966,6 @@ pub struct Composer {
     account_usage: Entity<crate::account_usage::AccountUsage>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
-    pr_chat: bool,
-    pr_context: Option<String>,
-    pr_chips: Vec<(crate::pull_requests::ContextChip, SharedString)>,
-    pr_chip_remove: Option<PrChipRemove>,
     idle_placeholder: SharedString,
     _picker_focus: Subscription,
     _input_events: Subscription,
@@ -7430,10 +7443,6 @@ impl Composer {
             _pickers_observe: pickers_observe,
             account_usage,
             side_chat: false,
-            pr_chat: false,
-            pr_context: None,
-            pr_chips: Vec::new(),
-            pr_chip_remove: None,
             idle_placeholder: "Do anything…".into(),
             _picker_focus: picker_focus,
             _input_events: input_events,
@@ -7811,34 +7820,6 @@ impl Composer {
     pub(crate) fn set_side_chat(&mut self, cx: &mut Context<Self>) {
         self.side_chat = true;
         cx.notify();
-    }
-
-    pub(crate) fn set_pr_chat(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
-        self.side_chat = true;
-        self.pr_chat = true;
-        self.idle_placeholder = placeholder.into();
-        if self.wizard.is_none() {
-            self.input
-                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn set_pr_context(&mut self, block: Option<String>) {
-        self.pr_context = block;
-    }
-
-    pub(crate) fn set_pr_chips(
-        &mut self,
-        chips: Vec<(crate::pull_requests::ContextChip, SharedString)>,
-        on_remove: PrChipRemove,
-        cx: &mut Context<Self>,
-    ) {
-        self.pr_chip_remove = Some(on_remove);
-        if self.pr_chips != chips {
-            self.pr_chips = chips;
-            cx.notify();
-        }
     }
 
     /// Whether the draft holds anything a close would lose: text, staged
@@ -8286,65 +8267,6 @@ impl Composer {
 
     fn staged_chip_count(&self, cx: &App) -> usize {
         self.staged_comments(cx).len() + self.staged_quotes(cx).len()
-    }
-
-    fn render_pr_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        if self.pr_chips.is_empty() {
-            return None;
-        }
-        let chips = self.pr_chips.iter().map(|(chip, label)| {
-            let chip = *chip;
-            let group: SharedString = format!("pr-chat-chip-group-{chip:?}").into();
-            div()
-                .group(group.clone())
-                .debug_selector(move || format!("pr-chat-chip-label-{chip:?}"))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(PR_CHIP_HEIGHT))
-                .pl(px(7.0))
-                .pr(px(4.0))
-                .rounded(px(6.0))
-                .bg(theme.ink(0.06))
-                .text_size(px(11.0))
-                .text_color(match chip {
-                    crate::pull_requests::ContextChip::PullRequest => theme.success,
-                    _ => theme.text.opacity(0.8),
-                })
-                .child(label.clone())
-                .child(
-                    div()
-                        .id(("pr-chat-chip-remove", chip as usize))
-                        .debug_selector(move || format!("pr-chat-chip-{chip:?}"))
-                        .role(gpui::Role::Button)
-                        .aria_label("Remove context")
-                        .cursor_pointer()
-                        .text_color(theme.text_muted)
-                        .opacity(0.0)
-                        .group_hover(group, |s| s.opacity(1.0))
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(remove) = this.pr_chip_remove.clone() {
-                                cx.defer(move |cx| remove(chip, cx));
-                            }
-                        }))
-                        .child("\u{00d7}"),
-                )
-        });
-        Some(
-            div()
-                .flex_none()
-                .h(px(pr_chip_strip_height(self.pr_chips.len())))
-                .overflow_hidden()
-                .flex()
-                .flex_row()
-                .gap(px(5.0))
-                .px(px(12.0))
-                .pt(px(PR_CHIP_PAD_TOP))
-                .children(chips),
-        )
     }
 
     fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
@@ -11245,12 +11167,6 @@ impl Composer {
             resolved.model_options = config.model_options;
             resolved.permission_mode = config.permission_mode;
         }
-        if self.pr_chat && resolved.harness.is_none() {
-            self.failure = Some("Pick an agent before sending.".into());
-            self.failure_key = self.bound_chat_id(cx);
-            cx.notify();
-            return;
-        }
         let existing_cwd = self.bound_chat_row(cx).and_then(|c| c.cwd.clone());
         // The PROJECT fixes the new chat's device + base folder — sessions are
         // minted onto the project's device, not necessarily this one. With no
@@ -11350,10 +11266,6 @@ impl Composer {
         let text = zeron_proto::attachment_mentions::demote_unattached_mentions(&text, &attached);
         let text = crate::quotes::with_quotes(&text, &quotes);
         let text = crate::comments::with_comments(&text, &comments);
-        let text = match &self.pr_context {
-            Some(block) if create_side_chat.is_some() => format!("{text}{block}"),
-            _ => text,
-        };
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -13065,21 +12977,9 @@ impl Composer {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
-                div()
-                    .id("composer-send")
-                    .debug_selector(|| "composer-send".into())
-                    .size(px(28.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(blocked, |el| el.opacity(0.35))
+                send_circle("composer-send", blocked, theme)
                     .when(!blocked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+                        el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(
                         if mode == SendButtonMode::Queue {
@@ -13088,15 +12988,39 @@ impl Composer {
                             "Send message"
                         },
                     ))
-                    .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(theme.bg),
-                    )
                     .into_any_element()
             }
         }
     }
+}
+
+/// The composer's send control: a size-7 filled circle with an up arrow,
+/// dimmed and inert while `blocked`. Other message composers reuse it so
+/// sending looks the same everywhere.
+pub(crate) fn send_circle(
+    id: &'static str,
+    blocked: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size(px(28.0))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.text)
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(blocked, |el| el.opacity(0.35))
+        .when(!blocked, |el| {
+            el.cursor_pointer().hover(|s| s.opacity(0.85))
+        })
+        .child(
+            crate::icons::icon(crate::icons::ARROW_UP)
+                .size(px(14.0))
+                .text_color(theme.bg),
+        )
 }
 
 /// The completion popups' floating rails run through
@@ -13662,8 +13586,7 @@ impl Render for Composer {
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
-        let comment_strip_h = comment_strip_height(self.staged_chip_count(cx))
-            + pr_chip_strip_height(self.pr_chips.len());
+        let comment_strip_h = comment_strip_height(self.staged_chip_count(cx));
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
         } else if expanded {
@@ -13921,7 +13844,6 @@ impl Render for Composer {
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_staged_chips(&theme, cx);
-        let pr_chips = self.render_pr_chips(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
         // Compensate for the transcript canvas beneath the frosted surface.
@@ -14028,7 +13950,6 @@ impl Render for Composer {
                 .relative()
                 .flex()
                 .flex_col()
-                .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
                 .children(strip)
@@ -14105,7 +14026,6 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .justify_end()
-                .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
                 .children(strip)
@@ -14209,11 +14129,6 @@ impl Render for Composer {
             .relative()
             .id("composer-surface")
             .debug_selector(|| "composer-surface".to_string())
-            .on_drop::<crate::shell::SidebarSessionDrag>(cx.listener(
-                |this, payload: &crate::shell::SidebarSessionDrag, window, cx| {
-                    this.add_thread_mention(&payload.chat_id, window, cx);
-                },
-            ))
             .on_drop::<crate::shell::TabDragPayload>(cx.listener(
                 |this, payload: &crate::shell::TabDragPayload, window, cx| {
                     this.add_thread_mention(&payload.chat_id, window, cx);
@@ -14308,7 +14223,7 @@ impl Render for Composer {
             // The pickers carry the composer's chat binding, so a bound
             // composer's footer reads and writes ITS chat (split partner,
             // sidechat), never the selection's.
-            let full_footer = !self.side_chat || self.pr_chat;
+            let full_footer = !self.side_chat;
             let footer = (session_chrome_opacity > 0.0 && full_footer).then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
@@ -18979,6 +18894,26 @@ mod tests {
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that
     /// merely *talk about* the scheme without containing a valid mention.
+    #[test]
+    fn chat_mentions_show_as_chat_chips_with_their_title() {
+        let link =
+            zeron_proto::chat_mentions::chat_mention_link("0fd51606", "Brief Hello").unwrap();
+        let raw = format!("compare {link} and {link}");
+        let (display, spans) = sent_mention_display(&raw).expect("chat chips");
+        assert_eq!(spans.len(), 2);
+        for span in &spans {
+            assert_eq!(span.kind, ChipKind::Chat);
+            assert_eq!(span.path.as_ref(), "0fd51606");
+            assert!(display[span.range.clone()].contains("Brief\u{00A0}Hello"));
+        }
+        // Two chats with one title keep their titles, never their ids.
+        let other =
+            zeron_proto::chat_mentions::chat_mention_link("a2c4", "Brief Hello").unwrap();
+        let (display, spans) = sent_mention_display(&format!("{link} {other}")).unwrap();
+        assert!(spans.iter().all(|span| display[span.range.clone()].contains("Brief")));
+        assert!(!display.contains("a2c4"));
+    }
+
     #[test]
     fn sent_mention_display_leaves_plain_prompts_untouched() {
         assert_eq!(sent_mention_display("fix the composer"), None);

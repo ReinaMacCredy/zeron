@@ -31,6 +31,8 @@ pub enum ChipKind {
     File,
     Directory,
     Thread,
+    /// Another chat, dropped from the sidebar.
+    Chat,
 }
 
 impl ChipKind {
@@ -178,6 +180,7 @@ pub(crate) fn chip_icon(
         ChipKind::Skill => ChipIcon::Glyph(crate::icons::MAGIC_STICK_3),
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
         ChipKind::Thread => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
+        ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),

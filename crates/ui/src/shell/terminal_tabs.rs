@@ -348,6 +348,7 @@ impl Shell {
         let fade_key = "window-control-titlebar-new-session";
         let mut plus = div()
             .id("titlebar-new-session")
+            .debug_selector(|| "titlebar-new-session".into())
             .size(px(24.0))
             .flex_none()
             .flex()
@@ -446,6 +447,7 @@ impl Shell {
             theme,
             None,
             "Terminals".into(),
+            None,
             None,
             div().into_any_element(),
         )

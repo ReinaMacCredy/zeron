@@ -2501,7 +2501,7 @@ impl AppearancePage {
                 let active = family == effective;
                 let focused = family == selected;
                 let label = SharedString::from(family.label().to_owned());
-                widgets::select_row(theme, active, focused, format!("{slug}-font-option-{ix}"))
+                popover::picker_row(theme, active, focused, format!("{slug}-font-option-{ix}"))
                     .id(SharedString::from(format!("{slug}-font-option-{ix}")))
                     .role(gpui::Role::MenuItemRadio)
                     .aria_label(label.clone())
@@ -2519,7 +2519,6 @@ impl AppearancePage {
                     })
                     .when(!available, |row| row.opacity(0.45))
                     .child(div().flex_1().min_w_0().truncate().child(label))
-                    .child(widgets::select_check(theme, active))
                     .into_any_element()
             })
             .collect();
@@ -4051,6 +4050,7 @@ impl EventEmitter<AppearanceSettingsEvent> for AppearancePage {}
 
 impl Render for AppearancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::toast::take_error(&mut self.background_error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let availability = typography::availability(cx);
         let fixed = theme.font_sans_fixed.clone();
@@ -4460,17 +4460,6 @@ impl Render for AppearancePage {
         if background_available {
             settings_rows.extend(self.render_chat_background_rows(&theme, &ui_settings, cx));
             settings_rows.extend(self.render_terminal_background_rows(&theme, &ui_settings, cx));
-        }
-        if let Some(error) = self.background_error.clone() {
-            settings_rows.push(
-                div()
-                    .mx(px(16.0))
-                    .py(px(10.0))
-                    .border_t_1()
-                    .border_color(widgets::row_divider(&theme))
-                    .child(widgets::error_strip(&theme, error).mt_0())
-                    .into_any_element(),
-            );
         }
         let current_reduce_motion = crate::motion::preference(cx);
         let reduce_motion_control = widgets::select(
