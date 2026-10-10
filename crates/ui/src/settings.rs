@@ -30,6 +30,7 @@ pub mod harnesses;
 pub mod home;
 pub mod notifications;
 pub mod permission_guide;
+pub mod predictions;
 pub mod shortcuts;
 pub mod source_control;
 pub mod thread_naming;

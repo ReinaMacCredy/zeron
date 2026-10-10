@@ -540,6 +540,24 @@ struct AttachmentRow {
     image: Option<std::sync::Arc<gpui::Image>>,
 }
 
+fn prediction_display(
+    prediction: Option<&str>,
+    text: &str,
+    idle: SharedString,
+) -> (SharedString, Option<SharedString>) {
+    match prediction {
+        Some(prediction) if text.is_empty() => (prediction.to_string().into(), None),
+        Some(prediction) => (
+            idle,
+            prediction
+                .strip_prefix(text)
+                .filter(|rest| !rest.is_empty())
+                .map(|rest| rest.to_string().into()),
+        ),
+        None => (idle, None),
+    }
+}
+
 /// What the composer holds that a send could carry. A staged image or diff
 /// comment counts: both synthesize their own prompt body, so either alone is
 /// a legal send — and during a live run has to read as Queue, not Stop.
@@ -7563,6 +7581,59 @@ impl Composer {
         state.chats.iter().find(|chat| chat.id == id)
     }
 
+    fn active_prediction(&self, cx: &App) -> Option<SharedString> {
+        if self.side_chat
+            || self.chat_override.is_some()
+            || self.wizard.is_some()
+            || self.editing_queued.is_some()
+            || self.mention.token.is_some()
+            || self.slash.token.is_some()
+        {
+            return None;
+        }
+        let chat_id = self.bound_chat_id(cx)?;
+        self.state
+            .read(cx)
+            .composer_prediction(&chat_id)
+            .map(|prediction| prediction.text.clone().into())
+    }
+
+    fn sync_prediction(&mut self, cx: &mut Context<Self>) {
+        if self.wizard.is_some() {
+            self.input.update(cx, |input, cx| input.set_ghost(None, cx));
+            return;
+        }
+        let prediction = self.active_prediction(cx);
+        let idle = self.idle_placeholder.clone();
+        self.input.update(cx, |input, cx| {
+            let (placeholder, ghost) =
+                prediction_display(prediction.as_deref(), input.text(), idle);
+            if input.placeholder != placeholder {
+                input.set_placeholder(placeholder, cx);
+            }
+            input.set_ghost(ghost, cx);
+        });
+    }
+
+    fn accept_prediction(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(prediction) = self.active_prediction(cx) else {
+            return false;
+        };
+        let input = self.input.read(cx);
+        if input.marked_range.is_some()
+            || !input.selected_range.is_empty()
+            || input.cursor_offset() != input.text().len()
+            || !prediction.starts_with(input.text())
+            || prediction.len() == input.text().len()
+        {
+            return false;
+        }
+        self.input
+            .update(cx, |input, cx| input.set_text(prediction.to_string(), cx));
+        self.on_input_edited(cx);
+        true
+    }
+
     /// Capture-knob passthrough (`ZERON_OPEN_DIALOG=model`): open the
     /// combined harness/model menu.
     pub fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -10967,6 +11038,10 @@ impl Composer {
         steer: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Some(chat_id) = self.bound_chat_id(cx) {
+            self.state
+                .update(cx, |state, _| state.consume_composer_prediction(&chat_id));
+        }
         match zeron_engine::computer::activation::parse_computer_invocation(&text) {
             Some(prompt) if prompt.is_empty() => {
                 self.failure = Some("Add a request after /computer-use.".into());
@@ -13090,6 +13165,7 @@ impl Render for Composer {
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
+        self.sync_prediction(cx);
         let theme = Theme::of(cx).clone();
         if self
             .bound_chat_row(cx)
@@ -13526,6 +13602,11 @@ impl Render for Composer {
                 ))
             },
         );
+        let container = container.on_action(cx.listener(|this, _: &MentionTab, _, cx| {
+            if !this.accept_prediction(cx) {
+                cx.propagate();
+            }
+        }));
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
         // to the mention/slash popups, which outrank this while they're open.
@@ -14367,6 +14448,96 @@ mod tests {
                 composer
                     .input
                     .update(cx, |input, cx| test(input, window, cx));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn prediction_display_follows_the_draft() {
+        let idle = SharedString::from("Do anything…");
+        let fix = Some("Fix the spacing.");
+        assert_eq!(
+            prediction_display(fix, "", idle.clone()),
+            ("Fix the spacing.".into(), None)
+        );
+        assert_eq!(
+            prediction_display(fix, "Fix", idle.clone()),
+            (idle.clone(), Some(" the spacing.".into()))
+        );
+        assert_eq!(
+            prediction_display(fix, "Fix the spacing.", idle.clone()),
+            (idle.clone(), None)
+        );
+        assert_eq!(
+            prediction_display(fix, "Ship", idle.clone()),
+            (idle.clone(), None)
+        );
+        assert_eq!(prediction_display(None, "", idle.clone()), (idle, None));
+    }
+
+    #[gpui::test]
+    fn tab_takes_the_prediction_into_the_draft_and_sending_retires_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, handle) = composer_focus_window(cx);
+        cx.update(|cx| init(cx, ComposerSendBehavior::default()));
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.selected_chat = Some("chat-a".into());
+                    state.set_composer_prediction(
+                        "chat-a",
+                        crate::state::ComposerPrediction {
+                            entry_id: "a1".into(),
+                            text: "Fix the spacing.".into(),
+                        },
+                    );
+                });
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.placeholder(cx), "Fix the spacing.");
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Fix", cx));
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .read_with(cx, |composer, cx| {
+                assert_eq!(composer.placeholder(cx), "Do anything…");
+                assert_eq!(
+                    composer
+                        .input
+                        .read(cx)
+                        .ghost
+                        .as_ref()
+                        .map(|g| g.to_string()),
+                    Some(" the spacing.".to_string())
+                );
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "tab");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input_text(cx), "Fix the spacing.");
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                composer.state.update(cx, |state, _| {
+                    state.consume_composer_prediction("chat-a");
+                });
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .read_with(cx, |composer, cx| {
+                assert_eq!(composer.placeholder(cx), "Do anything…");
             })
             .unwrap();
     }

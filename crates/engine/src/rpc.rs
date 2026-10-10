@@ -1964,6 +1964,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_PREDICTION_SETTINGS
+            | methods::SET_PREDICTION_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
             | methods::GET_TOOL_SETTINGS
@@ -1978,6 +1980,7 @@ fn forwardable(method: &str) -> bool {
             | methods::STOP_BACKGROUND_TASK
             | methods::WATCH_BACKGROUND_OUTPUT
             | methods::WATCH_TOKEN_RATE
+            | methods::WATCH_COMPOSER_PREDICTION
             | methods::FORK_CHAT
             | methods::REWIND_CHAT
             | methods::QUEUE_COMMAND
@@ -2110,6 +2113,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_QUEUE
             | methods::WATCH_BACKGROUND_OUTPUT
             | methods::WATCH_TOKEN_RATE
+            | methods::WATCH_COMPOSER_PREDICTION
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -2422,6 +2426,20 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
             }
+            methods::GET_PREDICTION_SETTINGS => {
+                RpcReply::value(&self.registry.prediction_settings())
+            }
+            methods::SET_PREDICTION_SETTINGS => {
+                let p: crate::registry::PredictionSettings = parse_params(params)?;
+                self.registry
+                    .set_prediction_settings(p)
+                    .map_err(RpcError::Failed)?;
+                let settings = self.registry.prediction_settings();
+                if !settings.enabled {
+                    self.sessions.clear_predictions();
+                }
+                RpcReply::value(&settings)
+            }
             methods::GET_DELEGATION_SETTINGS => {
                 RpcReply::value(&self.registry.delegation_settings())
             }
@@ -2587,6 +2605,15 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(
                     watch_stream(rx)
                         .map(|rate| serde_json::json!({ "rate": rate }))
+                        .boxed(),
+                ))
+            }
+            methods::WATCH_COMPOSER_PREDICTION => {
+                let p: ChatParams = parse_params(params)?;
+                let rx = self.sessions.watch_prediction(&p.chat_id);
+                Ok(RpcReply::Stream(
+                    watch_stream(rx)
+                        .map(|prediction| serde_json::json!({ "prediction": prediction }))
                         .boxed(),
                 ))
             }

@@ -36,6 +36,7 @@ pub mod instance_lock;
 pub mod local_import;
 mod model_catalogs;
 mod model_prices;
+pub mod predictions;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;

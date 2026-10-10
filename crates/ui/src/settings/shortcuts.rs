@@ -101,6 +101,7 @@ pub struct ShortcutsPage {
     permissions: appshots_page::PermissionsUi,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    predictions: Entity<crate::settings::predictions::PredictionsCard>,
     delegation: Entity<crate::settings::delegation::DelegationCard>,
     _state: Entity<AppState>,
 }
@@ -152,6 +153,10 @@ impl ShortcutsPage {
             thread_naming: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
+            },
+            predictions: {
+                let state = state.clone();
+                cx.new(|cx| crate::settings::predictions::PredictionsCard::new(state, cx))
             },
             delegation: {
                 let state = state.clone();
@@ -1368,6 +1373,7 @@ impl Render for ShortcutsPage {
                                             .child(cycle_tabs_row),
                                     )
                                     .child(self.thread_naming.clone())
+                                    .child(self.predictions.clone())
                                     .child(self.delegation.clone()),
                             ),
                     )

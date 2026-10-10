@@ -95,6 +95,7 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    predictions: PredictionSettings,
     delegation: DelegationSettings,
     tools: zeron_proto::tools::ToolSettings,
     system_prompt: String,
@@ -129,6 +130,14 @@ pub struct TitleSettings {
     /// None follows the session harness, using a supported installed fallback.
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PredictionSettings {
+    pub enabled: bool,
+    pub harness: Option<HarnessId>,
     pub model: Option<String>,
 }
 
@@ -499,6 +508,24 @@ impl HarnessRegistry {
         }
         settings.model = settings.model.filter(|model| !model.trim().is_empty());
         self.prefs().titles = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    pub fn prediction_settings(&self) -> PredictionSettings {
+        self.prefs().predictions.clone()
+    }
+
+    pub fn set_prediction_settings(&self, mut settings: PredictionSettings) -> Result<(), String> {
+        if let Some(id) = settings.harness {
+            if !zeron_harness::supports_titles(id) || !self.enabled_set().contains(&id) {
+                return Err("Choose an enabled harness that supports predictions".into());
+            }
+        } else if settings.model.is_some() {
+            return Err("Choose a prediction harness before choosing a model".into());
+        }
+        settings.model = settings.model.filter(|model| !model.trim().is_empty());
+        self.prefs().predictions = settings;
         self.persist_prefs();
         Ok(())
     }
@@ -1425,7 +1452,8 @@ mod tests {
 
         // The rewritten file is the new shape, and the legacy key is gone.
         let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
-        assert!(!text.contains("enabled"), "{text}");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(json.get("enabled").is_none(), "{text}");
         assert!(text.contains("codex") && text.contains("grok"), "{text}");
         // An agent registered after the migration is new, not a past "no".
         test_slot(&registry, HarnessId::Cursor, true);
