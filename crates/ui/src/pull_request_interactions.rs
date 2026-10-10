@@ -240,12 +240,7 @@ impl PullRequestDetailPage {
         let can_send = !sending
             && self.detail.is_some()
             && !self.comment_input.read(cx).text().trim().is_empty();
-        let mut stack = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(self.activity_switch(theme, cx));
+        let mut stack = div().relative().flex().flex_col().gap(px(8.0));
         if let Some(submission) = &self.submission {
             let excerpt: String = submission
                 .read(cx)

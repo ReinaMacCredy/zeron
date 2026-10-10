@@ -253,6 +253,23 @@ fn main() -> anyhow::Result<()> {
                     detail.update(cx, |d, cx| d.fixture_select_tab(2, cx));
                     pause(cx, 800).await;
                     shot(cx, "13c-activity-600-light")?;
+                    let open_chat = |cx: &mut AsyncApp| {
+                        window.update(cx, |_, w, cx| {
+                            w.dispatch_action(Box::new(pull_request_detail::OpenPrChat), cx)
+                        })
+                    };
+                    open_chat(cx)?;
+                    pause(cx, 800).await;
+                    shot(cx, "14-activity-ai-600-light")?;
+                    detail.update(cx, |d, cx| d.fixture_select_tab(0, cx));
+                    open_chat(cx)?;
+                    pause(cx, 800).await;
+                    shot(cx, "14b-summary-ai-600-light")?;
+                    window.update(cx, |_, w, _| w.resize(size(px(1320.), px(848.))))?;
+                    detail.update(cx, |d, cx| d.fixture_select_tab(2, cx));
+                    open_chat(cx)?;
+                    pause(cx, 800).await;
+                    shot(cx, "15-activity-ai-light")?;
                     Ok(())
                 }
                 .await;

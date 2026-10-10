@@ -33,6 +33,7 @@ mod composer_markdown;
 mod context_usage;
 pub mod device_panel;
 mod dictation;
+mod dock_orb;
 pub mod draft_store;
 pub mod edge_fade;
 pub mod rounded_clip;

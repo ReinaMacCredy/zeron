@@ -423,19 +423,22 @@ fn clip_patch(patch: &str) -> String {
 
 pub(crate) struct ChatDock {
     pub sheet: Option<AnyElement>,
-    pub bar: AnyElement,
+    pub bar: Option<AnyElement>,
+    pub orb: Orb,
+    pub focus: Option<gpui::FocusHandle>,
+    pub idle: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ActivityBar {
-    #[default]
-    Comment,
-    Ai,
+pub(crate) struct Orb {
+    pub working: bool,
+    pub unread: usize,
+    pub draft: bool,
 }
 
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
-pub struct FocusPrChat;
+pub struct OpenPrChat;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ChatRevision {
@@ -477,95 +480,111 @@ impl PullRequestDetailPage {
         self.chat_dock = dock;
     }
 
-    pub(crate) fn chat_bar_shown(&self) -> bool {
-        self.tab != Tab::Activity || self.cache.borrow().activity_bar == ActivityBar::Ai
+    pub(crate) fn chat_expanded(&self) -> bool {
+        self.chat_expanded
     }
 
-    pub(crate) fn show_chat_bar(&mut self, cx: &mut Context<Self>) {
-        if !self.chat_bar_shown() {
-            self.cache.borrow_mut().activity_bar = ActivityBar::Ai;
+    pub(crate) fn set_chat_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if self.chat_expanded != expanded {
+            self.chat_expanded = expanded;
             cx.notify();
         }
     }
 
-    fn set_activity_bar(&mut self, bar: ActivityBar, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cache.borrow().activity_bar == bar {
-            return;
-        }
-        self.cache.borrow_mut().activity_bar = bar;
-        match bar {
-            ActivityBar::Ai => window.dispatch_action(Box::new(FocusPrChat), cx),
-            ActivityBar::Comment => window.focus(&self.comment_input.read(cx).focus_handle(cx), cx),
-        }
-        cx.notify();
+    pub(super) fn chat_docked(&self) -> bool {
+        self.chat_dock
+            .as_ref()
+            .is_some_and(|dock| dock.bar.is_some())
     }
 
-    pub(super) fn activity_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.cache.borrow().activity_bar;
-        let segment = |bar: ActivityBar, id: &'static str, label: &'static str| {
-            let selected = current == bar;
-            crate::surface_chrome::tab(id, selected, theme)
-                .debug_selector(move || id.into())
-                .role(gpui::Role::Tab)
-                .aria_label(label)
-                .aria_selected(selected)
-                .tab_index(0)
-                .text_size(crate::typography::ui_rems(12.0))
-                .line_height(crate::typography::ui_rems(16.0))
-                .px(px(10.0))
-                .child(label)
-                .on_click(
-                    cx.listener(move |page, _, window, cx| page.set_activity_bar(bar, window, cx)),
+    pub(crate) fn parked_focus(&self, window: &Window) -> bool {
+        self.content_focus.is_focused(window)
+            || self.tree_focus.is_focused(window)
+            || self.files_focus.is_focused(window)
+            || self.tab_focus.iter().any(|focus| focus.is_focused(window))
+    }
+
+    pub(super) fn park_hidden_chat_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let hidden = !self.chat_docked()
+            && self
+                .chat_dock
+                .as_ref()
+                .and_then(|dock| dock.focus.as_ref())
+                .is_some_and(|focus| focus.contains_focused(window, cx));
+        if hidden {
+            window.focus(&self.content_focus, cx);
+        }
+    }
+
+    pub(super) fn chat_orb(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let orb = self
+            .chat_dock
+            .as_ref()
+            .map(|dock| dock.orb)
+            .unwrap_or_default();
+        let label = match orb.unread {
+            0 => "Ask AI about this pull request".to_owned(),
+            1 => "Ask AI about this pull request, 1 new reply".to_owned(),
+            n => format!("Ask AI about this pull request, {n} new replies"),
+        };
+        crate::dock_orb::DockOrb {
+            id: "pr-chat-orb",
+            glyph: crate::icons::SPARK,
+            tint: crate::icons::claude_brand(),
+            label: label.into(),
+            tooltip: "Ask AI  /",
+            marks: crate::dock_orb::Marks {
+                working: orb.working,
+                count: orb.unread,
+                dot: orb.draft,
+            },
+        }
+        .render(
+            theme,
+            |_, window, cx| window.dispatch_action(Box::new(OpenPrChat), cx),
+            cx,
+        )
+    }
+
+    pub(super) fn chat_dock(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dock = self.chat_dock.take()?;
+        let bar = dock.bar?;
+        let idle = dock.idle;
+        Some(
+            div()
+                .id("pr-chat-dock")
+                .debug_selector(|| "pr-chat-dock".into())
+                .flex_none()
+                .w_full()
+                .pt(px(8.0))
+                .pb(px(if self.tab == Tab::Activity {
+                    8.0
+                } else {
+                    NAV_CLEARANCE
+                }))
+                .child(
+                    widgets::page_column().pt_0().pb_0().child(
+                        div()
+                            .relative()
+                            .on_mouse_down_out(cx.listener(move |page, _, _, cx| {
+                                if idle {
+                                    page.set_chat_expanded(false, cx);
+                                }
+                            }))
+                            .children(dock.sheet.map(|sheet| {
+                                div()
+                                    .absolute()
+                                    .bottom_full()
+                                    .left_0()
+                                    .right_0()
+                                    .pb(px(8.0))
+                                    .child(sheet)
+                            }))
+                            .child(crate::dock_orb::rise("pr-chat-rise", bar)),
+                    ),
                 )
-        };
-        div()
-            .id("pr-bar-switch")
-            .debug_selector(|| "pr-bar-switch".into())
-            .role(gpui::Role::TabList)
-            .aria_label("Send to")
-            .flex_none()
-            .flex()
-            .gap(px(4.0))
-            .child(segment(ActivityBar::Comment, "pr-bar-comment", "Comment"))
-            .child(segment(ActivityBar::Ai, "pr-bar-ai", "AI"))
-            .into_any_element()
-    }
-
-    pub(super) fn chat_dock(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let switch = (self.tab == Tab::Activity).then(|| self.activity_switch(theme, cx));
-        let dock = self.chat_dock.take();
-        let (sheet, bar) = match dock {
-            Some(dock) => (dock.sheet, Some(dock.bar)),
-            None => (None, None),
-        };
-        div()
-            .id("pr-chat-dock")
-            .debug_selector(|| "pr-chat-dock".into())
-            .flex_none()
-            .w_full()
-            .pt(px(8.0))
-            .pb(px(NAV_CLEARANCE))
-            .child(
-                widgets::page_column().pt_0().pb_0().child(
-                    div()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .children(sheet.map(|sheet| {
-                            div()
-                                .absolute()
-                                .bottom_full()
-                                .left_0()
-                                .right_0()
-                                .pb(px(8.0))
-                                .child(sheet)
-                        }))
-                        .children(switch)
-                        .children(bar),
-                ),
-            )
-            .into_any_element()
+                .into_any_element(),
+        )
     }
 }
 

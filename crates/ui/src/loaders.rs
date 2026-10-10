@@ -410,37 +410,53 @@ fn progress_arc(
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let center = bounds.center();
-            let radius = diameter / 2.0 - RING_STROKE;
-            let mut paint_arc = |sweep: f32, color: gpui::Hsla| {
-                if sweep <= 0.0 {
-                    return;
-                }
-                let steps = ((RING_SEGMENTS * sweep).ceil() as usize).max(2);
-                let at = |i: usize| {
-                    // Clockwise from 12 o'clock.
-                    let theta = -std::f32::consts::FRAC_PI_2
-                        + std::f32::consts::TAU * sweep * (i as f32 / steps as f32);
-                    point(
-                        center.x + px(radius * theta.cos()),
-                        center.y + px(radius * theta.sin()),
-                    )
-                };
-                let mut builder = PathBuilder::stroke(px(RING_STROKE));
-                builder.move_to(at(0));
-                for i in 1..=steps {
-                    builder.line_to(at(i));
-                }
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, color);
-                }
-            };
-            paint_arc(1.0, track);
-            paint_arc(frac, arc);
+            paint_arc(bounds, diameter, 0.0, 1.0, track, window);
+            paint_arc(bounds, diameter, 0.0, frac, arc, window);
         },
     )
     .absolute()
     .inset_0()
+}
+
+pub fn turning_arc(diameter: f32, start: f32, sweep: f32, color: gpui::Hsla) -> gpui::Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| paint_arc(bounds, diameter, start, sweep, color, window),
+    )
+    .absolute()
+    .inset_0()
+}
+
+fn paint_arc(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    diameter: f32,
+    start: f32,
+    sweep: f32,
+    color: gpui::Hsla,
+    window: &mut Window,
+) {
+    if sweep <= 0.0 {
+        return;
+    }
+    let center = bounds.center();
+    let radius = diameter / 2.0 - RING_STROKE;
+    let steps = ((RING_SEGMENTS * sweep).ceil() as usize).max(2);
+    let at = |i: usize| {
+        let theta = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * (start + sweep * (i as f32 / steps as f32));
+        point(
+            center.x + px(radius * theta.cos()),
+            center.y + px(radius * theta.sin()),
+        )
+    };
+    let mut builder = PathBuilder::stroke(px(RING_STROKE));
+    builder.move_to(at(0));
+    for i in 1..=steps {
+        builder.line_to(at(i));
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// Full-window boot splash: the app's dot loader (the same [`gradient_spinner`]

@@ -12098,18 +12098,15 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if self.open_pr_chat_on_slash(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.type_into_composer(event, window, cx) {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key == "escape"
-            && matches!(self.route, Route::PullRequests)
-            && self
-                .pull_request_detail
-                .as_ref()
-                .is_some_and(|page| page.read(cx).chat_bar_shown())
-            && self.pr_chat_sheet_open(cx)
-        {
+        if event.keystroke.key == "escape" && self.pr_chat_expanded(cx) {
             self.fold_pr_chat(cx);
             cx.stop_propagation();
             return;
@@ -15795,8 +15792,8 @@ impl Render for Shell {
                 },
             ))
             .on_action(
-                cx.listener(|this, _: &crate::pull_request_detail::FocusPrChat, _, cx| {
-                    this.focus_pr_chat(cx)
+                cx.listener(|this, _: &crate::pull_request_detail::OpenPrChat, _, cx| {
+                    this.reveal_pr_chat(cx)
                 }),
             )
             .on_action(cx.listener(

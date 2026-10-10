@@ -25,8 +25,9 @@ use zeron_proto::change_request_assessment::{CiState, Facts, check_failed, check
 use zeron_proto::{ChangeRequestDetail, ChangeRequestListItem};
 use zeron_rpc::methods;
 
+pub use chat::OpenPrChat;
 pub(crate) use chat::{
-    ChatDock, ChatRevision, ContextChip, FocusPrChat, PrChatContext, extract_badge, find_checkout,
+    ChatDock, ChatRevision, ContextChip, Orb, PrChatContext, extract_badge, find_checkout,
 };
 
 #[derive(Clone, PartialEq, Action)]
@@ -291,7 +292,6 @@ pub(crate) struct PullRequestCache {
     controls:
         std::collections::HashMap<(Option<String>, String), zeron_proto::ChangeRequestControls>,
     merge_method: Option<zeron_proto::ChangeRequestMergeMethod>,
-    activity_bar: chat::ActivityBar,
 }
 
 struct CommentSubmission {
@@ -436,6 +436,7 @@ pub struct PullRequestDetailPage {
     image_failed: Option<String>,
     actions: actions::ActionsState,
     chat_dock: Option<ChatDock>,
+    chat_expanded: bool,
 }
 
 impl PullRequestDetailPage {
@@ -520,6 +521,7 @@ impl PullRequestDetailPage {
             image_failed: None,
             actions: Default::default(),
             chat_dock: None,
+            chat_expanded: false,
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -1058,11 +1060,14 @@ impl PullRequestDetailPage {
             .px(px(16.0))
             .flex()
             .justify_center()
-            .child(div().max_w_full().child(crate::frost::frosted(
+            .items_center()
+            .gap(px(8.0))
+            .child(div().min_w_0().max_w_full().child(crate::frost::frosted(
                 radius,
                 crate::frost::MENU_BLUR,
                 tabs,
             )))
+            .child(self.chat_orb(theme, cx))
             .into_any_element()
     }
 
@@ -1082,6 +1087,7 @@ impl PullRequestDetailPage {
         );
         crate::markdown::render::clear_selection_surface(&self.selection_prefix);
         self.tab = tab;
+        self.chat_expanded = false;
         self.scroll.scroll.set_offset(gpui::Point::default());
         if tab == Tab::Code && self.diff.is_none() && self.diff_task.is_none() {
             self.load_diff(false, cx);
@@ -1503,7 +1509,9 @@ impl Render for PullRequestDetailPage {
         if let Some(focus) = self.return_focus.take() {
             window.focus(&focus, cx);
         }
+        self.park_hidden_chat_focus(window, cx);
         let theme = Theme::of(cx).clone();
+        let docked = self.chat_docked();
         let empty_activity = self.tab == Tab::Activity
             && self
                 .detail
@@ -1520,8 +1528,12 @@ impl Render for PullRequestDetailPage {
                 })
                 .pt(px(24.0))
                 .pb(px(match self.tab {
+                    // The comment dock sits below the scroll, not over it.
+                    Tab::Activity => 32.0,
+                    // The workspace reserves its own room for the navigation.
                     Tab::Code => 0.0,
-                    Tab::Summary | Tab::Activity => 32.0,
+                    Tab::Summary if docked => 32.0,
+                    Tab::Summary => 76.0,
                 }))
                 .text_size(crate::typography::ui_rems(13.0))
                 .text_color(theme.text);
@@ -2240,11 +2252,8 @@ impl Render for PullRequestDetailPage {
         if self.tab_slide.animating_at(Instant::now()) {
             window.request_animation_frame();
         }
-        let composer = if self.chat_bar_shown() {
-            self.chat_dock(&theme, cx)
-        } else {
-            self.comment_composer(&theme, cx)
-        };
+        let chat = self.chat_dock(cx);
+        let comment = (self.tab == Tab::Activity).then(|| self.comment_composer(&theme, cx));
         let mut root = div()
             .size_full()
             .relative()
@@ -2266,7 +2275,8 @@ impl Render for PullRequestDetailPage {
                     .flex_1()
                     .min_h_0()
                     .child(content)
-                    .child(composer)
+                    .children(chat)
+                    .children(comment)
                     .child(navigation),
             );
         if let Some(preview) = &self.image_preview {
@@ -3065,10 +3075,9 @@ mod tests {
                 assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
                 let files = cx.debug_bounds("pr-file-list").unwrap();
                 assert!(files.top() >= search.bottom() && files.size.height > px(40.0));
-                let dock = cx.debug_bounds("pr-chat-dock").unwrap();
                 assert!(
-                    files.bottom() <= dock.top() && viewport.bottom() <= dock.top(),
-                    "the tree and the diff end above the bar and the navigation"
+                    files.bottom() > viewport.bottom(),
+                    "the tree runs to the window edge while the diff clears the navigation"
                 );
                 assert!(cx.debug_bounds("pr-files").is_none());
             } else {
@@ -3558,16 +3567,6 @@ mod tests {
         cx.update(|window, _| window.set_rem_size(px(16.0)));
         cx.run_until_parked();
         let platform = cx.debug_bounds("pr-verification-Windows").unwrap();
-        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
-        let hidden = platform.bottom() - content.bottom() + px(16.0);
-        if hidden > px(0.0) {
-            page.update(cx, |page, cx| {
-                page.scroll.scroll.set_offset(gpui::point(px(0.0), -hidden));
-                cx.notify();
-            });
-            cx.run_until_parked();
-        }
-        let platform = cx.debug_bounds("pr-verification-Windows").unwrap();
         cx.simulate_mouse_down(
             platform.center(),
             gpui::MouseButton::Left,
@@ -3691,7 +3690,12 @@ mod tests {
             let other = cx.debug_bounds("pr-message-1").unwrap();
             assert_eq!(composer.left(), column.left() + px(40.0));
             assert_eq!(composer.right(), column.right() - px(40.0));
-            assert_eq!(nav.center().x, composer.center().x);
+            let orb = cx.debug_bounds("pr-chat-orb").unwrap();
+            assert_eq!(
+                (nav.left() + orb.right()) / 2.0,
+                composer.center().x,
+                "the dock and the orb are centred as a pair"
+            );
             assert_eq!(
                 nav.top() - composer.bottom(),
                 px(16.0),

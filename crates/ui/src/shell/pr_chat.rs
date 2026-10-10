@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use super::*;
-use crate::pull_request_detail::{ChatDock, ChatRevision, ContextChip, PrChatContext};
+use crate::pull_request_detail::{ChatDock, ChatRevision, ContextChip, Orb, PrChatContext};
 use crate::settings::{PrChatHistory, PrChatSession};
 
 pub(super) const PR_CHAT_SHEET_CAP: f32 = 0.6;
@@ -24,7 +24,6 @@ pub(super) struct PrChatPanel {
     resumed: bool,
     location: Option<Option<zeron_proto::Space>>,
     error: Option<SharedString>,
-    folded: bool,
     pinned: bool,
     shown: bool,
     motion: Option<(Instant, bool)>,
@@ -32,6 +31,7 @@ pub(super) struct PrChatPanel {
     earlier: Option<SharedString>,
     previous: Option<PreviousChat>,
     sessions_menu: bool,
+    seen_replies: Option<usize>,
     _location: Option<Task<()>>,
     _saved: Option<Subscription>,
     _sent: Option<Subscription>,
@@ -50,7 +50,6 @@ impl PrChatPanel {
             resumed: false,
             location: None,
             error: None,
-            folded: false,
             pinned: false,
             shown: false,
             motion: None,
@@ -58,6 +57,7 @@ impl PrChatPanel {
             earlier: None,
             previous: None,
             sessions_menu: false,
+            seen_replies: None,
             _location: None,
             _saved: None,
             _sent: None,
@@ -118,17 +118,49 @@ fn live_sessions(
 
 impl Shell {
     pub(super) fn toggle_pr_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = self.pull_request_detail.clone() else {
-            return;
-        };
-        if !page.read(cx).chat_bar_shown() {
-            page.update(cx, |page, cx| page.show_chat_bar(cx));
-            self.reveal_pr_chat(cx);
-        } else if self.pr_chat_sheet_open(cx) {
+        if self.pr_chat_expanded(cx) {
             self.fold_pr_chat(cx);
         } else {
             self.reveal_pr_chat(cx);
         }
+    }
+
+    pub(super) fn pr_chat_expanded(&self, cx: &App) -> bool {
+        matches!(self.route, Route::PullRequests)
+            && self
+                .pull_request_detail
+                .as_ref()
+                .is_some_and(|page| page.read(cx).chat_expanded())
+    }
+
+    pub(super) fn open_pr_chat_on_slash(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key_char.as_deref() != Some("/")
+            || modifiers.platform
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.function
+            || !matches!(self.route, Route::PullRequests)
+        {
+            return false;
+        }
+        let Some(page) = self.pull_request_detail.as_ref() else {
+            return false;
+        };
+        let parked = window.focused(cx).is_none()
+            || self.unfocused.is_focused(window)
+            || self.shortcut_focus.is_focused(window)
+            || self.navigation_focus.main.is_focused(window)
+            || page.read(cx).parked_focus(window);
+        if parked {
+            self.reveal_pr_chat(cx);
+        }
+        parked
     }
 
     pub(super) fn reveal_pr_chat(&mut self, cx: &mut Context<Self>) {
@@ -143,8 +175,10 @@ impl Shell {
             .is_empty()
         });
         if let Some(panel) = self.pr_chat.as_mut() {
-            panel.folded = false;
             panel.pinned = kept;
+        }
+        if let Some(page) = self.pull_request_detail.clone() {
+            page.update(cx, |page, cx| page.set_chat_expanded(true, cx));
         }
         self.focus_pr_chat(cx);
         cx.notify();
@@ -171,8 +205,7 @@ impl Shell {
             let Some(context) = page.read(cx).chat_context() else {
                 return;
             };
-            let reveal = self.pr_chat_sheet_open(cx);
-            self.retarget_pr_chat(context, reveal, cx);
+            self.retarget_pr_chat(context, cx);
             if let Some(panel) = self.pr_chat.as_mut() {
                 panel.revision = revision;
             }
@@ -181,8 +214,7 @@ impl Shell {
         };
         if check_expiry && self.open_pr_chat_idle_expired(cx) {
             let context = panel.context.clone();
-            let reveal = self.pr_chat_sheet_open(cx);
-            self.retarget_pr_chat(context, reveal, cx);
+            self.retarget_pr_chat(context, cx);
             return;
         }
         if panel.revision == revision {
@@ -202,12 +234,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn retarget_pr_chat(
-        &mut self,
-        context: PrChatContext,
-        reveal_previous: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn retarget_pr_chat(&mut self, context: PrChatContext, cx: &mut Context<Self>) {
         self.discard_pr_chat(cx);
         let newest = self.newest_pr_chat_session(&context.index_key(), cx);
         match newest {
@@ -216,7 +243,7 @@ impl Shell {
             }
             Some((row, created_at)) => {
                 self.start_pr_chat(context, cx);
-                self.attach_previous_pr_chat(row, created_at, reveal_previous, cx);
+                self.attach_previous_pr_chat(row, created_at, cx);
             }
             None => self.start_pr_chat(context, cx),
         }
@@ -227,7 +254,6 @@ impl Shell {
         &mut self,
         row: zeron_proto::Chat,
         created_at: chrono::DateTime<Utc>,
-        reveal: bool,
         cx: &mut Context<Self>,
     ) {
         if self.pr_chat.is_none() {
@@ -239,7 +265,6 @@ impl Shell {
         tab.transcript
             .update(cx, |transcript, _| transcript.set_send_runway(false));
         if let Some(panel) = self.pr_chat.as_mut() {
-            panel.folded = !reveal;
             panel.previous = Some(PreviousChat { row, tab, idle });
         }
         self.sync_hidden_chats(cx);
@@ -348,7 +373,6 @@ impl Shell {
                     )
                     && let Some(panel) = shell.pr_chat.as_mut()
                 {
-                    panel.folded = false;
                     panel.earlier = None;
                     panel.previous = None;
                     cx.notify();
@@ -567,14 +591,19 @@ impl Shell {
 
     pub(super) fn fold_pr_chat(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.pr_chat.as_mut() {
-            panel.folded = true;
             panel.sessions_menu = false;
+        }
+        if let Some(page) = self.pull_request_detail.clone() {
+            page.update(cx, |page, cx| page.set_chat_expanded(false, cx));
         }
         cx.notify();
     }
 
     pub(super) fn pr_chat_sheet_open(&self, cx: &App) -> bool {
-        let Some(panel) = self.pr_chat.as_ref().filter(|panel| !panel.folded) else {
+        if !self.pr_chat_expanded(cx) {
+            return false;
+        }
+        let Some(panel) = self.pr_chat.as_ref() else {
             return false;
         };
         panel.indexed
@@ -1000,9 +1029,37 @@ impl Shell {
             (f32::from(window.viewport_size().height) - Theme::TITLEBAR_HEIGHT).max(0.0);
         let width = settings::widgets::column_width(window, cx).max(0.0);
         let cap = page_height * PR_CHAT_SHEET_CAP;
+        let expanded = self.pr_chat_expanded(cx);
         let visible = self.pr_chat_sheet_open(cx);
         let reduced = motion::reduced_motion(cx);
+        let working = self.pr_chat.as_ref().is_some_and(|panel| {
+            self.state
+                .read(cx)
+                .indicator_for(&panel.chat_id, Utc::now())
+                == Indicator::Working
+        });
+        let replies = self.pr_chat_tab().map(|tab| {
+            let state = tab.state.read(cx);
+            (
+                assistant_replies(&state.transcript),
+                state.transcript_replayed,
+            )
+        });
         let panel = self.pr_chat.as_mut()?;
+        let unread = match replies {
+            Some((count, replayed)) => {
+                if visible || (replayed && panel.seen_replies.is_none()) {
+                    panel.seen_replies = Some(count);
+                }
+                count.saturating_sub(panel.seen_replies.unwrap_or(count))
+            }
+            None => 0,
+        };
+        if !expanded {
+            panel.shown = false;
+            panel.motion = None;
+            panel.sessions_menu = false;
+        }
         if panel.shown != visible {
             panel.shown = visible;
             panel.motion = (!reduced).then(|| (Instant::now(), visible));
@@ -1035,18 +1092,35 @@ impl Shell {
             .and_then(|id| self.side_chats.get(&id))
             .map(|tab| (tab.transcript.clone(), tab.composer.clone()))
         else {
-            return panel.error.clone().map(|error| ChatDock {
+            return Some(ChatDock {
                 sheet: None,
-                bar: div()
-                    .id("pr-chat-error")
-                    .debug_selector(|| "pr-chat-error".into())
-                    .px(px(16.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child(error)
-                    .into_any_element(),
+                bar: panel.error.clone().filter(|_| expanded).map(|error| {
+                    div()
+                        .id("pr-chat-error")
+                        .debug_selector(|| "pr-chat-error".into())
+                        .px(px(16.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(error)
+                        .into_any_element()
+                }),
+                orb: Orb {
+                    working,
+                    unread,
+                    draft: false,
+                },
+                focus: None,
+                idle: true,
             });
         };
+        let draft = composer.read(cx).has_draft(cx);
+        let orb = Orb {
+            working,
+            unread,
+            draft: draft && !expanded,
+        };
+        let focus = Some(composer.read(cx).focus_handle(cx));
+        let idle = !draft && !visible && !composer.read(cx).pickers().read(cx).is_open();
         let chips: Vec<(ContextChip, SharedString)> = panel
             .context
             .chips()
@@ -1068,13 +1142,28 @@ impl Shell {
                 cx,
             );
         });
+        if !expanded {
+            return Some(ChatDock {
+                sheet: None,
+                bar: None,
+                orb,
+                focus,
+                idle,
+            });
+        }
         let bar = div()
             .debug_selector(|| "pr-chat-bar".into())
             .mx(px(-Theme::SPACE_LG))
             .child(composer.clone())
             .into_any_element();
         if !visible && reveal.is_none() {
-            return Some(ChatDock { sheet: None, bar });
+            return Some(ChatDock {
+                sheet: None,
+                bar: Some(bar),
+                orb,
+                focus,
+                idle,
+            });
         }
 
         let content = self.render_pr_chat_sheet(transcript, composer, &theme, cx);
@@ -1126,7 +1215,10 @@ impl Shell {
             .into_any_element();
         Some(ChatDock {
             sheet: Some(sheet),
-            bar,
+            bar: Some(bar),
+            orb,
+            focus,
+            idle,
         })
     }
 
@@ -1550,6 +1642,16 @@ fn user_turns(transcript: &[zeron_doc::SessionMessageEntry]) -> usize {
         .count()
 }
 
+fn assistant_replies(transcript: &[zeron_doc::SessionMessageEntry]) -> usize {
+    transcript
+        .iter()
+        .filter(|entry| {
+            entry.role == zeron_doc::MessageRole::Assistant
+                && entry.status == Some(zeron_doc::MessageStatus::Complete)
+        })
+        .count()
+}
+
 fn turn_count(turns: usize) -> String {
     match turns {
         1 => "1 turn".into(),
@@ -1821,6 +1923,7 @@ mod tests {
     ) -> (String, Entity<Composer>, Entity<AppState>) {
         open_pr(shell, cx, 7);
         wire.open(runtime, cx);
+        click(cx, "pr-chat-orb");
         shell.read_with(cx, |shell, _| {
             let tab = shell.pr_chat_tab().expect("chat minted locally");
             (
@@ -1950,6 +2053,9 @@ mod tests {
             (tab.composer.clone(), tab.state.clone(), chat_id)
         });
         settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "opens on the orb");
+        click(cx, "pr-chat-orb");
+        settle(cx);
         assert!(
             cx.debug_bounds("pr-chat-sheet").is_none(),
             "idle: the bar only"
@@ -1989,6 +2095,7 @@ mod tests {
             assert!(matches!(shell.route, Route::PullRequests));
             assert!(shell.pr_chat.is_some());
         });
+        click(cx, "pr-chat-orb");
 
         side.update(cx, |composer, cx| composer.send_prompt("Hi".into(), cx));
         let frames = wire.serve(&runtime, cx, |_, _| None);
@@ -2178,9 +2285,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sending_grows_the_sheet_and_fold_or_escape_shrinks_it_back_to_the_bar(
-        cx: &mut TestAppContext,
-    ) {
+    fn sending_opens_the_sheet_and_fold_or_escape_return_to_the_orb(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         let (chat_id, composer) = send_review(&runtime, &shell, cx, &mut wire);
@@ -2216,7 +2321,8 @@ mod tests {
         click(cx, "pr-chat-fold");
         settle(cx);
         assert!(cx.debug_bounds("pr-chat-sheet").is_none());
-        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "the bar stays");
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "back to the orb");
+        assert!(cx.debug_bounds("pr-chat-orb").is_some());
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.pr_chat_sheet_open(cx));
             assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id, "kept");
@@ -2240,6 +2346,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         settle(cx);
         assert!(cx.debug_bounds("pr-chat-sheet").is_none(), "Esc folds");
+        assert!(cx.debug_bounds("pr-chat-bar").is_none());
         shell.read_with(cx, |shell, _| {
             assert!(matches!(shell.route, Route::PullRequests));
             assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id);
@@ -2247,7 +2354,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn selecting_another_pr_keeps_the_sheet_and_switches_to_its_session(cx: &mut TestAppContext) {
+    fn selecting_another_pr_opens_on_the_orb_with_its_session(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         shell.update(cx, |shell, cx| {
@@ -2278,11 +2385,15 @@ mod tests {
         shell.read_with(cx, |shell, cx| {
             let panel = shell.pr_chat.as_ref().unwrap();
             assert_eq!(panel.chat_id, "s8", "the PR's newest session");
-            assert!(shell.pr_chat_sheet_open(cx), "switching does not fold");
+            assert!(
+                !shell.pr_chat_sheet_open(cx),
+                "a pull request opens collapsed"
+            );
             assert!(settings::current(cx).pr_chat_indexed(&chat_id), "untouched");
             assert!(shell.state.read(cx).is_hidden_chat(&chat_id));
         });
-        assert!(cx.debug_bounds("pr-chat-sheet").is_some());
+        assert!(cx.debug_bounds("pr-chat-sheet").is_none());
+        assert!(cx.debug_bounds("pr-chat-orb").is_some());
 
         open_pr(&shell, cx, 9);
         wire.open(&runtime, cx);
@@ -2293,16 +2404,19 @@ mod tests {
             assert_ne!(panel.chat_id, "s8");
             assert!(!shell.pr_chat_sheet_open(cx), "nothing to show");
         });
+        click(cx, "pr-chat-orb");
         assert!(cx.debug_bounds("pr-chat-sheet").is_none());
         assert!(cx.debug_bounds("pr-chat-bar").is_some());
 
         open_pr(&shell, cx, 7);
         wire.open(&runtime, cx);
+        assert!(!shell.read_with(cx, |shell, cx| shell.pr_chat_sheet_open(cx)));
+        click(cx, "pr-chat-orb");
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id);
             assert!(
                 shell.pr_chat_sheet_open(cx),
-                "a live session grows the sheet"
+                "the orb opens onto the live session"
             );
             assert_ne!(
                 shell.pr_chat_tab().unwrap().composer,
@@ -2485,10 +2599,14 @@ mod tests {
             let tab = shell.pr_chat_tab().unwrap();
             assert!(!tab.state.read(cx).side_chat_unsaved());
             assert_eq!(tab.state.read(cx).selected_chat.as_deref(), Some("newer"));
+            assert!(!shell.pr_chat_sheet_open(cx), "opens on the orb");
+        });
+        click(cx, "pr-chat-orb");
+        shell.read_with(cx, |shell, cx| {
             assert!(
                 shell.pr_chat_sheet_open(cx),
                 "a PR with a live session grows the sheet"
-            );
+            )
         });
         settle(cx);
         assert!(cx.debug_bounds("pr-chat-earlier").is_some());
@@ -2942,7 +3060,7 @@ mod tests {
             );
             assert!(
                 !shell.pr_chat_sheet_open(cx),
-                "opening the PR shows the bar only"
+                "opening the PR shows the orb"
             );
             assert!(settings::current(cx).pr_chat_indexed("old"));
             let rows = shell.pr_chat_session_rows(cx);
@@ -2952,7 +3070,7 @@ mod tests {
         set_last_message(&shell, cx, "old", chrono::Duration::minutes(10));
         shell.update(cx, |shell, cx| {
             shell.discard_pr_chat(cx);
-            shell.toggle_pr_chat(cx);
+            shell.reveal_pr_chat(cx);
         });
         let frames = wire.open(&runtime, cx);
         assert_eq!(lookups(&frames), 0, "inside 30 min: resumed");
@@ -2980,7 +3098,7 @@ mod tests {
         set_last_message(&shell, cx, "old", chrono::Duration::days(2));
         shell.update(cx, |shell, cx| {
             shell.discard_pr_chat(cx);
-            shell.toggle_pr_chat(cx);
+            shell.reveal_pr_chat(cx);
         });
         let frames = wire.open(&runtime, cx);
         assert_eq!(lookups(&frames), 0, "Never always resumes");
@@ -3085,6 +3203,7 @@ mod tests {
             assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "live");
             assert_eq!(shell.pr_chat_header_status(cx).as_deref(), Some("18m left"));
         });
+        click(cx, "pr-chat-orb");
         click(cx, "pr-chat-sessions");
         assert!(cx.debug_bounds("pr-chat-sessions-menu").is_some());
         shell.read_with(cx, |shell, cx| {
@@ -3155,17 +3274,16 @@ mod tests {
         wire.open(&runtime, cx);
         page(&shell, cx).update(cx, |page, cx| page.fixture_select_tab(2, cx));
         settle(cx);
-        assert!(
-            cx.debug_bounds("pr-comment-surface").is_some(),
-            "Activity starts on the comment box"
-        );
+        assert!(cx.debug_bounds("pr-comment-surface").is_some());
+        assert!(cx.debug_bounds("pr-chat-bar").is_none());
         cx.simulate_keystrokes(combo);
         wire.serve(&runtime, cx, |_, _| None);
         settle(cx);
         assert!(
             cx.debug_bounds("pr-chat-bar").is_some(),
-            "the toggle switches the bar to AI"
+            "the toggle expands"
         );
+        assert!(cx.debug_bounds("pr-comment-surface").is_some());
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
                 assert!(shell.pr_chat_owns_focus(window, cx), "focuses the bar");
@@ -3176,75 +3294,278 @@ mod tests {
         fill(&shell, cx, "Done.");
         shell.read_with(cx, |shell, cx| assert!(shell.pr_chat_sheet_open(cx)));
         cx.simulate_keystrokes(combo);
-        shell.read_with(cx, |shell, cx| assert!(!shell.pr_chat_sheet_open(cx)));
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.pr_chat_sheet_open(cx));
+            assert!(!shell.pr_chat_expanded(cx));
+        });
         cx.simulate_keystrokes(combo);
         shell.read_with(cx, |shell, cx| assert!(shell.pr_chat_sheet_open(cx)));
     }
 
+    fn composer_focused(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            composer
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
+    }
+
+    fn pr_composer(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Composer> {
+        shell.read_with(cx, |shell, _| {
+            shell.pr_chat_tab().expect("chat minted").composer.clone()
+        })
+    }
+
     #[gpui::test]
-    fn the_activity_bar_switches_between_comment_and_ai_and_keeps_the_choice(
+    fn a_pull_request_opens_on_the_orb_and_the_orb_expands_and_focuses_the_bar(
         cx: &mut TestAppContext,
     ) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         open_pr(&shell, cx, 7);
         wire.open(&runtime, cx);
-        let detail = page(&shell, cx);
         settle(cx);
-        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "Summary: AI");
-        assert!(cx.debug_bounds("pr-bar-switch").is_none());
-        assert!(cx.debug_bounds("pr-comment-surface").is_none());
-
-        detail.update(cx, |page, cx| page.fixture_select_tab(2, cx));
-        settle(cx);
-        assert!(cx.debug_bounds("pr-bar-switch").is_some());
+        assert!(cx.debug_bounds("pr-chat-bar").is_none());
+        assert!(cx.debug_bounds("pr-chat-dock").is_none());
+        let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+        let orb = cx.debug_bounds("pr-chat-orb").expect("orb beside the dock");
+        assert!(orb.left() >= nav.right(), "{orb:?} right of {nav:?}");
+        assert!(orb.left() - nav.right() <= px(12.0), "{orb:?} {nav:?}");
+        assert!((orb.size.width - px(38.0)).abs() < px(0.5));
+        assert!((orb.center().y - nav.center().y).abs() <= px(1.0));
+        let width = cx.update(|window, _| window.viewport_size().width);
+        let main = cx.debug_bounds("pr-detail-scroll").unwrap();
+        let pair = (nav.left() + orb.right()) / 2.0;
         assert!(
-            cx.debug_bounds("pr-comment-surface").is_some(),
-            "Activity: Comment"
+            (pair - main.center().x).abs() <= px(1.0),
+            "the pair is centred: {nav:?} {orb:?} {main:?}"
         );
+        assert!(orb.right() <= width);
+        let composer = pr_composer(&shell, cx);
+        assert!(!composer_focused(&composer, cx));
+
+        click(cx, "pr-chat-orb");
+        settle(cx);
+        let bar = cx.debug_bounds("pr-chat-bar").expect("expanded");
+        assert!(bar.bottom() <= nav.top(), "{bar:?} above {nav:?}");
+        assert!(composer_focused(&composer, cx));
+        assert!(cx.debug_bounds("pr-chat-orb").is_some(), "the orb stays");
+    }
+
+    #[gpui::test]
+    fn slash_with_no_input_focused_expands_the_bar(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_pr(&shell, cx, 7);
+        wire.open(&runtime, cx);
+        settle(cx);
+        let composer = pr_composer(&shell, cx);
+        cx.update(|window, _| window.blur());
+        cx.simulate_keystrokes("/");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "/ expands");
+        assert!(composer_focused(&composer, cx));
+        assert_eq!(
+            cx.update(|_, cx| composer.read(cx).input_text(cx)),
+            "",
+            "the shortcut is not typed"
+        );
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none());
+        assert!(
+            !composer_focused(&composer, cx),
+            "focus leaves the hidden bar"
+        );
+        cx.simulate_keystrokes("/");
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_some(),
+            "/ again after Esc"
+        );
+        cx.simulate_keystrokes("/");
+        settle(cx);
+        assert_eq!(
+            cx.update(|_, cx| composer.read(cx).input_text(cx)),
+            "/",
+            "inside an input / is text"
+        );
+    }
+
+    #[gpui::test]
+    fn escape_an_outside_click_and_a_tab_switch_fold_an_empty_bar(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_pr(&shell, cx, 7);
+        wire.open(&runtime, cx);
+        click(cx, "pr-chat-orb");
+        assert!(cx.debug_bounds("pr-chat-bar").is_some());
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "Esc");
+
+        click(cx, "pr-chat-orb");
+        let bar = cx.debug_bounds("pr-chat-bar").unwrap();
+        click(cx, "pr-chat-orb");
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_some(),
+            "the orb only opens"
+        );
+        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
+        cx.simulate_click(
+            gpui::point(content.left() + px(4.0), content.top() + px(4.0)),
+            gpui::Modifiers::default(),
+        );
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "outside click");
+
+        click(cx, "pr-chat-orb");
+        cx.simulate_click(bar.center(), gpui::Modifiers::default());
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "inside click");
+        page(&shell, cx).update(cx, |page, cx| page.fixture_select_tab(1, cx));
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none(), "tab switch");
+    }
+
+    #[gpui::test]
+    fn a_folded_draft_is_kept_and_dots_the_orb(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_pr(&shell, cx, 7);
+        wire.open(&runtime, cx);
+        click(cx, "pr-chat-orb");
+        let composer = pr_composer(&shell, cx);
+        cx.simulate_input("Why does CI fail?");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-orb-dot").is_none(), "no dot open");
+        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
+        cx.simulate_click(
+            gpui::point(content.left() + px(4.0), content.top() + px(4.0)),
+            gpui::Modifiers::default(),
+        );
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_some(),
+            "a draft stays open on an outside click"
+        );
+        click(cx, "pr-chat-orb");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_none());
+        assert!(cx.debug_bounds("pr-chat-orb-dot").is_some(), "draft dot");
+
+        click(cx, "pr-chat-orb");
+        assert_eq!(
+            cx.update(|_, cx| composer.read(cx).input_text(cx)),
+            "Why does CI fail?"
+        );
+        assert!(cx.debug_bounds("pr-chat-orb-dot").is_none());
+    }
+
+    #[gpui::test]
+    fn the_orb_rings_while_the_agent_works_and_counts_replies_that_land_folded(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (chat_id, _) = send_review(&runtime, &shell, cx, &mut wire);
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-sheet").is_some(),
+            "the send opened the sheet"
+        );
+        assert!(cx.debug_bounds("pr-chat-bar").is_some());
+        click(cx, "pr-chat-fold");
+        let session = |status: &str| -> zeron_proto::Session {
+            serde_json::from_value(serde_json::json!({
+                "chatId": chat_id, "deviceId": "local", "status": status,
+                "startedAt": Utc::now(), "updatedAt": Utc::now(),
+            }))
+            .unwrap()
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_sessions(vec![session("working")]);
+                cx.notify();
+            })
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-orb-working").is_some(), "ring");
+        assert!(cx.debug_bounds("pr-chat-orb-count").is_none());
+
+        fill(&shell, cx, "Two failing tests.");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_sessions(vec![session("idle")]);
+                cx.notify();
+            })
+        });
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-orb-working").is_none());
+        assert!(cx.debug_bounds("pr-chat-orb-count").is_some(), "badge");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().seen_replies, Some(0))
+        });
+
+        click(cx, "pr-chat-orb");
+        assert!(
+            cx.debug_bounds("pr-chat-sheet").is_some(),
+            "opens on the reply"
+        );
+        assert!(cx.debug_bounds("pr-chat-orb-count").is_none(), "read");
+        click(cx, "pr-chat-fold");
+        assert!(cx.debug_bounds("pr-chat-orb-count").is_none(), "stays read");
+    }
+
+    #[gpui::test]
+    fn on_activity_the_orb_opens_the_ai_bar_above_the_comment_box(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_pr(&shell, cx, 7);
+        wire.open(&runtime, cx);
+        page(&shell, cx).update(cx, |page, cx| page.fixture_select_tab(2, cx));
+        settle(cx);
+        assert!(cx.debug_bounds("pr-comment-surface").is_some());
         assert!(
             cx.debug_bounds("pr-review").is_some(),
             "with the Review menu"
         );
+        assert!(cx.debug_bounds("pr-bar-switch").is_none(), "no switch");
         assert!(cx.debug_bounds("pr-chat-bar").is_none());
 
-        click(cx, "pr-bar-ai");
+        click(cx, "pr-chat-orb");
         settle(cx);
-        assert!(cx.debug_bounds("pr-chat-bar").is_some());
-        assert!(cx.debug_bounds("pr-comment-surface").is_none());
-        let switch = cx.debug_bounds("pr-bar-switch").unwrap();
-        let bar = cx.debug_bounds("pr-chat-bar").unwrap();
-        assert!(switch.bottom() <= bar.top(), "{switch:?} above {bar:?}");
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                assert!(shell.pr_chat_owns_focus(window, cx), "AI focuses the bar")
-            })
-        });
-
-        detail.update(cx, |page, cx| page.fixture_select_tab(1, cx));
-        settle(cx);
-        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "Code: AI");
-        detail.update(cx, |page, cx| page.fixture_select_tab(2, cx));
-        settle(cx);
-        assert!(cx.debug_bounds("pr-chat-bar").is_some(), "Activity kept AI");
-
-        open_pr(&shell, cx, 8);
-        wire.open(&runtime, cx);
-        page(&shell, cx).update(cx, |page, cx| page.fixture_select_tab(2, cx));
-        settle(cx);
+        let bar = cx
+            .debug_bounds("pr-chat-bar")
+            .expect("AI above the comment box");
+        let comment = cx
+            .debug_bounds("pr-comment-surface")
+            .expect("comment box kept");
+        let content = cx.debug_bounds("pr-detail-scroll").unwrap();
+        let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+        assert!(content.bottom() <= bar.top(), "{content:?} {bar:?}");
+        assert!(bar.bottom() <= comment.top(), "{bar:?} over {comment:?}");
+        assert!(comment.bottom() <= nav.top(), "{comment:?} {nav:?}");
         assert!(
-            cx.debug_bounds("pr-chat-bar").is_some(),
-            "the choice holds for the next pull request"
+            comment.top() - bar.bottom() <= px(24.0),
+            "no gap the height of the dock: {bar:?} {comment:?}"
         );
 
-        click(cx, "pr-bar-comment");
+        cx.simulate_keystrokes("escape");
         settle(cx);
-        assert!(cx.debug_bounds("pr-comment-surface").is_some());
         assert!(cx.debug_bounds("pr-chat-bar").is_none());
+        assert!(cx.debug_bounds("pr-comment-surface").is_some());
     }
 
     #[gpui::test]
-    fn the_bar_sits_between_the_content_and_the_tab_bar_at_600px(cx: &mut TestAppContext) {
+    fn the_orb_and_the_bar_fit_every_tab_at_600px(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         cx.simulate_resize(gpui::size(px(600.0), px(848.0)));
@@ -3253,14 +3574,21 @@ mod tests {
         let detail = page(&shell, cx);
         for tab in 0..3 {
             detail.update(cx, |page, cx| page.fixture_select_tab(tab, cx));
-            if tab == 2 {
-                settle(cx);
-                click(cx, "pr-bar-ai");
-            }
+            wire.serve(&runtime, cx, |_, _| None);
+            settle(cx);
+            let width = cx.update(|window, _| window.viewport_size().width);
+            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+            let orb = cx.debug_bounds("pr-chat-orb").unwrap();
+            let main = cx.debug_bounds("pr-detail-scroll").unwrap();
+            assert!(nav.left() >= main.left() + px(16.0), "tab {tab}: {nav:?}");
+            assert!(orb.left() >= nav.right(), "tab {tab}: {orb:?} {nav:?}");
+            assert!(orb.right() <= width - px(16.0), "tab {tab}: {orb:?}");
+            assert!(cx.debug_bounds("pr-chat-bar").is_none(), "tab {tab}");
+
+            click(cx, "pr-chat-orb");
             wire.serve(&runtime, cx, |_, _| None);
             settle(cx);
             let bar = cx.debug_bounds("pr-chat-bar").expect("bar on every tab");
-            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
             let content = cx.debug_bounds("pr-detail-scroll").unwrap();
             assert!(bar.bottom() <= nav.top(), "tab {tab}: {bar:?} over {nav:?}");
             assert!(
@@ -3277,6 +3605,10 @@ mod tests {
                         && (composer.right() - card.right()).abs() <= px(1.0),
                     "the bar lines up with the cards: {composer:?} {card:?}"
                 );
+            }
+            if tab == 2 {
+                let comment = cx.debug_bounds("pr-comment-surface").unwrap();
+                assert!(bar.bottom() <= comment.top(), "{bar:?} {comment:?}");
             }
         }
     }

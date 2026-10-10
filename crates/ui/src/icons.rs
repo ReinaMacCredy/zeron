@@ -223,6 +223,7 @@ icon_assets![
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
     (STAR_BOLD, "star-bold"),
+    (SPARK, "spark"),
     // Hand-drawn lightning bolt (fast mode): outline off, filled on.
     (BOLT, "bolt"),
     (BOLT_BOLD, "bolt-bold"),
