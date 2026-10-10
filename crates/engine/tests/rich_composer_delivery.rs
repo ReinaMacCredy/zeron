@@ -166,6 +166,7 @@ fn request(prompt: &str) -> RunRequest {
         branch: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 fn rich_text(label: &str) -> (String, String) {

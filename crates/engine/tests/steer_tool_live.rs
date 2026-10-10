@@ -120,6 +120,7 @@ async fn steering_never_aborts_a_running_tool() {
                 permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             },
         )
         .unwrap();
@@ -163,6 +164,7 @@ async fn steering_never_aborts_a_running_tool() {
                     forked_at: None,
                     computer_control: false,
                     permission_mode: Default::default(),
+                    disabled_tools: Vec::new(),
                 },
             },
         )

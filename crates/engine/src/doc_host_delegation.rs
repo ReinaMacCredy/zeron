@@ -54,6 +54,8 @@ pub struct DelegateTaskParams {
     #[serde(default)]
     pub profile_id: Option<String>,
     #[serde(default)]
+    pub disabled_tools: Vec<String>,
+    #[serde(default)]
     pub wait: bool,
     #[serde(default)]
     pub client_request_id: Option<String>,
@@ -311,6 +313,7 @@ impl DocHost {
             permission_mode: PermissionMode::Ask,
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         }
     }
 
@@ -408,6 +411,14 @@ impl DocHost {
         }
         if let Some(config) = config.as_mut() {
             config.profile_id = params.profile_id.clone();
+        }
+        if !params.disabled_tools.is_empty() {
+            let config = config.get_or_insert_with(|| self.default_chat_config());
+            for name in &params.disabled_tools {
+                if !config.disabled_tools.contains(name) {
+                    config.disabled_tools.push(name.clone());
+                }
+            }
         }
         if let Some(options) = &params.model_options {
             config

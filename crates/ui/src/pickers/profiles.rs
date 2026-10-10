@@ -1486,6 +1486,7 @@ mod tests {
             notes: notes.into(),
             instructions: String::new(),
             by_agent: false,
+            disabled_tools: Vec::new(),
         }
     }
 
@@ -1517,6 +1518,7 @@ mod tests {
             permission_mode: PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         };
         let mut same = profile("Same", "");
         same.harness = HarnessId::ClaudeCode;
@@ -1557,6 +1559,7 @@ mod tests {
             permission_mode: PermissionMode::Full,
             instructions: String::new(),
             profile_id: Some("planner".into()),
+            disabled_tools: Vec::new(),
         };
         assert!(profile_drift(&planner, &current).is_empty());
 

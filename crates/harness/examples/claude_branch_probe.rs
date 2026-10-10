@@ -97,6 +97,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         forked_at: None,
         computer_control: false,
         mcp: None,
+        disabled_tools: Vec::new(),
     }
 }
 

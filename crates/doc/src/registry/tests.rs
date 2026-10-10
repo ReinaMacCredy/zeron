@@ -269,6 +269,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         }),
         last_message_preview: None,
         last_message_at: None,

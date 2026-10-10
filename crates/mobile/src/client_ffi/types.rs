@@ -839,6 +839,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
             permission_mode: Default::default(),
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         })
     }
 }
@@ -1123,6 +1124,7 @@ mod tests {
             permission_mode: zeron_proto::PermissionMode::Ask,
             instructions: "Plan only.".into(),
             profile_id: Some("planner".into()),
+            disabled_tools: Vec::new(),
         };
         let mut edit = ChatConfig::from(&existing);
         edit.reasoning = Some("high".into());

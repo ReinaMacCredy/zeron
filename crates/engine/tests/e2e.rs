@@ -43,6 +43,7 @@ fn run_request(prompt: &str) -> RunRequest {
         resume: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -2468,6 +2469,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         branch: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     };
     core.doc_host
         .queue_command(

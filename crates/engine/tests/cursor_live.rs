@@ -89,6 +89,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     resume: None,
                     forked_at: None,
                     computer_control: false,
+                    disabled_tools: Vec::new(),
                 },
             },
         )

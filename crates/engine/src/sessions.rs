@@ -581,7 +581,14 @@ impl Inner {
         let devices = lock(&self.device_hub)
             .as_ref()
             .is_some_and(|hub| hub.agent_access_enabled());
-        let disabled = self.registry.tool_settings().disabled(&[]);
+        let config = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let state = self.registry.tool_settings_state(
+            devices,
+            config.as_ref().map_or(&[][..], |c| &c.disabled_tools),
+        );
+        let disabled = state.disabled.iter().map(String::as_str).collect();
         let live = |group| zeron_proto::tools::group_live(group, &disabled);
         #[cfg(target_os = "macos")]
         let computer_guidance =
@@ -590,11 +597,7 @@ impl Inner {
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
         let system_prompt = self.registry.system_prompt();
-        let instructions = self
-            .workspace()
-            .and_then(|workspace| workspace.chat_config(chat_id))
-            .map(|config| config.instructions)
-            .unwrap_or_default();
+        let instructions = config.map(|c| c.instructions).unwrap_or_default();
         let blocks: Vec<&str> = [
             Some(system_prompt.as_str()).filter(|text| !text.is_empty()),
             Some(instructions.as_str()).filter(|text| !text.is_empty()),
@@ -603,8 +606,7 @@ impl Inner {
                 .filter(|_| live(ToolGroup::Computer)),
             live(ToolGroup::Delegation).then_some(crate::doc_host::DELEGATION_GUIDANCE),
             live(ToolGroup::Pages).then_some(zeron_proto::html_render::GUIDANCE),
-            (devices && live(ToolGroup::Devices))
-                .then_some(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
+            live(ToolGroup::Devices).then_some(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
         ]
         .into_iter()
         .flatten()
@@ -2164,6 +2166,7 @@ impl SessionsEngine {
                     branch: None,
                     forked_at: None,
                     computer_control: false,
+                    disabled_tools: config.disabled_tools,
                 }
             }
         };
@@ -2520,6 +2523,7 @@ impl SessionsEngine {
                                 branch: None,
                                 forked_at: None,
                                 computer_control: false,
+                                disabled_tools: Vec::new(),
                             })
                         });
                     let Some(mut request) = request else {
@@ -6342,6 +6346,7 @@ mod tests {
             branch: None,
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         }
     }
 

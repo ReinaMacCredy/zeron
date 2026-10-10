@@ -299,6 +299,7 @@ async fn exercise_projectless(command_first: bool) {
                         resume: None,
                         forked_at: None,
                         computer_control: false,
+                        disabled_tools: Vec::new(),
                     },
                     message_id: message_id.into(),
                 },

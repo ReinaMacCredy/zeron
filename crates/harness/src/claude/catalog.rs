@@ -115,6 +115,123 @@ pub fn context_window_tokens(choice_id: &str) -> Option<u64> {
     }
 }
 
+/// The CLI's `autoCompactWindow` (100K to 1M tokens). `auto` sends nothing,
+/// so the CLI keeps the window tuned for the model; the CLI compacts 33K
+/// before the chosen window (live-probed on 2.1.293 via `get_context_usage`).
+pub(crate) fn auto_compact() -> ModelOption {
+    ModelOption {
+        id: "autoCompact".into(),
+        label: "Auto-compact".into(),
+        choices: AUTO_COMPACT_CHOICES
+            .iter()
+            .map(|(id, label)| ModelOptionChoice {
+                id: (*id).into(),
+                label: (*label).into(),
+            })
+            .collect(),
+        default_choice: "auto".into(),
+    }
+}
+
+const AUTO_COMPACT_CHOICES: &[(&str, &str)] = &[
+    ("auto", "Auto"),
+    ("200k", "200K"),
+    ("300k", "300K"),
+    ("400k", "400K"),
+    ("600k", "600K"),
+    ("800k", "800K"),
+];
+
+/// The built-ins a chat may run without, grouped as a person thinks of
+/// them; names from the CLI's `init` frame (2.1.293). Bash, Read, Edit,
+/// Write and ToolSearch stay on: a coding chat without them cannot work.
+pub(crate) fn builtin_tool_groups() -> Vec<zeron_proto::tools::BuiltinToolGroup> {
+    [
+        (
+            "web",
+            "Web",
+            "Search the web and fetch pages.",
+            &["WebSearch", "WebFetch"][..],
+        ),
+        (
+            "agents",
+            "Sub-agents",
+            "Spawn and message sub-agents.",
+            &["Task", "SendMessage", "ListAgents"],
+        ),
+        (
+            "tasks",
+            "Task list",
+            "Track a todo list.",
+            &["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
+        ),
+        (
+            "schedule",
+            "Scheduling",
+            "Cron jobs, wakeups and remote triggers.",
+            &[
+                "CronCreate",
+                "CronDelete",
+                "CronList",
+                "ScheduleWakeup",
+                "RemoteTrigger",
+            ],
+        ),
+        (
+            "workflows",
+            "Workflows",
+            "Multi-agent workflow scripts.",
+            &["Workflow"],
+        ),
+        (
+            "worktrees",
+            "Worktrees",
+            "Enter and leave git worktrees.",
+            &["EnterWorktree", "ExitWorktree"],
+        ),
+        ("skills", "Skills", "Load skills on demand.", &["Skill"]),
+        (
+            "lsp",
+            "Language server",
+            "Code intelligence queries.",
+            &["LSP"],
+        ),
+        (
+            "notebooks",
+            "Notebooks",
+            "Edit Jupyter notebooks.",
+            &["NotebookEdit"],
+        ),
+        (
+            "notifications",
+            "Push notifications",
+            "Notify your devices.",
+            &["PushNotification"],
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, title, summary, tools)| zeron_proto::tools::BuiltinToolGroup {
+            id: id.into(),
+            title: title.into(),
+            summary: summary.into(),
+            tools: tools.iter().map(|t| (*t).into()).collect(),
+        },
+    )
+    .collect()
+}
+
+pub(crate) fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
+    match choice_id {
+        "200k" => Some(200_000),
+        "300k" => Some(300_000),
+        "400k" => Some(400_000),
+        "600k" => Some(600_000),
+        "800k" => Some(800_000),
+        _ => None,
+    }
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
@@ -343,21 +460,25 @@ pub fn static_models() -> Vec<Model> {
             "Fable 5.1",
             "Most intelligent model for building agents",
             FULL_LADDER,
-            vec![context_window()],
+            vec![context_window(), auto_compact()],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
             "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![context_window(), auto_compact()],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Best for everyday, complex tasks",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![
+                context_window(),
+                auto_compact(),
+                toggle("fastMode", "Fast Mode"),
+            ],
         ),
         model(
             "claude-opus-4-8",
@@ -378,7 +499,7 @@ pub fn static_models() -> Vec<Model> {
             "Sonnet 5",
             "Balanced speed and intelligence",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![context_window(), auto_compact()],
         ),
         model(
             "claude-haiku-4-5",

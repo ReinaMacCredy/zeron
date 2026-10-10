@@ -150,6 +150,7 @@ pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
         model_options: profile.model_options.clone(),
         notes: profile.notes.clone(),
         instructions: profile.instructions.clone(),
+        disabled_tools: profile.disabled_tools.clone(),
     }
 }
 
@@ -163,6 +164,7 @@ pub fn blank_draft(harness: HarnessId) -> AgentProfileDraft {
         model_options: Default::default(),
         notes: String::new(),
         instructions: String::new(),
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -259,6 +261,7 @@ mod tests {
             notes: String::new(),
             instructions: String::new(),
             by_agent: false,
+            disabled_tools: Vec::new(),
         };
         assert_eq!(
             summary(&profile, "Codex", Some("GPT-5.6")),

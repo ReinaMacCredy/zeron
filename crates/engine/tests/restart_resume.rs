@@ -53,6 +53,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         resume: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -1068,6 +1069,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         resume: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     };
     let assemble_real = || {
         EngineCore::assemble(

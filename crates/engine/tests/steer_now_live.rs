@@ -110,6 +110,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                 permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             },
         )
         .unwrap();
@@ -153,6 +154,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                     forked_at: None,
                     computer_control: false,
                     permission_mode: Default::default(),
+                    disabled_tools: Vec::new(),
                 },
             },
         )

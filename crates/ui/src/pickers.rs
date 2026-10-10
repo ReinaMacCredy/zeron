@@ -151,6 +151,7 @@ pub struct DraftConfig {
     pub permission_mode: PermissionMode,
     pub instructions: String,
     pub profile_id: Option<String>,
+    pub disabled_tools: Vec<String>,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -193,6 +194,7 @@ pub struct ResolvedRunConfig {
     pub permission_mode: PermissionMode,
     pub instructions: String,
     pub profile_id: Option<String>,
+    pub disabled_tools: Vec<String>,
 }
 
 impl ResolvedRunConfig {
@@ -207,6 +209,7 @@ impl ResolvedRunConfig {
             permission_mode: self.permission_mode,
             instructions: self.instructions.clone(),
             profile_id: self.profile_id.clone(),
+            disabled_tools: self.disabled_tools.clone(),
         })
     }
 }
@@ -1631,6 +1634,7 @@ impl Pickers {
                 permission_mode: self.effective_permission_mode(cx),
                 instructions: self.effective_instructions(cx),
                 profile_id: self.effective_profile_id(cx),
+                disabled_tools: self.effective_disabled_tools(cx),
             };
         }
         ResolvedRunConfig {
@@ -1645,6 +1649,18 @@ impl Pickers {
             permission_mode: self.effective_permission_mode(cx),
             instructions: self.effective_instructions(cx),
             profile_id: self.effective_profile_id(cx),
+            disabled_tools: self.effective_disabled_tools(cx),
+        }
+    }
+
+    fn effective_disabled_tools(&self, cx: &App) -> Vec<String> {
+        match self.chat_row(cx) {
+            Some(chat) => chat
+                .config
+                .as_ref()
+                .map(|config| config.disabled_tools.clone())
+                .unwrap_or_default(),
+            None => self.config.disabled_tools.clone(),
         }
     }
 
@@ -2868,6 +2884,7 @@ impl Pickers {
             config.sandbox = existing.sandbox;
             config.instructions = existing.instructions.clone();
             config.profile_id = existing.profile_id.clone();
+            config.disabled_tools = existing.disabled_tools.clone();
         }
         change(&mut config);
         // Reasoning must stay concrete for whatever model the row now names —
@@ -10532,6 +10549,7 @@ mod tests {
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            disabled_tools: Vec::new(),
         });
         assert_eq!(
             chat_harness_marks(&chat),
@@ -11412,6 +11430,7 @@ mod tests {
                         permission_mode: Default::default(),
                         instructions: String::new(),
                         profile_id: None,
+                        disabled_tools: Vec::new(),
                     }),
                     last_message_preview: None,
                     last_message_at: None,
@@ -11615,6 +11634,7 @@ mod tests {
                     notes: String::new(),
                     instructions: String::new(),
                     by_agent: false,
+                    disabled_tools: Vec::new(),
                 };
                 pickers.apply_profile(&profile, cx);
                 let pending = pickers.pending_model_switch.clone().expect("dialog");

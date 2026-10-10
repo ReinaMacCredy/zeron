@@ -65,6 +65,7 @@ fn run_request(prompt: &str) -> RunRequest {
         resume: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 

@@ -105,6 +105,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "project_actions",
                 "Manage the saved commands in the project's Actions menu.",
             ),
+            tool(
+                "context_settings",
+                "Read this chat's context settings and set its auto-compact window.",
+            ),
         ],
     },
     ToolGroupInfo {
@@ -284,6 +288,61 @@ impl ToolSettings {
                 .collect(),
         }
     }
+
+    /// These settings with a chat's own Zeron tool entries also turned off.
+    pub fn for_chat(&self, chat_disabled: &[String]) -> ToolSettings {
+        let mut settings = self.clone();
+        for name in chat_disabled
+            .iter()
+            .filter_map(|name| name.strip_prefix(ZERON_TOOL_PREFIX))
+        {
+            settings.set_tool(name, false);
+        }
+        settings
+    }
+}
+
+pub const ZERON_TOOL_PREFIX: &str = "mcp__zeron__";
+
+/// The Claude tool-name prefix the CLI gives an MCP server's tools.
+pub fn mcp_server_rule(server: &str) -> String {
+    let name: String = server
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("mcp__{name}")
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BuiltinToolGroup {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpServerEntry {
+    pub name: String,
+    pub rule: String,
+    pub status: String,
+    pub source: String,
+}
+
+/// What a harness can turn off per chat beyond Zeron's own tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HarnessToolInventory {
+    pub builtin: Vec<BuiltinToolGroup>,
+    pub mcp_servers: Vec<McpServerEntry>,
 }
 
 pub fn group_live(group: ToolGroup, disabled: &BTreeSet<&str>) -> bool {
@@ -321,6 +380,28 @@ mod tests {
             BTreeSet::from(["delegate_task", "task_cancel", "task_status"])
         );
         assert!(group_live(ToolGroup::Delegation, &settings.disabled(&[])));
+    }
+
+    #[test]
+    fn a_chat_turns_off_its_zeron_entries_only() {
+        let chat = vec![
+            "mcp__zeron__delegate_task".to_owned(),
+            "WebFetch".to_owned(),
+            "mcp__xcode".to_owned(),
+        ];
+        assert_eq!(
+            ToolSettings::default().for_chat(&chat).disabled(&[]),
+            BTreeSet::from(["delegate_task", "task_cancel", "task_status"])
+        );
+    }
+
+    #[test]
+    fn server_rules_match_the_cli_spelling() {
+        assert_eq!(mcp_server_rule("codex-cu"), "mcp__codex-cu");
+        assert_eq!(
+            mcp_server_rule("claude.ai Claude Docs"),
+            "mcp__claude_ai_Claude_Docs"
+        );
     }
 
     #[test]

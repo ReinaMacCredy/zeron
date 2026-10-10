@@ -161,6 +161,7 @@ fn run_request(prompt: &str) -> RunRequest {
         resume: None,
         forked_at: None,
         computer_control: false,
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -608,6 +609,7 @@ async fn chat_config_selects_the_run_harness() {
                 permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             }),
             None,
         )

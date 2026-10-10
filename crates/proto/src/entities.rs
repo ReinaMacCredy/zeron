@@ -174,6 +174,10 @@ pub struct ChatConfig {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// Tools this chat runs without, in Claude's spelling (see
+    /// [`crate::tools::ZERON_TOOL_PREFIX`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.
@@ -1897,6 +1901,8 @@ pub struct AgentProfile {
     pub notes: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_agent: bool,
 }
@@ -1918,6 +1924,8 @@ pub struct AgentProfileDraft {
     pub notes: String,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

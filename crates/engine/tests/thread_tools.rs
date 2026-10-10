@@ -231,6 +231,7 @@ fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &st
                     forked_at: None,
                     computer_control: false,
                     mcp: None,
+                    disabled_tools: Vec::new(),
                 },
                 message_id: message_id.into(),
             },
@@ -317,6 +318,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         permission_mode: zeron_proto::PermissionMode::Auto,
         instructions: String::new(),
         profile_id: None,
+        disabled_tools: Vec::new(),
     };
     rig.core
         .workspace
@@ -941,6 +943,7 @@ async fn a_delegated_child_names_its_own_profile_never_the_owners() {
                 permission_mode: Default::default(),
                 instructions: "Plan only.".into(),
                 profile_id: Some("planner".into()),
+                disabled_tools: Vec::new(),
             },
         )
         .unwrap();
@@ -1818,6 +1821,7 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
                 permission_mode: Default::default(),
                 instructions: "Review only.".into(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             },
         )
         .unwrap();

@@ -194,6 +194,7 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
             forked_at: None,
             computer_control: false,
             mcp: None,
+            disabled_tools: Vec::new(),
         },
         message_id: message_id.into(),
     }

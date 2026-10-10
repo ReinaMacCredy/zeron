@@ -296,11 +296,11 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "agent_profiles",
-            "description": "Manage the person's agent profiles: named bundles of harness, model, reasoning, permission mode, instructions and a when-to-use note, shown in the model picker's Profiles tab and listed by orchestrator_capabilities. Use this only when the person asks to create, change or remove a profile. `list` returns them. `upsert` saves one: omit `profileId` to add (name and harness are required), or pass it to change only the fields you send; an empty string clears model, notes or instructions. `instructions` are added to the agent's system prompt on every run of a chat using the profile, so write them as a role brief. `permissionMode` can never exceed this chat's own permission mode, also when editing a profile that already has a higher one. `delete` removes one by `profileId`. Profiles you save stay marked as written by an agent until the person saves them in Settings.",
+            "description": "Manage the person's agent profiles: named bundles of harness, model, reasoning, permission mode, model options, a tool set, instructions and a when-to-use note, shown in the model picker's Profiles tab and listed by orchestrator_capabilities. Use this only when the person asks to create, change, remove or switch to a profile. `list` returns them. `upsert` saves one: omit `profileId` to add (name and harness are required), or pass it to change only the fields you send; an empty string clears model, notes or instructions. `modelOptions` sets the model's options by id (choices from list_models, for example {\"contextWindow\": \"1m\", \"autoCompact\": \"400k\"}); an empty string drops one back to its default. `disabledTools` replaces the profile's tool set: tools a chat on this profile runs without, in Claude Code's names (`WebFetch`, `Task`), `mcp__<server>` for a whole MCP server, and `mcp__zeron__<tool>` for Zeron's own tools; built-in and server entries only matter on claude-code. Turning tools off saves little context (Claude Code defers most tool schemas) but keeps the agent from using them. `instructions` are added to the agent's system prompt on every run of a chat using the profile, so write them as a role brief. `permissionMode` can never exceed this chat's own permission mode, also when editing a profile that already has a higher one. `apply` switches this chat to a profile of its own harness from the next message on; it may not raise this chat's permission mode or turn back on a tool this chat has off. `delete` removes one by `profileId`. Profiles you save stay marked as written by an agent until the person saves them in Settings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "upsert", "delete"] },
+                    "action": { "type": "string", "enum": ["list", "upsert", "apply", "delete"] },
                     "profileId": { "type": "string" },
                     "name": { "type": "string", "maxLength": 80 },
                     "harness": { "type": "string", "description": "Harness id from orchestrator_capabilities." },
@@ -308,7 +308,22 @@ pub fn tool_list() -> Value {
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS },
                     "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"] },
                     "notes": { "type": "string", "maxLength": 2000, "description": "When to use this profile." },
-                    "instructions": { "type": "string", "maxLength": 16000 }
+                    "instructions": { "type": "string", "maxLength": 16000 },
+                    "modelOptions": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "disabledTools": { "type": "array", "items": { "type": "string" }, "maxItems": 200 }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "context_settings",
+            "description": "Read or change this chat's own context settings. Use `set` only when the person asks you to tune context for this chat. `get` returns the harness, model, context window, the auto-compact choice and its choices, and the tools this chat runs without. `set` with `autoCompact` (claude-code on a 1M context window only) picks the window Claude Code compacts at: `auto` keeps the model's own (about 967K on 1M), and a smaller window such as `300k` compacts about 33K before it, which keeps every turn cheaper at the cost of compacting sooner. The change applies from the next message: Claude Code reads it at launch, so the chat's runtime restarts and resumes, ending its background shells and sub-agents.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["get", "set"] },
+                    "autoCompact": { "type": "string", "enum": ["auto", "200k", "300k", "400k", "600k", "800k"] }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -498,7 +513,10 @@ impl ThreadTools {
 
     async fn disabled_tools(&self) -> HashSet<String> {
         self.client
-            .call(methods::GET_TOOL_SETTINGS, json!({}))
+            .call(
+                methods::GET_TOOL_SETTINGS,
+                json!({ "chatId": self.chat_id }),
+            )
             .await
             .ok()
             .and_then(|state| serde_json::from_value::<ToolSettingsState>(state).ok())
@@ -599,6 +617,7 @@ impl ThreadTools {
             "terminal" => self.terminal(args).await,
             "project_actions" => self.project_actions(args).await,
             "agent_profiles" => self.manage_agent_profiles(args).await,
+            "context_settings" => self.context_settings(args).await,
             "html_render" => self.html_render(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
@@ -1211,6 +1230,7 @@ impl ThreadTools {
                     "modelOptions": model_options,
                     "instructions": profile.as_ref().map(|profile| profile.instructions.clone()),
                     "profileId": profile.as_ref().map(|profile| profile.id.clone()),
+                    "disabledTools": profile.as_ref().map(|profile| profile.disabled_tools.clone()).unwrap_or_default(),
                     "wait": wait,
                     "clientRequestId": args["clientRequestId"].as_str(),
                 }),
@@ -1691,11 +1711,36 @@ impl ThreadTools {
                 let target = json!({ "harness": draft.harness, "model": draft.model });
                 self.check_model(&caller, &target, "model_unavailable: ")
                     .await?;
+                self.check_options(&draft, &args["modelOptions"]).await?;
+                check_tool_names(&draft.disabled_tools)?;
                 self.call_engine(
                     methods::UPSERT_AGENT_PROFILE,
                     json!({ "profileId": profile_id, "profile": draft, "byAgent": true }),
                 )
                 .await
+            }
+            "apply" => {
+                let profile = self
+                    .agent_profile(profile_id.ok_or("profileId is required")?)
+                    .await?;
+                let (caller, _) = self.peers().await?;
+                let current = caller
+                    .config
+                    .ok_or("this chat has no run configuration yet; send it a message first")?;
+                let config = applied_profile(&current, &profile)?;
+                self.call_engine(
+                    methods::MUTATE,
+                    json!({
+                        "op": "setChatConfig",
+                        "chatId": self.chat_id,
+                        "config": config,
+                        "note": { "text": format!("Profile {} applied by the agent.", profile.name) },
+                    }),
+                )
+                .await?;
+                Ok(
+                    json!({ "applied": profile.id, "config": config, "takesEffect": "next message" }),
+                )
             }
             "delete" => {
                 let profile_id = profile_id.ok_or("profileId is required")?;
@@ -1705,8 +1750,145 @@ impl ThreadTools {
                 )
                 .await
             }
-            _ => Err("action must be list, upsert or delete".into()),
+            _ => Err("action must be list, upsert, apply or delete".into()),
         }
+    }
+
+    pub async fn context_settings(&self, args: &Value) -> Result<Value, String> {
+        let (caller, _) = self.peers().await?;
+        let mut config = caller
+            .config
+            .ok_or("this chat has no run configuration yet; send it a message first")?;
+        let harness = json!(config.harness);
+        let models = self.models_of(harness.as_str().unwrap_or_default()).await?;
+        let model = config
+            .model
+            .as_deref()
+            .and_then(|id| models.iter().find(|m| m["id"] == id))
+            .or_else(|| models.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        let option = |id: &str| {
+            model["options"]
+                .as_array()
+                .and_then(|options| options.iter().find(|o| o["id"] == id))
+                .cloned()
+        };
+        let choice = |config: &zeron_proto::ChatConfig, id: &str| {
+            config
+                .model_options
+                .get(id)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| option(id).and_then(|o| o["defaultChoice"].as_str().map(str::to_owned)))
+        };
+        match args["action"].as_str().unwrap_or_default() {
+            "get" => Ok(json!({
+                "harness": harness,
+                "model": model["id"],
+                "contextWindow": choice(&config, "contextWindow"),
+                "autoCompact": choice(&config, "autoCompact"),
+                "autoCompactChoices": option("autoCompact").map(|o| {
+                    o["choices"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|c| c["id"].clone())
+                        .collect::<Vec<_>>()
+                }),
+                "disabledTools": config.disabled_tools,
+            })),
+            "set" => {
+                let pick = args["autoCompact"]
+                    .as_str()
+                    .ok_or("autoCompact is required")?;
+                let compact = option("autoCompact").ok_or(
+                    "auto-compact is a claude-code setting on long-context models; this chat's model has none",
+                )?;
+                let label = compact["choices"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|c| c["id"] == pick)
+                    .and_then(|c| c["label"].as_str())
+                    .ok_or_else(|| format!("unknown autoCompact choice {pick}"))?
+                    .to_owned();
+                if pick != "auto" && choice(&config, "contextWindow").as_deref() == Some("200k") {
+                    return Err(
+                        "auto-compact windows need the 1M context window; this chat runs at 200K"
+                            .into(),
+                    );
+                }
+                if pick == "auto" {
+                    config.model_options.remove("autoCompact");
+                } else {
+                    config
+                        .model_options
+                        .insert("autoCompact".into(), json!(pick));
+                }
+                self.call_engine(
+                    methods::MUTATE,
+                    json!({
+                        "op": "setChatConfig",
+                        "chatId": self.chat_id,
+                        "config": config,
+                        "note": { "text": format!("Auto-compact set to {label} by the agent.") },
+                    }),
+                )
+                .await?;
+                Ok(json!({ "autoCompact": pick, "takesEffect": "next message" }))
+            }
+            _ => Err("action must be get or set".into()),
+        }
+    }
+
+    async fn check_options(&self, draft: &AgentProfileDraft, sent: &Value) -> Result<(), String> {
+        let sent: Vec<&String> = sent
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| value.as_str().is_some_and(|v| !v.trim().is_empty()))
+            .map(|(id, _)| id)
+            .collect();
+        if sent.is_empty() {
+            return Ok(());
+        }
+        let harness = json!(draft.harness);
+        let models = self.models_of(harness.as_str().unwrap_or_default()).await?;
+        let model = draft
+            .model
+            .as_deref()
+            .and_then(|id| models.iter().find(|m| m["id"] == id))
+            .or_else(|| models.first())
+            .ok_or("model_options_unavailable: this harness lists no models")?;
+        for (id, value) in draft
+            .model_options
+            .iter()
+            .filter(|(id, _)| sent.contains(id))
+        {
+            let option = model["options"]
+                .as_array()
+                .and_then(|options| options.iter().find(|o| o["id"] == id.as_str()))
+                .ok_or_else(|| {
+                    format!(
+                        "model_options_unavailable: {} has no option {id}",
+                        model["id"]
+                    )
+                })?;
+            let choices: Vec<&str> = option["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["id"].as_str())
+                .collect();
+            if !value.as_str().is_some_and(|v| choices.contains(&v)) {
+                return Err(format!(
+                    "model_options_unavailable: {id} takes one of {}",
+                    choices.join(", ")
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn device_tool(&self, name: &str, args: &Value) -> Result<Value, String> {
@@ -2076,16 +2258,105 @@ fn profile_draft(
         model,
         reasoning,
         permission_mode,
-        model_options: existing
-            .filter(|_| same_harness)
-            .map(|profile| profile.model_options.clone())
-            .unwrap_or_default(),
+        model_options: {
+            let mut options = existing
+                .filter(|_| same_harness)
+                .map(|profile| profile.model_options.clone())
+                .unwrap_or_default();
+            for (id, value) in args["modelOptions"].as_object().into_iter().flatten() {
+                match value.as_str().map(str::trim) {
+                    Some("") | None => options.remove(id),
+                    Some(choice) => options.insert(id.clone(), json!(choice)),
+                };
+            }
+            options
+        },
         notes: kept("notes", existing.map(|profile| &profile.notes)),
         instructions: kept(
             "instructions",
             existing.map(|profile| &profile.instructions),
         ),
+        disabled_tools: match args["disabledTools"].as_array() {
+            Some(tools) => tools
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            None => existing
+                .map(|profile| profile.disabled_tools.clone())
+                .unwrap_or_default(),
+        },
     })
+}
+
+fn check_tool_names(names: &[String]) -> Result<(), String> {
+    for name in names {
+        if let Some(tool) = name.strip_prefix(zeron_proto::tools::ZERON_TOOL_PREFIX)
+            && !zeron_proto::tools::TOOL_GROUPS
+                .iter()
+                .any(|group| group.tools().iter().any(|t| t.name == tool))
+        {
+            return Err(format!("unknown Zeron tool {name}"));
+        }
+    }
+    Ok(())
+}
+
+/// Refused when the profile would widen what the chat may do.
+fn applied_profile(
+    current: &zeron_proto::ChatConfig,
+    profile: &AgentProfile,
+) -> Result<zeron_proto::ChatConfig, String> {
+    if profile.harness != current.harness {
+        return Err(format!(
+            "profile_harness_mismatch: {} runs on {}, this chat on {}; ask the person to switch",
+            profile.name,
+            json!(profile.harness).as_str().unwrap_or_default(),
+            json!(current.harness).as_str().unwrap_or_default()
+        ));
+    }
+    if let Some(mode) = profile.permission_mode
+        && permission_rank(mode) > permission_rank(current.permission_mode)
+    {
+        return Err(format!(
+            "permission_escalation_denied: this chat runs in {} mode, so it may not apply a profile in {}",
+            json!(current.permission_mode).as_str().unwrap_or_default(),
+            json!(mode).as_str().unwrap_or_default()
+        ));
+    }
+    let reenabled: Vec<&str> = current
+        .disabled_tools
+        .iter()
+        .filter(|tool| !profile.disabled_tools.contains(tool))
+        .map(String::as_str)
+        .collect();
+    if !reenabled.is_empty() {
+        return Err(format!(
+            "tool_escalation_denied: {} would turn back on {}, which this chat has off; ask the person to apply it",
+            profile.name,
+            reenabled.join(", ")
+        ));
+    }
+    let mut config = current.clone();
+    if let Some(model) = &profile.model {
+        config.model = Some(model.clone());
+    }
+    if let Some(reasoning) = profile.reasoning {
+        config.reasoning = Some(reasoning);
+    }
+    if let Some(mode) = profile.permission_mode {
+        config.permission_mode = mode;
+        config.sandbox = mode.sandbox();
+    }
+    if !profile.model_options.is_empty() {
+        config.model_options = profile.model_options.clone();
+    }
+    config.instructions = profile.instructions.clone();
+    config.profile_id = Some(profile.id.clone());
+    config.disabled_tools = profile.disabled_tools.clone();
+    Ok(config)
 }
 
 fn permission_rank(mode: PermissionMode) -> u8 {
@@ -2423,7 +2694,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 27] = [
+    const THREAD_TOOLS: [&str; 28] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2438,6 +2709,7 @@ mod tests {
         "terminal",
         "project_actions",
         "agent_profiles",
+        "context_settings",
         "html_preview",
         "html_render",
         "device_list",
@@ -2531,6 +2803,15 @@ mod tests {
                         Some("codex") => json!([
                             { "id": "gpt-5", "label": "GPT-5", "reasoningLevels": ["high"], "options": [] },
                             { "id": "gpt-5.6-luna", "label": "Luna", "reasoningLevels": [], "options": [] }
+                        ]),
+                        Some("claude-code") => json!([
+                            { "id": "claude-opus-5-5", "label": "Opus 5.5", "reasoningLevels": ["high"], "options": [
+                                { "id": "contextWindow", "label": "Context Window", "defaultChoice": "1m",
+                                  "choices": [{ "id": "200k", "label": "200K" }, { "id": "1m", "label": "1M" }] },
+                                { "id": "autoCompact", "label": "Auto-compact", "defaultChoice": "auto",
+                                  "choices": [{ "id": "auto", "label": "Auto" }, { "id": "300k", "label": "300K" }] }
+                            ] },
+                            { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "reasoningLevels": [], "options": [] }
                         ]),
                         _ => json!([]),
                     };
@@ -2775,7 +3056,7 @@ mod tests {
                         "png": "iVBORw0KGgo",
                     })))
                 }
-                methods::GET_TOOL_SETTINGS => Ok(RpcReply::Value(
+                methods::GET_TOOL_SETTINGS if params["chatId"] == "a" => Ok(RpcReply::Value(
                     json!({ "settings": {}, "disabled": self.disabled }),
                 )),
                 methods::GET_COMPUTER_CATALOG
@@ -4200,6 +4481,177 @@ mod tests {
         );
     }
 
+    fn rig_with(fake: Fake) -> Rig {
+        rig(fake)
+    }
+
+    fn with_caller_config(config: Value) -> Fake {
+        let mut fake = fixture();
+        fake.chats[0]["config"] = config;
+        fake
+    }
+
+    #[tokio::test]
+    async fn context_settings_set_auto_compact_on_the_callers_own_chat() {
+        let rig = rig(with_caller_config(json!({
+            "harness": "claude-code", "model": "claude-opus-5-5", "sandbox": "workspace-write",
+            "permissionMode": "ask", "modelOptions": { "contextWindow": "1m" }
+        })));
+        let got = rig
+            .tools
+            .call("context_settings", &json!({ "action": "get" }))
+            .await
+            .unwrap();
+        assert_eq!(got["autoCompact"], "auto");
+        assert_eq!(got["contextWindow"], "1m");
+        assert_eq!(got["autoCompactChoices"], json!(["auto", "300k"]));
+        let unknown = rig
+            .tools
+            .call(
+                "context_settings",
+                &json!({ "action": "set", "autoCompact": "800k" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(unknown.contains("unknown autoCompact choice"), "{unknown}");
+        rig.tools
+            .call(
+                "context_settings",
+                &json!({ "action": "set", "autoCompact": "300k" }),
+            )
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::MUTATE);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["op"], "setChatConfig");
+        assert_eq!(sent[0]["chatId"], "a");
+        assert_eq!(
+            sent[0]["config"]["modelOptions"],
+            json!({ "contextWindow": "1m", "autoCompact": "300k" })
+        );
+        assert_eq!(sent[0]["config"]["permissionMode"], "ask");
+        assert_eq!(
+            sent[0]["note"]["text"],
+            "Auto-compact set to 300K by the agent."
+        );
+    }
+
+    #[tokio::test]
+    async fn context_settings_refuse_a_window_the_chat_cannot_take() {
+        let rig = rig(with_caller_config(json!({
+            "harness": "claude-code", "model": "claude-opus-5-5", "sandbox": "workspace-write",
+            "modelOptions": { "contextWindow": "200k" }
+        })));
+        let narrow = rig
+            .tools
+            .call(
+                "context_settings",
+                &json!({ "action": "set", "autoCompact": "300k" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(narrow.contains("1M context window"), "{narrow}");
+        let rig2 = rig_with(with_caller_config(json!({
+            "harness": "claude-code", "model": "claude-haiku-4-5", "sandbox": "workspace-write"
+        })));
+        let none = rig2
+            .tools
+            .call(
+                "context_settings",
+                &json!({ "action": "set", "autoCompact": "300k" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(none.contains("has none"), "{none}");
+        assert!(logged(&rig.calls, methods::MUTATE).is_empty());
+        assert!(logged(&rig2.calls, methods::MUTATE).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_agent_profile_carries_options_and_a_tool_set() {
+        let rig = rig(fixture());
+        async fn upsert_on(tools: &ThreadTools, mut args: Value) -> Result<Value, String> {
+            args["action"] = json!("upsert");
+            tools.call("agent_profiles", &args).await
+        }
+        let upsert = |args: Value| upsert_on(&rig.tools, args);
+        let bad_option = upsert(json!({ "name": "Long", "harness": "claude-code",
+            "model": "claude-opus-5-5", "modelOptions": { "autoCompact": "900k" } }))
+        .await
+        .unwrap_err();
+        assert!(
+            bad_option.starts_with("model_options_unavailable"),
+            "{bad_option}"
+        );
+        let bad_tool = upsert(json!({ "name": "Long", "harness": "claude-code",
+            "disabledTools": ["mcp__zeron__no_such_tool"] }))
+        .await
+        .unwrap_err();
+        assert!(bad_tool.contains("unknown Zeron tool"), "{bad_tool}");
+        upsert(
+            json!({ "name": "Long", "harness": "claude-code", "model": "claude-opus-5-5",
+            "modelOptions": { "contextWindow": "1m", "autoCompact": "300k" },
+            "disabledTools": ["WebFetch", "mcp__xcode", "mcp__zeron__delegate_task"] }),
+        )
+        .await
+        .unwrap();
+        upsert(json!({ "profileId": "reviewer", "modelOptions": { "speed": "" } }))
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::UPSERT_AGENT_PROFILE);
+        assert_eq!(
+            sent[0]["profile"]["modelOptions"],
+            json!({ "contextWindow": "1m", "autoCompact": "300k" })
+        );
+        assert_eq!(
+            sent[0]["profile"]["disabledTools"],
+            json!(["WebFetch", "mcp__xcode", "mcp__zeron__delegate_task"])
+        );
+        assert_eq!(sent[1]["profile"]["modelOptions"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn an_agent_applies_a_profile_to_its_own_chat_without_widening_it() {
+        let ask_codex = |tools: Value| {
+            json!({ "harness": "codex", "model": "gpt-5", "sandbox": "read-only",
+                "permissionMode": "ask", "disabledTools": tools })
+        };
+        async fn apply(rig: &Rig, id: &str) -> Result<Value, String> {
+            rig.tools
+                .call(
+                    "agent_profiles",
+                    &json!({ "action": "apply", "profileId": id }),
+                )
+                .await
+        }
+        let rig = rig_with(with_caller_config(ask_codex(json!([]))));
+        let full = apply(&rig, "builder").await.unwrap_err();
+        assert!(full.starts_with("permission_escalation_denied"), "{full}");
+        apply(&rig, "reviewer").await.unwrap();
+        let sent = logged(&rig.calls, methods::MUTATE);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["chatId"], "a");
+        let config = &sent[0]["config"];
+        assert_eq!(config["model"], "gpt-5.6-luna");
+        assert_eq!(config["profileId"], "reviewer");
+        assert_eq!(config["instructions"], "Never edit files.");
+        assert_eq!(config["modelOptions"], json!({ "speed": "fast" }));
+        assert_eq!(config["sandbox"], json!(PermissionMode::Ask.sandbox()));
+
+        let narrowed = rig_with(with_caller_config(ask_codex(json!(["WebFetch"]))));
+        let reopened = apply(&narrowed, "reviewer").await.unwrap_err();
+        assert!(reopened.starts_with("tool_escalation_denied"), "{reopened}");
+        assert!(reopened.contains("WebFetch"), "{reopened}");
+
+        let claude = rig_with(with_caller_config(json!({
+            "harness": "claude-code", "sandbox": "workspace-write", "permissionMode": "full"
+        })));
+        let other = apply(&claude, "reviewer").await.unwrap_err();
+        assert!(other.starts_with("profile_harness_mismatch"), "{other}");
+        assert!(logged(&narrowed.calls, methods::MUTATE).is_empty());
+        assert!(logged(&claude.calls, methods::MUTATE).is_empty());
+    }
+
     #[tokio::test]
     async fn a_profile_fills_the_target_and_explicit_fields_override_it() {
         let rig = rig(fixture());
@@ -4832,7 +5284,7 @@ mod tests {
             .unwrap();
         // An empty listing proves nothing, so the pick goes through.
         rig.tools
-            .create_thread(&json!({ "prompt": "go", "harness": "claude-code", "model": "opus" }))
+            .create_thread(&json!({ "prompt": "go", "harness": "opencode", "model": "opus" }))
             .await
             .unwrap();
         assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 2);

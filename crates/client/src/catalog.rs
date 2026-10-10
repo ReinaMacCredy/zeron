@@ -131,6 +131,22 @@ fn context_window(default: &str) -> ModelOption {
     )
 }
 
+fn auto_compact() -> ModelOption {
+    option(
+        "autoCompact",
+        "Auto-compact",
+        &[
+            ("auto", "Auto"),
+            ("200k", "200K"),
+            ("300k", "300K"),
+            ("400k", "400K"),
+            ("600k", "600K"),
+            ("800k", "800K"),
+        ],
+        "auto",
+    )
+}
+
 const FULL_LADDER: &[&str] = &[
     "low",
     "medium",
@@ -347,21 +363,25 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 "Fable 5.1",
                 "Most intelligent model for building agents",
                 FULL_LADDER,
-                vec![context_window("200k")],
+                vec![context_window("200k"), auto_compact()],
             ),
             model(
                 "claude-fable-5",
                 "Fable 5",
                 "Previous generation Fable",
                 FULL_LADDER,
-                vec![context_window("200k")],
+                vec![context_window("200k"), auto_compact()],
             ),
             model(
                 "claude-opus-5",
                 "Opus 5",
                 "Powerful model for complex work",
                 FULL_LADDER,
-                vec![context_window("200k"), toggle("fastMode", "Fast Mode")],
+                vec![
+                    context_window("200k"),
+                    auto_compact(),
+                    toggle("fastMode", "Fast Mode"),
+                ],
             ),
             model(
                 "claude-opus-4-8",
@@ -382,7 +402,7 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 "Sonnet 5",
                 "Balanced speed and intelligence",
                 CLAUDE_XHIGH,
-                vec![context_window("200k")],
+                vec![context_window("200k"), auto_compact()],
             ),
             model(
                 "claude-haiku-4-5",

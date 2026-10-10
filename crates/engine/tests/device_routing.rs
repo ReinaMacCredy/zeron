@@ -849,6 +849,7 @@ async fn target_device_id_routes_over_the_relay() {
             resume: None,
             forked_at: None,
             computer_control: false,
+            disabled_tools: Vec::new(),
         },
         message_id: "m-a-1".into(),
     })

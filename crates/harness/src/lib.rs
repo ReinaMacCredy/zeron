@@ -311,6 +311,14 @@ pub trait Harness: Send + Sync {
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         self.commands().await
     }
+    /// What a chat on this harness can run without beyond Zeron's own tools,
+    /// as seen from `cwd` (project-scoped MCP servers differ per directory).
+    async fn tool_inventory(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<zeron_proto::tools::HarnessToolInventory, HarnessError> {
+        Ok(Default::default())
+    }
     /// Project-scoped skills; None means this provider does not advertise skills.
     async fn skills(
         &self,

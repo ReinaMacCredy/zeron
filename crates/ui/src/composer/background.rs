@@ -2169,6 +2169,7 @@ mod tests {
                 permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
+                disabled_tools: Vec::new(),
             }),
             last_message_preview: None,
             last_message_at: None,

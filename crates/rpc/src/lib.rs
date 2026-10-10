@@ -63,6 +63,8 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
+    /// Built-in tool groups and MCP servers a chat on `harness` can turn off.
+    pub const LIST_HARNESS_TOOLS: &str = "ListHarnessTools";
     /// How a harness compacts its own context: `native`, `slash` or `none`.
     pub const HARNESS_COMPACTION: &str = "HarnessCompaction";
     /// Compact a chat's context in place. Returns once the harness is done —
