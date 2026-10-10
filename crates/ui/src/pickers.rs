@@ -12223,6 +12223,102 @@ mod tests {
             .unwrap();
     }
 
+    #[gpui::test]
+    fn a_context_pick_stays_on_its_own_chat(cx: &mut gpui::TestAppContext) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![long_context_model("fable", true)]),
+                );
+                pickers.state.update(cx, |state, _| {
+                    let mut other = state.chats[0].clone();
+                    other.id = "c2".into();
+                    state.chats.push(other);
+                });
+                pickers.pick_context_position(2, cx);
+                let options = |pickers: &Pickers, id: &str, cx: &App| {
+                    let state = pickers.state.read(cx);
+                    let chat = state.chats.iter().find(|c| c.id == id).unwrap();
+                    chat.config.as_ref().unwrap().model_options.clone()
+                };
+                assert_eq!(
+                    options(pickers, "c1", cx).get(AUTO_COMPACT),
+                    Some(&serde_json::json!("400k"))
+                );
+                assert!(options(pickers, "c2", cx).is_empty());
+                pickers
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("c2".into()));
+                assert_eq!(picked_option(pickers, AUTO_COMPACT, cx), None);
+                assert_eq!(
+                    pickers
+                        .context_groups(cx)
+                        .map(|(window, compact)| Pickers::context_position(&window, &compact)),
+                    Some(context_long_stops_len(pickers, cx))
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_canvas_context_pick_stays_off_existing_chats(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let pickers = context_card_picker(cx, false, dir.path());
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_context_position(2, cx);
+            assert_eq!(
+                picked_option(pickers, AUTO_COMPACT, cx).as_deref(),
+                Some("400k")
+            );
+            pickers.state.update(cx, |state, _| {
+                state.chats = vec![zeron_proto::Chat {
+                    id: "c1".into(),
+                    device_id: "dev".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: Some(ChatConfig {
+                        harness: HarnessId::ClaudeCode,
+                        model: Some("fable".into()),
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        permission_mode: Default::default(),
+                        instructions: String::new(),
+                        profile_id: None,
+                        disabled_tools: Vec::new(),
+                    }),
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: chrono::Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                    sidechat_source_chat_id: None,
+                    created_by_chat_id: None,
+                    previous_harnesses: Vec::new(),
+                    delegation: None,
+                }];
+                state.selected_chat = Some("c1".into());
+            });
+            assert_eq!(picked_option(pickers, AUTO_COMPACT, cx), None);
+            assert_eq!(pickers.resolved(cx).model_options.get(AUTO_COMPACT), None);
+        });
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_reasoning(ReasoningLevel::High, cx);
+            let state = pickers.state.read(cx);
+            let config = state.chats[0].config.as_ref().unwrap();
+            assert_eq!(config.model_options.get(AUTO_COMPACT), None);
+        });
+    }
+
     fn long_context_model(id: &str, auto_compact: bool) -> Model {
         let select = |id: &str, label: &str, default: &str, choices: &[(&str, &str)]| ModelOption {
             id: id.into(),

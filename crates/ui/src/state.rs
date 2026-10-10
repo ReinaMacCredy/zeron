@@ -601,7 +601,8 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 pub use zeron_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
+    parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces,
+    sort_tabs,
 };
 
 /// What a session row shows that ticks with the clock rather than with its
@@ -1820,12 +1821,17 @@ impl AppState {
     }
 
     pub fn context_usage_for(&self, chat_id: Option<&str>) -> Option<zeron_proto::ContextUsage> {
-        match chat_id {
+        let usage = match chat_id {
             Some(id) if self.selected_chat.as_deref() != Some(id) => {
                 self.sub_context_usage.get(id).copied()
             }
             _ => self.context_usage,
-        }
+        }?;
+        let config = chat_id
+            .or(self.selected_chat.as_deref())
+            .and_then(|id| self.chats.iter().find(|chat| chat.id == id))
+            .and_then(|chat| chat.config.as_ref());
+        Some(crate::context_usage::with_chat_budget(usage, config))
     }
 
     pub fn token_rate(&self) -> Option<u32> {

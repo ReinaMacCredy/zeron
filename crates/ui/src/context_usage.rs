@@ -95,6 +95,27 @@ pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl Into
     .size(px(16.0))
 }
 
+/// Claude reports the model's whole window, and only from its next turn; the
+/// chat's own picks (200K, or a custom auto-compact window) are the budget.
+pub(crate) fn with_chat_budget(
+    usage: ContextUsage,
+    config: Option<&zeron_proto::ChatConfig>,
+) -> ContextUsage {
+    use zeron_harness::claude::catalog;
+    let Some(config) = config.filter(|c| c.harness == zeron_proto::HarnessId::ClaudeCode) else {
+        return usage;
+    };
+    let pick = |id: &str| config.model_options.get(id).and_then(|v| v.as_str());
+    let window = pick("contextWindow").and_then(catalog::context_window_tokens);
+    let compact = pick("autoCompact")
+        .and_then(catalog::auto_compact_tokens)
+        .filter(|_| window != Some(200_000));
+    ContextUsage {
+        window: compact.or(window).or(usage.window),
+        ..usage
+    }
+}
+
 fn with_separators(count: u64) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
@@ -208,6 +229,62 @@ mod tests {
                 window: Some(0)
             }))
             .contains("limit not reported")
+        );
+    }
+
+    #[test]
+    fn a_claude_chats_picks_set_its_budget() {
+        let reported = ContextUsage {
+            tokens: Some(83_378),
+            window: Some(1_000_000),
+        };
+        let config = |harness, picks: &[(&str, &str)]| zeron_proto::ChatConfig {
+            harness,
+            model: None,
+            reasoning: None,
+            model_options: picks
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), serde_json::json!(v)))
+                .collect(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: Default::default(),
+            instructions: String::new(),
+            profile_id: None,
+            disabled_tools: Vec::new(),
+        };
+        let window =
+            |config: Option<&zeron_proto::ChatConfig>| with_chat_budget(reported, config).window;
+        let claude = zeron_proto::HarnessId::ClaudeCode;
+        assert_eq!(window(None), Some(1_000_000));
+        assert_eq!(window(Some(&config(claude, &[]))), Some(1_000_000));
+        assert_eq!(
+            window(Some(&config(claude, &[("autoCompact", "400k")]))),
+            Some(400_000)
+        );
+        assert_eq!(
+            window(Some(&config(claude, &[("contextWindow", "200k")]))),
+            Some(200_000)
+        );
+        assert_eq!(
+            window(Some(&config(
+                claude,
+                &[("contextWindow", "200k"), ("autoCompact", "400k")]
+            ))),
+            Some(200_000)
+        );
+        assert_eq!(
+            window(Some(&config(
+                zeron_proto::HarnessId::Codex,
+                &[("autoCompact", "400k")]
+            ))),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            details(Some(with_chat_budget(
+                reported,
+                Some(&config(claude, &[("autoCompact", "400k")]))
+            ))),
+            "83,378 / 400,000 tokens\n316,622 tokens remaining"
         );
     }
 
