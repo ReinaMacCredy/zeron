@@ -90,6 +90,56 @@ fn workspace_footer_row() -> gpui::Div {
         .gap(px(4.0))
 }
 
+fn terminal_button(open: bool, theme: &Theme, cx: &App) -> AnyElement {
+    const HOVER: &str = "composer-footer-terminal";
+    let hovered = motion::hover_t(HOVER) > 0.0;
+    let rest = theme.text_muted.opacity(0.6);
+    let fg = if open {
+        theme.accent
+    } else {
+        motion::hover_blend(HOVER, rest, theme.text)
+    };
+    let shortcut = crate::settings::badge_combo(&crate::settings::shortcut_combo(
+        crate::settings::ShortcutId::ToggleTerminal,
+        cx,
+    ));
+    div()
+        .id(HOVER)
+        .debug_selector(|| HOVER.into())
+        .flex_none()
+        .h(px(20.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .bg(if open {
+            theme.accent_wash
+        } else {
+            motion::hover_blend(HOVER, gpui::transparent_black(), crate::theme::ink(0.05))
+        })
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(fg)
+        .on_hover(motion::hover_listener(HOVER))
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(crate::terminal::panel::ToggleTerminal), cx);
+        })
+        .child(
+            crate::icons::icon(crate::icons::TERMINAL)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(fg),
+        )
+        .child("Terminal")
+        .when(open || hovered, |el| {
+            el.child(popover::kbd_hint(theme, &shortcut))
+        })
+        .into_any_element()
+}
+
 use crate::composer::{ComposerInput, ComposerInputEvent, harness_display_name};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
@@ -891,6 +941,8 @@ pub struct Pickers {
     /// one — a sidechat composer's pickers, which must never touch the
     /// source chat's config (see [`crate::composer::Composer::chat_override`]).
     chat_override: Option<String>,
+    /// `None` hides the footer's Terminal button: only the main composer's drawer toggles.
+    terminal_open: Option<bool>,
     /// Space the branch draft/cache belong to (see the state observer).
     space_owner: Option<String>,
     device_owner: Option<String>,
@@ -1269,6 +1321,7 @@ impl Pickers {
             data_dir,
             draft_owner,
             chat_override: None,
+            terminal_open: None,
             open,
             model_rail: if boot_profiles {
                 ModelRail::Profiles
@@ -4725,6 +4778,19 @@ impl Pickers {
                 ))
                 .into_any_element(),
         )
+    }
+
+    pub fn set_terminal_open(&mut self, open: Option<bool>, cx: &mut Context<Self>) {
+        if self.terminal_open != open {
+            self.terminal_open = open;
+            cx.notify();
+        }
+    }
+
+    pub fn render_terminal_button(&self, cx: &App) -> Option<AnyElement> {
+        let theme = Theme::of(cx);
+        self.terminal_open
+            .map(|open| terminal_button(open, theme, cx))
     }
 
     /// The composer footer row: checkout-kind + ref, LEFT-aligned, only when

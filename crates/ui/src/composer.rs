@@ -14228,6 +14228,7 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
             });
+            let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
             if session_chrome_opacity > 0.0 {
                 let harness = full_footer
                     .then(|| self.pickers.read(cx).resolved(cx).harness)
@@ -14283,7 +14284,8 @@ impl Render for Composer {
                                         .gap(px(4.0))
                                         .children(sidechat_pill)
                                         .children(permission_chip)
-                                        .child(self.account_usage.clone()),
+                                        .child(self.account_usage.clone())
+                                        .children(terminal_button),
                                 ),
                         )
                     }),
