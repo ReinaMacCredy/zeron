@@ -1535,9 +1535,6 @@ pub struct UiSettings {
     pub files_show_all: bool,
     /// The user collapsed the sidecar beside the transcript to its icon rail.
     pub sidecar_collapsed: bool,
-    /// The session card (project, device, side chats, actions) beside the
-    /// transcript.
-    pub session_info_open: bool,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -1677,7 +1674,6 @@ impl Default for UiSettings {
             files_word_wrap: false,
             files_show_all: false,
             sidecar_collapsed: false,
-            session_info_open: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
             frost: FrostTuning::default(),
@@ -2342,7 +2338,6 @@ impl UiSettings {
             files_autosave_delay_ms,
             files_word_wrap,
             files_show_all,
-            session_info_open,
             accent,
             surface,
             new_thread_composer_background,
@@ -3298,6 +3293,21 @@ mod tests {
     }
 
     #[test]
+    fn the_retired_session_card_key_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth":300.0,"sidecarCollapsed":true,"sessionInfoOpen":true}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(loaded.sidecar_collapsed);
+        let saved = serde_json::to_value(&loaded).unwrap();
+        assert!(saved.get("sessionInfoOpen").is_none());
+    }
+
+    #[test]
     fn unknown_keys_from_a_newer_build_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -3816,7 +3826,6 @@ mod tests {
             code_font_size: 11.0,
             files_show_all: true,
             sidecar_collapsed: true,
-            session_info_open: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             frost: FrostTuning {

@@ -97,7 +97,6 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 mod panel_interaction_tests;
 mod pr_chat;
 pub(crate) mod project_icon;
-mod session_info;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -2600,8 +2599,6 @@ pub struct Shell {
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
     files_tween: Option<WidthTween>,
-    /// The session card's reveal (0 closed → 1 open).
-    session_info_tween: Option<WidthTween>,
     files_content_tween: Option<WidthTween>,
     /// The last tracked frame: its chat, the window fit, and for each of
     /// `[sidebar, surface host, Files]` the width painted and the width its
@@ -3167,7 +3164,6 @@ impl Shell {
             debug_upload,
             sidebar_tween: None,
             files_tween: None,
-            session_info_tween: None,
             files_content_tween: None,
             painted_columns: None,
             fit_exits: [None; 3],
@@ -13253,42 +13249,13 @@ impl Shell {
         }
         self.composer
             .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
-        // The session card: docked, the transcript holds its room free on
-        // the right and the composer follows the column left by half of it,
-        // so column and card center together.
-        let session_reveal = if has_selection {
-            self.session_info_reveal()
-        } else {
-            0.0
-        };
-        // The column's LIVE width: while the sidebar or a pane animates,
-        // `main_content_width` already holds the end width, and a reserve or
-        // card placed from it would jump ahead of the column and wait.
-        let live_column = (self.viewport_width
-            - self.sidebar_now()
-            - self.right_visible_width(cx)
-            - self.files_visible_width(cx)
-            - sidecar_width)
-            .max(0.0);
-        let live_main_width = match self.split.as_ref().map(|s| s.side) {
-            Some(split::SplitSide::Left) => live_column * (1.0 - self.settings.split_ratio),
-            Some(split::SplitSide::Right) => live_column * self.settings.split_ratio,
-            None => live_column,
-        };
-        let session_layout = session_info::session_card_layout(
-            live_main_width,
-            ui_settings.transcript_width,
-        );
-        let session_reserve = session_layout.reserve * session_reveal;
-        self.transcript
-            .update(cx, |transcript, cx| transcript.set_right_reserve(session_reserve, cx));
         // Panel open/close glides the composer width; a window resize or a
         // seam drag is direct manipulation, so the width tracks the pointer.
         let direct_width =
             self.reduced_motion || self.viewport_resized || self.pane_resize_dragging.is_some();
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
-                main_content_width - session_reserve,
+                main_content_width,
                 ui_settings.transcript_width,
                 has_selection,
             ),
@@ -13451,27 +13418,7 @@ impl Shell {
             window,
             cx,
         );
-        let status = div()
-            .relative()
-            .left(px(-session_reserve / 2.0))
-            .child(self.render_status_strip(composer_width, cx));
-        let session_header = if self.split.is_some() && has_selection {
-            split::SPLIT_HEADER_HEIGHT
-        } else {
-            0.0
-        };
-        let session_card = self
-            .render_session_info(
-                session_layout,
-                session_reveal,
-                self.viewport_height
-                    - Theme::TITLEBAR_HEIGHT
-                    - session_header
-                    - self.bottom_stack.get()
-                    - 24.0,
-                cx,
-            )
-            .map(|card| div().absolute().inset_0().top(px(session_header)).child(card));
+        let status = self.render_status_strip(composer_width, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -13567,7 +13514,6 @@ impl Shell {
                     )
                 },
             )
-            .children(session_card)
             .when_some(home_grid, |column, grid| {
                 column.child(div().absolute().inset_0().child(
                     crate::terminal::dock::above_terminal(grid, terminal_geometry.clone()),
@@ -13647,7 +13593,6 @@ impl Shell {
                             div()
                                 .id("persistent-composer")
                                 .relative()
-                                .left(px(-session_reserve / 2.0))
                                 .w(px(composer_width))
                                 .opacity(composer_opacity)
                                 .mx_auto()

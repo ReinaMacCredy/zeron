@@ -1582,7 +1582,7 @@ impl Shell {
     }
 
     /// The unified titlebar in chat mode:
-    /// `[new-session +] [session tabs] … [session card] [toggle-changes]`.
+    /// `[new-session +] [session tabs] … [toggle-changes]`.
     /// Carries the titlebar duties (drag region, animated left inset, the
     /// right-pane controls on git projects).
     pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1590,7 +1590,6 @@ impl Shell {
         // The canvas shows no tabs-adjacent chrome beyond the strip itself;
         // the bar keeps its height, drag region, and buttons.
         let on_canvas = self.state.read(cx).selected_chat.is_none();
-        let pr_route = matches!(self.route, Route::PullRequests);
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
@@ -1767,28 +1766,6 @@ impl Shell {
         // would sit UNDER it (both flex_none, the row overflows and paint
         // order stacks them), so they hide for the duration.
         let session_tabs = (!takeover).then(|| self.render_session_tabs(cx));
-        // The session card's toggle belongs to the transcript: it ends the
-        // transcript's stretch of the titlebar, left of the side pane's tabs
-        // when one is open, else just left of the explorer toggle.
-        let session_info_toggle = (!takeover && !on_canvas && !pr_route).then(|| {
-            let label = if self.session_info_open() {
-                "Hide session details"
-            } else {
-                "Show session details"
-            };
-            header_icon_button_with(
-                "toggle-session-info",
-                icons::corner_card_glyph(16.0, theme.text_muted),
-                label,
-                cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
-            )
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .flex_none()
-            .when(self.session_info_open(), |button| {
-                button.bg(crate::theme::wash(0.09))
-            })
-        });
 
         let inner = div()
             .size_full()
@@ -1800,7 +1777,6 @@ impl Shell {
             .pr(px(right_pad))
             .children(session_tabs)
             .child(div().flex_1())
-            .children(session_info_toggle)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE

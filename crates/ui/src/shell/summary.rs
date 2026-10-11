@@ -3,6 +3,7 @@
 use super::*;
 use crate::computer::{self, presence::PresenceTone, preview};
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
+use crate::project_actions::{ProjectActionsStatus, action_icon};
 use std::rc::Rc;
 use zeron_proto::computer::ComputerPreviewPlacement;
 use zeron_proto::device_hub::{DeviceOpener, DevicePlatform};
@@ -47,6 +48,7 @@ struct SidecarEntry {
     label: SharedString,
     value: Option<SidecarValue>,
     action: Option<SidecarAction>,
+    edit: Option<SidecarAction>,
     thumbnail: Option<String>,
 }
 
@@ -66,6 +68,7 @@ impl SidecarEntry {
             label: label.into(),
             value: None,
             action: None,
+            edit: None,
             thumbnail: None,
         }
     }
@@ -93,6 +96,14 @@ impl SidecarEntry {
         self
     }
 
+    fn edit(
+        mut self,
+        edit: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+    ) -> Self {
+        self.edit = Some(Rc::new(edit));
+        self
+    }
+
     fn tooltip(&self) -> SharedString {
         match &self.value {
             Some(
@@ -102,6 +113,20 @@ impl SidecarEntry {
                 | SidecarValue::Dot(Some(v), _),
             ) => format!("{}: {v}", self.label).into(),
             _ => self.label.clone(),
+        }
+    }
+}
+
+struct SidecarInk {
+    label: gpui::Hsla,
+    heading: gpui::Hsla,
+}
+
+impl SidecarInk {
+    fn of(theme: &Theme) -> Self {
+        Self {
+            label: theme.text,
+            heading: theme.text_muted,
         }
     }
 }
@@ -416,7 +441,92 @@ impl Shell {
             .map(|window| (window.label.clone(), window.used_fraction.clamp(0.0, 1.0)))
     }
 
+    fn sidecar_actions_section(&self) -> Option<SidecarSection> {
+        let status = self.project_actions.active_status()?.clone();
+        let snapshot = self.project_actions.visible_snapshot()?;
+        let key = self.project_actions.active.clone()?;
+        let mut entries = Vec::new();
+        match &status {
+            ProjectActionsStatus::Idle | ProjectActionsStatus::Loading => {
+                entries.push(SidecarEntry::new(
+                    "actions-loading",
+                    0,
+                    icons::LUCIDE_REFRESH_CW,
+                    "Loading actions…",
+                ));
+                return Some(SidecarSection {
+                    heading: "Actions".into(),
+                    entries,
+                    fold: None,
+                });
+            }
+            ProjectActionsStatus::Unavailable { message, .. } => {
+                entries.push(SidecarEntry::new(
+                    "actions-unavailable",
+                    0,
+                    icons::INFO_CIRCLE,
+                    message.clone(),
+                ));
+                entries.push(
+                    SidecarEntry::new("actions-retry", 0, icons::LUCIDE_REFRESH_CW, "Retry")
+                        .action(|this, _, cx| this.retry_project_actions(cx)),
+                );
+            }
+            _ => {}
+        }
+        let can_run = status.can_run();
+        for (ix, action) in snapshot.actions.into_iter().enumerate() {
+            let label = if action.run_on_worktree_create {
+                format!("{} (setup)", action.name)
+            } else {
+                action.name.clone()
+            };
+            let mut entry = SidecarEntry::new("action", ix, action_icon(action.icon), label);
+            if can_run {
+                let key = key.clone();
+                let run = action.clone();
+                entry =
+                    entry.action(move |this, _, cx| this.run_project_action(&key, run.clone(), cx));
+            }
+            entries.push(entry.edit(move |this, _, cx| {
+                this.open_project_action_editor(Some(action.clone()), None, cx)
+            }));
+        }
+        for (ix, draft) in snapshot.importable_actions.into_iter().enumerate() {
+            entries.push(
+                SidecarEntry::new(
+                    "import-action",
+                    ix,
+                    action_icon(draft.icon),
+                    draft.name.clone(),
+                )
+                .value(Some(SidecarValue::Text("Import".into())))
+                .action(move |this, _, cx| {
+                    this.open_project_action_editor(None, Some(draft.clone()), cx)
+                }),
+            );
+        }
+        if let Some(issue) = snapshot.project_file_issue {
+            entries.push(SidecarEntry::new(
+                "actions-issue",
+                0,
+                icons::INFO_CIRCLE,
+                issue,
+            ));
+        }
+        entries.push(
+            SidecarEntry::new("add-action", 0, icons::ASTRA_PLUS, "Add action")
+                .action(|this, _, cx| this.open_project_action_editor(None, None, cx)),
+        );
+        Some(SidecarSection {
+            heading: "Actions".into(),
+            entries,
+            fold: None,
+        })
+    }
+
     fn sidecar_sections(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<SidecarSection> {
+        self.ensure_project_actions(cx);
         let chat = self.state.read(cx).selected_chat_row().cloned();
         if let Some(chat) = chat.as_ref() {
             self.probe_summary_instructions(chat.id.clone(), cx);
@@ -612,7 +722,7 @@ impl Shell {
             });
         }
 
-        if let Some(source) = source {
+        if chat.is_some() {
             let mut entries: Vec<SidecarEntry> = sidechats
                 .into_iter()
                 .take(SECTION_CAP)
@@ -627,12 +737,18 @@ impl Shell {
                         })
                 })
                 .collect();
+            if let Some(source) = source {
+                entries.push(
+                    SidecarEntry::new("new-sidechat", 0, icons::ASTRA_PLUS, "New sidechat").action(
+                        move |this, _, cx| {
+                            this.create_sidechat(source.clone(), None, Default::default(), cx)
+                        },
+                    ),
+                );
+            }
             entries.push(
-                SidecarEntry::new("new-sidechat", 0, icons::ASTRA_PLUS, "New sidechat").action(
-                    move |this, _, cx| {
-                        this.create_sidechat(source.clone(), None, Default::default(), cx)
-                    },
-                ),
+                SidecarEntry::new("fork-chat", 0, icons::FORK, "Fork chat")
+                    .action(|this, _, cx| this.create_side_chat(cx)),
             );
             sections.push(SidecarSection {
                 heading: "Side chats".into(),
@@ -640,6 +756,8 @@ impl Shell {
                 fold: None,
             });
         }
+
+        sections.extend(self.sidecar_actions_section());
 
         if !subagents.is_empty() {
             let (running, previous) = split_subagents(subagents);
@@ -942,7 +1060,7 @@ impl Shell {
                     .px(px(8.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .line_height(px(19.0))
-                    .text_color(theme.text_faint)
+                    .text_color(SidecarInk::of(theme).heading)
                     .truncate()
                     .child(section.heading.clone()),
             )
@@ -1069,7 +1187,7 @@ impl Shell {
             .px(px(8.0))
             .rounded(px(8.0))
             .text_size(crate::typography::ui_rems(13.0))
-            .text_color(theme.text_muted)
+            .text_color(SidecarInk::of(theme).label)
             .whitespace_nowrap()
             .child(
                 div()
@@ -1104,8 +1222,40 @@ impl Shell {
                     .child(entry.label.clone()),
             )
             .children(value)
+            .when_some(entry.edit.clone().filter(|_| interactive), |el, edit| {
+                let id = format!("{group}-edit");
+                let selector = id.clone();
+                el.child(
+                    div()
+                        .id(SharedString::from(id))
+                        .debug_selector(move || selector.clone())
+                        .size(px(22.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.0))
+                        .invisible()
+                        .group_hover(group.clone(), |style| style.visible())
+                        .hover(|style| style.bg(crate::theme::wash(0.08)))
+                        .tooltip(crate::settings::widgets::text_tooltip("Edit action"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            edit(this, window, cx);
+                            if surface == SidecarSurface::Popover {
+                                this.set_sidecar_popover(false, cx);
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            icon(icons::SETTINGS_MINIMALISTIC)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
             .when(interactive, |el| {
-                el.hover(|s| s.bg(crate::theme::wash(0.06)).text_color(theme.text))
+                el.hover(|s| s.bg(crate::theme::wash(0.06)))
             });
         match entry.action.clone().filter(|_| interactive) {
             Some(action) => {
@@ -2065,5 +2215,187 @@ mod sidecar_regressions {
         assert_eq!(elapsed_next_change(59), 1);
         assert_eq!(elapsed_next_change(21 * 60 + 14), 46);
         assert_eq!(elapsed_next_change(3 * 3_600 + 59 * 60), 60);
+    }
+
+    #[test]
+    fn sidecar_labels_are_primary_text_and_headings_stay_muted() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let ink = SidecarInk::of(&theme);
+            assert_eq!(ink.label, theme.text);
+            assert_eq!(ink.heading, theme.text_muted);
+            assert_eq!(ink.label.l > ink.heading.l, theme.appearance.is_dark());
+        }
+    }
+
+    fn attach_engine(
+        shell: &Entity<Shell>,
+        runtime: &tokio::runtime::Runtime,
+        cx: &mut VisualTestContext,
+    ) -> crate::device_panel::tests::Calls {
+        let (engine, calls) = crate::device_panel::tests::fake_engine(runtime);
+        shell.update(cx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, _| state.set_test_engine(engine))
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        calls
+    }
+
+    fn called(
+        cx: &mut VisualTestContext,
+        calls: &crate::device_panel::tests::Calls,
+        method: &str,
+        count: usize,
+    ) -> Vec<serde_json::Value> {
+        crate::device_panel::tests::wait(cx, |_| {
+            crate::device_panel::tests::calls_of(calls, method).len() >= count
+        });
+        crate::device_panel::tests::calls_of(calls, method)
+    }
+
+    #[gpui::test]
+    fn fork_chat_follows_new_sidechat_and_forks_from_panel_and_rail(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        cx.executor().allow_parking();
+        let (shell, cx) = setup(cx);
+        let calls = attach_engine(&shell, &runtime, cx);
+        let new = cx.debug_bounds("sidecar-panel-new-sidechat-0").unwrap();
+        let fork = cx.debug_bounds("sidecar-panel-fork-chat-0").unwrap();
+        assert!(
+            fork.top() >= new.bottom(),
+            "Fork chat sits under New sidechat"
+        );
+        click(cx, "sidecar-panel-fork-chat-0");
+        let forks = called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 1);
+        assert_eq!(forks[0]["sourceChatId"], "parent");
+        assert_eq!(forks[0]["createdByChatId"], "parent");
+
+        click(cx, "sidecar-collapse");
+        click(cx, "sidecar-rail-fork-chat-0");
+        called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 2);
+    }
+
+    #[gpui::test]
+    fn the_actions_section_runs_edits_imports_and_adds_project_actions(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        cx.executor().allow_parking();
+        let (shell, cx) = setup(cx);
+        let calls = attach_engine(&shell, &runtime, cx);
+        let key = crate::project_actions::ProjectActionsKey {
+            device_id: "dev".into(),
+            space_id: "s1".into(),
+        };
+        let snapshot: zeron_proto::ProjectActionsSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "spaceId": "s1",
+                "actions": [{
+                    "id": "dev", "name": "Dev", "command": "bun dev",
+                    "icon": "play", "runOnWorktreeCreate": false
+                }],
+                "importableActions": [{
+                    "name": "Lint", "command": "bun lint", "icon": "lint"
+                }],
+                "projectFileIssue": null
+            }))
+            .unwrap();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.spaces = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "s1", "deviceId": "dev", "path": "/repo",
+                        "gitDetected": false, "createdAt": "2026-09-18T00:00:00Z"
+                    }))
+                    .unwrap(),
+                ];
+                let parent = state.chats.iter_mut().find(|c| c.id == "parent").unwrap();
+                parent.space_id = Some("s1".into());
+            });
+            shell.project_actions.activate(Some(key.clone()));
+            let generation = shell.project_actions.begin_load(&key);
+            assert!(
+                shell
+                    .project_actions
+                    .accept_load(&key, generation, Ok(snapshot))
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let headings = shell.update(cx, |shell, cx| {
+            let theme = Theme::of(cx).clone();
+            shell
+                .sidecar_sections(&theme, cx)
+                .iter()
+                .map(|section| section.heading.to_string())
+                .collect::<Vec<_>>()
+        });
+        let side = headings.iter().position(|h| h == "Side chats").unwrap();
+        assert_eq!(headings[side + 1], "Actions");
+        let rows = [
+            "sidecar-panel-action-0",
+            "sidecar-panel-import-action-0",
+            "sidecar-panel-add-action-0",
+        ];
+        let tops: Vec<_> = rows
+            .iter()
+            .map(|row| cx.debug_bounds(row).unwrap().top())
+            .collect();
+        assert!(tops.windows(2).all(|pair| pair[0] < pair[1]));
+
+        click(cx, "sidecar-panel-add-action-0");
+        shell.update(cx, |shell, _| {
+            let editor = shell
+                .project_actions
+                .editor
+                .take()
+                .expect("Add action opens the editor");
+            assert_eq!(editor.action_id, None);
+        });
+        click(cx, "sidecar-panel-import-action-0");
+        shell.update(cx, |shell, cx| {
+            let editor = shell
+                .project_actions
+                .editor
+                .take()
+                .expect("Import opens the editor");
+            assert_eq!(editor.action_id, None);
+            assert_eq!(editor.name.read(cx).text(), "Lint");
+        });
+        let row = cx.debug_bounds("sidecar-panel-action-0").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        click(cx, "sidecar-panel-action-0-edit");
+        shell.update(cx, |shell, _| {
+            let editor = shell.project_actions.editor.take().expect("the gear edits");
+            assert_eq!(editor.action_id.as_deref(), Some("dev"));
+        });
+
+        click(cx, "sidecar-panel-action-0");
+        let runs = called(cx, &calls, zeron_rpc::methods::RUN_PROJECT_ACTION, 1);
+        assert_eq!(runs[0]["actionId"], "dev");
+        assert_eq!(runs[0]["spaceId"], "s1");
+        assert_eq!(runs[0]["chatId"], "parent");
+
+        crate::device_panel::tests::wait(cx, |cx| {
+            shell.read_with(cx, |shell, _| {
+                matches!(
+                    shell.project_actions.active_status(),
+                    Some(ProjectActionsStatus::Unavailable { .. })
+                )
+            })
+        });
+        shell.update(cx, |shell, _| {
+            let generation = shell.project_actions.begin_load(&key);
+            let snapshot = shell.project_actions.active_snapshot().cloned().unwrap();
+            shell
+                .project_actions
+                .accept_load(&key, generation, Ok(snapshot));
+        });
+        click(cx, "sidecar-collapse");
+        assert!(cx.debug_bounds("sidecar-rail-add-action-0").is_some());
+        click(cx, "sidecar-rail-action-0");
+        called(cx, &calls, zeron_rpc::methods::RUN_PROJECT_ACTION, 2);
     }
 }
