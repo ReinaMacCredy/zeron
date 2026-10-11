@@ -184,9 +184,41 @@ fn main() -> anyhow::Result<()> {
                     let shot = |cx: &mut AsyncApp, name: &str| capture(any, cx, &output, name);
                     pause(cx, 900).await;
                     shot(cx, "01-board-loading")?;
-                    pause(cx, 6000).await;
                     set_delay(0)?;
+                    let mut first = None;
+                    for _ in 0..60 {
+                        pause(cx, 500).await;
+                        first = window.update(cx, |s, _, cx| s.fixture_first_pull_request(cx))?;
+                        if first.is_some() {
+                            break;
+                        }
+                    }
+                    let first = first.ok_or_else(|| anyhow::anyhow!("the board did not load"))?;
+                    pause(cx, 600).await;
                     shot(cx, "02-board")?;
+                    let select = |cx: &mut AsyncApp, url: String| {
+                        window.update(cx, |_, w, cx| {
+                            w.dispatch_action(
+                                Box::new(pull_request_detail::SelectPullRequest(url)),
+                                cx,
+                            )
+                        })
+                    };
+                    let close = |cx: &mut AsyncApp| {
+                        window.update(cx, |_, w, cx| {
+                            w.dispatch_action(Box::new(pull_request_detail::ClosePullRequest), cx)
+                        })
+                    };
+                    select(cx, first)?;
+                    pause(cx, 110).await;
+                    shot(cx, "02c-split-opening")?;
+                    pause(cx, 2500).await;
+                    shot(cx, "02d-split")?;
+                    close(cx)?;
+                    pause(cx, 110).await;
+                    shot(cx, "02e-split-closing")?;
+                    pause(cx, 800).await;
+                    shot(cx, "02f-board-closed")?;
                     window.update(cx, |s, _, cx| s.fixture_pull_request_settings(true, cx))?;
                     pause(cx, 600).await;
                     shot(cx, "02b-settings")?;
@@ -273,16 +305,14 @@ fn main() -> anyhow::Result<()> {
                     open_chat(cx)?;
                     pause(cx, 800).await;
                     shot(cx, "15-activity-ai-light")?;
-                    window.update(cx, |_, w, cx| {
-                        w.dispatch_action(Box::new(pull_request_detail::ClosePullRequest), cx)
-                    })?;
-                    pause(cx, 4000).await;
-                    shot(cx, "16-split-first-light")?;
                     cx.update(pull_request_detail::toggle_pull_request_tabs);
                     pause(cx, 800).await;
                     shot(cx, "16c-split-tucked-light")?;
                     cx.update(pull_request_detail::toggle_pull_request_tabs);
                     pause(cx, 800).await;
+                    close(cx)?;
+                    pause(cx, 1500).await;
+                    shot(cx, "16-board-closed-light")?;
                     window.update(cx, |_, w, _| w.resize(size(px(760.), px(848.))))?;
                     pause(cx, 800).await;
                     shot(cx, "16b-board-760-light")?;

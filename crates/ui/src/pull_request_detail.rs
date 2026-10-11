@@ -655,7 +655,7 @@ impl PullRequestDetailPage {
         page
     }
 
-    pub(crate) fn titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn titlebar(&mut self, closable: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let url = self.url.clone();
         let copy_url = self.url.clone();
@@ -754,6 +754,16 @@ impl PullRequestDetailPage {
                     },
                 ),
             )
+            .when(closable, |bar| {
+                bar.child(
+                    action("pr-detail-close", "Close pull request", &theme).on_click(
+                        |_, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(Box::new(ClosePullRequest), cx);
+                        },
+                    ),
+                )
+            })
             .into_any_element()
     }
 
@@ -1543,6 +1553,7 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
             | "pr-previous-file"
             | "pr-next-file"
             | "pr-split"
+            | "pr-detail-close"
     );
     let glyph = match id {
         "pr-split" => Some(crate::icons::SPLIT_COLUMNS),
@@ -1556,6 +1567,7 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         "pr-detail-refresh" | "pr-retry" | "pr-retry-diff" => Some(crate::icons::REFRESH),
         "pr-external" => Some(crate::icons::ARROW_UP_RIGHT),
         "pr-files" => Some(crate::icons::FILE_TREE),
+        "pr-detail-close" => Some(crate::icons::CLOSE),
         _ => None,
     };
     widgets::ghost_action(theme)
@@ -3839,7 +3851,7 @@ mod tests {
     impl Render for DetailHost {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let header = self.page.update(cx, |page, cx| page.titlebar(cx));
+            let header = self.page.update(cx, |page, cx| page.titlebar(false, cx));
             let segments = [
                 DockSegment {
                     id: "test-prs",

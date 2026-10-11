@@ -6517,6 +6517,7 @@ impl Shell {
         if matches!(self.route, Route::PullRequests) {
             return;
         }
+        self.dismiss_pull_request_detail(cx);
         self.enter_pull_requests_route(cx);
         self.nav.push(NavEntry::PullRequests);
     }
@@ -6679,7 +6680,9 @@ impl Shell {
     fn close_pull_request(&mut self, cx: &mut Context<Self>) {
         // Closing the detail view is Back when the board is behind it, so
         // history doesn't grow a loop.
-        if self.nav.previous() == Some(&NavEntry::PullRequests) {
+        if !self.pull_request_open {
+            self.dismiss_pull_request_detail(cx);
+        } else if self.nav.previous() == Some(&NavEntry::PullRequests) {
             self.navigate_back(cx);
         } else {
             self.dismiss_pull_request_detail(cx);
@@ -8437,7 +8440,10 @@ impl Shell {
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
             .when_some(
                 self.shown_pull_request_detail(cx).cloned(),
-                |bar, detail| bar.child(detail.update(cx, |page, cx| page.titlebar(cx))),
+                |bar, detail| {
+                    let closable = self.pull_request_wide;
+                    bar.child(detail.update(cx, |page, cx| page.titlebar(closable, cx)))
+                },
             );
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("pull-requests-titlebar", bar, cx)
@@ -12922,14 +12928,8 @@ impl Shell {
             self.pull_request_wide = main_content_width >= crate::pull_requests::SPLIT_MIN_WIDTH
                 && crate::settings::current(cx).pull_request_destination
                     == crate::settings::PullRequestDestination::Native;
-            if self.pull_request_wide
-                && page.read(cx).tab() == crate::pull_requests::PageTab::PullRequests
-            {
-                let unselected = self.pull_request_detail.is_none();
-                let picked = page.update(cx, |page, cx| page.take_first_pick(unselected, cx));
-                if let Some(url) = picked {
-                    self.select_pull_request(url, window, cx);
-                }
+            if page.update(cx, |page, _| page.take_scope_change()) {
+                self.dismiss_pull_request_detail(cx);
             }
             let shown = self.shown_pull_request_detail(cx).cloned();
             let wide = self.pull_request_wide;
@@ -21733,6 +21733,12 @@ impl Shell {
         &self,
     ) -> Option<Entity<crate::pull_request_detail::PullRequestDetailPage>> {
         self.pull_request_detail.clone()
+    }
+
+    pub fn fixture_first_pull_request(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        self.pull_requests_page
+            .clone()?
+            .update(cx, |page, cx| page.board_urls(cx).into_iter().next())
     }
 
     pub fn fixture_pull_request_settings(&mut self, open: bool, cx: &mut Context<Self>) {

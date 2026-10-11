@@ -375,7 +375,12 @@ pub struct PullRequestsPage {
     git_project: Option<ProjectRef>,
     split_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     full_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
-    pick_first: bool,
+    wide: bool,
+    page_width: Option<f32>,
+    split_slide: crate::motion::IndicatorSlide,
+    split_open: bool,
+    layout_tab: PageTab,
+    scope_changed: bool,
 }
 
 impl PullRequestsPage {
@@ -395,7 +400,7 @@ impl PullRequestsPage {
             self.board_list.scroll_to_reveal_item(row);
         }
         if url.is_some() {
-            self.pick_first = false;
+            self.scope_changed = false;
         }
         self.selected_url = url;
         cx.notify();
@@ -415,9 +420,22 @@ impl PullRequestsPage {
         if self.split_detail.is_some() != split.is_some() {
             self.board_list.remeasure();
         }
-        if self.split_detail != split || self.full_detail != full {
+        if self.wide != wide || self.split_detail != split || self.full_detail != full {
             cx.notify();
         }
+        let open = split.is_some();
+        if open != self.split_open {
+            let snap = crate::motion::reduced_motion(cx)
+                || !wide
+                || wide != self.wide
+                || self.tab != self.layout_tab
+                || self.page_width.is_none();
+            self.split_slide
+                .retarget(if open { 1.0 } else { 0.0 }, snap, Instant::now());
+            self.split_open = open;
+        }
+        self.layout_tab = self.tab;
+        self.wide = wide;
         self.split_detail = split;
         self.full_detail = full;
     }
@@ -428,6 +446,30 @@ impl PullRequestsPage {
         self.split_detail.as_ref().or(self.full_detail.as_ref())
     }
 
+    fn owns_focus(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.repository_menu.is_open()
+            || self.sort_menu.is_open()
+            || self.device_menu.is_open()
+            || [
+                &self.repository_focus,
+                &self.sort_focus,
+                &self.device_focus,
+                &self.option_focus,
+            ]
+            .into_iter()
+            .any(|focus| focus.is_focused(window))
+            || self
+                .search
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+            || self
+                .repository_input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+    }
+
     fn bottom_clearance(&self, cx: &gpui::App) -> f32 {
         crate::pull_request_detail::NAV_CLEARANCE
             + self
@@ -436,7 +478,7 @@ impl PullRequestsPage {
                 .map_or(0.0, |detail| detail.read(cx).pill_room())
     }
 
-    fn board_urls(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+    pub(crate) fn board_urls(&mut self, cx: &mut Context<Self>) -> Vec<String> {
         let board = self.board(cx);
         board
             .rows
@@ -450,19 +492,8 @@ impl PullRequestsPage {
             .collect()
     }
 
-    pub(crate) fn take_first_pick(
-        &mut self,
-        unselected: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        if !(self.pick_first || unselected)
-            || matches!(self.load_state, PullRequestsLoadState::Loading) && self.items.is_empty()
-        {
-            return None;
-        }
-        let first = self.board_urls(cx).into_iter().next()?;
-        self.pick_first = false;
-        Some(first)
+    pub(crate) fn take_scope_change(&mut self) -> bool {
+        std::mem::take(&mut self.scope_changed)
     }
 
     pub(crate) fn step_on_arrow(
@@ -674,7 +705,7 @@ impl PullRequestsPage {
                 |page: &mut Self, _, event, cx| match event {
                     ComposerInputEvent::Submitted => {
                         page.return_focus = Some(page.repository_focus.clone());
-                        page.pick_first = true;
+                        page.scope_changed = true;
                         page.select_repository(cx);
                     }
                     ComposerInputEvent::Edited => {
@@ -753,7 +784,12 @@ impl PullRequestsPage {
             git_project: None,
             split_detail: None,
             full_detail: None,
-            pick_first: false,
+            wide: false,
+            page_width: None,
+            split_slide: crate::motion::IndicatorSlide::at(0.0, Instant::now()),
+            split_open: false,
+            layout_tab: tab,
+            scope_changed: false,
         };
         page.initialize_repository(cx);
         page
@@ -957,7 +993,7 @@ impl PullRequestsPage {
         if self.target_device == target {
             return;
         }
-        self.pick_first = true;
+        self.scope_changed = true;
 
         self.initial_scope_task = None;
         self.initial_scope_attempted = true;
@@ -1092,7 +1128,7 @@ impl PullRequestsPage {
         if self.filter == filter {
             return;
         }
-        self.pick_first = true;
+        self.scope_changed = true;
         self.set_filter(filter, cx);
         if self.repository.is_none() {
             cx.notify();
@@ -1153,7 +1189,7 @@ impl PullRequestsPage {
     }
 
     fn select_project(&mut self, path: String, device: String, cx: &mut Context<Self>) {
-        self.pick_first = true;
+        self.scope_changed = true;
         self.cancel_project_detection();
         let state = self.state.read(cx);
         let Some(engine) = state.engine().cloned() else {
@@ -1528,7 +1564,7 @@ impl PullRequestsPage {
                                 page.return_focus = Some(page.repository_focus.clone());
                                 page.repository_input
                                     .update(cx, |input, cx| input.set_text(&repo, cx));
-                                page.pick_first = true;
+                                page.scope_changed = true;
                                 page.select_repository(cx);
                             }))
                             .into_any_element(),
@@ -1574,7 +1610,7 @@ impl PullRequestsPage {
                                 .on_click(cx.listener(|page, _, _, cx| {
                                     cx.stop_propagation();
                                     page.return_focus = Some(page.repository_focus.clone());
-                                    page.pick_first = true;
+                                    page.scope_changed = true;
                                     page.select_repository(cx);
                                 })),
                         ),
@@ -2770,7 +2806,7 @@ impl Render for PullRequestsPage {
                                     } else {
                                         view
                                     };
-                                    page.pick_first = true;
+                                    page.scope_changed = true;
                                     page.scroll_to_top();
                                     if !selected {
                                         page.select_filter(ChangeRequestFilter::All, cx);
@@ -2909,13 +2945,43 @@ impl Render for PullRequestsPage {
             .child(width_probe)
             .child(results)
             .children(scrollbar);
+        let page_probe = {
+            let page = cx.weak_entity();
+            gpui::canvas(
+                move |bounds, window, cx| {
+                    let width = f32::from(bounds.size.width);
+                    window.defer(cx, move |_, cx| {
+                        page.update(cx, |page, cx| {
+                            if page
+                                .page_width
+                                .is_none_or(|current| (current - width).abs() > 0.5)
+                            {
+                                page.page_width = Some(width);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
         let page = div()
             .id("pull-requests-page")
             .debug_selector(|| "pull-requests-page".into())
             .relative()
             .size_full()
-            .flex();
-        let Some(detail) = split else {
+            .flex()
+            .child(page_probe);
+        let now = Instant::now();
+        let opened = self.split_slide.value_at(now);
+        let tweening = self.split_slide.animating_at(now);
+        if tweening {
+            window.request_animation_frame();
+        }
+        if split.is_none() && !tweening {
             return page
                 .flex_col()
                 .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
@@ -2923,33 +2989,76 @@ impl Render for PullRequestsPage {
                 .child(results)
                 .child(dock)
                 .into_any_element();
-        };
+        }
+        let tween = self.page_width.filter(|_| tweening).map(|full| {
+            (
+                full,
+                (full * LIST_SHARE).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH),
+            )
+        });
         page.child(
             div()
                 .id("pull-requests-list")
                 .debug_selector(|| "pull-requests-list".into())
                 .h_full()
                 .flex_none()
-                .w(gpui::relative(LIST_SHARE))
-                .min_w(px(LIST_MIN_WIDTH))
-                .max_w(px(LIST_MAX_WIDTH))
+                .map(|el| match tween {
+                    Some((full, list)) => el.w(px(crate::motion::lerp(full, list, opened))),
+                    None => el
+                        .w(gpui::relative(LIST_SHARE))
+                        .min_w(px(LIST_MIN_WIDTH))
+                        .max_w(px(LIST_MAX_WIDTH)),
+                })
                 .flex()
                 .flex_col()
                 .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
                 .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, window, cx| {
-                    if let Some(url) = page.step_on_arrow(event, cx) {
+                    if let Some(url) = page
+                        .split_detail
+                        .is_some()
+                        .then(|| page.step_on_arrow(event, cx))
+                        .flatten()
+                    {
                         cx.stop_propagation();
                         window.dispatch_action(
                             Box::new(crate::pull_request_detail::SelectPullRequest(url)),
                             cx,
                         );
+                    } else if event.keystroke.key == "escape"
+                        && !event.keystroke.modifiers.modified()
+                        && page.split_detail.is_some()
+                        && !page.owns_focus(window, cx)
+                    {
+                        // Park focus so the shell's Esc folds the composer, else closes.
+                        window.blur();
                     }
                 }))
                 .child(header)
                 .child(results),
         )
-        .child(div().flex_none().w(px(1.0)).h_full().bg(theme.border))
-        .child(div().flex_1().min_w_0().h_full().child(detail))
+        .when_some(split, |page, detail| {
+            page.child(div().flex_none().w(px(1.0)).h_full().bg(theme.border))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .relative()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right_0()
+                                .map(|el| match tween {
+                                    Some((full, list)) => el.w(px(full - list - 1.0)),
+                                    None => el.left_0(),
+                                })
+                                .child(detail),
+                        ),
+                )
+        })
         .child(dock)
         .into_any_element()
     }
@@ -3007,6 +3116,7 @@ impl PullRequestsPage {
                             first,
                             last,
                             selected,
+                            self.wide,
                             &theme,
                             cx,
                         )
@@ -3179,6 +3289,7 @@ fn render_table_row(
     first: bool,
     last: bool,
     selected: bool,
+    select: bool,
     theme: &Theme,
     cx: &gpui::App,
 ) -> AnyElement {
@@ -3205,7 +3316,14 @@ fn render_table_row(
         .hover(|style| style.bg(theme.glass_hover()))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            crate::pull_request_detail::open(&url, window, cx);
+            if select {
+                window.dispatch_action(
+                    Box::new(crate::pull_request_detail::SelectPullRequest(url.clone())),
+                    cx,
+                );
+            } else {
+                crate::pull_request_detail::open(&url, window, cx);
+            }
         });
     let (date_label, timestamp) = if sort_field == PullRequestSortField::Opened {
         ("Opened", item.created_at)
@@ -3994,6 +4112,7 @@ mod tests {
                 PullRequestSortField::Updated,
                 true,
                 true,
+                false,
                 false,
                 Theme::of(cx),
                 cx,
