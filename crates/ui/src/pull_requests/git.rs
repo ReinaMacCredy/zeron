@@ -1051,12 +1051,13 @@ impl GitTab {
         !self.message.read(cx).text().trim().is_empty()
     }
 
-    fn composer_lift(&self) -> f32 {
-        if self.composer_open {
-            self.float.height() + 8.0
-        } else {
-            0.0
-        }
+    fn bottom_clearance(&self) -> f32 {
+        crate::pull_request_detail::NAV_CLEARANCE
+            + if self.composer_open {
+                self.float.height() + 8.0
+            } else {
+                0.0
+            }
     }
 
     fn composer_idle(&self, cx: &App) -> bool {
@@ -2782,7 +2783,7 @@ impl GitTab {
             .absolute()
             .left_0()
             .right_0()
-            .bottom_0()
+            .bottom(px(crate::pull_request_detail::NAV_CLEARANCE))
             .child(crate::settings::widgets::page_column().pt_0().pb_0().child(
                 crate::dock_orb::float(
                     "git-composer-rise",
@@ -2855,11 +2856,12 @@ impl GitTab {
             .child(
                 div()
                     .id("git-diff-scroll")
+                    .debug_selector(|| "git-diff-scroll".into())
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .pt(px(8.0))
-                    .pb(px(self.composer_lift()))
+                    .pb(px(self.bottom_clearance()))
                     .child(render_diff(open, theme)),
             )
             .into_any_element()
@@ -3905,7 +3907,7 @@ impl GitTab {
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
-                    .pb(px(12.0 + self.composer_lift()))
+                    .pb(px(12.0 + self.bottom_clearance()))
                     .child(
                         div()
                             .px(px(12.0))
@@ -4501,10 +4503,10 @@ impl Render for GitTab {
             }
         }
         let files = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
-        let lift = self.composer_lift();
+        let clearance = self.bottom_clearance();
         self.history.update(cx, |history, cx| {
             history.set_working_tree(Some(files), cx);
-            history.set_bottom_inset(lift, cx);
+            history.set_bottom_inset(clearance, cx);
         });
         let main = match &self.expanded {
             Some(open) => self.render_file_diff(open, &theme, cx),
@@ -4796,13 +4798,7 @@ impl super::PullRequestsPage {
                     cx.stop_propagation();
                 }
             }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .pb(px(crate::pull_request_detail::NAV_CLEARANCE))
-                    .child(view),
-            )
+            .child(div().flex_1().min_h_0().child(view))
             .child(dock)
             .into_any_element()
     }
@@ -5430,12 +5426,73 @@ mod tests {
                 "on Git the repository menu shares the toolbar row"
             );
             let content = cx.debug_bounds("pull-requests-git").unwrap();
-            let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
-            assert!(
-                content.bottom() <= dock.top(),
-                "Git content clears the dock"
+            let page = cx.debug_bounds("pull-requests-page").unwrap();
+            assert_eq!(
+                content.bottom(),
+                page.bottom(),
+                "Git content runs under the dock"
             );
         }
+    }
+
+    #[gpui::test]
+    fn the_history_and_its_file_diff_run_under_the_dock_to_the_page_bottom(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_page, tab, cx, _calls, _dir) = git_page(cx);
+        let history = tab.read_with(cx, |tab, _| tab.history.clone());
+        let inset = |cx: &mut gpui::VisualTestContext| {
+            history.read_with(cx, |history, _| history.bottom_inset())
+        };
+        settle(cx, |cx| cx.debug_bounds("git-working-tree-row").is_some());
+        let page = cx.debug_bounds("pull-requests-page").unwrap();
+        let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+        let rows = cx.debug_bounds("git-history-rows").unwrap();
+        assert_eq!(rows.bottom(), page.bottom(), "no band under the history");
+        assert!(rows.top() < dock.top(), "the dock floats over the history");
+        assert_eq!(
+            inset(cx),
+            crate::pull_request_detail::NAV_CLEARANCE,
+            "the last row scrolls clear of the dock"
+        );
+        assert!(page.bottom() - px(inset(cx)) <= dock.top());
+
+        press(cx, "git-commit-orb");
+        if cx.debug_bounds("git-tray").is_none() {
+            press(cx, "git-chip-files");
+        }
+        settle(cx, |cx| {
+            cx.update(|window, _| window.refresh());
+            let height = cx
+                .debug_bounds("git-composer")
+                .map(|bounds| f32::from(bounds.size.height));
+            height.is_some_and(|height| {
+                inset(cx) >= crate::pull_request_detail::NAV_CLEARANCE + height
+            })
+        });
+        let composer = cx.debug_bounds("git-composer").unwrap();
+        assert_eq!(
+            cx.debug_bounds("git-history-rows").unwrap(),
+            rows,
+            "the composer floats without moving the history"
+        );
+        assert!(composer.bottom() <= dock.top());
+        assert!(
+            page.bottom() - px(inset(cx)) <= composer.top(),
+            "the last row scrolls clear of the composer and the dock"
+        );
+
+        press(cx, "git-staged-row-0");
+        settle(cx, |cx| cx.debug_bounds("git-file-diff").is_some());
+        let diff = cx.debug_bounds("git-diff-scroll").unwrap();
+        assert_eq!(
+            diff.bottom(),
+            page.bottom(),
+            "the diff runs under the dock too"
+        );
+        assert!(cx.debug_bounds("git-composer").is_some());
     }
 
     #[test]

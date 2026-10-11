@@ -491,7 +491,6 @@ impl PullRequestDetailPage {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let tucked = settings::pull_request_tabs_tucked(cx);
         let mut page = Self {
             state,
             url,
@@ -566,8 +565,8 @@ impl PullRequestDetailPage {
             chat_dock: None,
             chat_expanded: false,
             chat_float: Default::default(),
-            tucked,
-            tuck: crate::motion::IndicatorSlide::at(if tucked { 1.0 } else { 0.0 }, Instant::now()),
+            tucked: false,
+            tuck: crate::motion::IndicatorSlide::at(0.0, Instant::now()),
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -969,7 +968,6 @@ impl PullRequestDetailPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let now = Instant::now();
-        self.sync_tuck(cx);
         if self.tuck.animating_at(now) || self.tab_slide.animating_at(now) {
             window.request_animation_frame();
         }
@@ -995,7 +993,14 @@ impl PullRequestDetailPage {
         dock_stack(
             pill,
             dock,
-            Some(tuck_tab(self.tucked, theme)),
+            Some(tuck_tab(
+                self.tucked,
+                theme,
+                cx.listener(|page, _, _, cx| {
+                    cx.stop_propagation();
+                    page.toggle_tabs(cx);
+                }),
+            )),
             Some(self.chat_orb(theme, cx)),
         )
     }
@@ -1047,16 +1052,25 @@ impl PullRequestDetailPage {
         )
     }
 
-    fn sync_tuck(&mut self, cx: &App) {
-        let tucked = settings::pull_request_tabs_tucked(cx);
-        if tucked != self.tucked {
-            self.tucked = tucked;
-            self.tuck.retarget(
-                if tucked { 1.0 } else { 0.0 },
-                crate::motion::reduced_motion(cx),
-                Instant::now(),
-            );
+    fn set_tucked(&mut self, tucked: bool, cx: &mut Context<Self>) {
+        if tucked == self.tucked {
+            return;
         }
+        self.tucked = tucked;
+        self.tuck.retarget(
+            if tucked { 1.0 } else { 0.0 },
+            crate::motion::reduced_motion(cx),
+            Instant::now(),
+        );
+        cx.notify();
+    }
+
+    pub fn toggle_tabs(&mut self, cx: &mut Context<Self>) {
+        self.set_tucked(!self.tucked, cx);
+    }
+
+    pub(crate) fn show_tabs(&mut self, cx: &mut Context<Self>) {
+        self.set_tucked(false, cx);
     }
 
     pub(crate) fn pill_room(&self) -> f32 {
@@ -1360,7 +1374,11 @@ fn pill_back(number: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn tuck_tab(tucked: bool, theme: &Theme) -> AnyElement {
+fn tuck_tab(
+    tucked: bool,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     let (glyph, label, state) = if tucked {
         (crate::icons::ALT_ARROW_UP, "Show pull request tabs", "up")
     } else {
@@ -1391,10 +1409,7 @@ fn tuck_tab(tucked: bool, theme: &Theme) -> AnyElement {
         .occlude()
         .focus_visible(|style| style.border_color(theme.accent))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(|_, _, cx| {
-            cx.stop_propagation();
-            toggle_pull_request_tabs(cx);
-        })
+        .on_click(on_click)
         .child(
             crate::icons::icon(glyph)
                 .debug_selector(move || format!("pr-pill-tuck-{state}"))
@@ -1410,13 +1425,6 @@ fn tuck_tab(tucked: bool, theme: &Theme) -> AnyElement {
         .justify_center()
         .child(crate::frost::frosted(8.0, crate::frost::MENU_BLUR, tab))
         .into_any_element()
-}
-
-pub fn toggle_pull_request_tabs(cx: &mut App) {
-    settings::update(settings::SavePolicy::Debounced, cx, |settings| {
-        settings.pull_request_tabs_tucked = !settings.pull_request_tabs_tucked;
-    });
-    cx.refresh_windows();
 }
 
 fn dock_stack(
@@ -1874,7 +1882,6 @@ impl Render for PullRequestDetailPage {
         }
         self.park_hidden_chat_focus(window, cx);
         let theme = Theme::of(cx).clone();
-        self.sync_tuck(cx);
         let lift = self.chat_lift();
         let pill_room = self.pill_room();
         let empty_activity = self.tab == Tab::Activity
@@ -4303,7 +4310,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tucking_hides_the_pill_returns_its_room_and_persists(cx: &mut gpui::TestAppContext) {
+    fn tucking_hides_the_pill_for_this_view_only(cx: &mut gpui::TestAppContext) {
         let _dir = fixture::settings(cx, crate::settings::UiSettings::default());
         cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
@@ -4318,7 +4325,6 @@ mod tests {
         let tuck = cx.debug_bounds("pr-pill-tuck").unwrap();
         cx.simulate_click(tuck.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert!(cx.update(|_, cx| crate::settings::pull_request_tabs_tucked(cx)));
         assert!(cx.debug_bounds("pr-pill").is_none(), "tucked away");
         assert!(
             cx.debug_bounds("pr-pill-tuck-up").is_some(),
@@ -4336,21 +4342,36 @@ mod tests {
             "the content takes the pill's room"
         );
         page.read_with(cx, |page, _| assert!(page.tab == Tab::Code));
+        page.update(cx, |page, cx| page.show_tabs(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-pill").is_some(), "showing untucks");
+        assert_eq!(cx.debug_bounds("pr-code-viewport").unwrap(), viewport);
+        cx.simulate_click(tuck.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-pill").is_none());
 
         let (fresh, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("pr-pill").is_none(),
-            "a new PR starts tucked"
+            cx.debug_bounds("pr-pill").is_some(),
+            "a new PR starts with its pill out"
         );
         fresh.read_with(cx, |host, cx| {
-            assert_eq!(host.page.read(cx).nav_clearance(), NAV_CLEARANCE)
+            assert_eq!(
+                host.page.read(cx).nav_clearance(),
+                NAV_CLEARANCE + PILL_ROOM
+            )
+        });
+        page.read_with(cx, |page, _| {
+            assert!(page.tucked, "the other view keeps its tuck")
         });
         let tuck = cx.debug_bounds("pr-pill-tuck").unwrap();
         cx.simulate_click(tuck.center(), gpui::Modifiers::default());
         cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-pill").is_none());
+        cx.simulate_click(tuck.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
         assert!(cx.debug_bounds("pr-pill").is_some(), "and comes back out");
         assert!(cx.debug_bounds("pr-pill-tuck-down").is_some());
-        assert!(!cx.update(|_, cx| crate::settings::pull_request_tabs_tucked(cx)));
     }
 }

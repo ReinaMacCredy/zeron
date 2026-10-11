@@ -3862,9 +3862,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_tucked_pill_survives_a_new_selection_and_the_composer_rises_over_the_pill(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_composer_rises_over_the_pill_and_sits_lower_when_tucked(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         open_board(&runtime, &shell, cx, &mut wire);
@@ -3880,7 +3878,6 @@ mod tests {
 
         click(cx, "pr-pill-tuck");
         settle(cx);
-        assert!(cx.update(|_, cx| settings::pull_request_tabs_tucked(cx)));
         assert!(cx.debug_bounds("pr-pill").is_none());
         assert!(cx.debug_bounds("pr-pill-tuck-up").is_some());
         assert_eq!(
@@ -3899,15 +3896,93 @@ mod tests {
         cx.simulate_keystrokes("escape");
         settle(cx);
 
+        click(cx, "pull-requests-tab-Git");
+        click(cx, "pull-requests-tab-PullRequests");
+        assert!(
+            cx.debug_bounds("pr-pill").is_none(),
+            "still viewing the same PR, so still tucked"
+        );
+        click(cx, "pr-pill-tuck");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-pill").is_some());
+    }
+
+    fn tuck_pill(cx: &mut VisualTestContext) {
+        click(cx, "pr-pill-tuck");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-pill").is_none(), "tucked");
+    }
+
+    fn assert_pill_out(cx: &mut VisualTestContext, why: &str) {
+        assert!(cx.debug_bounds("pr-pill").is_some(), "{why}");
+        assert!(cx.debug_bounds("pr-pill-tuck-down").is_some(), "{why}");
+    }
+
+    #[gpui::test]
+    fn clicking_a_pull_request_always_brings_a_tucked_pill_back(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_board(&runtime, &shell, cx, &mut wire);
+        open_split(&runtime, &shell, cx, &mut wire);
+        tuck_pill(cx);
+
         click(cx, "pull-request-list-row-8");
         wire.open(&runtime, cx);
         settle(cx);
         assert_eq!(selected(&shell, cx), Some(url(8)));
-        assert!(cx.debug_bounds("pr-pill").is_none(), "still tucked on #8");
-        click(cx, "pr-pill-tuck");
+        assert_pill_out(cx, "another row");
+
+        tuck_pill(cx);
+        click(cx, "pull-request-list-row-8");
         settle(cx);
-        assert!(cx.debug_bounds("pr-pill").is_some());
-        assert!(!cx.update(|_, cx| settings::pull_request_tabs_tucked(cx)));
+        assert_eq!(selected(&shell, cx), Some(url(8)));
+        assert_pill_out(cx, "the same row again");
+
+        tuck_pill(cx);
+        let row = bounds(cx, "pull-request-list-row-8");
+        cx.simulate_mouse_down(row.center(), gpui::MouseButton::Left, Default::default());
+        settle(cx);
+        assert!(cx.debug_bounds("pr-pill").is_none(), "a press alone");
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(8)));
+        assert_pill_out(cx, "enter on the row");
+
+        tuck_pill(cx);
+        click(cx, "pr-detail-close");
+        assert_full_board(&shell, cx);
+        open_split(&runtime, &shell, cx, &mut wire);
+        assert_pill_out(cx, "opening the split from the board");
+
+        tuck_pill(cx);
+        cx.simulate_resize(gpui::size(px(600.0), px(800.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-detail-scroll").is_none(),
+            "selected, not opened"
+        );
+        click(cx, "pull-request-row");
+        wire.open(&runtime, cx);
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(9)), "the same PR, opened");
+        assert!(cx.debug_bounds("pr-detail-back").is_some());
+        assert_pill_out(cx, "a narrow open");
+
+        tuck_pill(cx);
+        cx.update(|window, _| window.blur());
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        shell.read_with(cx, |shell, _| assert!(shell.pull_request_detail.is_none()));
+        click(cx, "pull-request-row");
+        wire.open(&runtime, cx);
+        settle(cx);
+        assert_pill_out(cx, "a narrow open after going back");
     }
 
     #[gpui::test]

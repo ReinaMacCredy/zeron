@@ -896,11 +896,6 @@ pub fn home_widgets(cx: &App) -> HomeWidgets {
         .unwrap_or_default()
 }
 
-pub fn pull_request_tabs_tucked(cx: &App) -> bool {
-    cx.try_global::<SettingsStore>()
-        .is_some_and(|store| store.current.pull_request_tabs_tucked)
-}
-
 pub fn update_home_widgets(cx: &mut App, mutate: impl FnOnce(&mut HomeWidgets)) {
     if update(SavePolicy::Immediate, cx, |settings| {
         mutate(&mut settings.home_widgets)
@@ -1527,7 +1522,6 @@ pub struct UiSettings {
     pub pull_requests_tab: crate::pull_requests::PageTab,
     /// Device-local bookmarks, keyed by provider/repository/PR, never GitHub mutations.
     pub pull_request_stars: Vec<String>,
-    pub pull_request_tabs_tucked: bool,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1672,7 +1666,6 @@ impl Default for UiSettings {
             last_pull_request_device: None,
             pull_requests_tab: crate::pull_requests::PageTab::PullRequests,
             pull_request_stars: Vec::new(),
-            pull_request_tabs_tucked: false,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -2387,7 +2380,6 @@ impl UiSettings {
             last_pull_request_device,
             pull_requests_tab,
             pull_request_stars,
-            pull_request_tabs_tucked,
         );
         current
     }
@@ -3285,6 +3277,19 @@ mod tests {
     }
 
     #[test]
+    fn the_retired_tucked_pill_key_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth":300.0,"pullRequestsTab":"git","pullRequestTabsTucked":true}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert_eq!(loaded.pull_requests_tab, crate::pull_requests::PageTab::Git);
+    }
+
+    #[test]
     fn unknown_keys_from_a_newer_build_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -3794,7 +3799,6 @@ mod tests {
             last_pull_request_device: Some("remote-device".into()),
             pull_requests_tab: crate::pull_requests::PageTab::Git,
             pull_request_stars: vec!["https://github.com/acme/zeron/pull/123".into()],
-            pull_request_tabs_tucked: true,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

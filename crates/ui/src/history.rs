@@ -4604,6 +4604,7 @@ impl Render for GitHistory {
                 .into_any_element()
         } else {
             div()
+                .debug_selector(|| "git-history-rows".into())
                 .relative()
                 .flex_1()
                 .min_h_0()

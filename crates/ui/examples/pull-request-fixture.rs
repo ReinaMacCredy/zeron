@@ -305,10 +305,10 @@ fn main() -> anyhow::Result<()> {
                     open_chat(cx)?;
                     pause(cx, 800).await;
                     shot(cx, "15-activity-ai-light")?;
-                    cx.update(pull_request_detail::toggle_pull_request_tabs);
+                    detail.update(cx, |d, cx| d.toggle_tabs(cx));
                     pause(cx, 800).await;
                     shot(cx, "16c-split-tucked-light")?;
-                    cx.update(pull_request_detail::toggle_pull_request_tabs);
+                    detail.update(cx, |d, cx| d.toggle_tabs(cx));
                     pause(cx, 800).await;
                     close(cx)?;
                     pause(cx, 1500).await;

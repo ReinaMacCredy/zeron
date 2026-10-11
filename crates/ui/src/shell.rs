@@ -6589,11 +6589,12 @@ impl Shell {
         if let Some(page) = &self.pull_requests_page {
             page.update(cx, |page, cx| page.select_url(Some(url.clone()), cx));
         }
-        if self
+        if let Some(detail) = self
             .pull_request_detail
-            .as_ref()
-            .is_some_and(|detail| detail.read(cx).url == url)
+            .clone()
+            .filter(|detail| detail.read(cx).url == url)
         {
+            detail.update(cx, |detail, cx| detail.show_tabs(cx));
             self.sync_pr_chat_target(true, cx);
             cx.notify();
             return;
