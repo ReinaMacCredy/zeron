@@ -3,7 +3,7 @@
 use super::*;
 use crate::computer::{self, presence::PresenceTone, preview};
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
-use crate::project_actions::{ProjectActionsStatus, action_icon};
+use crate::project_actions::{ProjectActionsStatus, action_icon, action_label};
 use std::rc::Rc;
 use zeron_proto::computer::ComputerPreviewPlacement;
 use zeron_proto::device_hub::{DeviceOpener, DevicePlatform};
@@ -476,12 +476,12 @@ impl Shell {
         }
         let can_run = status.can_run();
         for (ix, action) in snapshot.actions.into_iter().enumerate() {
-            let label = if action.run_on_worktree_create {
-                format!("{} (setup)", action.name)
-            } else {
-                action.name.clone()
-            };
-            let mut entry = SidecarEntry::new("action", ix, action_icon(action.icon), label);
+            let mut entry = SidecarEntry::new(
+                "action",
+                ix,
+                action_icon(action.icon),
+                action_label(&action),
+            );
             if can_run {
                 let key = key.clone();
                 let run = action.clone();

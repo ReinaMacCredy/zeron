@@ -219,6 +219,14 @@ pub fn preferred_action<'a>(
         .or_else(|| actions.first())
 }
 
+pub fn action_label(action: &ProjectAction) -> String {
+    if action.run_on_worktree_create {
+        format!("{} (setup)", action.name)
+    } else {
+        action.name.clone()
+    }
+}
+
 pub fn action_icon(icon: ProjectActionIcon) -> &'static str {
     match icon {
         ProjectActionIcon::Play => crate::icons::ACTION_PLAY,

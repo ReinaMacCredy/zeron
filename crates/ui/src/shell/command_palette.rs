@@ -5,9 +5,11 @@ use super::terminal_tabs::TerminalLaunch;
 use super::*;
 use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
+use crate::project_actions::{ProjectActionsKey, ProjectActionsStatus, action_icon, action_label};
 use zeron_proto::{
-    SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest, WorkspaceContentMatch,
-    WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
+    ProjectAction, ProjectActionDraft, SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest,
+    WorkspaceContentMatch, WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState,
+    WorkspaceTarget,
 };
 
 /// Key context of the palette card: its mod-1…4 tab bindings live here.
@@ -297,6 +299,33 @@ enum RowKind {
     },
     /// A line of a file in the focused chat's workspace.
     Content(WorkspaceContentMatch),
+    RunAction {
+        key: ProjectActionsKey,
+        action: ProjectAction,
+        label: String,
+    },
+    ImportAction {
+        draft: ProjectActionDraft,
+        label: String,
+    },
+    AddAction {
+        label: String,
+    },
+}
+
+impl RowKind {
+    fn project_action(&self) -> Option<(&'static str, &str, &'static str)> {
+        match self {
+            Self::RunAction { action, label, .. } => {
+                Some((action_icon(action.icon), label, "run action"))
+            }
+            Self::ImportAction { draft, label } => {
+                Some((action_icon(draft.icon), label, "import action"))
+            }
+            Self::AddAction { label } => Some((icons::ASTRA_PLUS, label, "")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -322,6 +351,9 @@ impl PaletteRow {
             RowKind::Content(found) => {
                 format!("content:{}:{}:{}", found.path, found.line, found.column)
             }
+            RowKind::RunAction { action, .. } => format!("action:{}", action.id),
+            RowKind::ImportAction { draft, .. } => format!("import-action:{}", draft.name),
+            RowKind::AddAction { .. } => "add-action".into(),
         };
         RowKey(self.section, id)
     }
@@ -493,6 +525,9 @@ impl Shell {
         });
         // Load the default Files list (recently changed files) right away.
         self.search_palette_workspace(cx);
+        if matches!(self.route, Route::Chat) {
+            self.ensure_project_actions(cx);
+        }
         cx.notify();
     }
 
@@ -687,12 +722,14 @@ impl Shell {
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
         let can_archive = self.state.read(cx).archivable_selected_chat().is_some();
+        let project_actions = self.palette_project_actions(&query, cx);
         let commands = |section| {
             PaletteSection::new(
                 section,
                 commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive)
                     .into_iter()
-                    .map(RowKind::Command),
+                    .map(RowKind::Command)
+                    .chain(project_actions.iter().cloned()),
             )
         };
         let threads = |limit| {
@@ -782,6 +819,64 @@ impl Shell {
         sections
             .into_iter()
             .filter(|section| !section.is_empty())
+            .collect()
+    }
+
+    fn palette_project_actions(&self, query: &str, cx: &App) -> Vec<RowKind> {
+        if !matches!(self.route, Route::Chat) {
+            return Vec::new();
+        }
+        let Some(key) = self
+            .project_action_context(cx)
+            .map(|context| context.key)
+            .filter(|key| self.project_actions.active.as_ref() == Some(key))
+        else {
+            return Vec::new();
+        };
+        let Some(status) = self.project_actions.active_status().filter(|status| {
+            !matches!(
+                status,
+                ProjectActionsStatus::Idle | ProjectActionsStatus::Loading
+            )
+        }) else {
+            return Vec::new();
+        };
+        let Some(snapshot) = self.project_actions.visible_snapshot() else {
+            return Vec::new();
+        };
+        let project = self
+            .state
+            .read(cx)
+            .space_row(&key.space_id)
+            .map(|space| space.display_name().to_owned())
+            .unwrap_or_default();
+        let runs = status
+            .can_run()
+            .then_some(snapshot.actions)
+            .into_iter()
+            .flatten()
+            .map(|action| RowKind::RunAction {
+                label: format!("{} · {project}", action_label(&action)),
+                key: key.clone(),
+                action,
+            });
+        let imports = snapshot
+            .importable_actions
+            .into_iter()
+            .map(|draft| RowKind::ImportAction {
+                label: format!("{} · {project}", draft.name),
+                draft,
+            });
+        let add = RowKind::AddAction {
+            label: format!("Add action… · {project}"),
+        };
+        runs.chain(imports)
+            .chain([add])
+            .filter(|row| {
+                row.project_action().is_some_and(|(_, label, verbs)| {
+                    matches_query(query, &format!("{verbs} {label}"))
+                })
+            })
             .collect()
     }
 
@@ -921,6 +1016,11 @@ impl Shell {
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
+            RowKind::RunAction { key, action, .. } => self.run_project_action(&key, action, cx),
+            RowKind::ImportAction { draft, .. } => {
+                self.open_project_action_editor(None, Some(draft), cx)
+            }
+            RowKind::AddAction { .. } => self.open_project_action_editor(None, None, cx),
             RowKind::File { path, is_dir } => {
                 self.open_palette_path(path, is_dir, None, window, cx)
             }
@@ -993,32 +1093,41 @@ impl Shell {
     ) -> Option<AnyElement> {
         Some(match &row.kind {
             RowKind::Command(command) => {
-                let label = command.label();
                 let shortcut = self.command_shortcut(command);
                 let target = row.clone();
-                popover::menu_row(theme, active, format!("command-action-{ix}"))
-                    .id(("command-action", ix))
-                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .min_h(px(30.0))
-                    .py(px(4.0))
+                command_row(
+                    theme,
+                    active,
+                    ix,
+                    command.icon(),
+                    command.label().into(),
+                    query,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate_palette_row(target.clone(), window, cx)
+                }))
+                .when_some(shortcut, |row, shortcut| {
+                    row.child(popover::kbd_hint(theme, &shortcut))
+                })
+                .into_any_element()
+            }
+            RowKind::RunAction { .. }
+            | RowKind::ImportAction { .. }
+            | RowKind::AddAction { .. } => {
+                let (glyph, label, _) = row.kind.project_action()?;
+                let import = matches!(row.kind, RowKind::ImportAction { .. });
+                let target = row.clone();
+                command_row(theme, active, ix, glyph, label.to_owned().into(), query)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
                     }))
-                    .child(
-                        icon(command.icon())
-                            .size(px(16.0))
-                            .flex_none()
-                            .text_color(theme.text_muted),
-                    )
-                    .child(div().flex_1().min_w_0().child(popover::search_highlight(
-                        label.into(),
-                        Some(query),
-                        theme,
-                    )))
-                    .when_some(shortcut, |row, shortcut| {
-                        row.child(popover::kbd_hint(theme, &shortcut))
+                    .when(import, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .child("Import"),
+                        )
                     })
                     .into_any_element()
             }
@@ -1349,6 +1458,35 @@ impl Shell {
             );
         Some(palette_overlay(viewport, card))
     }
+}
+
+fn command_row(
+    theme: &Theme,
+    active: bool,
+    ix: usize,
+    glyph: &'static str,
+    label: SharedString,
+    query: &str,
+) -> gpui::Stateful<gpui::Div> {
+    popover::menu_row(theme, active, format!("command-action-{ix}"))
+        .id(("command-action", ix))
+        .rounded(px(popover::PALETTE_ITEM_RADIUS))
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .min_h(px(30.0))
+        .py(px(4.0))
+        .child(
+            icon(glyph)
+                .size(px(16.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(popover::search_highlight(label, Some(query), theme)),
+        )
 }
 
 /// A section's title, in the sidebar's secondary text style, with its
@@ -3007,5 +3145,317 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    fn action_space(id: &str, path: &str) -> zeron_proto::Space {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "local", "path": path,
+            "gitDetected": false, "createdAt": "2026-09-18T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn action_chat(id: &str, space: Option<&str>, age: i64) -> zeron_proto::Chat {
+        let mut chat = chat(id, None, false, age);
+        chat.space_id = space.map(str::to_string);
+        chat
+    }
+
+    fn action_shell(
+        cx: &mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        dir: &std::path::Path,
+    ) -> (gpui::WindowHandle<Shell>, crate::device_panel::tests::Calls) {
+        cx.executor().allow_parking();
+        let window = palette_drag_shell(cx, dir);
+        let (engine, calls) = crate::device_panel::tests::fake_engine_with(
+            runtime,
+            std::sync::Arc::new(|method| {
+                if method == methods::LIST_PROJECT_ACTIONS {
+                    serde_json::json!({
+                        "spaceId": "s1",
+                        "actions": [{
+                            "id": "dev", "name": "Dev", "command": "bun dev",
+                            "icon": "play", "runOnWorktreeCreate": false
+                        }],
+                        "importableActions": [{
+                            "name": "Lint", "command": "bun lint", "icon": "lint"
+                        }],
+                        "projectFileIssue": null
+                    })
+                } else {
+                    serde_json::json!({})
+                }
+            }),
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.local_device_id = Some("local".into());
+                    state.spaces = vec![
+                        action_space("s1", "/code/alpha"),
+                        action_space("s2", "/code/beta"),
+                    ];
+                    state.apply_chats(vec![
+                        action_chat("a", Some("s1"), 0),
+                        action_chat("b", Some("s2"), 1),
+                        action_chat("loose", None, 2),
+                    ]);
+                    state.set_test_engine(engine);
+                    state.select_chat(Some("a".into()), cx);
+                });
+                shell.active_chat = "a".into();
+            })
+            .unwrap();
+        (window, calls)
+    }
+
+    fn open_palette(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) {
+        window
+            .update(cx, |shell, window, cx| {
+                if shell.command_palette.is_some() {
+                    shell.close_command_palette(window, cx);
+                }
+                shell.toggle_command_palette(window, cx);
+            })
+            .unwrap();
+    }
+
+    fn action_rows(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<RowKind> {
+        window
+            .update(cx, |shell, _, cx| {
+                sections(shell, cx)
+                    .into_iter()
+                    .flat_map(|(_, rows)| rows)
+                    .filter(|row| row.project_action().is_some())
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    fn action_labels(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<String> {
+        action_rows(window, cx)
+            .iter()
+            .filter_map(|row| row.project_action().map(|(_, label, _)| label.to_string()))
+            .collect()
+    }
+
+    fn wait_for_labels(
+        window: gpui::WindowHandle<Shell>,
+        cx: &mut TestAppContext,
+        expected: &[&str],
+    ) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if action_labels(window, cx) == expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(action_labels(window, cx), expected);
+    }
+
+    const ALPHA: [&str; 3] = ["Dev · alpha", "Lint · alpha", "Add action… · alpha"];
+
+    #[gpui::test]
+    fn palette_lists_the_current_projects_actions_and_none_without_one(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (window, calls) = action_shell(cx, &runtime, dir.path());
+
+        open_palette(window, cx);
+        wait_for_labels(window, cx, &ALPHA);
+        let loads = crate::device_panel::tests::calls_of(&calls, methods::LIST_PROJECT_ACTIONS);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0]["spaceId"], "s1");
+        let rows = action_rows(window, cx);
+        assert!(matches!(&rows[0], RowKind::RunAction { action, .. } if action.id == "dev"));
+        assert!(matches!(&rows[1], RowKind::ImportAction { draft, .. } if draft.name == "Lint"));
+        assert_eq!(
+            rows[0].project_action().unwrap().0,
+            action_icon(zeron_proto::ProjectActionIcon::Play)
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                let quick = sections(shell, cx)
+                    .into_iter()
+                    .find(|(section, _)| *section == Section::QuickActions)
+                    .unwrap();
+                assert!(quick.1.contains(&rows[0]));
+                shell.select_palette_tab(Tab::Commands, cx);
+            })
+            .unwrap();
+        assert_eq!(action_labels(window, cx), ALPHA);
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("loose".into()), cx));
+                shell.active_chat = "loose".into();
+            })
+            .unwrap();
+        open_palette(window, cx);
+        assert!(
+            action_labels(window, cx).is_empty(),
+            "a chat without a project has no actions"
+        );
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("a".into()), cx));
+                shell.active_chat = "a".into();
+            })
+            .unwrap();
+        for route in [
+            Route::PullRequests,
+            Route::Settings(SettingsSection::default()),
+        ] {
+            window
+                .update(cx, |shell, _, _| shell.route = route)
+                .unwrap();
+            open_palette(window, cx);
+            assert!(
+                action_labels(window, cx).is_empty(),
+                "{route:?} has no actions"
+            );
+        }
+        window
+            .update(cx, |shell, _, _| shell.route = Route::Chat)
+            .unwrap();
+        open_palette(window, cx);
+        wait_for_labels(window, cx, &ALPHA);
+    }
+
+    #[gpui::test]
+    fn split_offers_the_focused_panes_project_actions(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (window, calls) = action_shell(cx, &runtime, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.drop_session_on_side("b".into(), split::SplitSide::Right, cx);
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert_eq!(shell.split_chat_id(), Some("b"));
+            })
+            .unwrap();
+        open_palette(window, cx);
+        wait_for_labels(window, cx, &ALPHA);
+
+        window
+            .update(cx, |shell, window, cx| {
+                shell.close_command_palette(window, cx);
+                shell.open_chat("b".into(), cx);
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert_eq!(shell.split_chat_id(), Some("a"), "still split, b focused");
+            })
+            .unwrap();
+        open_palette(window, cx);
+        wait_for_labels(
+            window,
+            cx,
+            &["Dev · beta", "Lint · beta", "Add action… · beta"],
+        );
+        let loads = crate::device_panel::tests::calls_of(&calls, methods::LIST_PROJECT_ACTIONS);
+        assert_eq!(loads.last().unwrap()["spaceId"], "s2");
+    }
+
+    #[gpui::test]
+    fn palette_action_rows_run_import_and_add_through_the_sidecar_handlers(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (window, calls) = action_shell(cx, &runtime, dir.path());
+        open_palette(window, cx);
+        wait_for_labels(window, cx, &ALPHA);
+
+        let activate = |ix: usize, cx: &mut TestAppContext| {
+            open_palette(window, cx);
+            let row = action_rows(window, cx)[ix].clone();
+            window
+                .update(cx, |shell, window, cx| {
+                    let section = sections(shell, cx)
+                        .into_iter()
+                        .find(|(_, rows)| rows.contains(&row))
+                        .unwrap()
+                        .0;
+                    shell.activate_palette_row(PaletteRow::new(section, row), window, cx);
+                    assert!(shell.command_palette.is_none(), "the palette closes");
+                })
+                .unwrap();
+        };
+
+        activate(2, cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let editor = shell
+                    .project_actions
+                    .editor
+                    .take()
+                    .expect("Add action opens the editor");
+                assert_eq!(editor.action_id, None);
+                assert_eq!(editor.name.read(cx).text(), "");
+            })
+            .unwrap();
+        activate(1, cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let editor = shell
+                    .project_actions
+                    .editor
+                    .take()
+                    .expect("Import opens the editor");
+                assert_eq!(editor.action_id, None);
+                assert_eq!(editor.name.read(cx).text(), "Lint");
+                assert_eq!(editor.command.read(cx).text(), "bun lint");
+            })
+            .unwrap();
+
+        activate(0, cx);
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if !crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION).is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let runs = crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["actionId"], "dev");
+        assert_eq!(runs[0]["spaceId"], "s1");
+        assert_eq!(runs[0]["chatId"], "a");
+    }
+
+    #[gpui::test]
+    fn palette_search_finds_actions_by_name_and_run(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (window, _calls) = action_shell(cx, &runtime, dir.path());
+        open_palette(window, cx);
+        wait_for_labels(window, cx, &ALPHA);
+        for (query, expected) in [
+            ("run", &["Dev · alpha"][..]),
+            ("dev", &["Dev · alpha"]),
+            ("lint", &["Lint · alpha"]),
+            ("add action", &["Add action… · alpha"]),
+            ("alpha", &ALPHA),
+            ("nothing like it", &[]),
+        ] {
+            window
+                .update(cx, |shell, _, cx| {
+                    let search = shell.command_palette.as_ref().unwrap().search.clone();
+                    search.update(cx, |input, cx| input.set_text(query, cx));
+                })
+                .unwrap();
+            assert_eq!(action_labels(window, cx), expected, "query {query:?}");
+        }
     }
 }

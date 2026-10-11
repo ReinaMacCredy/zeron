@@ -10,8 +10,8 @@ use crate::project_actions::{
 };
 
 #[derive(Clone)]
-struct ProjectActionContext {
-    key: ProjectActionsKey,
+pub(super) struct ProjectActionContext {
+    pub(super) key: ProjectActionsKey,
     chat_id: String,
     target_device_id: Option<String>,
 }
@@ -81,7 +81,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn project_action_context(&self, cx: &App) -> Option<ProjectActionContext> {
+    pub(super) fn project_action_context(&self, cx: &App) -> Option<ProjectActionContext> {
         let state = self.state.read(cx);
         let chat = state.selected_chat_row()?;
         let space_id = chat.space_id.clone()?;
