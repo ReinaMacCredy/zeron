@@ -73,7 +73,7 @@ impl Shell {
 
     pub(super) fn sidebar_peek_mounted(&self) -> bool {
         self.sidebar_peek.handoff
-            || (self.settings.sidebar_collapsed && self.sidebar_peek_progress() > 0.0)
+            || (!self.sidebar_pinned_open() && self.sidebar_peek_progress() > 0.0)
     }
 
     fn sidebar_peek_menu_open(&self) -> bool {
@@ -101,7 +101,7 @@ impl Shell {
             || self.sync_flow == SyncFlow::SignedOutRestartRequired;
         PeekInput {
             enabled: settings::sidebar_hover_enabled(cx)
-                && self.settings.sidebar_collapsed
+                && !self.sidebar_pinned_open()
                 && !self.tween_active(self.sidebar_tween)
                 && window.is_window_active()
                 && !modal
@@ -569,6 +569,32 @@ mod tests {
         cx.simulate_mouse_move(chat, None, Default::default());
         advance(cx, CLOSE_DELAY);
         shell.read_with(cx, |shell, _| assert!(!shell.sidebar_peek.open));
+    }
+
+    #[gpui::test]
+    fn sidebar_peek_stays_closed_where_the_sidebar_is_docked(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let edge = gpui::point(px(3.0), px(150.0));
+        shell.update(cx, |shell, _| {
+            shell.route = Route::Settings(SettingsSection::Devices);
+        });
+        cx.simulate_mouse_move(edge, None, Default::default());
+        advance(cx, OPEN_DELAY * 2);
+        shell.read_with(cx, |shell, _| {
+            assert!(!shell.sidebar_peek.open);
+            assert!(!shell.sidebar_peek_mounted());
+        });
+    }
+
+    #[gpui::test]
+    fn clicked_sidebar_focus_still_counts_as_parked(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                window.focus(&shell.sidebar_peek_focus, cx);
+                assert!(shell.shell_focus_parked(window, cx));
+            })
+        });
     }
 
     #[gpui::test]

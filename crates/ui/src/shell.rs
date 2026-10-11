@@ -12518,12 +12518,7 @@ impl Shell {
         // listener returns, so only the shell's parking handles qualify.
         let in_right = self.navigation_focus.right.is_focused(window)
             || self.navigation_focus.tabs.is_focused(window);
-        let parked = in_right
-            || window.focused(cx).is_none()
-            || self.unfocused.is_focused(window)
-            || self.shortcut_focus.is_focused(window)
-            || self.navigation_focus.main.is_focused(window);
-        if !parked {
+        if !in_right && !self.shell_focus_parked(window, cx) {
             return false;
         }
         let side_chat = match self.resolved_right_active(cx) {
@@ -16818,7 +16813,7 @@ impl Render for Shell {
                             .child(title_bar),
                     )
                     .when(
-                        self.settings.sidebar_collapsed && settings::sidebar_hover_enabled(cx),
+                        !self.sidebar_pinned_open() && settings::sidebar_hover_enabled(cx),
                         |el| {
                             // Keep the idle trigger in the base scene. On macOS,
                             // any deferred draw captures the entire native overlay.

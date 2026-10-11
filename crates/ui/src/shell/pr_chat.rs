@@ -218,6 +218,7 @@ impl Shell {
             || self.unfocused.is_focused(window)
             || self.shortcut_focus.is_focused(window)
             || self.navigation_focus.main.is_focused(window)
+            || self.sidebar_peek_focus.is_focused(window)
     }
 
     pub(super) fn escape_closes_pull_request(&self, window: &Window, cx: &App) -> bool {
