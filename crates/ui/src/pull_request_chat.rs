@@ -588,7 +588,7 @@ impl PullRequestDetailPage {
                 .bottom(px(if self.tab == Tab::Activity {
                     8.0
                 } else {
-                    NAV_CLEARANCE
+                    self.nav_clearance()
                 }))
                 .child(
                     widgets::page_column().pt_0().pb_0().child(

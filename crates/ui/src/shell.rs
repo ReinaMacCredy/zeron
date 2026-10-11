@@ -12207,6 +12207,10 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if self.select_pull_request_tab_on_digit(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.type_into_composer(event, window, cx) {
             cx.stop_propagation();
             return;
@@ -12931,23 +12935,9 @@ impl Shell {
             let wide = self.pull_request_wide;
             if let Some(detail) = &shown {
                 let dock = self.render_pr_chat(window, cx);
-                detail.update(cx, |detail, _| {
-                    detail.set_chat_dock(dock);
-                    detail.set_hosted(wide);
-                });
+                detail.update(cx, |detail, _| detail.set_chat_dock(dock));
             }
-            page.update(cx, |page, cx| {
-                page.set_layout(wide, shown.clone().filter(|_| wide), cx)
-            });
-            if let Some(detail) = shown.filter(|_| !wide) {
-                return div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .child(div().flex_1().min_w_0().h_full().child(detail))
-                    .into_any_element();
-            }
+            page.update(cx, |page, cx| page.set_layout(wide, shown, cx));
             return div()
                 .flex_1()
                 .min_w_0()
@@ -15939,15 +15929,6 @@ impl Render for Shell {
                     this.select_pull_request(action.0.clone(), window, cx)
                 },
             ))
-            .on_action(
-                cx.listener(|this, _: &crate::pull_request_detail::OpenGitTab, _, cx| {
-                    if let Some(page) = &this.pull_requests_page {
-                        page.update(cx, |page, cx| {
-                            page.select_tab(crate::pull_requests::PageTab::Git, cx)
-                        });
-                    }
-                }),
-            )
             .on_action(cx.listener(
                 |this, action: &crate::pull_request_detail::AddPullRequestProject, _, cx| {
                     this.open_add_space_on_device(&action.0, cx);
@@ -19200,7 +19181,7 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn the_page_dock_gives_way_to_the_detail_and_back_or_escape_return(cx: &mut TestAppContext) {
+    fn the_page_dock_stays_under_the_pill_and_back_or_escape_return(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -19253,11 +19234,13 @@ mod exit_regressions {
                 );
             });
             cx.run_until_parked();
-            assert!(cx.debug_bounds("pr-detail-nav").is_some());
+            let pill = cx.debug_bounds("pr-pill").unwrap();
+            let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
             assert!(
-                cx.debug_bounds("pull-requests-page-tabs").is_none(),
-                "the detail's dock is the only dock"
+                pill.bottom() < dock.top(),
+                "the pill sits above the page dock"
             );
+            assert!(cx.debug_bounds("pr-detail-back").is_some());
         };
         let on_board = |shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext| {
             shell.read_with(cx, |shell, _| {
@@ -19265,7 +19248,7 @@ mod exit_regressions {
                 assert!(shell.pull_request_detail.is_none());
             });
             assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
-            assert!(cx.debug_bounds("pr-detail-nav").is_none());
+            assert!(cx.debug_bounds("pr-pill").is_none());
         };
         on_board(&shell, cx);
 

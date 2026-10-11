@@ -156,6 +156,46 @@ impl Shell {
         parked
     }
 
+    pub(super) fn select_pull_request_tab_on_digit(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        let slot = match event.keystroke.key_char.as_deref() {
+            Some("1") => 0,
+            Some("2") => 1,
+            Some("3") => 2,
+            _ => return false,
+        };
+        if modifiers.platform
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.function
+            || !matches!(self.route, Route::PullRequests)
+        {
+            return false;
+        }
+        let Some(detail) = self.shown_pull_request_detail(cx).cloned() else {
+            return false;
+        };
+        let parked = {
+            let page = detail.read(cx);
+            !page.overlay_open()
+                && (self.shell_focus_parked(window, cx)
+                    || page.parked_focus(window)
+                    || self
+                        .pull_requests_page
+                        .as_ref()
+                        .is_some_and(|board| board.read(cx).page_tab_focused(window)))
+        };
+        if parked {
+            detail.update(cx, |page, cx| page.select_tab_slot(slot, cx));
+        }
+        parked
+    }
+
     pub(super) fn open_commit_composer_on_c(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -3356,7 +3396,8 @@ mod tests {
         settle(cx);
         assert!(cx.debug_bounds("pr-chat-bar").is_none());
         assert!(cx.debug_bounds("pr-chat-dock").is_none());
-        let nav = cx.debug_bounds("pr-dock").unwrap();
+        let nav = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+        let pill = cx.debug_bounds("pr-pill").expect("the pill above the dock");
         let orb = cx.debug_bounds("pr-chat-orb").expect("orb beside the dock");
         assert!(orb.left() >= nav.right(), "{orb:?} right of {nav:?}");
         assert!(orb.left() - nav.right() <= px(12.0), "{orb:?} {nav:?}");
@@ -3376,7 +3417,8 @@ mod tests {
         click(cx, "pr-chat-orb");
         settle(cx);
         let bar = cx.debug_bounds("pr-chat-bar").expect("expanded");
-        assert!(bar.bottom() <= nav.top(), "{bar:?} above {nav:?}");
+        assert!(bar.bottom() <= pill.top(), "{bar:?} rises above {pill:?}");
+        assert_eq!(cx.debug_bounds("pr-pill"), Some(pill), "the pill stays out");
         assert!(composer_focused(&composer, cx));
         assert!(cx.debug_bounds("pr-chat-orb").is_some(), "the orb stays");
 
@@ -3464,16 +3506,21 @@ mod tests {
             assert_eq!(shell.nav.current(), &NavEntry::PullRequests)
         });
 
-        let dock = bounds(cx, "pr-dock");
-        let tabs = bounds(cx, "pull-requests-page-tabs");
-        let number = bounds(cx, "pr-dock-number");
-        let sections = bounds(cx, "pr-detail-nav");
-        for part in [tabs, number, sections] {
-            assert!(inside(dock, part), "{part:?} in {dock:?}");
+        let dock = bounds(cx, "pull-requests-page-tabs");
+        for part in ["pull-requests-tab-PullRequests", "pull-requests-tab-Git"] {
+            assert!(inside(dock, bounds(cx, part)), "{part} in {dock:?}");
         }
-        assert!(tabs.right() <= number.left() && number.right() <= sections.left());
+        assert!(cx.debug_bounds("pr-summary").unwrap().bottom() < dock.top());
+        let pill = bounds(cx, "pr-pill");
+        let number = bounds(cx, "pr-pill-number");
+        let sections = bounds(cx, "pr-detail-nav");
+        assert!(inside(pill, number) && inside(pill, sections));
+        assert!(number.right() <= sections.left());
+        assert!(pill.bottom() < dock.top(), "{pill:?} above {dock:?}");
+        assert!((pill.center().x - dock.center().x).abs() <= px(1.0));
+        assert!(pill.size.height < dock.size.height);
         assert!(cx.debug_bounds("pr-detail-back").is_none());
-        assert!(cx.debug_bounds("pr-detail-git").is_none());
+        assert!(cx.debug_bounds("pr-pill-tuck").is_some());
         let orb = bounds(cx, "pr-chat-orb");
         assert!(orb.left() >= dock.right() && orb.left() - dock.right() <= px(12.0));
         let page = bounds(cx, "pull-requests-page");
@@ -3540,27 +3587,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_dock_follows_wide_narrow_and_git_and_the_selection_survives(cx: &mut TestAppContext) {
+    fn the_pill_shows_only_with_a_pull_request_and_backs_out_on_narrow(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         open_board(&runtime, &shell, cx, &mut wire);
         click(cx, "pull-request-list-row-8");
         wire.open(&runtime, cx);
+        click(cx, "pr-code");
+        shell.read_with(cx, |shell, cx| {
+            let detail = shell.pull_request_detail.as_ref().unwrap().read(cx);
+            assert_eq!(
+                detail.tab(),
+                crate::pull_request_detail::Tab::Code,
+                "the pill switches"
+            );
+        });
 
         click(cx, "pull-requests-tab-Git");
-        assert!(
-            cx.debug_bounds("pr-dock").is_none(),
-            "Git keeps its own dock"
-        );
         assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
-        assert!(cx.debug_bounds("pr-detail-nav").is_none());
+        assert!(cx.debug_bounds("pr-pill").is_none(), "no pill on Git");
+        assert!(cx.debug_bounds("pr-pill-tuck").is_none(), "nor its tab");
         assert!(cx.debug_bounds("pull-requests-list").is_none());
         click(cx, "pull-requests-tab-PullRequests");
         assert_eq!(selected(&shell, cx), Some(url(8)), "PRs to Git and back");
-        assert!(cx.debug_bounds("pr-detail-nav").is_some());
+        assert!(cx.debug_bounds("pr-pill").is_some());
         assert!(cx.debug_bounds("pull-requests-list").is_some());
 
-        cx.simulate_resize(gpui::size(px(700.0), px(800.0)));
+        cx.simulate_resize(gpui::size(px(600.0), px(800.0)));
         settle(cx);
         assert!(
             cx.debug_bounds("pull-requests-list").is_none(),
@@ -3571,29 +3624,27 @@ mod tests {
             "selected, not opened"
         );
         assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
-        assert!(cx.debug_bounds("pr-dock").is_none());
+        assert!(cx.debug_bounds("pr-pill").is_none(), "no pill on the board");
+        assert!(cx.debug_bounds("pr-pill-tuck").is_none());
+        assert!(cx.debug_bounds("pr-chat-orb").is_none());
 
         click(cx, "pull-request-row");
         wire.open(&runtime, cx);
         settle(cx);
-        let dock = bounds(cx, "pr-dock");
+        let dock = bounds(cx, "pull-requests-page-tabs");
+        let pill = bounds(cx, "pr-pill");
         let back = bounds(cx, "pr-detail-back");
         let sections = bounds(cx, "pr-detail-nav");
-        let git = bounds(cx, "pr-detail-git");
-        for part in [back, sections, git] {
-            assert!(inside(dock, part), "{part:?} in {dock:?}");
-        }
-        assert!(back.right() <= sections.left() && sections.right() <= git.left());
-        assert!(
-            cx.debug_bounds("pull-requests-page-tabs").is_none(),
-            "one dock"
-        );
-        assert!(bounds(cx, "pr-chat-orb").left() >= dock.right());
+        assert!(inside(pill, back) && back.right() <= sections.left());
+        assert!(cx.debug_bounds("pr-pill-number").is_none());
+        assert!(pill.bottom() < dock.top());
+        assert!(pill.left() >= px(16.0) && pill.right() <= px(600.0 - 16.0));
+        let orb = bounds(cx, "pr-chat-orb");
+        assert!(orb.left() >= dock.right() && orb.right() <= px(600.0 - 16.0));
         let opened = selected(&shell, cx).expect("a pull request is open");
 
-        click(cx, "pr-detail-git");
-        assert!(cx.debug_bounds("pr-detail-back").is_none());
-        assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
+        click(cx, "pull-requests-tab-Git");
+        assert!(cx.debug_bounds("pr-pill").is_none());
         click(cx, "pull-requests-tab-PullRequests");
         assert!(
             cx.debug_bounds("pr-detail-back").is_some(),
@@ -3602,9 +3653,110 @@ mod tests {
         assert_eq!(selected(&shell, cx), Some(opened));
 
         click(cx, "pr-detail-back");
-        assert!(cx.debug_bounds("pr-detail-back").is_none());
+        assert!(cx.debug_bounds("pr-pill").is_none());
         assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
         shell.read_with(cx, |shell, _| assert!(shell.pull_request_detail.is_none()));
+
+        click(cx, "pull-request-row");
+        wire.open(&runtime, cx);
+        settle(cx);
+        assert!(cx.debug_bounds("pr-detail-back").is_some());
+        cx.update(|window, _| window.blur());
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-pill").is_none(), "Esc goes back too");
+        shell.read_with(cx, |shell, _| assert!(shell.pull_request_detail.is_none()));
+    }
+
+    fn section(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) -> crate::pull_request_detail::Tab {
+        page(shell, cx).read_with(cx, |page, _| page.tab())
+    }
+
+    #[gpui::test]
+    fn digits_switch_sections_tucked_or_not_but_type_in_an_input(cx: &mut TestAppContext) {
+        use crate::pull_request_detail::Tab;
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_pr(&shell, cx, 7);
+        wire.open(&runtime, cx);
+        settle(cx);
+        cx.update(|window, _| window.blur());
+        cx.simulate_keystrokes("2");
+        settle(cx);
+        assert_eq!(section(&shell, cx), Tab::Code);
+        cx.simulate_keystrokes("3");
+        settle(cx);
+        assert_eq!(section(&shell, cx), Tab::Activity);
+
+        click(cx, "pr-pill-tuck");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-pill").is_none());
+        cx.update(|window, _| window.blur());
+        cx.simulate_keystrokes("1");
+        settle(cx);
+        assert_eq!(section(&shell, cx), Tab::Summary, "tucked too");
+        cx.simulate_keystrokes("4");
+        settle(cx);
+        assert_eq!(section(&shell, cx), Tab::Summary);
+
+        click(cx, "pr-chat-orb");
+        let composer = pr_composer(&shell, cx);
+        assert!(composer_focused(&composer, cx));
+        cx.simulate_keystrokes("2");
+        settle(cx);
+        assert_eq!(section(&shell, cx), Tab::Summary, "typing is not a switch");
+        assert_eq!(cx.update(|_, cx| composer.read(cx).input_text(cx)), "2");
+    }
+
+    #[gpui::test]
+    fn the_tucked_pill_survives_a_new_selection_and_the_composer_rises_over_the_pill(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_board(&runtime, &shell, cx, &mut wire);
+        let dock = bounds(cx, "pull-requests-page-tabs");
+        let pill = bounds(cx, "pr-pill");
+        click(cx, "pr-chat-orb");
+        settle(cx);
+        let bar = bounds(cx, "pr-chat-bar");
+        assert!(bar.bottom() <= pill.top(), "{bar:?} over {pill:?}");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        click(cx, "pr-pill-tuck");
+        settle(cx);
+        assert!(cx.update(|_, cx| settings::pull_request_tabs_tucked(cx)));
+        assert!(cx.debug_bounds("pr-pill").is_none());
+        assert!(cx.debug_bounds("pr-pill-tuck-up").is_some());
+        assert_eq!(
+            bounds(cx, "pull-requests-page-tabs"),
+            dock,
+            "the dock holds still"
+        );
+        click(cx, "pr-chat-orb");
+        settle(cx);
+        let low = bounds(cx, "pr-chat-bar");
+        assert!(
+            low.bottom() > bar.bottom(),
+            "tucked, the composer sits lower"
+        );
+        assert!(low.bottom() <= bounds(cx, "pr-pill-tuck").top());
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        click(cx, "pull-request-list-row-8");
+        wire.open(&runtime, cx);
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(8)));
+        assert!(cx.debug_bounds("pr-pill").is_none(), "still tucked on #8");
+        click(cx, "pr-pill-tuck");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-pill").is_some());
+        assert!(!cx.update(|_, cx| settings::pull_request_tabs_tucked(cx)));
     }
 
     #[gpui::test]
@@ -3908,10 +4060,13 @@ mod tests {
             wire.serve(&runtime, cx, |_, _| None);
             settle(cx);
             let width = cx.update(|window, _| window.viewport_size().width);
-            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+            let nav = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+            let pill = cx.debug_bounds("pr-pill").unwrap();
             let orb = cx.debug_bounds("pr-chat-orb").unwrap();
             let main = cx.debug_bounds("pr-detail-scroll").unwrap();
             assert!(nav.left() >= main.left() + px(16.0), "tab {tab}: {nav:?}");
+            assert!(pill.left() >= main.left() + px(16.0), "tab {tab}: {pill:?}");
+            assert!(pill.right() <= width - px(16.0), "tab {tab}: {pill:?}");
             assert!(orb.left() >= nav.right(), "tab {tab}: {orb:?} {nav:?}");
             assert!(orb.right() <= width - px(16.0), "tab {tab}: {orb:?}");
             assert!(cx.debug_bounds("pr-chat-bar").is_none(), "tab {tab}");
@@ -3921,7 +4076,10 @@ mod tests {
             settle(cx);
             let bar = cx.debug_bounds("pr-chat-bar").expect("bar on every tab");
             let content = cx.debug_bounds("pr-detail-scroll").unwrap();
-            assert!(bar.bottom() <= nav.top(), "tab {tab}: {bar:?} over {nav:?}");
+            assert!(
+                bar.bottom() <= pill.top(),
+                "tab {tab}: {bar:?} over {pill:?}"
+            );
             assert!(
                 content.bottom() > bar.bottom(),
                 "tab {tab}: {bar:?} floats over {content:?}"

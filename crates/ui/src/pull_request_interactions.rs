@@ -451,7 +451,7 @@ impl PullRequestDetailPage {
             .debug_selector(|| "pr-comment-dock".into())
             .flex_none()
             .w_full()
-            .pb(px(NAV_CLEARANCE))
+            .pb(px(self.nav_clearance()))
             .child(widgets::page_column().pt_0().pb_0().child(stack))
             .into_any_element()
     }

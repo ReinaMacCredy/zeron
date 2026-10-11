@@ -609,7 +609,7 @@ impl PullRequestDetailPage {
             .gap(px(1.0))
             .pt(px(4.0))
             .pb(px(if wide {
-                NAV_CLEARANCE + self.chat_lift()
+                self.nav_clearance() + self.chat_lift()
             } else {
                 8.0
             }));
@@ -909,7 +909,7 @@ impl PullRequestDetailPage {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .pb(px(NAV_CLEARANCE))
+            .pb(px(self.nav_clearance()))
             .child(toolbar)
             .child(stream_frame(theme, viewport))
             .when(!wide && self.files_expanded, |el| {

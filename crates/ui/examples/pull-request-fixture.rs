@@ -278,6 +278,11 @@ fn main() -> anyhow::Result<()> {
                     })?;
                     pause(cx, 4000).await;
                     shot(cx, "16-split-first-light")?;
+                    cx.update(pull_request_detail::toggle_pull_request_tabs);
+                    pause(cx, 800).await;
+                    shot(cx, "16c-split-tucked-light")?;
+                    cx.update(pull_request_detail::toggle_pull_request_tabs);
+                    pause(cx, 800).await;
                     window.update(cx, |_, w, _| w.resize(size(px(760.), px(848.))))?;
                     pause(cx, 800).await;
                     shot(cx, "16b-board-760-light")?;

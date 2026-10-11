@@ -44,10 +44,6 @@ pub struct SelectPullRequest(pub String);
 
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
-pub struct OpenGitTab;
-
-#[derive(Clone, PartialEq, Action)]
-#[action(namespace = shell, no_json)]
 pub struct OpenPrImage(pub String);
 
 /// Open a new session with this prompt staged in the composer (not sent).
@@ -148,6 +144,41 @@ pub(crate) const NAV_CLEARANCE: f32 = 16.0 + NAV_HEIGHT + 16.0;
 /// The pill's outer height: segment, its inset and the tray's padding on
 /// both sides, and the composer-style 1px edge.
 const NAV_HEIGHT: f32 = NAV_SEGMENT_HEIGHT + 2.0 * (NAV_SEGMENT_INSET + NAV_PADDING) + 2.0;
+const PILL_SEGMENT_HEIGHT: f32 = 28.0;
+const PILL_HEIGHT: f32 = PILL_SEGMENT_HEIGHT + 2.0 * (NAV_SEGMENT_INSET + NAV_PADDING) + 2.0;
+/// Clear of the tuck tab, which rises 11px out of the dock's top edge.
+const PILL_GAP: f32 = 12.0;
+const PILL_ROOM: f32 = PILL_HEIGHT + PILL_GAP;
+const PILL_DROP: f32 = 10.0;
+const DOCK_GAP: f32 = 8.0;
+
+#[derive(Clone, Copy)]
+struct DockSize {
+    segment: f32,
+    pad: f32,
+    label: f32,
+    glyph: f32,
+}
+
+const DOCK: DockSize = DockSize {
+    segment: NAV_SEGMENT_HEIGHT,
+    pad: 14.0,
+    label: 12.0,
+    glyph: 14.0,
+};
+
+const PILL: DockSize = DockSize {
+    segment: PILL_SEGMENT_HEIGHT,
+    pad: 10.0,
+    label: 11.0,
+    glyph: 12.0,
+};
+
+impl DockSize {
+    fn radius(self) -> f32 {
+        self.segment / 2.0 + NAV_SEGMENT_INSET + NAV_PADDING + 1.0
+    }
+}
 
 /// What a patch row stands for in the review stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,7 +477,8 @@ pub struct PullRequestDetailPage {
     chat_dock: Option<ChatDock>,
     chat_expanded: bool,
     chat_float: crate::dock_orb::Float,
-    hosted: bool,
+    tucked: bool,
+    tuck: crate::motion::IndicatorSlide,
 }
 
 impl PullRequestDetailPage {
@@ -459,6 +491,7 @@ impl PullRequestDetailPage {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let tucked = settings::pull_request_tabs_tucked(cx);
         let mut page = Self {
             state,
             url,
@@ -533,7 +566,8 @@ impl PullRequestDetailPage {
             chat_dock: None,
             chat_expanded: false,
             chat_float: Default::default(),
-            hosted: false,
+            tucked,
+            tuck: crate::motion::IndicatorSlide::at(if tucked { 1.0 } else { 0.0 }, Instant::now()),
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -916,46 +950,47 @@ impl PullRequestDetailPage {
         self.rebuild_stream(cx);
     }
 
-    fn navigation(
+    pub(crate) fn navigation(
         &mut self,
+        dock: AnyElement,
+        back: bool,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.hosted {
-            return None;
+    ) -> AnyElement {
+        let now = Instant::now();
+        self.sync_tuck(cx);
+        if self.tuck.animating_at(now) || self.tab_slide.animating_at(now) {
+            window.request_animation_frame();
         }
-        let back = dock_button(
-            "pr-detail-back",
-            crate::icons::ALT_ARROW_LEFT,
-            Some(self.number_label()),
-            "Back to pull requests",
-            theme.accent,
-            theme,
-            |window, cx| window.dispatch_action(Box::new(ClosePullRequest), cx),
-        );
-        let git = dock_button(
-            "pr-detail-git",
-            crate::icons::FORK,
-            None,
-            "Git",
-            theme.text_muted,
-            theme,
-            |window, cx| window.dispatch_action(Box::new(OpenGitTab), cx),
-        );
-        let tabs = self.dock_tabs(theme, cx);
-        let bar = dock_bar(
-            "detail",
-            "pr-dock",
-            vec![back, dock_divider(theme), tabs, dock_divider(theme), git],
-            theme,
-            window,
-            cx,
-        );
-        Some(dock_row(bar, Some(self.chat_orb(theme, cx))))
+        let hidden = self.tuck.value_at(now);
+        let pill = (hidden < 1.0).then(|| {
+            div()
+                .relative()
+                .top(px(PILL_DROP * hidden))
+                .opacity(1.0 - hidden)
+                .w_full()
+                .mb(px(PILL_GAP))
+                .pr(px(crate::dock_orb::SIZE + DOCK_GAP))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w_full()
+                        .child(self.pill(back, theme, cx)),
+                )
+                .into_any_element()
+        });
+        dock_stack(
+            pill,
+            dock,
+            Some(tuck_tab(self.tucked, theme)),
+            Some(self.chat_orb(theme, cx)),
+        )
     }
 
-    pub(crate) fn dock_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn pill(&mut self, back: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let counts = self.detail.as_ref().map(|detail| {
             [
                 None,
@@ -969,17 +1004,57 @@ impl PullRequestDetailPage {
             glyph,
             count: counts.and_then(|counts| counts[tab_slot(tab) as usize]),
         });
-        dock_tabs(
-            "pr-detail-nav",
-            "Pull request sections",
-            &segments,
-            tab_slot(self.tab) as usize,
-            self.tab_slide.value_at(Instant::now()),
-            &self.tab_focus,
+        let number = self.number_label();
+        let lead = if back {
+            pill_back(number, theme)
+        } else {
+            pill_number(number, theme)
+        };
+        let tabs = tab_list("pr-detail-nav", "Pull request sections")
+            .min_w_0()
+            .child(tab_grid(
+                "pr-detail-nav",
+                &segments,
+                tab_slot(self.tab) as usize,
+                self.tab_slide.value_at(Instant::now()),
+                &self.tab_focus,
+                PILL,
+                theme,
+                cx,
+                |page, slot, _, cx| page.select_tab(TABS[slot].0, cx),
+            ));
+        dock_surface(
+            div().id("pr-pill").debug_selector(|| "pr-pill".into()),
+            div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .child(lead)
+                .child(tabs)
+                .into_any_element(),
+            PILL,
             theme,
-            cx,
-            |page, slot, _, cx| page.select_tab(TABS[slot].0, cx),
         )
+    }
+
+    fn sync_tuck(&mut self, cx: &App) {
+        let tucked = settings::pull_request_tabs_tucked(cx);
+        if tucked != self.tucked {
+            self.tucked = tucked;
+            self.tuck.retarget(
+                if tucked { 1.0 } else { 0.0 },
+                crate::motion::reduced_motion(cx),
+                Instant::now(),
+            );
+        }
+    }
+
+    pub(crate) fn pill_room(&self) -> f32 {
+        PILL_ROOM * (1.0 - self.tuck.value_at(Instant::now()))
+    }
+
+    pub(crate) fn nav_clearance(&self) -> f32 {
+        NAV_CLEARANCE + self.pill_room()
     }
 
     pub(crate) fn number_label(&self) -> SharedString {
@@ -991,10 +1066,6 @@ impl PullRequestDetailPage {
             .map_or_else(|| "#".into(), |number| format!("#{number}").into())
     }
 
-    pub(crate) fn set_hosted(&mut self, hosted: bool) {
-        self.hosted = hosted;
-    }
-
     pub(crate) fn tab(&self) -> Tab {
         self.tab
     }
@@ -1002,6 +1073,12 @@ impl PullRequestDetailPage {
     pub(crate) fn start_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.select_tab(tab, cx);
         self.tab_slide = crate::motion::IndicatorSlide::at(tab_slot(tab), Instant::now());
+    }
+
+    pub(crate) fn select_tab_slot(&mut self, slot: usize, cx: &mut Context<Self>) {
+        if let Some((tab, ..)) = TABS.get(slot) {
+            self.select_tab(*tab, cx);
+        }
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
@@ -1048,6 +1125,7 @@ fn tab_grid<T: 'static>(
     selected: usize,
     position: f32,
     focus: &[gpui::FocusHandle],
+    size: DockSize,
     theme: &Theme,
     cx: &mut Context<T>,
     select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
@@ -1097,14 +1175,14 @@ fn tab_grid<T: 'static>(
             .on_hover(crate::motion::hover_listener(hover_key))
             .child(
                 div()
-                    .h(px(NAV_SEGMENT_HEIGHT))
-                    .px(px(14.0))
+                    .h(px(size.segment))
+                    .px(px(size.pad))
                     .rounded_full()
                     .flex()
                     .items_center()
                     .justify_center()
                     .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_size(crate::typography::ui_rems(size.label))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
                     .bg(crate::motion::mix(
@@ -1114,7 +1192,7 @@ fn tab_grid<T: 'static>(
                     ))
                     .child(
                         crate::icons::icon(glyph)
-                            .size(px(14.0))
+                            .size(px(size.glyph))
                             .flex_none()
                             .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
                     )
@@ -1124,13 +1202,13 @@ fn tab_grid<T: 'static>(
                             .flex()
                             .items_baseline()
                             .gap(px(6.0))
-                            .line_height(crate::typography::ui_rems(16.0))
+                            .line_height(crate::typography::ui_rems(size.label + 4.0))
                             .child(div().min_w_0().truncate().child(label))
                             .children(count.map(|count| {
                                 div()
                                     .debug_selector(move || format!("{segment_id}-count"))
                                     .flex_none()
-                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_size(crate::typography::ui_rems(size.label - 1.0))
                                     .font_weight(gpui::FontWeight::NORMAL)
                                     .text_color(theme.text_muted)
                                     .child(count.to_string())
@@ -1173,31 +1251,6 @@ fn tab_list(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> 
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dock_pill<T: 'static>(
-    key: &'static str,
-    id: &'static str,
-    label: &'static str,
-    segments: &[DockSegment],
-    selected: usize,
-    position: f32,
-    focus: &[gpui::FocusHandle],
-    theme: &Theme,
-    window: &mut Window,
-    cx: &mut Context<T>,
-    select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
-) -> AnyElement {
-    let grid = tab_grid(id, segments, selected, position, focus, theme, cx, select);
-    dock_surface(
-        key,
-        tab_list(id, label),
-        grid.into_any_element(),
-        theme,
-        window,
-        cx,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn dock_tabs<T: 'static>(
     id: &'static str,
     label: &'static str,
     segments: &[DockSegment],
@@ -1208,170 +1261,18 @@ pub(crate) fn dock_tabs<T: 'static>(
     cx: &mut Context<T>,
     select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
 ) -> AnyElement {
-    tab_list(id, label)
-        .min_w_0()
-        .child(tab_grid(
-            id, segments, selected, position, focus, theme, cx, select,
-        ))
-        .into_any_element()
-}
-
-pub(crate) fn dock_bar(
-    key: &'static str,
-    id: &'static str,
-    items: Vec<AnyElement>,
-    theme: &Theme,
-    window: &mut Window,
-    cx: &App,
-) -> AnyElement {
-    dock_surface(
-        key,
-        div().id(id).debug_selector(move || id.into()),
-        div()
-            .flex()
-            .items_center()
-            .min_w_0()
-            .children(items)
-            .into_any_element(),
-        theme,
-        window,
-        cx,
-    )
-}
-
-pub(crate) fn dock_divider(theme: &Theme) -> AnyElement {
-    div()
-        .flex_none()
-        .w(px(1.0))
-        .h(px(18.0))
-        .mx(px(3.0))
-        .bg(theme.border)
-        .into_any_element()
-}
-
-pub(crate) fn dock_label(id: &'static str, text: SharedString, theme: &Theme) -> AnyElement {
-    div()
-        .debug_selector(move || id.into())
-        .flex_none()
-        .h(px(NAV_SEGMENT_HEIGHT))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(12.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.accent)
-        .child(text)
-        .into_any_element()
-}
-
-pub(crate) fn dock_button(
-    id: &'static str,
-    glyph: &'static str,
-    text: Option<SharedString>,
-    label: &'static str,
-    tint: gpui::Hsla,
-    theme: &Theme,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let hover = theme.glass_hover().opacity(0.6);
-    div()
-        .id(id)
-        .debug_selector(move || id.into())
-        .group(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .tab_index(0)
-        .flex_none()
-        .p(px(NAV_SEGMENT_INSET))
-        .rounded_full()
-        .cursor_pointer()
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx);
-        })
-        .child(
-            div()
-                .h(px(NAV_SEGMENT_HEIGHT))
-                .px(px(if text.is_some() { 12.0 } else { 11.0 }))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(tint)
-                .group_hover(id, move |style| style.bg(hover))
-                .child(
-                    crate::icons::icon(glyph)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(tint),
-                )
-                .children(text),
-        )
-        .into_any_element()
-}
-
-#[derive(Default)]
-struct DockMorph {
-    key: &'static str,
-    started: Option<Instant>,
-    from: f32,
-    natural: Rc<std::cell::Cell<f32>>,
-    drawn: Rc<std::cell::Cell<f32>>,
-}
-
-thread_local! {
-    static DOCK_MORPHS: RefCell<std::collections::HashMap<gpui::WindowId, DockMorph>> =
-        RefCell::default();
+    let grid = tab_grid(
+        id, segments, selected, position, focus, DOCK, theme, cx, select,
+    );
+    dock_surface(tab_list(id, label), grid.into_any_element(), DOCK, theme)
 }
 
 fn dock_surface(
-    key: &'static str,
     surface: gpui::Stateful<gpui::Div>,
     inner: AnyElement,
+    size: DockSize,
     theme: &Theme,
-    window: &mut Window,
-    cx: &App,
 ) -> AnyElement {
-    let now = Instant::now();
-    let reduced = crate::motion::reduced_motion(cx);
-    let edges = 2.0 * (NAV_PADDING + 1.0);
-    let (width, natural, drawn) = DOCK_MORPHS.with_borrow_mut(|morphs| {
-        let morph = morphs
-            .entry(window.window_handle().window_id())
-            .or_default();
-        if morph.key != key {
-            let from = morph.drawn.get();
-            *morph = DockMorph {
-                key,
-                started: (from > 0.0 && !reduced).then_some(now),
-                from,
-                ..Default::default()
-            };
-        }
-        let duration = crate::motion::INDICATOR_SLIDE
-            .total()
-            .mul_f32(crate::motion::speed_scale())
-            .as_secs_f32();
-        let progress = morph.started.map_or(1.0, |started| {
-            if duration <= 0.0 {
-                1.0
-            } else {
-                crate::motion::INDICATOR_SLIDE
-                    .progress(now.saturating_duration_since(started).as_secs_f32() / duration)
-            }
-        });
-        let width = (progress < 1.0).then(|| match morph.natural.get() {
-            natural if natural > 0.0 => crate::motion::lerp(morph.from, natural + edges, progress),
-            _ => morph.from,
-        });
-        (width, morph.natural.clone(), morph.drawn.clone())
-    });
-    if width.is_some() {
-        window.request_animation_frame();
-    }
     let surface = surface
         .relative()
         .occlude()
@@ -1387,38 +1288,133 @@ fn dock_surface(
         .when(!theme.is_frost(), |el| el.shadow_lg())
         .flex_none()
         .flex()
-        .when_some(width, |el, width| {
-            el.w(px(width)).overflow_hidden().justify_center()
+        .child(div().relative().min_w_0().child(inner));
+    // Concentric: the pill radius is the segment radius plus the padding.
+    crate::frost::frosted(size.radius(), crate::frost::MENU_BLUR, surface).into_any_element()
+}
+
+fn pill_number(number: SharedString, theme: &Theme) -> AnyElement {
+    div()
+        .debug_selector(|| "pr-pill-number".into())
+        .flex_none()
+        .h(px(PILL.segment + 2.0 * NAV_SEGMENT_INSET))
+        .px(px(PILL.pad))
+        .flex()
+        .items_center()
+        .text_size(crate::typography::ui_rems(PILL.label))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.accent)
+        .child(number)
+        .into_any_element()
+}
+
+fn pill_back(number: SharedString, theme: &Theme) -> AnyElement {
+    let hover = theme.glass_hover().opacity(0.6);
+    div()
+        .id("pr-detail-back")
+        .debug_selector(|| "pr-detail-back".into())
+        .group("pr-detail-back")
+        .role(gpui::Role::Button)
+        .aria_label("Back to pull requests")
+        .tab_index(0)
+        .flex_none()
+        .p(px(NAV_SEGMENT_INSET))
+        .rounded_full()
+        .cursor_pointer()
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .on_click(|_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(Box::new(ClosePullRequest), cx);
         })
         .child(
             div()
-                .relative()
-                .when(width.is_some(), |el| el.flex_none())
-                .when(width.is_none(), |el| el.min_w_0())
-                .child(inner)
+                .h(px(PILL.segment))
+                .pl(px(6.0))
+                .pr(px(PILL.pad))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .text_size(crate::typography::ui_rems(PILL.label))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.accent)
+                .group_hover("pr-detail-back", move |style| style.bg(hover))
                 .child(
-                    gpui::canvas(
-                        move |bounds, _, _| natural.set(f32::from(bounds.size.width)),
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                ),
+                    crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
+                        .size(px(PILL.glyph))
+                        .flex_none()
+                        .text_color(theme.accent),
+                )
+                .child(number),
         )
-        .child(
-            gpui::canvas(
-                move |bounds, _, _| drawn.set(f32::from(bounds.size.width)),
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0(),
-        );
-    // Concentric: the pill radius is the segment radius plus the padding.
-    let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_SEGMENT_INSET + NAV_PADDING + 1.0;
-    crate::frost::frosted(radius, crate::frost::MENU_BLUR, surface).into_any_element()
+        .into_any_element()
 }
 
-pub(crate) fn dock_row(pill: AnyElement, orb: Option<AnyElement>) -> AnyElement {
+fn tuck_tab(tucked: bool, theme: &Theme) -> AnyElement {
+    let (glyph, label, state) = if tucked {
+        (crate::icons::ALT_ARROW_UP, "Show pull request tabs", "up")
+    } else {
+        (
+            crate::icons::ALT_ARROW_DOWN,
+            "Hide pull request tabs",
+            "down",
+        )
+    };
+    let tab = div()
+        .id("pr-pill-tuck")
+        .debug_selector(|| "pr-pill-tuck".into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .w(px(30.0))
+        .h(px(12.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_t_1()
+        .border_l_1()
+        .border_r_1()
+        .border_color(theme.composer_surface_border())
+        .rounded_t(px(8.0))
+        .bg(theme.composer_surface_bg())
+        .cursor_pointer()
+        .occlude()
+        .focus_visible(|style| style.border_color(theme.accent))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| {
+            cx.stop_propagation();
+            toggle_pull_request_tabs(cx);
+        })
+        .child(
+            crate::icons::icon(glyph)
+                .debug_selector(move || format!("pr-pill-tuck-{state}"))
+                .size(px(11.0))
+                .text_color(theme.text_muted),
+        );
+    div()
+        .absolute()
+        .top(px(-11.0))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(crate::frost::frosted(8.0, crate::frost::MENU_BLUR, tab))
+        .into_any_element()
+}
+
+pub fn toggle_pull_request_tabs(cx: &mut App) {
+    settings::update(settings::SavePolicy::Debounced, cx, |settings| {
+        settings.pull_request_tabs_tucked = !settings.pull_request_tabs_tucked;
+    });
+    cx.refresh_windows();
+}
+
+fn dock_stack(
+    above: Option<AnyElement>,
+    dock: AnyElement,
+    tab: Option<AnyElement>,
+    orb: Option<AnyElement>,
+) -> AnyElement {
     div()
         .absolute()
         .bottom(px(16.0))
@@ -1426,12 +1422,29 @@ pub(crate) fn dock_row(pill: AnyElement, orb: Option<AnyElement>) -> AnyElement 
         .right_0()
         .px(px(16.0))
         .flex()
-        .justify_center()
-        .items_center()
-        .gap(px(8.0))
-        .child(div().min_w_0().max_w_full().child(pill))
-        .children(orb)
+        .flex_col()
+        .children(above)
+        .child(
+            div()
+                .flex()
+                .justify_center()
+                .items_center()
+                .gap(px(DOCK_GAP))
+                .child(
+                    div()
+                        .relative()
+                        .min_w_0()
+                        .max_w_full()
+                        .child(dock)
+                        .children(tab),
+                )
+                .children(orb),
+        )
         .into_any_element()
+}
+
+pub(crate) fn dock_row(dock: AnyElement, orb: Option<AnyElement>) -> AnyElement {
+    dock_stack(None, dock, None, orb)
 }
 
 #[cfg(any(test, feature = "pull-request-fixture"))]
@@ -1849,7 +1862,9 @@ impl Render for PullRequestDetailPage {
         }
         self.park_hidden_chat_focus(window, cx);
         let theme = Theme::of(cx).clone();
+        self.sync_tuck(cx);
         let lift = self.chat_lift();
+        let pill_room = self.pill_room();
         let empty_activity = self.tab == Tab::Activity
             && self
                 .detail
@@ -1870,7 +1885,7 @@ impl Render for PullRequestDetailPage {
                     Tab::Activity => 32.0 + lift,
                     // The workspace reserves its own room for the navigation.
                     Tab::Code => 0.0,
-                    Tab::Summary => 76.0 + lift,
+                    Tab::Summary => 76.0 + pill_room + lift,
                 }))
                 .text_size(crate::typography::ui_rems(13.0))
                 .text_color(theme.text);
@@ -2585,8 +2600,8 @@ impl Render for PullRequestDetailPage {
                 .when(self.tab != Tab::Code, |el| el.children(rail))
                 .into_any_element()
         };
-        let navigation = self.navigation(&theme, window, cx);
-        if self.tab_slide.animating_at(Instant::now()) {
+        let now = Instant::now();
+        if self.tab_slide.animating_at(now) || self.tuck.animating_at(now) {
             window.request_animation_frame();
         }
         let chat = self.chat_dock(cx);
@@ -2615,8 +2630,7 @@ impl Render for PullRequestDetailPage {
                     .children(
                         chat.map(|chat| div().relative().flex_none().w_full().h_0().child(chat)),
                     )
-                    .children(comment)
-                    .children(navigation),
+                    .children(comment),
             );
         if let Some(preview) = &self.image_preview {
             let weak = cx.weak_entity();
@@ -3599,9 +3613,9 @@ mod tests {
     impl Render for NavigationHitHost {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let navigation = self
-                .page
-                .update(cx, |page, cx| page.navigation(&theme, window, cx));
+            let navigation = self.page.update(cx, |page, cx| {
+                page.navigation(test_dock(), false, &theme, window, cx)
+            });
             let raw = self.raw_presses.clone();
             div()
                 .size_full()
@@ -3635,8 +3649,16 @@ mod tests {
                         )
                         .on_click(cx.listener(|host, _, _, _| host.clicks += 1)),
                 )
-                .child(div().absolute().inset_0().children(navigation))
+                .child(div().absolute().inset_0().child(navigation))
         }
+    }
+
+    fn test_dock() -> AnyElement {
+        div()
+            .debug_selector(|| "test-dock".into())
+            .w(px(140.0))
+            .h(px(NAV_HEIGHT))
+            .into_any_element()
     }
 
     #[gpui::test]
@@ -3666,7 +3688,7 @@ mod tests {
         cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
         cx.run_until_parked();
         let tab = cx.debug_bounds("pr-code").unwrap();
-        let nav = cx.debug_bounds("pr-dock").unwrap();
+        let nav = cx.debug_bounds("pr-pill").unwrap();
         for point in [
             tab.center(),
             gpui::point(nav.left() + px(2.0), nav.center().y),
@@ -3687,7 +3709,7 @@ mod tests {
             );
             assert!(host.page.read(cx).tab == Tab::Code);
         });
-        let outside = gpui::point(nav.center().x, nav.bottom() + px(10.0));
+        let outside = gpui::point(nav.center().x, nav.top() - px(10.0));
         cx.simulate_mouse_down(outside, gpui::MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(outside, gpui::MouseButton::Left, gpui::Modifiers::default());
         host.read_with(cx, |host, _| {
@@ -3761,6 +3783,8 @@ mod tests {
         page: Entity<PullRequestDetailPage>,
         _subscription: Subscription,
         returned: bool,
+        back: bool,
+        dock_focus: [gpui::FocusHandle; 2],
     }
 
     impl DetailHost {
@@ -3806,13 +3830,45 @@ mod tests {
                 page,
                 _subscription: subscription,
                 returned: false,
+                back: false,
+                dock_focus: [cx.focus_handle(), cx.focus_handle()],
             }
         }
     }
 
     impl Render for DetailHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
             let header = self.page.update(cx, |page, cx| page.titlebar(cx));
+            let segments = [
+                DockSegment {
+                    id: "test-prs",
+                    label: "PRs",
+                    glyph: crate::icons::PULL_REQUEST,
+                    count: Some(3),
+                },
+                DockSegment {
+                    id: "test-git",
+                    label: "Git",
+                    glyph: crate::icons::FORK,
+                    count: None,
+                },
+            ];
+            let dock = dock_pill(
+                "pull-requests-page-tabs",
+                "Pull requests or Git",
+                &segments,
+                0,
+                0.0,
+                &self.dock_focus,
+                &theme,
+                cx,
+                |_, _, _, _| {},
+            );
+            let back = self.back;
+            let navigation = self.page.update(cx, |page, cx| {
+                page.navigation(dock, back, &theme, window, cx)
+            });
             div()
                 .size_full()
                 .relative()
@@ -3821,6 +3877,7 @@ mod tests {
                     cx.notify();
                 }))
                 .child(self.page.clone())
+                .child(navigation)
                 .child(
                     div()
                         .absolute()
@@ -3855,9 +3912,12 @@ mod tests {
                 assert!(bounds.top() >= px(0.0) && bounds.bottom() <= px(Theme::TITLEBAR_HEIGHT));
                 previous_right = bounds.right();
             }
-            let dock = cx.debug_bounds("pr-dock").unwrap();
+            let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
             assert_eq!(dock.bottom(), px(784.0));
             assert_eq!(dock.size.height, px(NAV_HEIGHT));
+            let pill = cx.debug_bounds("pr-pill").unwrap();
+            assert_eq!(pill.size.height, px(PILL_HEIGHT));
+            assert_eq!(pill.bottom() + px(PILL_GAP), dock.top());
             for selector in ["pr-summary", "pr-code", "pr-activity"] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
@@ -3943,11 +4003,12 @@ mod tests {
             cx.simulate_resize(gpui::size(px(width), px(height)));
             cx.run_until_parked();
             let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
-            let nav = cx.debug_bounds("pr-dock").unwrap();
+            let nav = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+            let pill = cx.debug_bounds("pr-pill").unwrap();
             assert!(viewport.size.height > px(60.0), "{viewport:?}");
             assert!(
-                viewport.bottom() <= nav.top(),
-                "diff must clear floating navigation"
+                viewport.bottom() <= pill.top(),
+                "diff must clear the pill above the dock"
             );
             assert_eq!(
                 viewport.size.width,
@@ -4019,7 +4080,8 @@ mod tests {
             cx.run_until_parked();
             let column = cx.debug_bounds("pr-content-column").unwrap();
             let composer = cx.debug_bounds("pr-comment-surface").unwrap();
-            let nav = cx.debug_bounds("pr-dock").unwrap();
+            let nav = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+            let pill = cx.debug_bounds("pr-pill").unwrap();
             let meta = cx.debug_bounds("pr-detail-meta").unwrap();
             let thread = cx.debug_bounds("pr-activity-thread").unwrap();
             assert_eq!(
@@ -4038,9 +4100,9 @@ mod tests {
                 "the dock and the orb are centred as a pair"
             );
             assert_eq!(
-                nav.top() - composer.bottom(),
+                pill.top() - composer.bottom(),
                 px(16.0),
-                "docked above the navigation"
+                "docked above the pill"
             );
             let scroll = cx.debug_bounds("pr-detail-scroll").unwrap();
             assert!(
@@ -4169,26 +4231,56 @@ mod tests {
     }
 
     #[gpui::test]
-    fn alone_the_dock_leads_with_back_and_ends_with_git(cx: &mut gpui::TestAppContext) {
+    fn the_pill_sits_over_the_dock_and_leads_with_back_only_on_a_full_page(
+        cx: &mut gpui::TestAppContext,
+    ) {
         fixture::init(cx);
         cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
-        for width in [600.0, 1200.0] {
+        for (width, back) in [
+            (600.0, false),
+            (1200.0, false),
+            (1200.0, true),
+            (600.0, true),
+        ] {
+            host.update(cx, |host, cx| {
+                host.back = back;
+                cx.notify();
+            });
             cx.simulate_resize(gpui::size(px(width), px(800.0)));
             cx.run_until_parked();
-            assert!(cx.debug_bounds("pr-detail-back").is_some());
             let title = cx.debug_bounds("pr-detail-title").unwrap();
             assert!(title.left() <= px(4.0), "the header has no back control");
-            let dock = cx.debug_bounds("pr-dock").unwrap();
-            let back = cx.debug_bounds("pr-detail-back").unwrap();
+            let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+            let pill = cx.debug_bounds("pr-pill").unwrap();
             let tabs = cx.debug_bounds("pr-detail-nav").unwrap();
-            let git = cx.debug_bounds("pr-detail-git").unwrap();
             let orb = cx.debug_bounds("pr-chat-orb").unwrap();
-            assert!(dock.left() < back.left() && back.right() < tabs.left());
-            assert!(tabs.right() < git.left() && git.right() < dock.right());
+            let tuck = cx.debug_bounds("pr-pill-tuck").unwrap();
+            assert!(
+                (pill.center().x - dock.center().x).abs() <= px(1.0),
+                "centred over the dock, not the dock and orb: {pill:?} {dock:?}"
+            );
+            assert!(pill.size.height < dock.size.height, "slimmer than the dock");
+            assert!(pill.left() >= px(16.0) && pill.right() <= px(width - 16.0));
+            assert!((tuck.center().x - dock.center().x).abs() <= px(1.0));
+            assert!(
+                tuck.top() > pill.bottom() && tuck.top() < dock.top() && tuck.bottom() > dock.top(),
+                "the tab sticks out of the dock's top edge: {tuck:?} {dock:?} {pill:?}"
+            );
+            assert!(cx.debug_bounds("pr-pill-tuck-down").is_some());
             assert!(orb.left() >= dock.right());
-            assert!(dock.right() <= px(width) && dock.left() >= px(0.0));
-            assert!(cx.debug_bounds("pull-requests-page-tabs").is_none());
+            assert!((orb.center().y - dock.center().y).abs() <= px(1.0));
+            let (lead, other) = if back {
+                ("pr-detail-back", "pr-pill-number")
+            } else {
+                ("pr-pill-number", "pr-detail-back")
+            };
+            let lead = cx.debug_bounds(lead).unwrap();
+            assert!(cx.debug_bounds(other).is_none());
+            assert!(
+                lead.left() >= pill.left() && lead.right() <= tabs.left(),
+                "{lead:?} leads {tabs:?} in {pill:?}"
+            );
         }
         let page = host.read_with(cx, |host, _| host.page.clone());
         page.update_in(cx, |page, window, cx| window.focus(&page.content_focus, cx));
@@ -4196,5 +4288,57 @@ mod tests {
         cx.simulate_click(back.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         host.read_with(cx, |host, _| assert!(host.returned));
+    }
+
+    #[gpui::test]
+    fn tucking_hides_the_pill_returns_its_room_and_persists(cx: &mut gpui::TestAppContext) {
+        let _dir = fixture::settings(cx, crate::settings::UiSettings::default());
+        cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
+        let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
+        let page = host.read_with(cx, |host, _| host.page.clone());
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        page.update(cx, |page, cx| page.select_tab(Tab::Code, cx));
+        cx.run_until_parked();
+        let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
+        let dock = cx.debug_bounds("pull-requests-page-tabs").unwrap();
+        assert!(cx.debug_bounds("pr-pill").is_some());
+
+        let tuck = cx.debug_bounds("pr-pill-tuck").unwrap();
+        cx.simulate_click(tuck.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, cx| crate::settings::pull_request_tabs_tucked(cx)));
+        assert!(cx.debug_bounds("pr-pill").is_none(), "tucked away");
+        assert!(
+            cx.debug_bounds("pr-pill-tuck-up").is_some(),
+            "the arrow flips"
+        );
+        assert_eq!(
+            cx.debug_bounds("pull-requests-page-tabs").unwrap(),
+            dock,
+            "the dock stays put"
+        );
+        let tucked = cx.debug_bounds("pr-code-viewport").unwrap();
+        assert_eq!(
+            tucked.bottom() - viewport.bottom(),
+            px(PILL_ROOM),
+            "the content takes the pill's room"
+        );
+        page.read_with(cx, |page, _| assert!(page.tab == Tab::Code));
+
+        let (fresh, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pr-pill").is_none(),
+            "a new PR starts tucked"
+        );
+        fresh.read_with(cx, |host, cx| {
+            assert_eq!(host.page.read(cx).nav_clearance(), NAV_CLEARANCE)
+        });
+        let tuck = cx.debug_bounds("pr-pill-tuck").unwrap();
+        cx.simulate_click(tuck.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-pill").is_some(), "and comes back out");
+        assert!(cx.debug_bounds("pr-pill-tuck-down").is_some());
+        assert!(!cx.update(|_, cx| crate::settings::pull_request_tabs_tucked(cx)));
     }
 }

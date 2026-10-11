@@ -373,8 +373,8 @@ pub struct PullRequestsPage {
     tab_focus: [gpui::FocusHandle; 2],
     git_view: Option<(Entity<git::GitTab>, Subscription)>,
     git_project: Option<ProjectRef>,
-    wide: bool,
     split_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
+    full_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pick_first: bool,
 }
 
@@ -408,17 +408,32 @@ impl PullRequestsPage {
     pub(crate) fn set_layout(
         &mut self,
         wide: bool,
-        split_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
+        detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
         cx: &mut Context<Self>,
     ) {
-        if self.split_detail.is_some() != split_detail.is_some() {
+        let (split, full) = if wide { (detail, None) } else { (None, detail) };
+        if self.split_detail.is_some() != split.is_some() {
             self.board_list.remeasure();
         }
-        if self.wide != wide || self.split_detail != split_detail {
+        if self.split_detail != split || self.full_detail != full {
             cx.notify();
         }
-        self.wide = wide;
-        self.split_detail = split_detail;
+        self.split_detail = split;
+        self.full_detail = full;
+    }
+
+    pub(crate) fn shown_detail(
+        &self,
+    ) -> Option<&Entity<crate::pull_request_detail::PullRequestDetailPage>> {
+        self.split_detail.as_ref().or(self.full_detail.as_ref())
+    }
+
+    fn bottom_clearance(&self, cx: &gpui::App) -> f32 {
+        crate::pull_request_detail::NAV_CLEARANCE
+            + self
+                .split_detail
+                .as_ref()
+                .map_or(0.0, |detail| detail.read(cx).pill_room())
     }
 
     fn board_urls(&mut self, cx: &mut Context<Self>) -> Vec<String> {
@@ -736,8 +751,8 @@ impl PullRequestsPage {
             tab_focus: [cx.focus_handle(), cx.focus_handle()],
             git_view: None,
             git_project: None,
-            wide: false,
             split_detail: None,
+            full_detail: None,
             pick_first: false,
         };
         page.initialize_repository(cx);
@@ -2397,6 +2412,18 @@ impl Render for PullRequestsPage {
         if self.tab == PageTab::Git {
             return self.render_git_page(&theme, window, cx);
         }
+        if let Some(detail) = self.full_detail.clone() {
+            let count = self.pull_request_count();
+            let dock = self.render_page_dock(count, &theme, window, cx);
+            return div()
+                .id("pull-requests-page")
+                .debug_selector(|| "pull-requests-page".into())
+                .relative()
+                .size_full()
+                .child(detail)
+                .child(dock)
+                .into_any_element();
+        }
         let initial_loading =
             self.items.is_empty() && matches!(self.load_state, PullRequestsLoadState::Loading);
         let refreshing =
@@ -2857,7 +2884,7 @@ impl Render for PullRequestsPage {
                             .mx_auto()
                             .px(px(PR_PAGE_HORIZONTAL_PADDING))
                             .pt(px(8.0))
-                            .pb(px(crate::pull_request_detail::NAV_CLEARANCE))
+                            .pb(px(self.bottom_clearance(cx)))
                             .child(content)
                             .children(load_more),
                     ),
@@ -2868,10 +2895,7 @@ impl Render for PullRequestsPage {
         // Keep the page actions reachable while browsing a long list. Only the
         // results scroll; the shared edges remain identical in every layout.
         let split = self.split_detail.clone();
-        let dock = match &split {
-            Some(detail) => self.render_split_dock(detail, count, &theme, window, cx),
-            None => self.render_page_dock(count, &theme, window, cx),
-        };
+        let dock = self.render_page_dock(count, &theme, window, cx);
         let results = div()
             .id("pull-requests-scroll-host")
             .flex_1()
@@ -2999,7 +3023,7 @@ impl PullRequestsPage {
             .justify_center()
             .when(index == 0, |el| el.pt(px(8.0)))
             .when(index + 1 == board.rows.len(), |el| {
-                el.pb(px(crate::pull_request_detail::NAV_CLEARANCE))
+                el.pb(px(self.bottom_clearance(cx)))
             })
             .child(
                 div()
