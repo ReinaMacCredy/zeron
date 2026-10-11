@@ -266,7 +266,6 @@ pub(crate) fn star_button(url: &str, theme: &Theme, cx: &gpui::App) -> gpui::Sta
         .rounded(px(6.0))
         .border_1()
         .border_color(gpui::transparent_black())
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .cursor_pointer()
         .hover(|style| style.bg(theme.glass_hover()))
         .tooltip(widgets::text_tooltip(label))
@@ -1477,7 +1476,6 @@ impl PullRequestsPage {
                                 space.path,
                                 if online { "" } else { ", offline" }
                             ))
-                            .focus_visible(|style| style.border_color(theme.accent))
                             .tooltip(widgets::text_tooltip(format!(
                                 "{name}\n{device}\n{}",
                                 space.path
@@ -1551,7 +1549,6 @@ impl PullRequestsPage {
                             .aria_selected(selected)
                             .tab_index(0)
                             .aria_label(format!("Open {repo}"))
-                            .focus_visible(|style| style.border_color(theme.accent))
                             .child(popover::picker_icon_slot(
                                 icon(icons::FOLDER)
                                     .size(px(14.0))
@@ -1767,7 +1764,6 @@ impl PullRequestsPage {
                         .tab_index(0)
                         .aria_selected(active)
                         .aria_label(label)
-                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .child(label)
                         .on_click(cx.listener(move |page, _, _, cx| {
                             cx.stop_propagation();
@@ -2028,7 +2024,6 @@ impl PullRequestsPage {
                         .h(px(HEADER_CONTROL_HEIGHT))
                         .px(px(14.0))
                         .gap(px(8.0))
-                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .when(loading, |el| {
                             el.opacity(0.7).child(crate::loaders::mini_glyph_spinner(
                                 "pull-requests-more-spinner",
@@ -2081,7 +2076,6 @@ impl PullRequestsPage {
             .tab_index(0)
             .border_1()
             .border_color(gpui::transparent_black())
-            .focus_visible(|style| style.border_2().border_color(theme.accent))
             .flex_none()
             .h(px(HEADER_CONTROL_HEIGHT))
             .px(px(8.0))
@@ -2168,7 +2162,6 @@ impl PullRequestsPage {
                         ))
                         .aria_selected(active)
                         .tab_index(0)
-                        .focus_visible(|style| style.border_2().border_color(theme.accent))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.return_focus = Some(page.device_focus.clone());
                             page.set_target_device((!local).then(|| device_id.clone()), cx);
@@ -2348,7 +2341,6 @@ fn empty_action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::S
         .px(px(14.0))
         .border_1()
         .border_color(theme.border)
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .child(label)
 }
 
@@ -2568,9 +2560,6 @@ impl Render for PullRequestsPage {
                                     .border_1()
                                     .border_color(gpui::transparent_black())
                                     .hover(|style| style.bg(crate::theme::ink(0.04)))
-                                    .focus_visible(|style| {
-                                        style.border_2().border_color(theme.accent)
-                                    })
                                     .when(loading, |el| el.opacity(0.5))
                                     .on_click(cx.listener(|page, _, _, cx| page.refresh(cx)))
                                     .child(if refreshing {
@@ -2705,9 +2694,6 @@ impl Render for PullRequestsPage {
                                                 .items_center()
                                                 .justify_center()
                                                 .rounded(px(4.0))
-                                                .focus_visible(|style| {
-                                                    style.border_2().border_color(theme.accent)
-                                                })
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|page, _, _, cx| {
                                                     page.search.update(cx, |input, cx| {
@@ -2792,7 +2778,6 @@ impl Render for PullRequestsPage {
                                         style.bg(crate::theme::ink(0.07)).text_color(theme.text)
                                     })
                                 })
-                                .focus_visible(|style| style.border_2().border_color(theme.accent))
                                 .child(
                                     icon(if selected { selected_glyph } else { glyph })
                                         .size(px(13.0))
@@ -3182,7 +3167,6 @@ impl PullRequestsPage {
                 .rounded(px(6.0))
                 .border_1()
                 .border_color(gpui::transparent_black())
-                .focus_visible(|style| style.border_2().border_color(theme.accent))
                 .cursor_pointer()
                 .hover(|style| style.bg(crate::theme::ink(0.025)))
                 .on_click(cx.listener(move |page, _, _, cx| {
@@ -3311,7 +3295,6 @@ fn render_table_row(
         ))
         .tab_index(0)
         .when(selected, |el| el.bg(theme.glass_hover()))
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .cursor_pointer()
         .hover(|style| style.bg(theme.glass_hover()))
         .on_click(move |_, window, cx| {
@@ -3422,7 +3405,6 @@ fn render_list_row(
         .px(px(12.0))
         .gap(px(Theme::SPACE_SM))
         .when(selected, |el| el.bg(theme.glass_hover()))
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .cursor_pointer()
         .hover(|style| style.bg(theme.glass_hover()))
         .on_click(move |_, window, cx| {

@@ -3787,6 +3787,9 @@ pub struct Transcript {
     typography_generation: u32,
     content_width: f32,
     preview_inset: f32,
+    /// Width held free at the column's right for a docked side card; the
+    /// reading column centers in what remains.
+    right_reserve: f32,
     /// Last global code-fence layout generation applied to this transcript.
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
@@ -4337,6 +4340,7 @@ impl Transcript {
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
             preview_inset: 0.0,
+            right_reserve: 0.0,
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             hidden_fence: None,
@@ -4435,6 +4439,21 @@ impl Transcript {
     // ---- rail plumbing (rendering lives in crate::rail) ----
 
     /// Shell-driven width gate: the rail hides below 48rem of container width.
+    /// Shell-driven: hold `reserve` px free on the right of the reading
+    /// column (a docked side card), so the column and card center together.
+    pub fn set_right_reserve(&mut self, reserve: f32, cx: &mut Context<Self>) {
+        let reserve = reserve.max(0.0);
+        if (self.right_reserve - reserve).abs() > 0.25 {
+            self.right_reserve = reserve;
+            // Rows rewrap at the new width, including virtual ones offscreen.
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+            cx.notify();
+        }
+    }
+
     pub fn set_rail_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.rail_enabled != enabled {
             self.rail_enabled = enabled;
@@ -9437,9 +9456,10 @@ impl Transcript {
             .justify_center()
             .pt(px(top_gap))
             .pb(px(bottom_pad))
-            // Keep side gutters as the configurable column shrinks to fit.
+            // Keep side gutters as the configurable column shrinks to fit;
+            // a docked side card's room comes off the right.
             .pl(px(48.0))
-            .pr(px(48.0 + self.preview_inset))
+            .pr(px(48.0 + self.preview_inset + self.right_reserve))
             .child(
                 div()
                     .w_full()
@@ -13035,7 +13055,8 @@ impl Render for Transcript {
             let mut released = diagrams.begin_frame(crate::theme::style_generation());
             let list_width = f32::from(self.list.viewport_bounds().size.width);
             let column = if list_width > 0.0 {
-                self.content_width.min(list_width)
+                self.content_width
+                    .min((list_width - self.right_reserve).max(1.0))
             } else {
                 self.content_width
             };

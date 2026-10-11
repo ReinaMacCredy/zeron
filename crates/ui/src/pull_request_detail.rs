@@ -1240,7 +1240,6 @@ fn tab_grid<T: 'static>(
                     ),
             )
             .rounded_full()
-            .focus_visible(|style| style.border_2().border_color(theme.accent))
             .on_click(cx.listener(move |host, _, window, cx| click(host, slot, window, cx)))
             .on_key_down(
                 cx.listener(move |host, event: &gpui::KeyDownEvent, window, cx| {
@@ -1345,7 +1344,6 @@ fn pill_back(number: SharedString, theme: &Theme) -> AnyElement {
         .p(px(NAV_SEGMENT_INSET))
         .rounded_full()
         .cursor_pointer()
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .on_click(|_, window, cx| {
             cx.stop_propagation();
             window.dispatch_action(Box::new(ClosePullRequest), cx);
@@ -1407,7 +1405,6 @@ fn tuck_tab(
         .bg(theme.composer_surface_bg())
         .cursor_pointer()
         .occlude()
-        .focus_visible(|style| style.border_color(theme.accent))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(on_click)
         .child(
@@ -1586,7 +1583,6 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         .tab_index(0)
         .border_1()
         .border_color(gpui::transparent_black())
-        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .cursor_pointer()
         .when(icon_only, |el| {
             el.size(px(24.0))
@@ -2028,7 +2024,6 @@ impl Render for PullRequestDetailPage {
                                 .gap(px(8.0))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(theme.glass_hover()))
-                                .focus_visible(|style| style.border_2().border_color(theme.accent))
                                 .child(
                                     crate::icons::icon(if self.checks_expanded {
                                         crate::icons::ALT_ARROW_DOWN
@@ -2123,9 +2118,6 @@ impl Render for PullRequestDetailPage {
                                             .role(gpui::Role::Link)
                                             .tab_index(0)
                                             .aria_label(format!("Open {name}"))
-                                            .focus_visible(|style| {
-                                                style.border_2().border_color(theme.accent)
-                                            })
                                             .hover(|style| style.bg(theme.glass_hover()))
                                             .on_click(move |_, _, cx| cx.open_url(&link))
                                     }),
@@ -2476,9 +2468,6 @@ impl Render for PullRequestDetailPage {
                                                                     style
                                                                         .bg(theme.ink(0.07))
                                                                         .text_color(theme.text)
-                                                                })
-                                                                .focus_visible(|style| {
-                                                                    style.border_1().border_color(theme.accent)
                                                                 })
                                                                 .child(
                                                                     crate::icons::icon(

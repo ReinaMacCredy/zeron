@@ -1082,6 +1082,8 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (window, _dir) = device_shell(cx);
+        // A flag flip mid open-tween becomes a fit exit whose last frame a test window never draws.
+        cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
         let (sim, pad) = window
             .update(cx, |shell, window, cx| {
                 shell.debug_gate = Some(GatePhase::Ready);

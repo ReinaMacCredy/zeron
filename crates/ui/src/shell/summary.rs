@@ -145,7 +145,7 @@ impl Shell {
         if split_open || self.state.read(cx).selected_chat.is_none() {
             return 0.0;
         }
-        let popover_mode = self.right_pane_open(cx);
+        let popover_mode = self.right_pane_shown(cx);
         let collapsed = self.settings.sidecar_collapsed
             || popover_mode
             || full_column <= SIDECAR_AUTO_COLLAPSE_WIDTH;
@@ -803,7 +803,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let sections = self.sidecar_sections(&theme, cx);
         let collapsed = self.sidecar_collapsed_now == Some(true);
-        let popover_mode = self.right_pane_open(cx);
+        let popover_mode = self.right_pane_shown(cx);
         let (slide, fade) = match self.sidecar_flip {
             Some(flip) => (
                 self.motion_progress(flip.started, motion::SIDECAR_LAYOUT),

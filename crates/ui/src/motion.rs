@@ -462,6 +462,9 @@ pub const SIDECAR_FADE: MotionSpec = MotionSpec::new(150, EASE);
 pub const SIDECAR_POPOVER_FADE: MotionSpec = MotionSpec::new(160, EASE);
 pub const SIDECAR_POPOVER_SLIDE: MotionSpec =
     MotionSpec::new(220, CubicBezier::new(0.32, 0.72, 0.0, 1.0));
+/// Panel columns share the dialog entrance's gentle acceleration and soft
+/// landing. Wide moves stretch this base to at most 240ms in the shell.
+pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 pub const SEGMENT_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_QUINT);
