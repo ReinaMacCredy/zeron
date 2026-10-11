@@ -30,14 +30,20 @@ pub(crate) use git::OpenSourceControlSettings;
 pub use git::PageTab;
 
 const PR_PAGE_MAX_WIDTH: f32 = 760.0;
+pub(crate) const SPLIT_MIN_WIDTH: f32 = 900.0;
 const PR_PAGE_HORIZONTAL_PADDING: f32 = 40.0;
 const PR_TABLE_ROW_HEIGHT: f32 = 64.0;
+const LIST_ROW_HEIGHT: f32 = 52.0;
 const PR_SCROLL_FADE_BAND: f32 = 24.0;
 /// A stored first page younger than this is shown as is; an older one is
 /// shown and refreshed from GitHub behind it.
 const STORED_PAGE_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 /// Every control in the board's header and filter rows shares one height.
 const HEADER_CONTROL_HEIGHT: f32 = 32.0;
+const LIST_SHARE: f32 = 0.38;
+const LIST_MIN_WIDTH: f32 = 300.0;
+const LIST_MAX_WIDTH: f32 = 440.0;
+const LIST_PADDING: f32 = 12.0;
 
 /// Where the loaded listing stands relative to everything GitHub matched.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -367,6 +373,9 @@ pub struct PullRequestsPage {
     tab_focus: [gpui::FocusHandle; 2],
     git_view: Option<(Entity<git::GitTab>, Subscription)>,
     git_project: Option<ProjectRef>,
+    wide: bool,
+    split_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
+    pick_first: bool,
 }
 
 impl PullRequestsPage {
@@ -375,8 +384,99 @@ impl PullRequestsPage {
     }
 
     pub(crate) fn select_url(&mut self, url: Option<String>, cx: &mut Context<Self>) {
+        if let Some(url) = &url
+            && let Some(row) = self.board.as_ref().and_then(|board| {
+                board.rows.iter().position(|row| {
+                    matches!(row, BoardRow::Item { index, .. }
+                        if board.items.get(*index).is_some_and(|item| &item.url == url))
+                })
+            })
+        {
+            self.board_list.scroll_to_reveal_item(row);
+        }
+        if url.is_some() {
+            self.pick_first = false;
+        }
         self.selected_url = url;
         cx.notify();
+    }
+
+    pub(crate) fn tab(&self) -> PageTab {
+        self.tab
+    }
+
+    pub(crate) fn set_layout(
+        &mut self,
+        wide: bool,
+        split_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.split_detail.is_some() != split_detail.is_some() {
+            self.board_list.remeasure();
+        }
+        if self.wide != wide || self.split_detail != split_detail {
+            cx.notify();
+        }
+        self.wide = wide;
+        self.split_detail = split_detail;
+    }
+
+    fn board_urls(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+        let board = self.board(cx);
+        board
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                BoardRow::Item { index, .. } => {
+                    board.items.get(*index).map(|item| item.url.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn take_first_pick(
+        &mut self,
+        unselected: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if !(self.pick_first || unselected)
+            || matches!(self.load_state, PullRequestsLoadState::Loading) && self.items.is_empty()
+        {
+            return None;
+        }
+        let first = self.board_urls(cx).into_iter().next()?;
+        self.pick_first = false;
+        Some(first)
+    }
+
+    pub(crate) fn step_on_arrow(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.platform || modifiers.control || modifiers.alt || modifiers.shift {
+            return None;
+        }
+        match event.keystroke.key.as_str() {
+            "up" => self.step_selection(-1, cx),
+            "down" => self.step_selection(1, cx),
+            _ => None,
+        }
+    }
+
+    fn step_selection(&mut self, step: isize, cx: &mut Context<Self>) -> Option<String> {
+        let urls = self.board_urls(cx);
+        let current = self
+            .selected_url
+            .as_ref()
+            .and_then(|url| urls.iter().position(|candidate| candidate == url));
+        let next = match current {
+            Some(index) => index.checked_add_signed(step)?,
+            None => 0,
+        };
+        urls.get(next).cloned()
     }
     pub(crate) fn target_device(&self) -> Option<String> {
         self.target_device.clone()
@@ -559,6 +659,7 @@ impl PullRequestsPage {
                 |page: &mut Self, _, event, cx| match event {
                     ComposerInputEvent::Submitted => {
                         page.return_focus = Some(page.repository_focus.clone());
+                        page.pick_first = true;
                         page.select_repository(cx);
                     }
                     ComposerInputEvent::Edited => {
@@ -635,6 +736,9 @@ impl PullRequestsPage {
             tab_focus: [cx.focus_handle(), cx.focus_handle()],
             git_view: None,
             git_project: None,
+            wide: false,
+            split_detail: None,
+            pick_first: false,
         };
         page.initialize_repository(cx);
         page
@@ -838,6 +942,7 @@ impl PullRequestsPage {
         if self.target_device == target {
             return;
         }
+        self.pick_first = true;
 
         self.initial_scope_task = None;
         self.initial_scope_attempted = true;
@@ -972,6 +1077,7 @@ impl PullRequestsPage {
         if self.filter == filter {
             return;
         }
+        self.pick_first = true;
         self.set_filter(filter, cx);
         if self.repository.is_none() {
             cx.notify();
@@ -1032,6 +1138,7 @@ impl PullRequestsPage {
     }
 
     fn select_project(&mut self, path: String, device: String, cx: &mut Context<Self>) {
+        self.pick_first = true;
         self.cancel_project_detection();
         let state = self.state.read(cx);
         let Some(engine) = state.engine().cloned() else {
@@ -1406,6 +1513,7 @@ impl PullRequestsPage {
                                 page.return_focus = Some(page.repository_focus.clone());
                                 page.repository_input
                                     .update(cx, |input, cx| input.set_text(&repo, cx));
+                                page.pick_first = true;
                                 page.select_repository(cx);
                             }))
                             .into_any_element(),
@@ -1451,6 +1559,7 @@ impl PullRequestsPage {
                                 .on_click(cx.listener(|page, _, _, cx| {
                                     cx.stop_propagation();
                                     page.return_focus = Some(page.repository_focus.clone());
+                                    page.pick_first = true;
                                     page.select_repository(cx);
                                 })),
                         ),
@@ -2356,6 +2465,7 @@ impl Render for PullRequestsPage {
             .id("pull-requests-column")
             .debug_selector(|| "pull-requests-column".to_owned())
             .max_w(px(PR_PAGE_MAX_WIDTH))
+            .when(self.split_detail.is_some(), |el| el.px(px(LIST_PADDING)))
             .pt_0()
             .pb(px(Theme::SPACE_LG))
             .flex_none()
@@ -2633,6 +2743,7 @@ impl Render for PullRequestsPage {
                                     } else {
                                         view
                                     };
+                                    page.pick_first = true;
                                     page.scroll_to_top();
                                     if !selected {
                                         page.select_filter(ChangeRequestFilter::All, cx);
@@ -2756,33 +2867,67 @@ impl Render for PullRequestsPage {
         };
         // Keep the page actions reachable while browsing a long list. Only the
         // results scroll; the shared edges remain identical in every layout.
-        let dock = self.render_page_dock(count, &theme, window, cx);
-        div()
+        let split = self.split_detail.clone();
+        let dock = match &split {
+            Some(detail) => self.render_split_dock(detail, count, &theme, window, cx),
+            None => self.render_page_dock(count, &theme, window, cx),
+        };
+        let results = div()
+            .id("pull-requests-scroll-host")
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .on_hover(cx.listener(|page, hovered: &bool, _, cx| {
+                if page.scroll.set_list_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .child(width_probe)
+            .child(results)
+            .children(scrollbar);
+        let page = div()
             .id("pull-requests-page")
             .debug_selector(|| "pull-requests-page".into())
             .relative()
             .size_full()
-            .flex()
-            .flex_col()
-            .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
-            .child(header)
-            .child(
-                div()
-                    .id("pull-requests-scroll-host")
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .on_hover(cx.listener(|page, hovered: &bool, _, cx| {
-                        if page.scroll.set_list_hovered(*hovered) {
-                            cx.notify();
-                        }
-                    }))
-                    .child(width_probe)
-                    .child(results)
-                    .children(scrollbar),
-            )
-            .child(dock)
-            .into_any_element()
+            .flex();
+        let Some(detail) = split else {
+            return page
+                .flex_col()
+                .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
+                .child(header)
+                .child(results)
+                .child(dock)
+                .into_any_element();
+        };
+        page.child(
+            div()
+                .id("pull-requests-list")
+                .debug_selector(|| "pull-requests-list".into())
+                .h_full()
+                .flex_none()
+                .w(gpui::relative(LIST_SHARE))
+                .min_w(px(LIST_MIN_WIDTH))
+                .max_w(px(LIST_MAX_WIDTH))
+                .flex()
+                .flex_col()
+                .pt(px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG))
+                .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, window, cx| {
+                    if let Some(url) = page.step_on_arrow(event, cx) {
+                        cx.stop_propagation();
+                        window.dispatch_action(
+                            Box::new(crate::pull_request_detail::SelectPullRequest(url)),
+                            cx,
+                        );
+                    }
+                }))
+                .child(header)
+                .child(results),
+        )
+        .child(div().flex_none().w(px(1.0)).h_full().bg(theme.border))
+        .child(div().flex_1().min_w_0().h_full().child(detail))
+        .child(dock)
+        .into_any_element()
     }
 }
 
@@ -2821,22 +2966,27 @@ impl PullRequestsPage {
                     .content_width
                     .map(table_layout)
                     .unwrap_or(PullRequestTableLayout::Narrow);
+                let selected = self.selected_url.as_deref() == Some(item.url.as_str());
                 // Each row paints its slice of the group's card.
                 div()
                     .w_full()
                     .bg(widgets::block_fill(&theme))
                     .when(first, |el| el.rounded_t(px(12.0)))
                     .when(last, |el| el.rounded_b(px(12.0)))
-                    .child(render_table_row(
-                        item,
-                        layout,
-                        self.sort.field,
-                        first,
-                        last,
-                        self.selected_url.as_deref() == Some(item.url.as_str()),
-                        &theme,
-                        cx,
-                    ))
+                    .child(if self.split_detail.is_some() {
+                        render_list_row(item, first, last, selected, &theme, cx)
+                    } else {
+                        render_table_row(
+                            item,
+                            layout,
+                            self.sort.field,
+                            first,
+                            last,
+                            selected,
+                            &theme,
+                            cx,
+                        )
+                    })
                     .into_any_element()
             }
             BoardRow::Footer => self
@@ -2855,7 +3005,11 @@ impl PullRequestsPage {
                 div()
                     .w_full()
                     .max_w(px(PR_PAGE_MAX_WIDTH))
-                    .px(px(PR_PAGE_HORIZONTAL_PADDING))
+                    .px(px(if self.split_detail.is_some() {
+                        LIST_PADDING
+                    } else {
+                        PR_PAGE_HORIZONTAL_PADDING
+                    }))
                     .child(content),
             )
             .into_any_element()
@@ -3086,6 +3240,106 @@ fn render_table_row(
             .child(star)
             .into_any_element()
     }
+}
+
+fn render_list_row(
+    item: &ChangeRequestListItem,
+    first: bool,
+    last: bool,
+    selected: bool,
+    theme: &Theme,
+    cx: &gpui::App,
+) -> AnyElement {
+    let url = item.url.clone();
+    let author = if item.author.login.is_empty() {
+        "Unknown author"
+    } else {
+        item.author.login.as_str()
+    };
+    table_row_shell(PullRequestTableLayout::Compact, first, last, theme)
+        .id(SharedString::from(format!(
+            "pull-request-row-{}",
+            pull_request_key(item)
+        )))
+        .debug_selector({
+            let number = item.number;
+            move || format!("pull-request-list-row-{number}")
+        })
+        .role(gpui::Role::Link)
+        .aria_label(format!(
+            "{}: {} #{}. {}. Show pull request",
+            item.title,
+            item.repository,
+            item.number,
+            status_description(item)
+        ))
+        .aria_selected(selected)
+        .tab_index(0)
+        .relative()
+        .min_h(px(LIST_ROW_HEIGHT))
+        .px(px(12.0))
+        .gap(px(Theme::SPACE_SM))
+        .when(selected, |el| el.bg(theme.glass_hover()))
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.glass_hover()))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(
+                Box::new(crate::pull_request_detail::SelectPullRequest(url.clone())),
+                cx,
+            );
+        })
+        .when(selected, |el| {
+            el.child(
+                div()
+                    .debug_selector(|| "pull-request-row-selected".into())
+                    .absolute()
+                    .left_0()
+                    .top(px(10.0))
+                    .bottom(px(10.0))
+                    .w(px(2.0))
+                    .rounded_full()
+                    .bg(theme.accent),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .debug_selector(|| "pull-request-title".to_string())
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(crate::typography::ui_rems(widgets::ROW_TITLE_SIZE))
+                        .text_color(theme.text)
+                        .child(
+                            icon(request_glyph(item))
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(request_color(item, theme)),
+                        )
+                        .child(div().min_w_0().truncate().child(single_line(&item.title))),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "pull-request-row-meta".to_string())
+                        .pl(px(22.0))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(format!("{author} · #{}", item.number)),
+                ),
+        )
+        .child(star_button(&item.url, theme, cx))
+        .into_any_element()
 }
 
 fn status_description(item: &ChangeRequestListItem) -> String {
@@ -3636,6 +3890,24 @@ fn settle_snapshot<T>(
 }
 
 #[cfg(test)]
+impl PullRequestsPage {
+    pub(crate) fn show_test_pull_requests(
+        &mut self,
+        repository: &str,
+        numbers: &[u64],
+        cx: &mut Context<Self>,
+    ) {
+        self.items = numbers
+            .iter()
+            .map(|number| tests::pull_request(repository, *number, 1, 1, 1))
+            .collect();
+        self.view_items = None;
+        self.load_state = PullRequestsLoadState::Ready;
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
@@ -3654,7 +3926,7 @@ mod tests {
         }
     }
 
-    fn pull_request(
+    pub(super) fn pull_request(
         repository: &str,
         number: u64,
         changes: u64,

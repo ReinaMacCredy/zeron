@@ -4624,6 +4624,32 @@ impl super::PullRequestsPage {
         view
     }
 
+    fn page_segments(
+        &self,
+        pull_requests: Option<usize>,
+    ) -> [crate::pull_request_detail::DockSegment; 2] {
+        PAGE_TABS.map(
+            |(tab, label, id, glyph)| crate::pull_request_detail::DockSegment {
+                id,
+                label: if self.wide && tab == PageTab::PullRequests {
+                    "PRs"
+                } else {
+                    label
+                },
+                glyph,
+                count: match tab {
+                    PageTab::PullRequests => pull_requests,
+                    PageTab::Git => None,
+                },
+            },
+        )
+    }
+
+    fn select_page_tab(&mut self, slot: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(PAGE_TABS[slot].0, cx);
+        window.focus(&self.tab_focus[slot], cx);
+    }
+
     pub(super) fn render_page_dock(
         &mut self,
         pull_requests: Option<usize>,
@@ -4635,19 +4661,41 @@ impl super::PullRequestsPage {
         if self.tab_slide.animating_at(now) {
             window.request_animation_frame();
         }
-        let segments =
-            PAGE_TABS.map(
-                |(tab, label, id, glyph)| crate::pull_request_detail::DockSegment {
-                    id,
-                    label,
-                    glyph,
-                    count: match tab {
-                        PageTab::PullRequests => pull_requests,
-                        PageTab::Git => None,
-                    },
-                },
-            );
+        let segments = self.page_segments(pull_requests);
         let pill = crate::pull_request_detail::dock_pill(
+            "page",
+            "pull-requests-page-tabs",
+            "Pull requests or Git",
+            &segments,
+            tab_slot(self.tab) as usize,
+            self.tab_slide.value_at(now),
+            &self.tab_focus,
+            theme,
+            window,
+            cx,
+            Self::select_page_tab,
+        );
+        let orb = (self.tab == PageTab::Git)
+            .then(|| self.commit_orb(theme, cx))
+            .flatten();
+        crate::pull_request_detail::dock_row(pill, orb)
+    }
+
+    pub(super) fn render_split_dock(
+        &mut self,
+        detail: &Entity<crate::pull_request_detail::PullRequestDetailPage>,
+        pull_requests: Option<usize>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::pull_request_detail::{dock_bar, dock_divider, dock_label, dock_row, dock_tabs};
+        let now = std::time::Instant::now();
+        if self.tab_slide.animating_at(now) {
+            window.request_animation_frame();
+        }
+        let segments = self.page_segments(pull_requests);
+        let page_tabs = dock_tabs(
             "pull-requests-page-tabs",
             "Pull requests or Git",
             &segments,
@@ -4656,15 +4704,29 @@ impl super::PullRequestsPage {
             &self.tab_focus,
             theme,
             cx,
-            |page, slot, window, cx| {
-                page.select_tab(PAGE_TABS[slot].0, cx);
-                window.focus(&page.tab_focus[slot], cx);
-            },
+            Self::select_page_tab,
         );
-        let orb = (self.tab == PageTab::Git)
-            .then(|| self.commit_orb(theme, cx))
-            .flatten();
-        crate::pull_request_detail::dock_row(pill, orb)
+        let (number, detail_tabs, orb) = detail.update(cx, |detail, cx| {
+            (
+                detail.number_label(),
+                detail.dock_tabs(theme, cx),
+                detail.chat_orb(theme, cx),
+            )
+        });
+        let bar = dock_bar(
+            "split",
+            "pr-dock",
+            vec![
+                page_tabs,
+                dock_divider(theme),
+                dock_label("pr-dock-number", number, theme),
+                detail_tabs,
+            ],
+            theme,
+            window,
+            cx,
+        );
+        dock_row(bar, Some(orb))
     }
 
     fn commit_orb(&self, theme: &Theme, cx: &App) -> Option<AnyElement> {

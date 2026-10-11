@@ -40,6 +40,14 @@ pub struct ClosePullRequest;
 
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
+pub struct SelectPullRequest(pub String);
+
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct OpenGitTab;
+
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
 pub struct OpenPrImage(pub String);
 
 /// Open a new session with this prompt staged in the composer (not sent).
@@ -98,8 +106,8 @@ pub fn open_on_device(url: &str, device: Option<String>, window: &mut Window, cx
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tab {
     Summary,
     Code,
     Activity,
@@ -438,6 +446,7 @@ pub struct PullRequestDetailPage {
     chat_dock: Option<ChatDock>,
     chat_expanded: bool,
     chat_float: crate::dock_orb::Float,
+    hosted: bool,
 }
 
 impl PullRequestDetailPage {
@@ -524,6 +533,7 @@ impl PullRequestDetailPage {
             chat_dock: None,
             chat_expanded: false,
             chat_float: Default::default(),
+            hosted: false,
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -636,35 +646,6 @@ impl PullRequestDetailPage {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(
-                widgets::ghost_action(&theme)
-                    .id("pr-detail-back")
-                    .debug_selector(|| "pr-detail-back".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Back to pull requests")
-                    .tab_index(0)
-                    .flex_none()
-                    .gap(px(2.0))
-                    .pl(px(4.0))
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .focus_visible(|style| style.border_2().border_color(theme.accent))
-                    .cursor_pointer()
-                    .occlude()
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                        window.prevent_default()
-                    })
-                    .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_LEFT)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child("Pull requests")
-                    .on_click(|_, window, cx| {
-                        cx.stop_propagation();
-                        window.dispatch_action(Box::new(ClosePullRequest), cx);
-                    }),
-            )
             .child(
                 div()
                     .id("pr-detail-title")
@@ -935,7 +916,46 @@ impl PullRequestDetailPage {
         self.rebuild_stream(cx);
     }
 
-    fn navigation(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn navigation(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.hosted {
+            return None;
+        }
+        let back = dock_button(
+            "pr-detail-back",
+            crate::icons::ALT_ARROW_LEFT,
+            Some(self.number_label()),
+            "Back to pull requests",
+            theme.accent,
+            theme,
+            |window, cx| window.dispatch_action(Box::new(ClosePullRequest), cx),
+        );
+        let git = dock_button(
+            "pr-detail-git",
+            crate::icons::FORK,
+            None,
+            "Git",
+            theme.text_muted,
+            theme,
+            |window, cx| window.dispatch_action(Box::new(OpenGitTab), cx),
+        );
+        let tabs = self.dock_tabs(theme, cx);
+        let bar = dock_bar(
+            "detail",
+            "pr-dock",
+            vec![back, dock_divider(theme), tabs, dock_divider(theme), git],
+            theme,
+            window,
+            cx,
+        );
+        Some(dock_row(bar, Some(self.chat_orb(theme, cx))))
+    }
+
+    pub(crate) fn dock_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let counts = self.detail.as_ref().map(|detail| {
             [
                 None,
@@ -949,7 +969,7 @@ impl PullRequestDetailPage {
             glyph,
             count: counts.and_then(|counts| counts[tab_slot(tab) as usize]),
         });
-        let pill = dock_pill(
+        dock_tabs(
             "pr-detail-nav",
             "Pull request sections",
             &segments,
@@ -959,8 +979,29 @@ impl PullRequestDetailPage {
             theme,
             cx,
             |page, slot, _, cx| page.select_tab(TABS[slot].0, cx),
-        );
-        dock_row(pill, Some(self.chat_orb(theme, cx)))
+        )
+    }
+
+    pub(crate) fn number_label(&self) -> SharedString {
+        self.detail
+            .as_ref()
+            .map(|detail| detail.number)
+            .or_else(|| self.preview.as_ref().map(|item| item.number))
+            .or_else(|| self.url.rsplit('/').next()?.parse().ok())
+            .map_or_else(|| "#".into(), |number| format!("#{number}").into())
+    }
+
+    pub(crate) fn set_hosted(&mut self, hosted: bool) {
+        self.hosted = hosted;
+    }
+
+    pub(crate) fn tab(&self) -> Tab {
+        self.tab
+    }
+
+    pub(crate) fn start_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.select_tab(tab, cx);
+        self.tab_slide = crate::motion::IndicatorSlide::at(tab_slot(tab), Instant::now());
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
@@ -1001,9 +1042,8 @@ pub(crate) struct DockSegment {
 /// thumb's coverage. The pill sizes to its content and only shrinks when
 /// the window is narrower than that.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dock_pill<T: 'static>(
+fn tab_grid<T: 'static>(
     id: &'static str,
-    label: &'static str,
     segments: &[DockSegment],
     selected: usize,
     position: f32,
@@ -1011,7 +1051,7 @@ pub(crate) fn dock_pill<T: 'static>(
     theme: &Theme,
     cx: &mut Context<T>,
     select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
-) -> AnyElement {
+) -> gpui::Div {
     let slots = segments.len() as f32;
     let thumb = div()
         .debug_selector(move || format!("{id}-thumb"))
@@ -1115,11 +1155,225 @@ pub(crate) fn dock_pill<T: 'static>(
                 }),
             )
     });
-    let tabs = div()
+    div()
+        .relative()
+        .grid()
+        .grid_cols(len as u16)
+        .child(thumb)
+        .children(items)
+}
+
+fn tab_list(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
         .id(id)
         .debug_selector(move || id.into())
         .role(gpui::Role::TabList)
         .aria_label(label)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dock_pill<T: 'static>(
+    key: &'static str,
+    id: &'static str,
+    label: &'static str,
+    segments: &[DockSegment],
+    selected: usize,
+    position: f32,
+    focus: &[gpui::FocusHandle],
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
+) -> AnyElement {
+    let grid = tab_grid(id, segments, selected, position, focus, theme, cx, select);
+    dock_surface(
+        key,
+        tab_list(id, label),
+        grid.into_any_element(),
+        theme,
+        window,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dock_tabs<T: 'static>(
+    id: &'static str,
+    label: &'static str,
+    segments: &[DockSegment],
+    selected: usize,
+    position: f32,
+    focus: &[gpui::FocusHandle],
+    theme: &Theme,
+    cx: &mut Context<T>,
+    select: impl Fn(&mut T, usize, &mut Window, &mut Context<T>) + Clone + 'static,
+) -> AnyElement {
+    tab_list(id, label)
+        .min_w_0()
+        .child(tab_grid(
+            id, segments, selected, position, focus, theme, cx, select,
+        ))
+        .into_any_element()
+}
+
+pub(crate) fn dock_bar(
+    key: &'static str,
+    id: &'static str,
+    items: Vec<AnyElement>,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &App,
+) -> AnyElement {
+    dock_surface(
+        key,
+        div().id(id).debug_selector(move || id.into()),
+        div()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .children(items)
+            .into_any_element(),
+        theme,
+        window,
+        cx,
+    )
+}
+
+pub(crate) fn dock_divider(theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .w(px(1.0))
+        .h(px(18.0))
+        .mx(px(3.0))
+        .bg(theme.border)
+        .into_any_element()
+}
+
+pub(crate) fn dock_label(id: &'static str, text: SharedString, theme: &Theme) -> AnyElement {
+    div()
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(NAV_SEGMENT_HEIGHT))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.accent)
+        .child(text)
+        .into_any_element()
+}
+
+pub(crate) fn dock_button(
+    id: &'static str,
+    glyph: &'static str,
+    text: Option<SharedString>,
+    label: &'static str,
+    tint: gpui::Hsla,
+    theme: &Theme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let hover = theme.glass_hover().opacity(0.6);
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .group(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .flex_none()
+        .p(px(NAV_SEGMENT_INSET))
+        .rounded_full()
+        .cursor_pointer()
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(
+            div()
+                .h(px(NAV_SEGMENT_HEIGHT))
+                .px(px(if text.is_some() { 12.0 } else { 11.0 }))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tint)
+                .group_hover(id, move |style| style.bg(hover))
+                .child(
+                    crate::icons::icon(glyph)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(tint),
+                )
+                .children(text),
+        )
+        .into_any_element()
+}
+
+#[derive(Default)]
+struct DockMorph {
+    key: &'static str,
+    started: Option<Instant>,
+    from: f32,
+    natural: Rc<std::cell::Cell<f32>>,
+    drawn: Rc<std::cell::Cell<f32>>,
+}
+
+thread_local! {
+    static DOCK_MORPHS: RefCell<std::collections::HashMap<gpui::WindowId, DockMorph>> =
+        RefCell::default();
+}
+
+fn dock_surface(
+    key: &'static str,
+    surface: gpui::Stateful<gpui::Div>,
+    inner: AnyElement,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &App,
+) -> AnyElement {
+    let now = Instant::now();
+    let reduced = crate::motion::reduced_motion(cx);
+    let edges = 2.0 * (NAV_PADDING + 1.0);
+    let (width, natural, drawn) = DOCK_MORPHS.with_borrow_mut(|morphs| {
+        let morph = morphs
+            .entry(window.window_handle().window_id())
+            .or_default();
+        if morph.key != key {
+            let from = morph.drawn.get();
+            *morph = DockMorph {
+                key,
+                started: (from > 0.0 && !reduced).then_some(now),
+                from,
+                ..Default::default()
+            };
+        }
+        let duration = crate::motion::INDICATOR_SLIDE
+            .total()
+            .mul_f32(crate::motion::speed_scale())
+            .as_secs_f32();
+        let progress = morph.started.map_or(1.0, |started| {
+            if duration <= 0.0 {
+                1.0
+            } else {
+                crate::motion::INDICATOR_SLIDE
+                    .progress(now.saturating_duration_since(started).as_secs_f32() / duration)
+            }
+        });
+        let width = (progress < 1.0).then(|| match morph.natural.get() {
+            natural if natural > 0.0 => crate::motion::lerp(morph.from, natural + edges, progress),
+            _ => morph.from,
+        });
+        (width, morph.natural.clone(), morph.drawn.clone())
+    });
+    if width.is_some() {
+        window.request_animation_frame();
+    }
+    let surface = surface
+        .relative()
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1132,17 +1386,36 @@ pub(crate) fn dock_pill<T: 'static>(
         .bg(theme.composer_surface_bg())
         .when(!theme.is_frost(), |el| el.shadow_lg())
         .flex_none()
+        .flex()
+        .when_some(width, |el, width| {
+            el.w(px(width)).overflow_hidden().justify_center()
+        })
         .child(
             div()
                 .relative()
-                .grid()
-                .grid_cols(len as u16)
-                .child(thumb)
-                .children(items),
+                .when(width.is_some(), |el| el.flex_none())
+                .when(width.is_none(), |el| el.min_w_0())
+                .child(inner)
+                .child(
+                    gpui::canvas(
+                        move |bounds, _, _| natural.set(f32::from(bounds.size.width)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                ),
+        )
+        .child(
+            gpui::canvas(
+                move |bounds, _, _| drawn.set(f32::from(bounds.size.width)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
         );
     // Concentric: the pill radius is the segment radius plus the padding.
     let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_SEGMENT_INSET + NAV_PADDING + 1.0;
-    crate::frost::frosted(radius, crate::frost::MENU_BLUR, tabs).into_any_element()
+    crate::frost::frosted(radius, crate::frost::MENU_BLUR, surface).into_any_element()
 }
 
 pub(crate) fn dock_row(pill: AnyElement, orb: Option<AnyElement>) -> AnyElement {
@@ -2312,7 +2585,7 @@ impl Render for PullRequestDetailPage {
                 .when(self.tab != Tab::Code, |el| el.children(rail))
                 .into_any_element()
         };
-        let navigation = self.navigation(&theme, cx);
+        let navigation = self.navigation(&theme, window, cx);
         if self.tab_slide.animating_at(Instant::now()) {
             window.request_animation_frame();
         }
@@ -2343,7 +2616,7 @@ impl Render for PullRequestDetailPage {
                         chat.map(|chat| div().relative().flex_none().w_full().h_0().child(chat)),
                     )
                     .children(comment)
-                    .child(navigation),
+                    .children(navigation),
             );
         if let Some(preview) = &self.image_preview {
             let weak = cx.weak_entity();
@@ -3324,9 +3597,11 @@ mod tests {
     }
 
     impl Render for NavigationHitHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let navigation = self.page.update(cx, |page, cx| page.navigation(&theme, cx));
+            let navigation = self
+                .page
+                .update(cx, |page, cx| page.navigation(&theme, window, cx));
             let raw = self.raw_presses.clone();
             div()
                 .size_full()
@@ -3360,7 +3635,7 @@ mod tests {
                         )
                         .on_click(cx.listener(|host, _, _, _| host.clicks += 1)),
                 )
-                .child(div().absolute().inset_0().child(navigation))
+                .child(div().absolute().inset_0().children(navigation))
         }
     }
 
@@ -3391,7 +3666,7 @@ mod tests {
         cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
         cx.run_until_parked();
         let tab = cx.debug_bounds("pr-code").unwrap();
-        let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+        let nav = cx.debug_bounds("pr-dock").unwrap();
         for point in [
             tab.center(),
             gpui::point(nav.left() + px(2.0), nav.center().y),
@@ -3580,9 +3855,9 @@ mod tests {
                 assert!(bounds.top() >= px(0.0) && bounds.bottom() <= px(Theme::TITLEBAR_HEIGHT));
                 previous_right = bounds.right();
             }
-            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
-            assert_eq!(nav.bottom(), px(784.0));
-            assert_eq!(nav.size.height, px(NAV_HEIGHT));
+            let dock = cx.debug_bounds("pr-dock").unwrap();
+            assert_eq!(dock.bottom(), px(784.0));
+            assert_eq!(dock.size.height, px(NAV_HEIGHT));
             for selector in ["pr-summary", "pr-code", "pr-activity"] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
@@ -3668,7 +3943,7 @@ mod tests {
             cx.simulate_resize(gpui::size(px(width), px(height)));
             cx.run_until_parked();
             let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
-            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+            let nav = cx.debug_bounds("pr-dock").unwrap();
             assert!(viewport.size.height > px(60.0), "{viewport:?}");
             assert!(
                 viewport.bottom() <= nav.top(),
@@ -3744,7 +4019,7 @@ mod tests {
             cx.run_until_parked();
             let column = cx.debug_bounds("pr-content-column").unwrap();
             let composer = cx.debug_bounds("pr-comment-surface").unwrap();
-            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+            let nav = cx.debug_bounds("pr-dock").unwrap();
             let meta = cx.debug_bounds("pr-detail-meta").unwrap();
             let thread = cx.debug_bounds("pr-activity-thread").unwrap();
             assert_eq!(
@@ -3894,19 +4169,27 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_back_control_leads_the_header_and_returns_to_the_board(cx: &mut gpui::TestAppContext) {
+    fn alone_the_dock_leads_with_back_and_ends_with_git(cx: &mut gpui::TestAppContext) {
         fixture::init(cx);
+        cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         for width in [600.0, 1200.0] {
             cx.simulate_resize(gpui::size(px(width), px(800.0)));
             cx.run_until_parked();
-            let back = cx.debug_bounds("pr-detail-back").unwrap();
+            assert!(cx.debug_bounds("pr-detail-back").is_some());
             let title = cx.debug_bounds("pr-detail-title").unwrap();
-            assert!(back.right() <= title.left(), "{back:?} {title:?}");
-            assert!(cx.debug_bounds("pr-detail-nav").is_some());
+            assert!(title.left() <= px(4.0), "the header has no back control");
+            let dock = cx.debug_bounds("pr-dock").unwrap();
+            let back = cx.debug_bounds("pr-detail-back").unwrap();
+            let tabs = cx.debug_bounds("pr-detail-nav").unwrap();
+            let git = cx.debug_bounds("pr-detail-git").unwrap();
+            let orb = cx.debug_bounds("pr-chat-orb").unwrap();
+            assert!(dock.left() < back.left() && back.right() < tabs.left());
+            assert!(tabs.right() < git.left() && git.right() < dock.right());
+            assert!(orb.left() >= dock.right());
+            assert!(dock.right() <= px(width) && dock.left() >= px(0.0));
             assert!(cx.debug_bounds("pull-requests-page-tabs").is_none());
         }
-        host.read_with(cx, |host, _| assert!(!host.returned));
         let page = host.read_with(cx, |host, _| host.page.clone());
         page.update_in(cx, |page, window, cx| window.focus(&page.content_focus, cx));
         let back = cx.debug_bounds("pr-detail-back").unwrap();

@@ -2344,6 +2344,9 @@ pub struct Shell {
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
+    /// Opened as its own page, so a narrow window shows it over the board.
+    pull_request_open: bool,
+    pull_request_wide: bool,
     pr_chat: Option<pr_chat::PrChatPanel>,
     pr_chat_trash: pr_chat::PrChatTrash,
     /// A detail view a history step landed on, opened by the next render
@@ -2948,6 +2951,8 @@ impl Shell {
             pull_requests_page: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
+            pull_request_open: false,
+            pull_request_wide: false,
             pr_chat: None,
             pr_chat_trash: Default::default(),
             pending_pull_request: None,
@@ -6544,6 +6549,37 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pull_request_open = true;
+        self.load_pull_request_detail(url, target, window, cx);
+        if let Some(page) = &self.pull_requests_page {
+            page.update(cx, |page, cx| {
+                page.select_tab(crate::pull_requests::PageTab::PullRequests, cx)
+            });
+        }
+    }
+
+    fn select_pull_request(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self
+            .pull_request_detail
+            .as_ref()
+            .map(|detail| detail.read(cx).tab());
+        let target = self
+            .pull_requests_page
+            .as_ref()
+            .and_then(|page| page.read(cx).target_device());
+        self.load_pull_request_detail(url, target, window, cx);
+        if let (Some(tab), Some(detail)) = (tab, self.pull_request_detail.clone()) {
+            detail.update(cx, |detail, cx| detail.start_on(tab, cx));
+        }
+    }
+
+    fn load_pull_request_detail(
+        &mut self,
+        url: String,
+        target: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_pull_request = None;
         if self.pull_requests_page.is_none() {
             self.pull_requests_page =
@@ -6591,10 +6627,53 @@ impl Shell {
         self.pending_pull_request = None;
         self.pull_request_detail = None;
         self.pull_request_detail_subscription = None;
+        self.pull_request_open = false;
         if let Some(page) = &self.pull_requests_page {
             page.update(cx, |page, cx| page.select_url(None, cx));
         }
         cx.notify();
+    }
+
+    pub(super) fn shown_pull_request_detail(
+        &self,
+        cx: &App,
+    ) -> Option<&Entity<crate::pull_request_detail::PullRequestDetailPage>> {
+        let on_pull_requests = matches!(self.route, Route::PullRequests)
+            && self.pull_requests_page.as_ref().is_none_or(|page| {
+                page.read(cx).tab() == crate::pull_requests::PageTab::PullRequests
+            });
+        (on_pull_requests && (self.pull_request_wide || self.pull_request_open))
+            .then_some(self.pull_request_detail.as_ref())
+            .flatten()
+    }
+
+    fn select_pull_request_on_arrow(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.pull_request_wide {
+            return false;
+        }
+        let Some(detail) = self.shown_pull_request_detail(cx).cloned() else {
+            return false;
+        };
+        let parked = {
+            let detail = detail.read(cx);
+            !detail.overlay_open()
+                && !detail.chat_expanded()
+                && (self.shell_focus_parked(window, cx) || detail.reading_focus(window))
+        };
+        let Some(url) = parked
+            .then(|| self.pull_requests_page.clone())
+            .flatten()
+            .and_then(|page| page.update(cx, |page, cx| page.step_on_arrow(event, cx)))
+        else {
+            return false;
+        };
+        self.select_pull_request(url, window, cx);
+        true
     }
 
     fn close_pull_request(&mut self, cx: &mut Context<Self>) {
@@ -8356,9 +8435,10 @@ impl Shell {
             .pl(px((self.sidebar_now() + Theme::SPACE_LG)
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-            .when_some(self.pull_request_detail.clone(), |bar, detail| {
-                bar.child(detail.update(cx, |page, cx| page.titlebar(cx)))
-            });
+            .when_some(
+                self.shown_pull_request_detail(cx).cloned(),
+                |bar, detail| bar.child(detail.update(cx, |page, cx| page.titlebar(cx))),
+            );
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("pull-requests-titlebar", bar, cx)
             .into_any_element()
@@ -12123,6 +12203,10 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if self.select_pull_request_on_arrow(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.type_into_composer(event, window, cx) {
             cx.stop_propagation();
             return;
@@ -12823,19 +12907,39 @@ impl Shell {
             if let Some((url, device)) = self.pending_pull_request.take() {
                 self.show_pull_request_detail(url, device, window, cx);
             }
-            if self.pull_requests_page.is_none() {
-                self.pull_requests_page =
-                    Some(cx.new(|cx| PullRequestsPage::new(self.state.clone(), cx)));
+            let page = match &self.pull_requests_page {
+                Some(page) => page.clone(),
+                None => {
+                    let page = cx.new(|cx| PullRequestsPage::new(self.state.clone(), cx));
+                    self.pull_requests_page = Some(page.clone());
+                    page
+                }
+            };
+            self.pull_request_wide = main_content_width >= crate::pull_requests::SPLIT_MIN_WIDTH
+                && crate::settings::current(cx).pull_request_destination
+                    == crate::settings::PullRequestDestination::Native;
+            if self.pull_request_wide
+                && page.read(cx).tab() == crate::pull_requests::PageTab::PullRequests
+            {
+                let unselected = self.pull_request_detail.is_none();
+                let picked = page.update(cx, |page, cx| page.take_first_pick(unselected, cx));
+                if let Some(url) = picked {
+                    self.select_pull_request(url, window, cx);
+                }
             }
-            let outlet = self
-                .pull_requests_page
-                .as_ref()
-                .cloned()
-                .map(IntoElement::into_any_element)
-                .unwrap_or_else(|| Empty.into_any_element());
-            if let Some(detail) = self.pull_request_detail.clone() {
+            let shown = self.shown_pull_request_detail(cx).cloned();
+            let wide = self.pull_request_wide;
+            if let Some(detail) = &shown {
                 let dock = self.render_pr_chat(window, cx);
-                detail.update(cx, |page, _| page.set_chat_dock(dock));
+                detail.update(cx, |detail, _| {
+                    detail.set_chat_dock(dock);
+                    detail.set_hosted(wide);
+                });
+            }
+            page.update(cx, |page, cx| {
+                page.set_layout(wide, shown.clone().filter(|_| wide), cx)
+            });
+            if let Some(detail) = shown.filter(|_| !wide) {
                 return div()
                     .flex_1()
                     .min_w_0()
@@ -12850,7 +12954,7 @@ impl Shell {
                 .h_full()
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h_0().child(outlet))
+                .child(div().flex_1().min_h_0().child(page))
                 .into_any_element();
         }
 
@@ -15763,7 +15867,10 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &ToggleTerminal, window, cx| match this.route {
                     Route::Chat => this.toggle_terminal(window, cx),
-                    Route::PullRequests => this.toggle_pr_chat(cx),
+                    Route::PullRequests if this.shown_pull_request_detail(cx).is_some() => {
+                        this.toggle_pr_chat(cx)
+                    }
+                    Route::PullRequests => {}
                     Route::Settings(_) | Route::Terminal => {}
                 }),
             )
@@ -15827,6 +15934,20 @@ impl Render for Shell {
                     this.close_pull_request(cx)
                 },
             ))
+            .on_action(cx.listener(
+                |this, action: &crate::pull_request_detail::SelectPullRequest, window, cx| {
+                    this.select_pull_request(action.0.clone(), window, cx)
+                },
+            ))
+            .on_action(
+                cx.listener(|this, _: &crate::pull_request_detail::OpenGitTab, _, cx| {
+                    if let Some(page) = &this.pull_requests_page {
+                        page.update(cx, |page, cx| {
+                            page.select_tab(crate::pull_requests::PageTab::Git, cx)
+                        });
+                    }
+                }),
+            )
             .on_action(cx.listener(
                 |this, action: &crate::pull_request_detail::AddPullRequestProject, _, cx| {
                     this.open_add_space_on_device(&action.0, cx);
@@ -19066,10 +19187,10 @@ mod exit_regressions {
                     });
                     cx.run_until_parked();
                     let new_session = cx.debug_bounds("titlebar-new-session").unwrap();
-                    let back = cx.debug_bounds("pr-detail-back").unwrap();
+                    let title = cx.debug_bounds("pr-detail-title").unwrap();
                     assert!(
-                        back.left() >= new_session.right() + px(8.0),
-                        "PR header overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, back={back:?}, new_session={new_session:?}"
+                        title.left() >= new_session.right() + px(8.0),
+                        "PR header overlaps New session: width={width}, collapsed={collapsed}, fullscreen={fullscreen}, title={title:?}, new_session={new_session:?}"
                     );
                     let external = cx.debug_bounds("pr-external").unwrap();
                     assert!(external.right() <= px(width));
@@ -19116,6 +19237,7 @@ mod exit_regressions {
         });
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
+            motion::set_reduced_motion(cx, true);
             shell.open_pull_requests(cx);
         });
         cx.simulate_resize(gpui::size(px(600.0), px(800.0)));

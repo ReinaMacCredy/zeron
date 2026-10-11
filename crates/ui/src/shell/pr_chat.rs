@@ -126,11 +126,8 @@ impl Shell {
     }
 
     pub(super) fn pr_chat_expanded(&self, cx: &App) -> bool {
-        matches!(self.route, Route::PullRequests)
-            && self
-                .pull_request_detail
-                .as_ref()
-                .is_some_and(|page| page.read(cx).chat_expanded())
+        self.shown_pull_request_detail(cx)
+            .is_some_and(|page| page.read(cx).chat_expanded())
     }
 
     pub(super) fn open_pr_chat_on_slash(
@@ -149,7 +146,7 @@ impl Shell {
         {
             return false;
         }
-        let Some(page) = self.pull_request_detail.as_ref() else {
+        let Some(page) = self.shown_pull_request_detail(cx) else {
             return false;
         };
         let parked = self.shell_focus_parked(window, cx) || page.read(cx).parked_focus(window);
@@ -166,7 +163,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         if !matches!(self.route, Route::PullRequests)
-            || self.pull_request_detail.is_some()
+            || self.shown_pull_request_detail(cx).is_some()
             || !self.shell_focus_parked(window, cx)
         {
             return false;
@@ -184,10 +181,10 @@ impl Shell {
     }
 
     pub(super) fn escape_closes_pull_request(&self, window: &Window, cx: &App) -> bool {
-        if !matches!(self.route, Route::PullRequests) {
+        if self.pull_request_wide {
             return false;
         }
-        self.pull_request_detail.as_ref().is_some_and(|page| {
+        self.shown_pull_request_detail(cx).is_some_and(|page| {
             let page = page.read(cx);
             !page.overlay_open()
                 && (self.shell_focus_parked(window, cx) || page.parked_focus(window))
@@ -3359,14 +3356,14 @@ mod tests {
         settle(cx);
         assert!(cx.debug_bounds("pr-chat-bar").is_none());
         assert!(cx.debug_bounds("pr-chat-dock").is_none());
-        let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+        let nav = cx.debug_bounds("pr-dock").unwrap();
         let orb = cx.debug_bounds("pr-chat-orb").expect("orb beside the dock");
         assert!(orb.left() >= nav.right(), "{orb:?} right of {nav:?}");
         assert!(orb.left() - nav.right() <= px(12.0), "{orb:?} {nav:?}");
         assert!((orb.size.width - px(38.0)).abs() < px(0.5));
         assert!((orb.center().y - nav.center().y).abs() <= px(1.0));
         let width = cx.update(|window, _| window.viewport_size().width);
-        let main = cx.debug_bounds("pr-detail-scroll").unwrap();
+        let main = cx.debug_bounds("pull-requests-page").unwrap();
         let pair = (nav.left() + orb.right()) / 2.0;
         assert!(
             (pair - main.center().x).abs() <= px(1.0),
@@ -3411,6 +3408,245 @@ mod tests {
         assert!(
             last.bottom() > content.top() && last.bottom() <= bar.top(),
             "the last card scrolls clear of the bar: {last:?} {bar:?} {content:?}"
+        );
+    }
+
+    fn open_board(
+        runtime: &tokio::runtime::Runtime,
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+        wire: &mut Wire,
+    ) {
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        settle(cx);
+        wire.open(runtime, cx);
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| {
+            page.show_test_pull_requests("acme/zeron", &[7, 8, 9], cx)
+        });
+        settle(cx);
+        wire.open(runtime, cx);
+        settle(cx);
+    }
+
+    fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .pull_request_detail
+                .as_ref()
+                .map(|detail| detail.read(cx).url.clone())
+        })
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Bounds<Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    #[gpui::test]
+    fn a_wide_board_shows_the_list_beside_the_first_pull_request(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_board(&runtime, &shell, cx, &mut wire);
+        assert_eq!(
+            selected(&shell, cx),
+            Some(url(7)),
+            "the first PR is selected"
+        );
+        let list = bounds(cx, "pull-requests-list");
+        let detail = bounds(cx, "pr-detail-scroll");
+        assert!(list.right() <= detail.left(), "{list:?} beside {detail:?}");
+        assert!(list.size.width < detail.size.width);
+        assert!(inside(list, bounds(cx, "pull-request-list-row-7")));
+        assert!(inside(list, bounds(cx, "pull-request-row-selected")));
+        assert!(cx.debug_bounds("pr-detail-title").is_some(), "its header");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.nav.current(), &NavEntry::PullRequests)
+        });
+
+        let dock = bounds(cx, "pr-dock");
+        let tabs = bounds(cx, "pull-requests-page-tabs");
+        let number = bounds(cx, "pr-dock-number");
+        let sections = bounds(cx, "pr-detail-nav");
+        for part in [tabs, number, sections] {
+            assert!(inside(dock, part), "{part:?} in {dock:?}");
+        }
+        assert!(tabs.right() <= number.left() && number.right() <= sections.left());
+        assert!(cx.debug_bounds("pr-detail-back").is_none());
+        assert!(cx.debug_bounds("pr-detail-git").is_none());
+        let orb = bounds(cx, "pr-chat-orb");
+        assert!(orb.left() >= dock.right() && orb.left() - dock.right() <= px(12.0));
+        let page = bounds(cx, "pull-requests-page");
+        let pair = (dock.left() + orb.right()) / 2.0;
+        assert!(
+            (pair - page.center().x).abs() <= px(1.0),
+            "{dock:?} {page:?}"
+        );
+        assert!(dock.bottom() <= page.bottom() - px(15.0));
+    }
+
+    #[gpui::test]
+    fn rows_and_arrows_swap_the_detail_in_place_and_keep_its_tab(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_board(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-code");
+        click(cx, "pull-request-list-row-8");
+        wire.open(&runtime, cx);
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(8)));
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.nav.current(),
+                &NavEntry::PullRequests,
+                "no navigation"
+            );
+            let detail = shell.pull_request_detail.as_ref().unwrap().read(cx);
+            assert_eq!(detail.tab(), crate::pull_request_detail::Tab::Code);
+        });
+        assert!(cx.debug_bounds("pull-requests-list").is_some());
+        let row = bounds(cx, "pull-request-list-row-8");
+        let mark = bounds(cx, "pull-request-row-selected");
+        assert!(inside(row, mark), "the selected row is marked");
+
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(9)), "down from the list");
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(9)), "the last row stays");
+        cx.simulate_keystrokes("up");
+        settle(cx);
+        assert_eq!(selected(&shell, cx), Some(url(8)), "up from the list");
+
+        cx.update(|window, _| window.blur());
+        cx.simulate_keystrokes("up");
+        settle(cx);
+        assert_eq!(
+            selected(&shell, cx),
+            Some(url(7)),
+            "up with nothing focused"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.nav.current(), &NavEntry::PullRequests)
+        });
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+        assert_eq!(
+            selected(&shell, cx),
+            Some(url(7)),
+            "Esc does not close the split"
+        );
+    }
+
+    #[gpui::test]
+    fn the_dock_follows_wide_narrow_and_git_and_the_selection_survives(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_board(&runtime, &shell, cx, &mut wire);
+        click(cx, "pull-request-list-row-8");
+        wire.open(&runtime, cx);
+
+        click(cx, "pull-requests-tab-Git");
+        assert!(
+            cx.debug_bounds("pr-dock").is_none(),
+            "Git keeps its own dock"
+        );
+        assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
+        assert!(cx.debug_bounds("pr-detail-nav").is_none());
+        assert!(cx.debug_bounds("pull-requests-list").is_none());
+        click(cx, "pull-requests-tab-PullRequests");
+        assert_eq!(selected(&shell, cx), Some(url(8)), "PRs to Git and back");
+        assert!(cx.debug_bounds("pr-detail-nav").is_some());
+        assert!(cx.debug_bounds("pull-requests-list").is_some());
+
+        cx.simulate_resize(gpui::size(px(700.0), px(800.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pull-requests-list").is_none(),
+            "full-page board"
+        );
+        assert!(
+            cx.debug_bounds("pr-detail-scroll").is_none(),
+            "selected, not opened"
+        );
+        assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
+        assert!(cx.debug_bounds("pr-dock").is_none());
+
+        click(cx, "pull-request-row");
+        wire.open(&runtime, cx);
+        settle(cx);
+        let dock = bounds(cx, "pr-dock");
+        let back = bounds(cx, "pr-detail-back");
+        let sections = bounds(cx, "pr-detail-nav");
+        let git = bounds(cx, "pr-detail-git");
+        for part in [back, sections, git] {
+            assert!(inside(dock, part), "{part:?} in {dock:?}");
+        }
+        assert!(back.right() <= sections.left() && sections.right() <= git.left());
+        assert!(
+            cx.debug_bounds("pull-requests-page-tabs").is_none(),
+            "one dock"
+        );
+        assert!(bounds(cx, "pr-chat-orb").left() >= dock.right());
+        let opened = selected(&shell, cx).expect("a pull request is open");
+
+        click(cx, "pr-detail-git");
+        assert!(cx.debug_bounds("pr-detail-back").is_none());
+        assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
+        click(cx, "pull-requests-tab-PullRequests");
+        assert!(
+            cx.debug_bounds("pr-detail-back").is_some(),
+            "back on its PR"
+        );
+        assert_eq!(selected(&shell, cx), Some(opened));
+
+        click(cx, "pr-detail-back");
+        assert!(cx.debug_bounds("pr-detail-back").is_none());
+        assert!(cx.debug_bounds("pull-requests-page-tabs").is_some());
+        shell.read_with(cx, |shell, _| assert!(shell.pull_request_detail.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_ai_orb_follows_the_selected_pull_request(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        open_board(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-orb");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_some());
+        let detail = bounds(cx, "pr-detail-scroll");
+        assert!(
+            inside(detail, bounds(cx, "pr-chat-bar")),
+            "the bar floats over its PR"
+        );
+        shell.read_with(cx, |shell, _| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert!(panel.context.index_key().ends_with("#7"));
+        });
+
+        click(cx, "pull-request-list-row-8");
+        wire.open(&runtime, cx);
+        settle(cx);
+        assert!(
+            cx.debug_bounds("pr-chat-bar").is_none(),
+            "switching folds it"
+        );
+        assert!(cx.debug_bounds("pr-chat-orb").is_some());
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert!(panel.context.index_key().ends_with("#8"), "the orb is #8's");
+            assert!(!shell.pr_chat_expanded(cx));
+        });
+        click(cx, "pr-chat-orb");
+        settle(cx);
+        assert!(cx.debug_bounds("pr-chat-bar").is_some());
+        cx.simulate_keystrokes("down");
+        settle(cx);
+        assert_eq!(
+            selected(&shell, cx),
+            Some(url(8)),
+            "arrows type in the open bar"
         );
     }
 

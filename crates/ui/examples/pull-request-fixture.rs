@@ -273,6 +273,14 @@ fn main() -> anyhow::Result<()> {
                     open_chat(cx)?;
                     pause(cx, 800).await;
                     shot(cx, "15-activity-ai-light")?;
+                    window.update(cx, |_, w, cx| {
+                        w.dispatch_action(Box::new(pull_request_detail::ClosePullRequest), cx)
+                    })?;
+                    pause(cx, 4000).await;
+                    shot(cx, "16-split-first-light")?;
+                    window.update(cx, |_, w, _| w.resize(size(px(760.), px(848.))))?;
+                    pause(cx, 800).await;
+                    shot(cx, "16b-board-760-light")?;
                     Ok(())
                 }
                 .await;

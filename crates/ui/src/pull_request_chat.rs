@@ -512,6 +512,11 @@ impl PullRequestDetailPage {
             || self.tab_focus.iter().any(|focus| focus.is_focused(window))
     }
 
+    pub(crate) fn reading_focus(&self, window: &Window) -> bool {
+        self.content_focus.is_focused(window)
+            || self.tab_focus.iter().any(|focus| focus.is_focused(window))
+    }
+
     pub(crate) fn overlay_open(&self) -> bool {
         self.actions.overlay_open()
             || self.files_expanded
@@ -532,7 +537,7 @@ impl PullRequestDetailPage {
         }
     }
 
-    pub(super) fn chat_orb(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn chat_orb(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let orb = self
             .chat_dock
             .as_ref()
