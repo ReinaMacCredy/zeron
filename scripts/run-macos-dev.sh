@@ -60,10 +60,10 @@ fi
 DRIVER="$CONTENTS/Resources/cua-driver/cua-driver"
 if [[ -n "$IDENTITY" ]]; then
   codesign --force --options runtime --sign "$IDENTITY" --identifier sh.zeron.cua-driver.dev "$DRIVER"
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
   codesign --force --sign - --identifier sh.zeron.cua-driver.dev "$DRIVER"
-  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 

@@ -20,6 +20,9 @@ pub mod capabilities {
     pub const SOURCE_CONTROL_V1: &str = "source-control-v1";
     pub const SOURCE_CONTROL_SYNC_V1: &str = "source-control-sync-v1";
     pub const SOURCE_CONTROL_COMMITS_V1: &str = "source-control-commits-v1";
+    /// The host creates a projectless chat's scratch folder
+    /// (`crate::projectless`) when it runs; older hosts only know `~`.
+    pub const PROJECTLESS_SCRATCH_V1: &str = "projectless-scratch-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -34,6 +37,7 @@ pub mod capabilities {
         SOURCE_CONTROL_V1,
         SOURCE_CONTROL_SYNC_V1,
         SOURCE_CONTROL_COMMITS_V1,
+        PROJECTLESS_SCRATCH_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -120,6 +124,7 @@ mod tests {
                     "source-control-v1",
                     "source-control-sync-v1",
                     "source-control-commits-v1",
+                    "projectless-scratch-v1",
                     "voice-client-media-v1"
                 ],
             })

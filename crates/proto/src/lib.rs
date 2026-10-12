@@ -16,6 +16,7 @@ pub mod html_render;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
+pub mod projectless;
 pub mod sidebar_pins;
 pub mod source_control;
 pub mod tools;

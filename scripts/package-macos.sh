@@ -72,7 +72,7 @@ fi
 # No --deep (Apple deprecated it): the nested driver is signed first, then
 # the bundle seals it.
 codesign --force "${SIGN[@]}" --identifier sh.zeron.cua-driver "$DRIVER"
-codesign --force "${SIGN[@]}" --entitlements "$ROOT/dist/macos/Dictation.entitlements" "$APP"
+codesign --force "${SIGN[@]}" --entitlements "$ROOT/dist/macos/Zeron.entitlements" "$APP"
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may
 # still exit 0 depending on the notarytool version — the `stapler staple` that
