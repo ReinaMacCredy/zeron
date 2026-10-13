@@ -147,7 +147,6 @@ impl RateLimitWindows {
         }
     }
 
-    /// `Some` when `error` (a `TurnError`) is a plan usage or rate limit.
     pub(crate) fn usage_limit(&self, error: &Value) -> Option<AgentEvent> {
         let code = match error.get("codexErrorInfo")? {
             Value::String(code) => code.as_str(),

@@ -1,7 +1,3 @@
-//! Continuations the engine sends on its own: a usage-limited turn at its
-//! reset time, and the turns an update restart interrupted once the engine is
-//! back. Persisted so a quit or crash in between loses neither.
-
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -24,8 +20,6 @@ const RESTART_FRESH_MS: i64 = 10 * 60 * 1000;
 #[serde(rename_all = "camelCase")]
 pub struct Continuation {
     pub chat_id: String,
-    /// The chat's last user entry when it stopped; a newer one means the
-    /// user already moved on and the continuation is dropped.
     #[serde(default)]
     pub after_user: Option<String>,
 }
@@ -192,7 +186,6 @@ impl ResumeSchedule {
         });
     }
 
-    /// The user acted in the chat: whatever was scheduled for it is stale.
     pub fn clear(&self, chat_id: &str) {
         self.update(|stored| {
             let before = stored.limited.len();
@@ -210,11 +203,12 @@ impl ResumeSchedule {
         });
     }
 
-    pub fn continues_after_restart(&self, chat_id: &str) -> bool {
+    pub fn restart_continuation(&self, chat_id: &str) -> Option<Option<String>> {
         lock(&self.inner.stored)
             .after_restart
             .iter()
-            .any(|entry| entry.chat_id == chat_id)
+            .find(|entry| entry.chat_id == chat_id)
+            .map(|entry| entry.after_user.clone())
     }
 
     pub fn take_restart(&self, now: i64) -> Vec<Continuation> {
@@ -353,7 +347,7 @@ mod tests {
         let reopened = ResumeSchedule::open(dir.path());
         assert!(!reopened.snapshot().auto_resume);
         assert!(reopened.snapshot().chats[0].auto);
-        assert!(reopened.continues_after_restart("r"));
+        assert_eq!(reopened.restart_continuation("r"), Some(None));
         assert_eq!(reopened.take_restart(2_000), restart);
         assert!(
             ResumeSchedule::open(dir.path())

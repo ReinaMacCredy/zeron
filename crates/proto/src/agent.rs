@@ -129,14 +129,12 @@ pub struct HarnessUpdateStatus {
 /// entry carrying exactly this text renders as a "Resumed" divider.
 pub const RESUME_PROMPT: &str = "Resume without asking to continue.";
 
-/// A chat whose last turn stopped on a provider usage limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitResume {
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<i64>,
-    /// Sends [`RESUME_PROMPT`] at `resets_at` unless the user acts first.
     pub auto: bool,
 }
 

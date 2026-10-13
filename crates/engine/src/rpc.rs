@@ -3433,6 +3433,10 @@ impl RpcService for EngineRpc {
                     if p.continue_threads { stopped } else { Vec::new() },
                     chrono::Utc::now().timestamp_millis(),
                 );
+                let host = self.doc_host.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || host.flush_all()).await {
+                    tracing::warn!(%error, "restart flush failed");
+                }
                 RpcReply::value(&serde_json::json!({ "interrupted": chats.len() }))
             }
             methods::WATCH_LIMIT_RESUMES => Ok(RpcReply::Stream(watch_stream(

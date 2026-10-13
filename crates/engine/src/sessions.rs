@@ -1757,7 +1757,6 @@ impl SessionsEngine {
     /// shells, everything the agent runs. The next message resumes the
     /// conversation in a fresh process. (Sending, steering and switching
     /// models never come here: they keep the runtime and its work.)
-    /// Chats whose turn is running now, optionally only on `harnesses`.
     pub fn working_chats(&self, harnesses: Option<&[HarnessId]>) -> Vec<String> {
         let working: Vec<String> = lock(&self.inner.statuses)
             .values()
@@ -2580,11 +2579,10 @@ impl SessionsEngine {
                         .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
                 })
                 .unwrap_or(false);
-            let continues = self
-                .inner
-                .resume_schedule
-                .get()
-                .is_some_and(|schedule| schedule.continues_after_restart(&chat_id));
+            let continues = self.inner.resume_schedule.get().is_some_and(|schedule| {
+                schedule.restart_continuation(&chat_id)
+                    == Some(prompt.as_ref().map(|(id, _, _)| id.clone()))
+            });
             let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME && !continues;
             if will_resume {
                 lock(&self.inner.reviving).insert(chat_id.clone());

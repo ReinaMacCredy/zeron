@@ -3730,9 +3730,6 @@ impl DocHost {
             .map(|entry| entry.id))
     }
 
-    /// Sends [`zeron_proto::RESUME_PROMPT`] for a turn the engine stopped,
-    /// unless the chat moved on: it is busy, archived, has rows queued, or
-    /// holds a user message newer than `continuation.after_user`.
     pub async fn queue_continuation(
         &self,
         continuation: &crate::resume_schedule::Continuation,
