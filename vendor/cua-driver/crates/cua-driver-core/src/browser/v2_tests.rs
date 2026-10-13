@@ -1394,6 +1394,48 @@ async fn approved_existing_profile_attach_claims_then_binds_one_generation() {
 }
 
 #[tokio::test]
+async fn re_prepare_with_a_live_matching_grant_keeps_its_consented_socket() {
+    const TRANSPORT: &str = "transport-v2-re-prepare";
+    let (f, _) = protected_existing_profile_fixture().await;
+    let prepare = || async {
+        let prepared = BrowserPrepareTool::new(f.engine.clone())
+            .invoke(json!({
+                "pid": 1,
+                "window_id": 7,
+                "session": SESSION,
+                "_transport_session_id": TRANSPORT,
+                "strategy": { "kind": "existing_profile" }
+            }))
+            .await;
+        assert_eq!(
+            structured(&prepared)["status"],
+            "ok",
+            "{}",
+            structured(&prepared)
+        );
+    };
+    prepare().await;
+    let first = f
+        .engine
+        .pool
+        .get_existing(&f.ws_url, 1)
+        .await
+        .expect("first prepare claims generation 1");
+    prepare().await;
+    let second = f
+        .engine
+        .pool
+        .get_existing(&f.ws_url, 2)
+        .await
+        .expect("re-prepare claims generation 2");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "re-prepare must keep the live consented socket instead of redialing"
+    );
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
 async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() {
     const TRANSPORT: &str = "transport-v2-method-policy";
     let (f, _) = protected_existing_profile_fixture().await;

@@ -1147,6 +1147,20 @@ impl BrowserEngine {
             || previous_grant
                 .as_ref()
                 .is_some_and(|grant| grant.cleanup_remote_debugging);
+        // Consent is per WebSocket; redialing a live matching socket raises a new browser prompt.
+        let reuse_previous_socket = match previous_grant.as_ref() {
+            Some(previous) => {
+                previous.window_id == window_id
+                    && previous.fingerprint.matches(&fingerprint)
+                    && previous.endpoint_ws_url == endpoint.ws_url
+                    && self
+                        .pool
+                        .get_existing(&previous.endpoint_ws_url, previous.generation)
+                        .await
+                        .is_ok()
+            }
+            None => false,
+        };
         let grant = self.existing_profile_grants.mint(
             &request.session,
             request.transport_session.as_deref(),
@@ -1160,9 +1174,11 @@ impl BrowserEngine {
             protected_consent,
         );
         if let Some(previous) = previous_grant {
-            self.pool
-                .release_existing(&previous.endpoint_ws_url, previous.generation)
-                .await;
+            if !reuse_previous_socket {
+                self.pool
+                    .release_existing(&previous.endpoint_ws_url, previous.generation)
+                    .await;
+            }
             if let Some(protected) = previous.protected_consent.as_ref() {
                 self.approval_broker.revoke(protected).await;
             }
@@ -1180,14 +1196,15 @@ impl BrowserEngine {
             if let Some(result) = initial {
                 (result, false)
             } else {
+                let consent_request = BrowserConsentRequest {
+                    pid,
+                    window_id,
+                    attempt: 1,
+                };
                 match claim_with_optional_consent(
                     &mut claim,
                     self.platform
-                        .handle_existing_profile_consent(BrowserConsentRequest {
-                            pid,
-                            window_id,
-                            attempt: 1,
-                        }),
+                        .handle_existing_profile_consent(consent_request.clone()),
                 )
                 .await
                 {
@@ -1211,7 +1228,10 @@ impl BrowserEngine {
                                 .abort(error)
                                 .await);
                         }
-                        return Err(error);
+                        return Err(self
+                            .platform
+                            .dismiss_existing_profile_consent(consent_request, error)
+                            .await);
                     }
                 }
             }
@@ -1229,6 +1249,11 @@ impl BrowserEngine {
         )
         .await;
         if let Err(_final_claim_error) = claimed {
+            if reuse_previous_socket {
+                self.pool
+                    .release_existing(&endpoint.ws_url, previous_generation)
+                    .await;
+            }
             self.revoke_existing_profile_grant(
                 &request.session,
                 request.transport_session.as_deref(),

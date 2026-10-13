@@ -1003,11 +1003,12 @@ impl BrowserEngine {
             let reconnected = tokio::select! {
                 result = &mut reconnect => result,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                    match self.platform.handle_existing_profile_consent(BrowserConsentRequest {
+                    let consent_request = BrowserConsentRequest {
                         pid,
                         window_id: grant.window_id,
                         attempt,
-                    }).await {
+                    };
+                    match self.platform.handle_existing_profile_consent(consent_request.clone()).await {
                         Ok(BrowserConsentOutcome::Accepted | BrowserConsentOutcome::NotPresent) => {
                             reconnect.await
                         }
@@ -1020,7 +1021,10 @@ impl BrowserEngine {
                                 self.revoke_existing_profile_grant(session, transport_session, pid)
                                     .await;
                             }
-                            return Err(error);
+                            return Err(self
+                                .platform
+                                .dismiss_existing_profile_consent(consent_request, error)
+                                .await);
                         }
                     }
                 }

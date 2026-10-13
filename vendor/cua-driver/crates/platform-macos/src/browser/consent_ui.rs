@@ -114,6 +114,19 @@ fn distinct_elements(matches: Vec<(usize, String)>) -> Vec<(usize, String)> {
     distinct
 }
 
+fn distinct_across_trees(
+    candidates: impl IntoIterator<Item = usize>,
+    same: impl Fn(usize, usize) -> bool,
+) -> Vec<usize> {
+    let mut distinct: Vec<usize> = Vec::new();
+    for element in candidates {
+        if !distinct.iter().any(|known| same(*known, element)) {
+            distinct.push(element);
+        }
+    }
+    distinct
+}
+
 fn exact_allow_button(nodes: &[AXNode]) -> Result<Option<usize>, BrowserRefusal> {
     let mut matches = Vec::new();
     for (sheet_index, sheet) in nodes
@@ -252,8 +265,7 @@ pub fn dismiss(pid: i32, approved_window_id: u32) -> Result<bool, BrowserRefusal
                 }
             }
         }
-        candidates.sort_unstable();
-        candidates.dedup();
+        let candidates = distinct_across_trees(candidates, same_element);
         if let Some(error) = matcher_error {
             for nodes in &trees {
                 release_actionable_nodes(nodes);
@@ -358,8 +370,7 @@ pub async fn handle(
                 }
             }
         }
-        candidates.sort_unstable();
-        candidates.dedup();
+        let candidates = distinct_across_trees(candidates, same_element);
         if let Some(error) = matcher_error {
             for nodes in &trees {
                 release_actionable_nodes(nodes);
@@ -488,6 +499,47 @@ mod tests {
             node("AXButton", 1, Some("Allow"), &["AXPress"]),
         ];
         assert_eq!(exact_allow_button(&nodes).unwrap(), Some(7));
+    }
+
+    #[test]
+    fn one_sheet_reached_through_several_window_walks_is_one_action() {
+        let walk = |element_ptr| {
+            vec![
+                node("AXWindow", 0, Some("Helium"), &[]),
+                node("AXSheet", 1, Some("Allow remote debugging?"), &[]),
+                AXNode {
+                    element_ptr,
+                    ..node("AXButton", 2, Some("Cancel"), &["AXPress"])
+                },
+                AXNode {
+                    element_ptr,
+                    ..node("AXButton", 2, Some("Allow"), &["AXPress"])
+                },
+            ]
+        };
+        let same = |a: usize, b: usize| a == b || matches!((a, b), (7, 70) | (70, 7));
+        let allow = |walks: &[Vec<AXNode>]| {
+            let found = walks
+                .iter()
+                .filter_map(|nodes| exact_allow_button(nodes).unwrap())
+                .collect::<Vec<_>>();
+            distinct_across_trees(found, same)
+        };
+        let cancel = |walks: &[Vec<AXNode>]| {
+            let found = walks
+                .iter()
+                .filter_map(|nodes| exact_cancel_button(nodes).unwrap())
+                .collect::<Vec<_>>();
+            distinct_across_trees(found, same)
+        };
+
+        let one_sheet = [walk(7), walk(70), walk(7)];
+        assert_eq!(allow(&one_sheet), vec![7]);
+        assert_eq!(cancel(&one_sheet), vec![7]);
+
+        let two_sheets = [walk(7), walk(8)];
+        assert_eq!(allow(&two_sheets), vec![7, 8]);
+        assert_eq!(cancel(&two_sheets), vec![7, 8]);
     }
 
     #[test]

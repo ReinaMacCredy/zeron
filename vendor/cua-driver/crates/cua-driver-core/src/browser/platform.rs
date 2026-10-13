@@ -453,6 +453,17 @@ pub trait BrowserPlatform: Send + Sync {
         ))
     }
 
+    /// Dismiss the browser-owned connection prompt raised by a dial that core
+    /// abandoned after `handle_existing_profile_consent` refused. The adapter
+    /// must preserve `error`, adding exact cleanup evidence where useful.
+    async fn dismiss_existing_profile_consent(
+        &self,
+        _request: BrowserConsentRequest,
+        error: BrowserRefusal,
+    ) -> BrowserRefusal {
+        error
+    }
+
     /// Current identity fingerprint for `pid`. Used to detect pid reuse
     /// between binding and mutation.
     async fn process_fingerprint(&self, pid: i64) -> Result<ProcessFingerprint, BrowserRefusal>;
