@@ -41,6 +41,9 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 /// indefinitely.
 pub(crate) const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
 
+// Chromium clamps every off-screen node to the viewport edge, so how far below the fold a node sits is unknowable.
+const BELOW_FOLD_NODES: usize = 100;
+
 unsafe fn set_messaging_timeout(element: AXUIElementRef) {
     let _ = AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS);
 }
@@ -149,6 +152,10 @@ fn outside_clip([x, y, width, height]: [f64; 4], viewport: Option<[f64; 4]>) -> 
     x + width <= cx || y + height <= cy || x >= cx + cw || y >= cy + ch
 }
 
+fn below_viewport([x, y, _, _]: [f64; 4], viewport: Option<[f64; 4]>) -> bool {
+    viewport.is_some_and(|[vx, vy, vw, vh]| y >= vy + vh && x >= vx && x < vx + vw)
+}
+
 pub struct TreeWalkResult {
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
@@ -209,6 +216,7 @@ pub fn walk_tree_bounded(
     let mut index_counter = 0usize;
     // Shared visited-node counter passed into walk_element to enforce the cap.
     let mut visited_count = 0usize;
+    let mut below_fold = BELOW_FOLD_NODES;
     // Set to true only when walk_element actually stops early due to the cap —
     // avoids a false-positive when the tree naturally ends on exactly the cap.
     let mut truncated = false;
@@ -352,6 +360,7 @@ pub fn walk_tree_bounded(
             &mut lines,
             &mut index_counter,
             &mut visited_count,
+            &mut below_fold,
             &mut truncated,
             max_elements,
             max_depth,
@@ -627,6 +636,7 @@ unsafe fn walk_children(
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
     visited_count: &mut usize,
+    below_fold: &mut usize,
     truncated: &mut bool,
     max_elements: usize,
     max_depth: usize,
@@ -666,6 +676,7 @@ unsafe fn walk_children(
             lines,
             counter,
             visited_count,
+            below_fold,
             truncated,
             max_elements,
             max_depth,
@@ -687,6 +698,7 @@ unsafe fn walk_element(
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
     visited_count: &mut usize,
+    below_fold: &mut usize,
     truncated: &mut bool,
     max_elements: usize,
     max_depth: usize,
@@ -740,10 +752,14 @@ unsafe fn walk_element(
     let role = role.unwrap_or_else(|| "AXUnknown".into());
 
     if in_web_content && bounds.is_some_and(|bounds| outside_clip(bounds, clip)) {
-        for child in children {
-            CFRelease(child as CFTypeRef);
+        if *below_fold > 0 && bounds.is_some_and(|bounds| below_viewport(bounds, clip)) {
+            *below_fold -= 1;
+        } else {
+            for child in children {
+                CFRelease(child as CFTypeRef);
+            }
+            return;
         }
-        return;
     }
     *visited_count += 1;
     // react-select draws its read-only input at scale(.01), leaving no usable frame.
@@ -773,6 +789,7 @@ unsafe fn walk_element(
             lines,
             counter,
             visited_count,
+            below_fold,
             truncated,
             max_elements,
             max_depth,
@@ -839,6 +856,7 @@ unsafe fn walk_element(
             lines,
             counter,
             visited_count,
+            below_fold,
             truncated,
             max_elements,
             max_depth,
@@ -964,6 +982,7 @@ unsafe fn walk_element(
         lines,
         counter,
         visited_count,
+        below_fold,
         truncated,
         max_elements,
         max_depth,
