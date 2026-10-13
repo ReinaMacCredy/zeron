@@ -1005,13 +1005,29 @@ pub fn apply_diff_frame(diffs: &mut Vec<CheckoutDiff>, value: serde_json::Value)
     }
 }
 
+fn shows_review(pane: DiffScope, review: crate::review::ReviewScope) -> bool {
+    use crate::review::ReviewScope;
+    matches!(
+        (pane, review),
+        (DiffScope::WorkingTree, ReviewScope::Uncommitted)
+            | (DiffScope::Branch, ReviewScope::Branch)
+            | (DiffScope::LatestTurn, ReviewScope::LatestTurn)
+    )
+}
+
 fn comment_state_key(
     comments: &[ReviewComment],
     draft: Option<&(String, CommentSide, u32)>,
 ) -> u64 {
     let mut parts: Vec<String> = comments
         .iter()
-        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
+        .flat_map(|comment| {
+            [
+                comment.id.clone(),
+                comment.body.clone(),
+                format!("{}:{:?}", comment.line, comment.side()),
+            ]
+        })
         .collect();
     if let Some((path, side, line)) = draft {
         parts.push(format!("draft:{path}:{}:{line}", side.tag()));
@@ -2452,6 +2468,22 @@ impl Changes {
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
                 changes.highlights.clear();
+                let scope = changes.scope;
+                changes.state.update(cx, |state, cx| {
+                    let key = state.composer_key();
+                    if let Some(run) = state
+                        .reviews
+                        .get_mut(&key)
+                        .and_then(|review| review.run.as_mut())
+                        .filter(|run| {
+                            run.status == crate::review::RunStatus::Done
+                                && shows_review(scope, run.scope)
+                        })
+                        && crate::review::refresh(&mut run.findings, &files)
+                    {
+                        cx.notify();
+                    }
+                });
                 let staged = changes.staged_comments(cx);
                 let draft = changes.draft_anchor();
                 let (rows, ranges) = flatten_rows(
@@ -2830,6 +2862,12 @@ impl Changes {
         let findings = state
             .reviews
             .get(&key)
+            .filter(|review| {
+                review
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| shows_review(self.scope, run.scope))
+            })
             .map(crate::review::ChatReview::cards)
             .unwrap_or_default();
         state

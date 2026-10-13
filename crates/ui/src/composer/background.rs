@@ -130,6 +130,7 @@ pub(crate) fn delegate_runs(
     chats: &[zeron_proto::Chat],
     owner: &str,
     turn_start_ms: i64,
+    keep: Option<&str>,
 ) -> Vec<AgentRun> {
     chats
         .iter()
@@ -146,7 +147,8 @@ pub(crate) fn delegate_runs(
                 zeron_proto::DelegationStatus::Failed => RunState::Failed,
             };
             let started_ms = delegation.started_at.timestamp_millis();
-            (state == RunState::Working || started_ms >= turn_start_ms).then(|| AgentRun {
+            let kept = keep == Some(chat.id.as_str());
+            (state == RunState::Working || started_ms >= turn_start_ms || kept).then(|| AgentRun {
                 part_id: chat.id.clone(),
                 doc_id: chat.id.clone(),
                 title: chat
@@ -511,10 +513,17 @@ impl Composer {
             };
             let turn_start = latest_prompt(transcript);
             let mut agents = agent_runs(transcript, turn_start.unwrap_or(0));
+            let pending_review = state
+                .reviews
+                .get(&chat_id)
+                .and_then(|review| review.run.as_ref())
+                .filter(|run| !run.findings.is_empty())
+                .and_then(|run| run.task_id.as_deref());
             agents.extend(delegate_runs(
                 &state.chats,
                 &chat_id,
                 turn_start.map_or(0, |ix| transcript[ix].created_at),
+                pending_review,
             ));
             (agents, shell_tasks(state.session_for(&chat_id)))
         };
@@ -2002,14 +2011,17 @@ mod tests {
             child("new-stopped", "owner", Interrupted, 5_000),
             child("elsewhere", "other", Running, 5_000),
         ];
-        let runs = delegate_runs(&chats, "owner", 4_000);
+        let runs = delegate_runs(&chats, "owner", 4_000, Some("old-done"));
         let ids: Vec<&str> = runs.iter().map(|run| run.doc_id.as_str()).collect();
-        assert_eq!(ids, ["old-running", "new-failed", "new-stopped"]);
+        assert_eq!(
+            ids,
+            ["old-running", "old-done", "new-failed", "new-stopped"]
+        );
         assert!(runs.iter().all(|run| run.delegated));
         assert_eq!(runs[0].harness, Some(HarnessId::Codex));
         assert_eq!(runs[0].state, RunState::Working);
-        assert_eq!(runs[1].state, RunState::Failed);
-        assert_eq!(runs[2].state, RunState::Stopped);
+        assert_eq!(runs[2].state, RunState::Failed);
+        assert_eq!(runs[3].state, RunState::Stopped);
     }
 
     #[test]

@@ -43,7 +43,7 @@ impl CodeReviewPage {
         card
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -122,17 +122,18 @@ impl CodeReviewPage {
             );
         };
         let current = crate::settings::review_reviewer(cx);
-        let choices = options.choices();
-        let selected = choices
-            .iter()
-            .position(|choice| match (choice, &current) {
-                (
-                    ReviewerChoice::Harness { harness: a, .. },
-                    ReviewerChoice::Harness { harness: b, .. },
-                ) => a == b,
-                _ => *choice == current,
-            })
-            .unwrap_or(0);
+        let mut choices = options.choices();
+        let same_slot = |choice: &ReviewerChoice| match (choice, &current) {
+            (
+                ReviewerChoice::Harness { harness: a, .. },
+                ReviewerChoice::Harness { harness: b, .. },
+            ) => a == b,
+            _ => *choice == current,
+        };
+        if !choices.iter().any(same_slot) {
+            choices.insert(1, current.clone());
+        }
+        let selected = choices.iter().position(same_slot).unwrap_or(0);
         let auto = crate::review::resolve_reviewer(&ReviewerChoice::Auto, None, &options).name();
         let reviewer_select: AnyElement = widgets::select(
             "code-review-reviewer",

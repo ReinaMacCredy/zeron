@@ -57,7 +57,6 @@ pub(crate) fn render_comment_card<T: 'static>(
     let id = comment.id.clone();
     div()
         .group(group.clone())
-        .h(px(comments::card_height(&comment.body)))
         .w_full()
         .flex_none()
         .flex()
@@ -131,10 +130,7 @@ pub(crate) fn render_comment_card<T: 'static>(
                 )
                 .child(
                     div()
-                        .flex_1()
-                        .min_h_0()
-                        // Height is analytic, so an over-long body clips
-                        // inside the card rather than past the fold height.
+                        .max_h(px(comments::CARD_BODY_MAX_HEIGHT))
                         .max_w(px(comments::CARD_BODY_MAX_WIDTH))
                         .overflow_hidden()
                         .text_size(px(12.0))
@@ -195,7 +191,6 @@ pub(crate) fn render_finding_card<T: 'static>(
             .child(label)
     };
     div()
-        .h(px(crate::review::finding_card_height(&comment.body)))
         .w_full()
         .flex_none()
         .flex()
@@ -246,8 +241,7 @@ pub(crate) fn render_finding_card<T: 'static>(
                 .when(!detail.is_empty(), |el| {
                     el.child(
                         div()
-                            .flex_1()
-                            .min_h_0()
+                            .max_h(px(comments::CARD_BODY_MAX_HEIGHT))
                             .max_w(px(comments::CARD_BODY_MAX_WIDTH))
                             .overflow_hidden()
                             .text_size(px(12.0))

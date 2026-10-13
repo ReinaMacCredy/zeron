@@ -10691,6 +10691,8 @@ impl Composer {
             // Attachments stay stashed under their chat key (the map swap IS
             // the navigation); only the transient chrome resets.
             self.preview = None;
+            self.comments_menu = Default::default();
+            self.drop_review_menu();
             self.reset_mention(None, cx);
             self.reset_slash(None, cx);
             // Route changes snap (round 5/6): a mode difference between the
@@ -13981,8 +13983,14 @@ impl Render for Composer {
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
+        if self.staged_comments(cx).is_empty() {
+            self.comments_menu = Default::default();
+        }
         let comments_chip = self.render_staged_chips(&theme, cx);
         let review_chip = self.render_review_chip(&theme, cx);
+        if review_chip.is_none() {
+            self.drop_review_menu();
+        }
         let pr_chips = self.render_pr_chips(&theme, cx);
 
         let pill_border = theme.composer_surface_border();

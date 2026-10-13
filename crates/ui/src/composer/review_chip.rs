@@ -19,9 +19,6 @@ const CHIP_HEIGHT: f32 = 28.0;
 #[derive(Default)]
 pub(super) struct ReviewChipUi {
     pub(super) menu: Popup<()>,
-    stats_task: Option<Task<()>>,
-    spawn_task: Option<Task<()>>,
-    read_task: Option<Task<()>>,
     options: Option<ReviewerOptions>,
     options_task: Option<Task<()>>,
     model_menu: Option<(usize, HarnessId)>,
@@ -249,6 +246,9 @@ impl Composer {
             });
         }
         self.read_finished_review(&target, cx);
+        if self.review.options.is_none() && self.review.options_task.is_none() {
+            self.load_reviewer_options(cx);
+        }
 
         let scope = self.review_scope(&target, cx);
         let (run_scope, marker) = {
@@ -278,7 +278,7 @@ impl Composer {
         if current.as_deref() != Some(key.as_str()) {
             let mut scopes = vec![scope];
             scopes.extend(run_scope.filter(|run_scope| *run_scope != scope));
-            self.fetch_review_stats(target, scopes, key, cx);
+            self.fetch_review_stats(target, scopes, Some(key), cx);
         }
     }
 
@@ -286,20 +286,22 @@ impl Composer {
         &mut self,
         target: Target,
         scopes: Vec<ReviewScope>,
-        key: String,
+        key: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.state.update(cx, |state, _| {
-            state
-                .reviews
-                .entry(target.chat_id.clone())
-                .or_default()
-                .stats_key = Some(key.clone());
-        });
-        self.review.stats_task = Some(cx.spawn(async move |this, cx| {
+        if let Some(key) = &key {
+            self.state.update(cx, |state, _| {
+                state
+                    .reviews
+                    .entry(target.chat_id.clone())
+                    .or_default()
+                    .stats_key = Some(key.clone());
+            });
+        }
+        cx.spawn(async move |this, cx| {
             let mut fetched = Vec::new();
             for scope in scopes {
                 fetched.push((scope, checkout_diff(&engine, &target, scope).await));
@@ -307,7 +309,7 @@ impl Composer {
             this.update(cx, |composer, cx| {
                 composer.state.update(cx, |state, cx| {
                     let review = state.reviews.entry(target.chat_id.clone()).or_default();
-                    if review.stats_key.as_deref() != Some(key.as_str()) {
+                    if key.is_some() && review.stats_key != key {
                         return;
                     }
                     for (scope, result) in fetched {
@@ -336,7 +338,8 @@ impl Composer {
                 });
             })
             .ok();
-        }));
+        })
+        .detach();
     }
 
     fn read_finished_review(&mut self, target: &Target, cx: &mut Context<Self>) {
@@ -364,7 +367,7 @@ impl Composer {
         let chat_id = target.chat_id.clone();
         self.set_run(&chat_id, cx, |run| run.status = RunStatus::Reading);
         let target = target.clone();
-        self.review.read_task = Some(cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let view = engine
                 .client()
                 .call(
@@ -417,7 +420,8 @@ impl Composer {
                 });
             })
             .ok();
-        }));
+        })
+        .detach();
     }
 
     fn set_run(&self, chat_id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut ReviewRun)) {
@@ -445,11 +449,17 @@ impl Composer {
         let choice = self.reviewer_choice(&chat_id, cx);
         let mut run = ReviewRun::new(scope);
         run.choice = Some(choice.clone());
-        self.state.update(cx, |state, cx| {
-            state.reviews.entry(chat_id.clone()).or_default().run = Some(run);
+        let previous = self.state.update(cx, |state, cx| {
+            let previous = state
+                .reviews
+                .entry(chat_id.clone())
+                .or_default()
+                .run
+                .replace(run);
             cx.notify();
+            previous.filter(|run| run.status == RunStatus::Done && !run.findings.is_empty())
         });
-        self.review.spawn_task = Some(cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let started = launch_review(&engine, &target, scope, &choice).await;
             this.update(cx, |composer, cx| {
                 composer.set_run(&chat_id, cx, |run| {
@@ -463,12 +473,19 @@ impl Composer {
                             run.note = note;
                             run.status = RunStatus::Running;
                         }
-                        Err(message) => run.status = RunStatus::Failed(message),
+                        Err(message) => match previous {
+                            Some(mut previous) => {
+                                previous.retry_error = Some(message);
+                                *run = previous;
+                            }
+                            None => run.status = RunStatus::Failed(message),
+                        },
                     }
                 });
             })
             .ok();
-        }));
+        })
+        .detach();
     }
 
     fn reviewer_choice(&self, chat_id: &str, cx: &App) -> ReviewerChoice {
@@ -504,19 +521,23 @@ impl Composer {
             return;
         };
         self.review.menu.open(());
-        let key = format!("menu|{}", uuid::Uuid::new_v4());
-        self.fetch_review_stats(target, ReviewScope::ALL.to_vec(), key, cx);
-        if let Some(engine) = self.state.read(cx).engine().cloned() {
-            self.review.options_task = Some(cx.spawn(async move |this, cx| {
-                let options = review::reviewer_options(&engine).await;
-                this.update(cx, |composer, cx| {
-                    composer.review.options = Some(options);
-                    cx.notify();
-                })
-                .ok();
-            }));
-        }
+        self.fetch_review_stats(target, ReviewScope::ALL.to_vec(), None, cx);
+        self.load_reviewer_options(cx);
         cx.notify();
+    }
+
+    fn load_reviewer_options(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.review.options_task = Some(cx.spawn(async move |this, cx| {
+            let options = review::reviewer_options(&engine).await;
+            this.update(cx, |composer, cx| {
+                composer.review.options = Some(options);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn set_review_scope(&mut self, scope: ReviewScope, cx: &mut Context<Self>) {
@@ -1290,6 +1311,13 @@ impl Composer {
             .into_any_element()
     }
 
+    pub(super) fn drop_review_menu(&mut self) {
+        self.review.menu = Default::default();
+        self.review.model_intent.reset();
+        self.review.model_menu = None;
+        self.review.model_bounds = None;
+    }
+
     pub(super) fn review_menu_open(&self) -> bool {
         self.review.menu.is_open()
     }
@@ -1347,6 +1375,12 @@ impl Composer {
             .note
             .clone()
             .map(|note| div().pb(px(4.0)).text_color(theme.text_faint).child(note));
+        let retry_error = run.retry_error.clone().map(|message| {
+            div()
+                .pb(px(4.0))
+                .text_color(theme.danger)
+                .child(format!("Review again failed: {message}"))
+        });
         let rows = run.findings.iter().map(|finding| {
             let (tint, wash) = finding.severity.colors(theme);
             let outdated = finding.placement == review::Placement::Outdated;
@@ -1451,6 +1485,7 @@ impl Composer {
                 .flex_col()
                 .text_size(crate::typography::ui_rems(12.0))
                 .children(note)
+                .children(retry_error)
                 .when(listed, |el| el.children(rows))
                 .when(listed, |el| {
                     el.child(

@@ -2945,7 +2945,7 @@ impl FilesSurface {
             && let Some(top) = editor_comment_overlay_top(
                 &layout,
                 comment.line,
-                comments::card_height(&comment.body),
+                editor_comment_card_height(&comment.body, card_width),
             )
         {
             overlays.push(
@@ -2989,7 +2989,7 @@ impl FilesSurface {
             .left(px(left))
             .top(px(top))
             .w(px(width))
-            .h(px(comments::card_height(&comment.body)))
+            .h(px(editor_comment_card_height(&comment.body, width)))
             .flex()
             .flex_col()
             .font_family(theme.font_sans.clone())
@@ -3276,6 +3276,10 @@ fn editor_comment_overlay_top(
     let row = layout.rows.iter().find(|row| row.line == line)?;
     let preferred = row.top + layout.line_height;
     Some(preferred.clamp(0.0, (layout.viewport_height - card_height).max(0.0)))
+}
+
+fn editor_comment_card_height(body: &str, card_width: f32) -> f32 {
+    comments::card_height_at(body, card_width - 2.0 * Theme::SPACE_LG)
 }
 
 fn editor_comment_overlay_horizontal(layout: &EditorOverlayLayout) -> (f32, f32) {

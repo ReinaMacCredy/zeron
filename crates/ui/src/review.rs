@@ -297,6 +297,7 @@ pub struct ReviewRun {
     pub reviewed: Option<String>,
     pub note: Option<String>,
     pub choice: Option<ReviewerChoice>,
+    pub retry_error: Option<String>,
 }
 
 impl ReviewRun {
@@ -310,6 +311,7 @@ impl ReviewRun {
             reviewed: None,
             note: None,
             choice: None,
+            retry_error: None,
         }
     }
 
@@ -482,39 +484,64 @@ struct RawFinding {
     path: String,
     #[serde(default)]
     side: Option<String>,
-    line: u32,
+    line: serde_json::Value,
     #[serde(default)]
     text: Option<String>,
-    severity: Severity,
+    severity: String,
     title: String,
     #[serde(default)]
     body: String,
 }
 
+fn raw_finding(value: serde_json::Value) -> Option<RawFinding> {
+    serde_json::from_value(value).ok()
+}
+
+fn finding_from(ix: usize, raw: RawFinding) -> Option<Finding> {
+    let line = match &raw.line {
+        serde_json::Value::Number(n) => u32::try_from(n.as_u64()?).ok()?,
+        serde_json::Value::String(s) => s.trim().parse().ok()?,
+        _ => return None,
+    };
+    let severity = match raw.severity.trim().to_ascii_lowercase().as_str() {
+        "bug" => Severity::Bug,
+        "risk" => Severity::Risk,
+        "nit" => Severity::Nit,
+        _ => return None,
+    };
+    Some(Finding {
+        id: format!("finding-{ix}"),
+        path: raw.path.trim().trim_start_matches("./").to_string(),
+        side: match raw.side.as_deref().map(str::trim) {
+            Some("L" | "l" | "old") => CommentSide::Old,
+            _ => CommentSide::New,
+        },
+        line,
+        text: raw.text.filter(|text| !text.trim().is_empty()),
+        severity,
+        title: raw.title,
+        body: raw.body,
+        placement: Placement::Fresh,
+    })
+}
+
 pub fn parse_findings(result: &str) -> Option<Vec<Finding>> {
     let start = result.rfind(FENCE)? + FENCE.len();
     let rest = result[start..].split_once('\n')?.1;
-    let end = rest.find("```")?;
-    let raw: Vec<RawFinding> = serde_json::from_str(rest[..end].trim()).ok()?;
-    Some(
-        raw.into_iter()
-            .enumerate()
-            .map(|(ix, raw)| Finding {
-                id: format!("finding-{ix}"),
-                path: raw.path.trim().trim_start_matches("./").to_string(),
-                side: match raw.side.as_deref().map(str::trim) {
-                    Some("L" | "l" | "old") => CommentSide::Old,
-                    _ => CommentSide::New,
-                },
-                line: raw.line,
-                text: raw.text.filter(|text| !text.trim().is_empty()),
-                severity: raw.severity,
-                title: raw.title,
-                body: raw.body,
-                placement: Placement::Fresh,
-            })
-            .collect(),
-    )
+    let end = if rest.starts_with("```") {
+        0
+    } else {
+        rest.find("\n```")?
+    };
+    let items: Vec<serde_json::Value> = serde_json::from_str(rest[..end].trim()).ok()?;
+    let total = items.len();
+    let findings: Vec<Finding> = items
+        .into_iter()
+        .filter_map(raw_finding)
+        .enumerate()
+        .filter_map(|(ix, raw)| finding_from(ix, raw))
+        .collect();
+    (total == 0 || !findings.is_empty()).then_some(findings)
 }
 
 fn same_text(a: &str, b: &str) -> bool {
@@ -549,7 +576,14 @@ fn locate(files: &[FileDiff], finding: &Finding) -> Option<(u32, String)> {
 
 pub fn place_new(findings: &mut [Finding], files: &[FileDiff]) {
     for finding in findings {
-        match locate(files, finding) {
+        let located = locate(files, finding).or_else(|| {
+            let cited = Finding {
+                text: None,
+                ..finding.clone()
+            };
+            locate(files, &cited)
+        });
+        match located {
             Some((line, text)) => {
                 finding.line = line;
                 finding.text = Some(text);
@@ -684,6 +718,23 @@ mod tests {
         assert_eq!(found.path, "src/a.rs");
         assert_eq!(found.side, CommentSide::Old);
         assert_eq!(found.severity, Severity::Bug);
+    }
+
+    #[test]
+    fn one_bad_item_does_not_sink_the_block() {
+        let found = parse_findings(&reply(
+            "[{\"path\":\"a\",\"line\":\"4\",\"severity\":\"Bug\",\"title\":\"x\",\"text\":\"/// ```rust\"},\
+             {\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"y\"}]",
+        ))
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].line, found[0].severity), (4, Severity::Bug));
+        assert_eq!(
+            parse_findings(&reply(
+                "[{\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"y\"}]"
+            )),
+            None
+        );
     }
 
     #[test]
