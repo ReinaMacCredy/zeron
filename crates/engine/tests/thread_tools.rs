@@ -1106,6 +1106,45 @@ async fn an_archived_owner_gets_no_wake_and_stays_archived() {
 }
 
 #[tokio::test]
+async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
+    let rig = rig(Duration::from_millis(5));
+    let mut params = delegate("review the diff");
+    params.wake = Some(zeron_proto::DelegationWake::Never);
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || !delegation(&rig.core, &child).is_running(),
+        "the child to finish",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        delegation(&rig.core, &child).delivery,
+        Some(zeron_proto::DelegationDelivery::Disposed)
+    );
+    assert_eq!(queue_len(&rig.core, "lead"), 0);
+    assert!(
+        !entries(&rig.core, "lead")
+            .iter()
+            .any(|e| e.from_chat_id.as_deref() == Some(child.as_str())),
+        "no wake for a never-wake child"
+    );
+    let read = rig
+        .core
+        .doc_host
+        .task_status("lead", &child, false)
+        .await
+        .unwrap();
+    assert_eq!(read.summary.as_deref(), Some("noted"));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn delegation_limits_and_retries_follow_the_settings() {
     let rig = rig(Duration::from_millis(200));
     let limits = zeron_engine::registry::DelegationSettings {

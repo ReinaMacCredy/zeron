@@ -302,12 +302,14 @@ impl Delegation {
 
 /// When a finished child wakes its owner. `SettledOnly` is a `mode: wait`
 /// call: its blocking return carries the result while the owner's turn is
-/// live, so only an owner that already settled is woken.
+/// live, so only an owner that already settled is woken. `Never` is a child
+/// the user started from the UI (a review), whose result the UI reads itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DelegationWake {
     Always,
     SettledOnly,
+    Never,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

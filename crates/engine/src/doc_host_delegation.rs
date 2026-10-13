@@ -58,6 +58,8 @@ pub struct DelegateTaskParams {
     #[serde(default)]
     pub wait: bool,
     #[serde(default)]
+    pub wake: Option<DelegationWake>,
+    #[serde(default)]
     pub client_request_id: Option<String>,
 }
 
@@ -447,11 +449,11 @@ impl DocHost {
                 .sessions()
                 .and_then(|sessions| sessions.session_status(&owner.id))
                 .and_then(|session| session.started_at),
-            wake: if params.wait {
+            wake: params.wake.unwrap_or(if params.wait {
                 DelegationWake::SettledOnly
             } else {
                 DelegationWake::Always
-            },
+            }),
             status: DelegationStatus::Running,
             cancel_requested: false,
             delivery: None,
@@ -888,7 +890,7 @@ impl DocHost {
         let owner = asker
             .delegation
             .as_ref()
-            .filter(|d| d.is_running())
+            .filter(|d| d.is_running() && d.wake != DelegationWake::Never)
             .map(|d| d.delegated_by_chat_id.clone());
         let mut targets: Vec<String> = owner.iter().cloned().collect();
         for watcher in self
@@ -1133,7 +1135,8 @@ impl DocHost {
                             .delegation
                             .as_ref()
                             .is_some_and(|o| o.cancel_requested)
-                }) {
+                }) || d.wake == DelegationWake::Never
+                {
                     d.delivery = Some(DelegationDelivery::Disposed);
                 } else if d.wake == DelegationWake::SettledOnly
                     && owner_turn.is_some()
