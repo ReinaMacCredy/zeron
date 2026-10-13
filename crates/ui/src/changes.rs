@@ -2820,8 +2820,14 @@ impl Changes {
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         let state = self.state.read(cx);
+        let key = state.composer_key();
+        let findings = state
+            .reviews
+            .get(&key)
+            .map(crate::review::ChatReview::cards)
+            .unwrap_or_default();
         state
-            .review_comments(&state.composer_key())
+            .review_comments(&key)
             .iter()
             .filter(|comment| {
                 self.draft
@@ -2830,6 +2836,7 @@ impl Changes {
                     != Some(&comment.id)
             })
             .cloned()
+            .chain(findings)
             .collect()
     }
 
@@ -3046,6 +3053,28 @@ impl Changes {
         });
         self.sync_comment_rows(cx);
         cx.notify();
+    }
+
+    fn fix_finding(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(id) = id.strip_prefix(crate::review::CARD_PREFIX) else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            let key = state.composer_key();
+            state.stage_review_findings(&key, Some(id));
+            cx.notify();
+        });
+    }
+
+    fn dismiss_finding(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(id) = id.strip_prefix(crate::review::CARD_PREFIX) else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            let key = state.composer_key();
+            state.dismiss_review_finding(&key, id);
+            cx.notify();
+        });
     }
 
     fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -3512,8 +3541,25 @@ impl Changes {
                     return gpui::Empty.into_any_element();
                 };
                 let comments = self.comments_for(&file_diff.path, cx);
-                match comments.get(card as usize) {
-                    Some(comment) => crate::comment_ui::render_comment_card(
+                let finding = comments.get(card as usize).and_then(|comment| {
+                    let id = comment.id.strip_prefix(crate::review::CARD_PREFIX)?;
+                    let state = self.state.read(cx);
+                    state
+                        .reviews
+                        .get(&state.composer_key())?
+                        .finding(id)
+                        .cloned()
+                });
+                match (comments.get(card as usize), finding) {
+                    (Some(comment), Some(finding)) => crate::comment_ui::render_finding_card(
+                        comment,
+                        finding.severity,
+                        &theme,
+                        cx,
+                        Self::fix_finding,
+                        Self::dismiss_finding,
+                    ),
+                    (Some(comment), None) => crate::comment_ui::render_comment_card(
                         comment,
                         &theme,
                         cx,
@@ -3521,7 +3567,7 @@ impl Changes {
                         Self::remove_comment,
                         None,
                     ),
-                    None => gpui::Empty.into_any_element(),
+                    (None, _) => gpui::Empty.into_any_element(),
                 }
             }
             DiffRow::CommentDraft { file } => {

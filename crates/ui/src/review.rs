@@ -6,6 +6,7 @@ use crate::changes::{FileDiff, line_anchor};
 use crate::comments::{CommentSide, ReviewComment};
 
 pub const REQUEST_PREFIX: &str = "zeron-review:";
+pub const CARD_PREFIX: &str = "review-finding:";
 const FENCE: &str = "```zeron-review";
 const MAX_PATCH_BYTES: usize = 120_000;
 const REANCHOR_WINDOW: u32 = 40;
@@ -26,6 +27,41 @@ impl ChatReview {
 
     pub fn unavailable(&self, scope: ReviewScope) -> Option<&str> {
         self.stats.get(&scope)?.as_ref().err().map(String::as_str)
+    }
+
+    pub fn cards(&self) -> Vec<ReviewComment> {
+        self.run
+            .iter()
+            .filter(|run| run.status == RunStatus::Done)
+            .flat_map(|run| &run.findings)
+            .filter(|finding| finding.placement == Placement::Fresh)
+            .map(Finding::card)
+            .collect()
+    }
+
+    pub fn finding(&self, id: &str) -> Option<&Finding> {
+        self.run
+            .as_ref()?
+            .findings
+            .iter()
+            .find(|finding| finding.id == id)
+    }
+
+    pub fn take_fixable(&mut self, only: Option<&str>) -> Vec<ReviewComment> {
+        let Some(run) = self.run.as_mut() else {
+            return Vec::new();
+        };
+        let (staged, kept): (Vec<_>, Vec<_>) = run.findings.drain(..).partition(|finding| {
+            finding.placement != Placement::Outdated && only.is_none_or(|id| finding.id == id)
+        });
+        run.findings = kept;
+        staged.iter().map(Finding::comment).collect()
+    }
+
+    pub fn dismiss(&mut self, id: &str) {
+        if let Some(run) = self.run.as_mut() {
+            run.findings.retain(|finding| finding.id != id);
+        }
     }
 }
 
@@ -150,6 +186,14 @@ impl Severity {
             Self::Nit => "Nit",
         }
     }
+
+    pub fn colors(self, theme: &crate::theme::Theme) -> (gpui::Hsla, gpui::Hsla) {
+        match self {
+            Self::Bug => (theme.danger, theme.danger.opacity(0.14)),
+            Self::Risk => (theme.warning, theme.warning.opacity(0.14)),
+            Self::Nit => (theme.text_muted, crate::theme::ink(0.08)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +232,13 @@ impl Finding {
             body.push_str(self.body.trim());
         }
         ReviewComment::new(self.path.clone(), self.side, self.line, body)
+    }
+
+    fn card(&self) -> ReviewComment {
+        ReviewComment {
+            id: format!("{CARD_PREFIX}{}", self.id),
+            ..self.comment()
+        }
     }
 }
 
@@ -441,6 +492,24 @@ mod tests {
         assert_eq!(
             (findings[1].line, findings[1].placement),
             (42, Placement::Fresh)
+        );
+
+        let mut run = ReviewRun::new(ReviewScope::Uncommitted);
+        run.status = RunStatus::Done;
+        run.findings = findings;
+        let mut review = ChatReview {
+            run: Some(run),
+            ..ChatReview::default()
+        };
+        let cards = review.cards();
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].id.starts_with(CARD_PREFIX));
+        let staged = review.take_fixable(None);
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].location(), "src/session.rs:42");
+        assert_eq!(
+            review.run.unwrap().findings[0].placement,
+            Placement::Outdated
         );
     }
 

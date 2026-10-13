@@ -324,6 +324,7 @@ impl Composer {
                     serde_json::json!({ "chatId": chat_id, "taskId": task_id }),
                 )
                 .await;
+            let restored = reviewed.is_none();
             let reviewed = match reviewed {
                 Some(patch) => Some(patch),
                 None => checkout_diff(&engine, &target, scope)
@@ -356,7 +357,11 @@ impl Composer {
                         Ok(None) => run.status = RunStatus::Unreadable,
                         Ok(Some(mut findings)) => {
                             let files = parse_patch(reviewed.as_deref().unwrap_or_default());
-                            review::place_new(&mut findings, &files);
+                            if restored {
+                                review::refresh(&mut findings, &files);
+                            } else {
+                                review::place_new(&mut findings, &files);
+                            }
                             run.reported = findings.len();
                             run.findings = findings;
                             run.status = RunStatus::Done;
@@ -879,11 +884,7 @@ impl Composer {
             return None;
         }
         let rows = run.findings.iter().map(|finding| {
-            let (tint, wash) = match finding.severity {
-                review::Severity::Bug => (theme.danger, theme.danger.opacity(0.14)),
-                review::Severity::Risk => (theme.warning, theme.warning.opacity(0.14)),
-                review::Severity::Nit => (theme.text_muted, crate::theme::ink(0.08)),
-            };
+            let (tint, wash) = finding.severity.colors(theme);
             let outdated = finding.placement == review::Placement::Outdated;
             let id = finding.id.clone();
             div()
@@ -996,7 +997,7 @@ impl Composer {
                             el.child(button("review-fix-all", "Fix all", true).on_click(
                                 cx.listener(|this, _, _, cx| {
                                     cx.stop_propagation();
-                                    this.stage_findings(None, cx);
+                                    this.stage_findings(cx);
                                 }),
                             ))
                         })
@@ -1013,34 +1014,21 @@ impl Composer {
         )
     }
 
-    pub(crate) fn stage_findings(&mut self, only: Option<String>, cx: &mut Context<Self>) {
+    fn stage_findings(&mut self, cx: &mut Context<Self>) {
         let key = self.current_key.clone();
         self.state.update(cx, |state, cx| {
-            let Some(run) = state
-                .reviews
-                .get_mut(&key)
-                .and_then(|review| review.run.as_mut())
-            else {
-                return;
-            };
-            let (staged, kept): (Vec<_>, Vec<_>) = run.findings.drain(..).partition(|finding| {
-                finding.placement != review::Placement::Outdated
-                    && only.as_ref().is_none_or(|id| &finding.id == id)
-            });
-            run.findings = kept;
-            for finding in staged {
-                state.add_review_comment(&key, finding.comment());
-            }
+            state.stage_review_findings(&key, None);
             cx.notify();
         });
         self.close_roster();
         cx.notify();
     }
 
-    pub(crate) fn dismiss_finding(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn dismiss_finding(&mut self, id: &str, cx: &mut Context<Self>) {
         let key = self.current_key.clone();
-        self.set_run(&key, cx, |run| {
-            run.findings.retain(|finding| finding.id != id)
+        self.state.update(cx, |state, cx| {
+            state.dismiss_review_finding(&key, id);
+            cx.notify();
         });
     }
 }

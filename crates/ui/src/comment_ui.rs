@@ -145,6 +145,110 @@ pub(crate) fn render_comment_card<T: 'static>(
         .into_any_element()
 }
 
+pub(crate) fn render_finding_card<T: 'static>(
+    comment: &ReviewComment,
+    severity: crate::review::Severity,
+    theme: &Theme,
+    cx: &Context<T>,
+    fix: fn(&mut T, &str, &mut Context<T>),
+    dismiss: fn(&mut T, &str, &mut Context<T>),
+) -> AnyElement {
+    let (tint, wash) = severity.colors(theme);
+    let shown = comment
+        .body
+        .strip_prefix(&format!("{}: ", severity.word()))
+        .unwrap_or(&comment.body)
+        .to_string();
+    let title = shown.lines().next().unwrap_or_default().to_string();
+    let action = |label: &'static str, primary: bool, run: fn(&mut T, &str, &mut Context<T>)| {
+        let id = comment.id.clone();
+        div()
+            .id(SharedString::from(format!(
+                "finding-{}-{}",
+                label.to_lowercase(),
+                comment.id
+            )))
+            .flex_none()
+            .px(px(7.0))
+            .rounded(px(5.0))
+            .cursor_pointer()
+            .text_size(px(11.0))
+            .role(gpui::Role::Button)
+            .aria_label(format!("{label} {title}"))
+            .when(primary, |el| el.bg(theme.solid).text_color(theme.on_solid))
+            .when(!primary, |el| {
+                el.text_color(theme.text_muted)
+                    .hover(|s| s.bg(theme.glass_hover()))
+            })
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                run(this, &id, cx);
+            }))
+            .child(label)
+    };
+    div()
+        .h(px(comments::card_height(&comment.body)))
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .bg(wash.opacity(0.5))
+        .child(comment_accent_bar(tint.opacity(0.6)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .px(px(Theme::SPACE_LG))
+                .py(px(comments::CARD_PAD_V / 2.0))
+                .child(
+                    div()
+                        .h(px(comments::CARD_HEADER_HEIGHT))
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .px(px(5.0))
+                                .rounded(px(4.0))
+                                .bg(wash)
+                                .text_color(tint)
+                                .text_size(px(10.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(severity.word()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(theme.font_mono.clone())
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(comment.location())),
+                        )
+                        .child(action("Fix", true, fix))
+                        .child(action("Dismiss", false, dismiss)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .text_size(px(12.0))
+                        .line_height(px(comments::CARD_LINE_HEIGHT))
+                        .text_color(theme.text_dim)
+                        .child(SharedString::from(shown)),
+                ),
+        )
+        .into_any_element()
+}
+
 pub(crate) fn render_comment_edit<T: 'static>(
     comment: &ReviewComment,
     group: SharedString,

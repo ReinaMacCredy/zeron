@@ -1123,6 +1123,21 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    pub fn stage_review_findings(&mut self, key: &str, only: Option<&str>) {
+        let Some(review) = self.reviews.get_mut(key) else {
+            return;
+        };
+        for comment in review.take_fixable(only) {
+            self.add_review_comment(key, comment);
+        }
+    }
+
+    pub fn dismiss_review_finding(&mut self, key: &str, id: &str) {
+        if let Some(review) = self.reviews.get_mut(key) {
+            review.dismiss(id);
+        }
+    }
+
     pub fn add_review_comment(&mut self, key: &str, comment: ReviewComment) {
         self.review_comments
             .entry(key.to_string())
