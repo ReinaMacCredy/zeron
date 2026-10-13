@@ -1206,7 +1206,7 @@ impl ThreadTools {
                         .config
                         .as_ref()
                         .map_or(PermissionMode::Ask, |c| c.permission_mode);
-                    permission_rank(*mode) <= permission_rank(owner)
+                    mode.rank() <= owner.rank()
                 })
                 .map(|mode| json!(mode)),
         };
@@ -1700,7 +1700,7 @@ impl ThreadTools {
                     .as_ref()
                     .map_or(PermissionMode::Ask, |config| config.permission_mode);
                 if let Some(mode) = draft.permission_mode
-                    && permission_rank(mode) > permission_rank(owner)
+                    && mode.rank() > owner.rank()
                 {
                     return Err(format!(
                         "permission_escalation_denied: this chat runs in {} mode, so a profile it saves may not use {}",
@@ -2317,7 +2317,7 @@ fn applied_profile(
         ));
     }
     if let Some(mode) = profile.permission_mode
-        && permission_rank(mode) > permission_rank(current.permission_mode)
+        && mode.rank() > current.permission_mode.rank()
     {
         return Err(format!(
             "permission_escalation_denied: this chat runs in {} mode, so it may not apply a profile in {}",
@@ -2356,14 +2356,6 @@ fn applied_profile(
     config.profile_id = Some(profile.id.clone());
     config.disabled_tools = profile.disabled_tools.clone();
     Ok(config)
-}
-
-fn permission_rank(mode: PermissionMode) -> u8 {
-    match mode {
-        PermissionMode::Ask => 0,
-        PermissionMode::Auto => 1,
-        PermissionMode::Full => 2,
-    }
 }
 
 fn wait_timeout(args: &Value) -> Duration {

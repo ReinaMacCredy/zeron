@@ -1,11 +1,13 @@
 use gpui::{AnyElement, App, Context, SharedString, Task, div, prelude::*, px};
-use zeron_proto::{CheckoutDiff, HarnessId};
+use zeron_proto::{CheckoutDiff, HarnessId, PermissionMode};
 use zeron_rpc::methods;
 
 use super::{Composer, ComposerEvent};
 use crate::changes::{default_base_ref, parse_patch};
 use crate::popover::{self, Popup};
-use crate::review::{self, PromptInput, ReviewRun, ReviewScope, RunStatus};
+use crate::review::{
+    self, PromptInput, ReviewRun, ReviewScope, ReviewerChoice, ReviewerOptions, RunStatus,
+};
 use crate::theme::Theme;
 
 const CHIP_HEIGHT: f32 = 28.0;
@@ -16,6 +18,8 @@ pub(super) struct ReviewChipUi {
     stats_task: Option<Task<()>>,
     spawn_task: Option<Task<()>>,
     read_task: Option<Task<()>>,
+    options: Option<ReviewerOptions>,
+    options_task: Option<Task<()>>,
 }
 
 #[derive(Clone)]
@@ -25,6 +29,7 @@ struct Target {
     branch: Option<String>,
     worktree: bool,
     harness: Option<HarnessId>,
+    permission: Option<PermissionMode>,
 }
 
 enum Look {
@@ -85,33 +90,63 @@ fn capitalize(text: &str) -> String {
         .unwrap_or_default()
 }
 
-fn other_family(chat: Option<HarnessId>, offered: &[HarnessId]) -> Option<HarnessId> {
-    let wanted: &[HarnessId] = match chat {
-        Some(HarnessId::ClaudeCode) => &[HarnessId::Codex],
-        Some(HarnessId::Codex) => &[HarnessId::ClaudeCode],
-        _ => &[HarnessId::ClaudeCode, HarnessId::Codex],
-    };
-    wanted.iter().copied().find(|id| offered.contains(id))
-}
-
-async fn offered_harnesses(engine: &crate::state::EngineHandle) -> Vec<HarnessId> {
-    let Ok(value) = engine
+async fn launch_review(
+    engine: &crate::state::EngineHandle,
+    target: &Target,
+    scope: ReviewScope,
+    choice: &ReviewerChoice,
+) -> Result<(String, String, Option<String>), String> {
+    let (diff, base) = checkout_diff(engine, target, scope).await?;
+    let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
+    if files.is_empty() {
+        return Err("Nothing to review".to_string());
+    }
+    let options = review::reviewer_options(engine).await;
+    let reviewer = review::resolve_reviewer(choice, target.harness, &options);
+    let profile = reviewer.profile.as_ref();
+    let permission_mode = profile
+        .and_then(|profile| profile.permission_mode)
+        .filter(|mode| {
+            target
+                .permission
+                .is_some_and(|owner| mode.rank() <= owner.rank())
+        });
+    let task = review::prompt(PromptInput {
+        scope,
+        base: base.as_deref(),
+        patch: &diff.patch,
+        truncated: diff.truncated,
+        files: &files,
+    });
+    let params = serde_json::json!({
+        "ownerChatId": target.chat_id,
+        "task": task,
+        "title": "Review changes",
+        "role": "review",
+        "wake": "never",
+        "clientRequestId": review::request_id(scope, &uuid::Uuid::new_v4().to_string()),
+        "harness": reviewer.harness,
+        "model": reviewer.model,
+        "reasoning": profile.and_then(|profile| profile.reasoning),
+        "permissionMode": permission_mode,
+        "modelOptions": profile
+            .filter(|profile| !profile.model_options.is_empty())
+            .map(|profile| profile.model_options.clone()),
+        "instructions": profile.map(|profile| profile.instructions.clone()),
+        "profileId": profile.map(|profile| profile.id.clone()),
+        "disabledTools": profile.map(|profile| profile.disabled_tools.clone()).unwrap_or_default(),
+    });
+    let view = engine
         .client()
-        .call(methods::LIST_HARNESSES, serde_json::json!({}))
+        .call(methods::DELEGATE_TASK, params)
         .await
-    else {
-        return Vec::new();
-    };
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|row| {
-            row.get("installed").and_then(|v| v.as_bool()) != Some(false)
-                && row.get("enabled").and_then(|v| v.as_bool()) != Some(false)
-        })
-        .filter_map(|row| serde_json::from_value(row.get("id")?.clone()).ok())
-        .collect()
+        .map_err(|err| err.to_string())?;
+    let task_id = view
+        .get("taskId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "The reviewer did not start".to_string())?
+        .to_string();
+    Ok((task_id, diff.patch, reviewer.note))
 }
 
 impl Composer {
@@ -138,6 +173,7 @@ impl Composer {
             cwd,
             branch: chat.branch.clone(),
             harness: chat.config.as_ref().map(|config| config.harness),
+            permission: chat.config.as_ref().map(|config| config.permission_mode),
         })
     }
 
@@ -399,72 +435,45 @@ impl Composer {
             state.reviews.entry(chat_id.clone()).or_default().run = Some(ReviewRun::new(scope));
             cx.notify();
         });
-        self.review.spawn_task =
-            Some(cx.spawn(async move |this, cx| {
-                let started = async {
-                let (diff, base) = checkout_diff(&engine, &target, scope).await?;
-                let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
-                if files.is_empty() {
-                    return Err("Nothing to review".to_string());
-                }
-                let offered = offered_harnesses(&engine).await;
-                let picked = other_family(target.harness, &offered);
-                let harness = picked.or(target.harness);
-                let note = (picked.is_none()).then(|| {
-                    format!(
-                        "No other agent is available, so {} reviews its own family",
-                        target.harness.map_or("the chat's agent", super::harness_display_name)
-                    )
-                });
-                let task = review::prompt(PromptInput {
-                    scope,
-                    base: base.as_deref(),
-                    patch: &diff.patch,
-                    truncated: diff.truncated,
-                    files: &files,
-                });
-                let mut params = serde_json::json!({
-                    "ownerChatId": target.chat_id,
-                    "task": task,
-                    "title": "Review changes",
-                    "role": "review",
-                    "wake": "never",
-                    "clientRequestId": review::request_id(scope, &uuid::Uuid::new_v4().to_string()),
-                });
-                if let Some(harness) = harness {
-                    params["harness"] = serde_json::to_value(harness).unwrap_or_default();
-                }
-                let view = engine
-                    .client()
-                    .call(methods::DELEGATE_TASK, params)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                let task_id = view
-                    .get("taskId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "The reviewer did not start".to_string())?
-                    .to_string();
-                Ok((task_id, diff.patch, note))
-            }
-            .await;
-                this.update(cx, |composer, cx| {
-                    composer.set_run(&chat_id, cx, |run| {
-                        if run.status != RunStatus::Starting {
-                            return;
+        let choice = self.reviewer_choice(&chat_id, cx);
+        self.review.spawn_task = Some(cx.spawn(async move |this, cx| {
+            let started = launch_review(&engine, &target, scope, &choice).await;
+            this.update(cx, |composer, cx| {
+                composer.set_run(&chat_id, cx, |run| {
+                    if run.status != RunStatus::Starting {
+                        return;
+                    }
+                    match started {
+                        Ok((task_id, patch, note)) => {
+                            run.task_id = Some(task_id);
+                            run.reviewed = Some(patch);
+                            run.note = note;
+                            run.status = RunStatus::Running;
                         }
-                        match started {
-                            Ok((task_id, patch, note)) => {
-                                run.task_id = Some(task_id);
-                                run.reviewed = Some(patch);
-                                run.note = note;
-                                run.status = RunStatus::Running;
-                            }
-                            Err(message) => run.status = RunStatus::Failed(message),
-                        }
-                    });
-                })
-                .ok();
-            }));
+                        Err(message) => run.status = RunStatus::Failed(message),
+                    }
+                });
+            })
+            .ok();
+        }));
+    }
+
+    fn reviewer_choice(&self, chat_id: &str, cx: &App) -> ReviewerChoice {
+        self.state
+            .read(cx)
+            .reviews
+            .get(chat_id)
+            .and_then(|review| review.reviewer.clone())
+            .unwrap_or_else(|| crate::settings::review_reviewer(cx))
+    }
+
+    fn set_reviewer(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
+        let key = self.current_key.clone();
+        self.state.update(cx, |state, cx| {
+            state.reviews.entry(key).or_default().reviewer = Some(choice);
+            cx.notify();
+        });
+        self.close_review_menu(cx);
     }
 
     fn close_review_menu(&mut self, cx: &mut Context<Self>) {
@@ -481,6 +490,16 @@ impl Composer {
         self.review.menu.open(());
         let key = format!("menu|{}", uuid::Uuid::new_v4());
         self.fetch_review_stats(target, ReviewScope::ALL.to_vec(), key, cx);
+        if let Some(engine) = self.state.read(cx).engine().cloned() {
+            self.review.options_task = Some(cx.spawn(async move |this, cx| {
+                let options = review::reviewer_options(&engine).await;
+                this.update(cx, |composer, cx| {
+                    composer.review.options = Some(options);
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         cx.notify();
     }
 
@@ -594,8 +613,8 @@ impl Composer {
                 Look::Unreadable => (
                     crate::icons::CHECKLIST,
                     "Couldn’t read findings".into(),
-                    theme.warning,
-                    theme.warning.opacity(0.45),
+                    theme.text_muted,
+                    theme.border,
                     None,
                     "The reviewer did not end with a findings block. Click to open its thread."
                         .into(),
@@ -796,6 +815,39 @@ impl Composer {
                         )
                     })
             });
+        let effective = self.reviewer_choice(&target.chat_id, cx);
+        let options = self.review.options.clone().unwrap_or_default();
+        let auto_name = self.review.options.as_ref().map(|options| {
+            review::resolve_reviewer(&ReviewerChoice::Auto, target.harness, options).name()
+        });
+        let mut choices = options.choices();
+        if !choices.contains(&effective) {
+            choices.insert(1, effective.clone());
+        }
+        let reviewer_rows = choices.into_iter().enumerate().map(|(ix, choice)| {
+            let label = options.label(&choice);
+            let detail = (choice == ReviewerChoice::Auto)
+                .then(|| auto_name.clone())
+                .flatten();
+            let selected = choice == effective;
+            let id = SharedString::from(format!("composer-reviewer-{ix}"));
+            popover::menu_row(&popup, false, id.clone())
+                .id(id)
+                .role(gpui::Role::MenuItemRadio)
+                .aria_label(format!("Reviewer {label}"))
+                .gap(px(8.0))
+                .child(crate::settings::widgets::select_check(&popup, selected))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .when_some(detail, |el, detail| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(popup.text_faint)
+                            .child(detail),
+                    )
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.set_reviewer(choice.clone(), cx)))
+        });
         let review_label = format!(
             "Review {}",
             selected.label(review.base.as_deref()).to_lowercase()
@@ -826,6 +878,9 @@ impl Composer {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_review_menu(cx)))
             .child(popover::menu_heading(&popup, "Scope"))
             .children(rows)
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(&popup, "Reviewer"))
+            .children(reviewer_rows)
             .child(popover::menu_separator())
             .child(review_now)
             .into_any_element();
@@ -868,9 +923,13 @@ impl Composer {
                 }
                 text
             }
+            _ if run.note.is_some() => "working".to_string(),
             _ => return None,
         };
-        Some(suffix)
+        Some(match run.note {
+            Some(_) => format!("{suffix} · fallback"),
+            None => suffix,
+        })
     }
 
     pub(super) fn render_review_findings(
@@ -880,9 +939,14 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let run = self.review_run_for(doc_id, cx)?;
-        if run.status != RunStatus::Done || run.findings.is_empty() {
+        let listed = run.status == RunStatus::Done && !run.findings.is_empty();
+        if !listed && run.note.is_none() {
             return None;
         }
+        let note = run
+            .note
+            .clone()
+            .map(|note| div().pb(px(4.0)).text_color(theme.text_faint).child(note));
         let rows = run.findings.iter().map(|finding| {
             let (tint, wash) = finding.severity.colors(theme);
             let outdated = finding.placement == review::Placement::Outdated;
@@ -986,30 +1050,33 @@ impl Composer {
                 .flex()
                 .flex_col()
                 .text_size(crate::typography::ui_rems(12.0))
-                .children(rows)
-                .child(
-                    div()
-                        .pt(px(6.0))
-                        .flex()
-                        .flex_row()
-                        .gap(px(6.0))
-                        .when(fixable, |el| {
-                            el.child(button("review-fix-all", "Fix all", true).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.stage_findings(cx);
-                                }),
-                            ))
-                        })
-                        .child(
-                            button("review-open-changes", "Open Changes", false).on_click(
-                                cx.listener(|_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.emit(ComposerEvent::OpenChanges);
-                                }),
+                .children(note)
+                .when(listed, |el| el.children(rows))
+                .when(listed, |el| {
+                    el.child(
+                        div()
+                            .pt(px(6.0))
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .when(fixable, |el| {
+                                el.child(button("review-fix-all", "Fix all", true).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.stage_findings(cx);
+                                    }),
+                                ))
+                            })
+                            .child(
+                                button("review-open-changes", "Open Changes", false).on_click(
+                                    cx.listener(|_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(ComposerEvent::OpenChanges);
+                                    }),
+                                ),
                             ),
-                        ),
-                )
+                    )
+                })
                 .into_any_element(),
         )
     }

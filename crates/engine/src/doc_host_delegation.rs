@@ -81,14 +81,6 @@ fn failure(code: &str, message: impl std::fmt::Display) -> EngineError {
     EngineError::Other(format!("{code}: {message}"))
 }
 
-fn permission_rank(mode: PermissionMode) -> u8 {
-    match mode {
-        PermissionMode::Ask => 0,
-        PermissionMode::Auto => 1,
-        PermissionMode::Full => 2,
-    }
-}
-
 fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
@@ -429,7 +421,7 @@ impl DocHost {
         }
         if let Some(mode) = params.permission_mode {
             let config = config.get_or_insert_with(|| self.default_chat_config());
-            if permission_rank(mode) > permission_rank(config.permission_mode) {
+            if mode.rank() > config.permission_mode.rank() {
                 return Err(failure(
                     "permission_escalation_denied",
                     "a delegated task may only narrow this chat's permission mode",

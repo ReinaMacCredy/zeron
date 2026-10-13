@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use zeron_engine::registry::HarnessDescriptor;
+use zeron_proto::{AgentProfile, HarnessId};
+use zeron_rpc::methods;
 
 use crate::changes::{FileDiff, line_anchor};
 use crate::comments::{CommentSide, ReviewComment};
+use crate::composer::harness_display_name;
 
 pub const REQUEST_PREFIX: &str = "zeron-review:";
 pub const CARD_PREFIX: &str = "review-finding:";
@@ -18,6 +22,7 @@ pub struct ChatReview {
     pub stats: HashMap<ReviewScope, Result<(u32, u32), String>>,
     pub stats_key: Option<String>,
     pub run: Option<ReviewRun>,
+    pub reviewer: Option<ReviewerChoice>,
 }
 
 impl ChatReview {
@@ -63,6 +68,164 @@ impl ChatReview {
             run.findings.retain(|finding| finding.id != id);
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReviewerChoice {
+    #[default]
+    Auto,
+    Harness {
+        harness: HarnessId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    Profile {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReviewerOptions {
+    pub offered: Vec<HarnessId>,
+    pub profiles: Vec<AgentProfile>,
+}
+
+impl ReviewerOptions {
+    pub fn label(&self, choice: &ReviewerChoice) -> String {
+        match choice {
+            ReviewerChoice::Auto => "Auto".to_string(),
+            ReviewerChoice::Harness { harness, model } => match model {
+                Some(model) => format!("{} · {model}", harness_display_name(*harness)),
+                None => harness_display_name(*harness).to_string(),
+            },
+            ReviewerChoice::Profile { id } => self
+                .profiles
+                .iter()
+                .find(|profile| &profile.id == id)
+                .map_or_else(
+                    || "Missing profile".to_string(),
+                    |profile| profile.name.clone(),
+                ),
+        }
+    }
+
+    pub fn choices(&self) -> Vec<ReviewerChoice> {
+        std::iter::once(ReviewerChoice::Auto)
+            .chain(self.offered.iter().map(|harness| ReviewerChoice::Harness {
+                harness: *harness,
+                model: None,
+            }))
+            .chain(self.profiles.iter().map(|profile| ReviewerChoice::Profile {
+                id: profile.id.clone(),
+            }))
+            .collect()
+    }
+}
+
+pub async fn reviewer_options(engine: &crate::state::EngineHandle) -> ReviewerOptions {
+    let offered = engine
+        .client()
+        .call_as::<Vec<HarnessDescriptor>>(methods::LIST_HARNESSES, serde_json::json!({}))
+        .await
+        .map(|list| {
+            crate::pickers::offered_harnesses(&list)
+                .into_iter()
+                .map(|descriptor| descriptor.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let profiles = crate::agent_profiles::list(engine, None)
+        .await
+        .unwrap_or_default();
+    ReviewerOptions { offered, profiles }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reviewer {
+    pub harness: Option<HarnessId>,
+    pub model: Option<String>,
+    pub profile: Option<AgentProfile>,
+    pub note: Option<String>,
+}
+
+impl Reviewer {
+    pub fn name(&self) -> String {
+        match (&self.profile, self.harness) {
+            (Some(profile), _) => profile.name.clone(),
+            (None, Some(harness)) => harness_display_name(harness).to_string(),
+            (None, None) => "the chat's agent".to_string(),
+        }
+    }
+}
+
+pub fn other_family(chat: Option<HarnessId>, offered: &[HarnessId]) -> Option<HarnessId> {
+    let wanted: &[HarnessId] = match chat {
+        Some(HarnessId::ClaudeCode) => &[HarnessId::Codex],
+        Some(HarnessId::Codex) => &[HarnessId::ClaudeCode],
+        _ => &[HarnessId::ClaudeCode, HarnessId::Codex],
+    };
+    wanted.iter().copied().find(|id| offered.contains(id))
+}
+
+pub fn resolve_reviewer(
+    choice: &ReviewerChoice,
+    chat: Option<HarnessId>,
+    options: &ReviewerOptions,
+) -> Reviewer {
+    let usable = |profile: &AgentProfile| options.offered.contains(&profile.harness);
+    let from_profile = |profile: &AgentProfile| Reviewer {
+        harness: Some(profile.harness),
+        model: profile.model.clone(),
+        profile: Some(profile.clone()),
+        note: None,
+    };
+    let skipped = match choice {
+        ReviewerChoice::Auto => None,
+        ReviewerChoice::Harness { harness, model } if options.offered.contains(harness) => {
+            return Reviewer {
+                harness: Some(*harness),
+                model: model.clone(),
+                ..Reviewer::default()
+            };
+        }
+        ReviewerChoice::Harness { harness, .. } => {
+            Some(format!("{} is unavailable", harness_display_name(*harness)))
+        }
+        ReviewerChoice::Profile { id } => match options.profiles.iter().find(|p| &p.id == id) {
+            Some(profile) if usable(profile) => return from_profile(profile),
+            Some(profile) => Some(format!("{} is unavailable", profile.name)),
+            None => Some("The chosen profile was deleted".to_string()),
+        },
+    };
+    let named = options
+        .profiles
+        .iter()
+        .find(|profile| profile.name.trim().eq_ignore_ascii_case("reviewer") && usable(profile));
+    let mut reviewer = match (named, other_family(chat, &options.offered)) {
+        (Some(profile), _) => from_profile(profile),
+        (None, Some(harness)) => Reviewer {
+            harness: Some(harness),
+            ..Reviewer::default()
+        },
+        (None, None) => {
+            let own = Reviewer {
+                harness: chat,
+                ..Reviewer::default()
+            };
+            Reviewer {
+                note: Some(format!(
+                    "No other agent is available, so {} reviews its own work",
+                    own.name()
+                )),
+                ..own
+            }
+        }
+    };
+    if let Some(skipped) = skipped {
+        reviewer.note = Some(format!("{skipped}, so {} reviews instead", reviewer.name()));
+    }
+    reviewer
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -521,6 +684,62 @@ mod tests {
         let comment = finding.comment();
         assert_eq!(comment.body, "Risk: Leaks\nClose it.");
         assert_eq!(comment.location(), "src/a.rs:7");
+    }
+
+    fn profile(id: &str, name: &str, harness: HarnessId) -> AgentProfile {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "harness": harness,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_reviewer_resolves_by_choice_then_falls_back_with_a_note() {
+        let options = ReviewerOptions {
+            offered: vec![HarnessId::ClaudeCode, HarnessId::Codex],
+            profiles: vec![profile("p1", "Reviewer", HarnessId::Codex)],
+        };
+        let auto = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &options);
+        assert_eq!(auto.profile.map(|p| p.id), Some("p1".to_string()));
+        assert_eq!(auto.note, None);
+
+        let no_profiles = ReviewerOptions {
+            profiles: Vec::new(),
+            ..options.clone()
+        };
+        let auto = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &no_profiles);
+        assert_eq!(auto.harness, Some(HarnessId::ClaudeCode));
+
+        let alone = ReviewerOptions {
+            offered: vec![HarnessId::Codex],
+            profiles: Vec::new(),
+        };
+        let own = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &alone);
+        assert_eq!(own.harness, Some(HarnessId::Codex));
+        assert!(own.note.is_some());
+
+        let gone = resolve_reviewer(
+            &ReviewerChoice::Profile {
+                id: "deleted".into(),
+            },
+            Some(HarnessId::ClaudeCode),
+            &no_profiles,
+        );
+        assert_eq!(gone.harness, Some(HarnessId::Codex));
+        assert!(gone.note.unwrap().contains("deleted"));
+
+        let unavailable = resolve_reviewer(
+            &ReviewerChoice::Harness {
+                harness: HarnessId::Mock,
+                model: None,
+            },
+            Some(HarnessId::ClaudeCode),
+            &no_profiles,
+        );
+        assert_eq!(unavailable.harness, Some(HarnessId::Codex));
+        assert!(unavailable.note.is_some());
     }
 
     #[test]

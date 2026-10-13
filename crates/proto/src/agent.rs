@@ -200,6 +200,14 @@ impl PermissionMode {
         matches!(self, PermissionMode::Full)
     }
 
+    pub fn rank(self) -> u8 {
+        match self {
+            PermissionMode::Ask => 0,
+            PermissionMode::Auto => 1,
+            PermissionMode::Full => 2,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PermissionMode::Ask => "Ask for approval",
