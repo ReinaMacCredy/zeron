@@ -223,3 +223,94 @@ async fn a_gone_popup_close_never_rebinds_to_the_tab_close_with_the_same_label()
     }));
     manager.dispose().await;
 }
+
+fn wizard(f: &Fixture, step: usize) {
+    let button = |label: String, token: &str, y: i64| {
+        json!({
+            "role": "AXButton",
+            "label": label,
+            "frame": { "x": -290, "y": y, "width": 60, "height": 20 },
+            "element_token": token,
+            "actions": ["AXPress"],
+        })
+    };
+    f.set_elements(vec![
+        button("Back".into(), "back", 30),
+        button(format!("Continue to step {}", step + 1), "next", 60),
+    ]);
+    f.knobs().token_generation = Some(0);
+}
+
+async fn back_ref(tools: &ComputerTools, context: &ComputerToolContext) -> u64 {
+    let listing = tools
+        .call(
+            "computer_get_state",
+            args(json!({ "window_id": WINDOW })),
+            context,
+        )
+        .await;
+    ref_for(&result_json(&listing), "Back")
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_same_click_on_a_page_it_changed_is_progress_not_a_repeat() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    wizard(&f, 8);
+    let knobs = f.knobs.clone();
+    f.knobs().tool_handlers.insert(
+        "click".into(),
+        Arc::new(move |_| {
+            let mut knobs = knobs.lock().unwrap();
+            let label = knobs.elements[1]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let step: usize = label.rsplit(' ').next().unwrap().parse().unwrap();
+            knobs.elements[1]["label"] = json!(format!("Continue to step {}", step - 1));
+            json!({ "structuredContent": { "effect": "unverifiable" } })
+        }),
+    );
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let back = back_ref(&tools, &context).await;
+    for _ in 0..4 {
+        let outcome = click(&tools, &context, back).await;
+        assert_eq!(outcome["error"], json!(false), "{outcome}");
+    }
+    assert_eq!(f.named("click").len(), 4);
+    manager.dispose().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_third_same_click_on_an_unchanged_page_is_still_refused() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    wizard(&f, 8);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let back = back_ref(&tools, &context).await;
+    for _ in 0..2 {
+        let outcome = click(&tools, &context, back).await;
+        assert_eq!(outcome["error"], json!(false), "{outcome}");
+        tools
+            .call(
+                "computer_get_state",
+                args(json!({ "window_id": WINDOW })),
+                &context,
+            )
+            .await;
+    }
+    let outcome = click(&tools, &context, back).await;
+    assert_eq!(
+        outcome["body"]["error"]["code"],
+        json!("repeated_unverified_action"),
+        "{outcome}"
+    );
+    assert_eq!(f.named("click").len(), 2);
+    manager.dispose().await;
+}
