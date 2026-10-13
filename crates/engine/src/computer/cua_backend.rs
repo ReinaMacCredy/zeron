@@ -2542,7 +2542,7 @@ impl CuaInner {
             && !same_rect(&prepared, &bounds)
         {
             return Err(CuaActionError::new(
-                "Target moved after drag preparation; obtain a new screenshot.",
+                "The target window moved since this target was observed; obtain a new screenshot.",
                 CuaEffect::NotDispatched,
             )
             .code("stale_geometry")
@@ -2555,7 +2555,10 @@ impl CuaInner {
                 state.desktop_epoch,
             )
         };
-        if point.is_some() && !observed.is_some_and(|observed| same_rect(&observed, &bounds)) {
+        if point.is_some()
+            && prepared_bounds.is_none()
+            && !observed.is_some_and(|observed| same_rect(&observed, &bounds))
+        {
             return Err(CuaActionError::new(
                 "Window geometry changed since observation; obtain a new screenshot.",
                 CuaEffect::NotDispatched,
@@ -2806,6 +2809,7 @@ impl CuaInner {
         window_id: Option<&str>,
         modifiers: &[ComputerInputModifier],
         target: Option<&ComputerResolvedTarget>,
+        prepared_bounds: Option<ComputerRect>,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
         let Some(point) = point else {
             return Err(CuaActionError::new(
@@ -2865,8 +2869,9 @@ impl CuaInner {
             .into());
         }
         let mut args = Map::new();
+        let element_scroll = token.is_some() && dx == 0.0 && mods.is_none();
         match token {
-            Some(token) if dx == 0.0 && mods.is_none() => {
+            Some(token) if element_scroll => {
                 args.insert(
                     "direction".into(),
                     json!(if dy > 0.0 { "down" } else { "up" }),
@@ -2907,9 +2912,13 @@ impl CuaInner {
                 }
             }
         }
-        let mut result = self
-            .input("scroll", args, window_id, Some(point), None)
-            .await?;
+        let mut result = if element_scroll {
+            self.input("scroll", args, window_id, None, None).await?
+        } else {
+            self.input("scroll", args, window_id, Some(point), prepared_bounds)
+                .await?
+        };
+        result.point = Some(point);
         result.scroll_delta = Some(ComputerScrollDelta {
             delta_x: if ticks_x != 0.0 {
                 dx.signum() * ticks_x * 120.0
@@ -4894,9 +4903,18 @@ impl ComputerBackend for CuaComputerBackend {
         window_id: Option<&str>,
         modifiers: &[ComputerInputModifier],
         target: Option<&ComputerResolvedTarget>,
+        prepared_bounds: Option<ComputerRect>,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
         self.inner
-            .scroll(point, delta_x, delta_y, window_id, modifiers, target)
+            .scroll(
+                point,
+                delta_x,
+                delta_y,
+                window_id,
+                modifiers,
+                target,
+                prepared_bounds,
+            )
             .await
     }
 

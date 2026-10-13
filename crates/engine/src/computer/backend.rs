@@ -870,6 +870,7 @@ pub trait ComputerBackend: Send + Sync {
         window_id: Option<&str>,
         modifiers: &[ComputerInputModifier],
         target: Option<&ComputerResolvedTarget>,
+        prepared_bounds: Option<ComputerRect>,
     ) -> Result<ComputerBackendActionResult, ComputerError>;
 
     fn focus_neutral_semantic_text(&self) -> bool {

@@ -485,6 +485,7 @@ impl ComputerBackend for Scripted {
         window_id: Option<&str>,
         modifiers: &[ComputerInputModifier],
         target: Option<&ComputerResolvedTarget>,
+        prepared_bounds: Option<ComputerRect>,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
         hooked!(
             self,
@@ -498,7 +499,15 @@ impl ComputerBackend for Scripted {
                 target.cloned()
             ),
             self.fake
-                .scroll(point, delta_x, delta_y, window_id, modifiers, target)
+                .scroll(
+                    point,
+                    delta_x,
+                    delta_y,
+                    window_id,
+                    modifiers,
+                    target,
+                    prepared_bounds
+                )
                 .await
         )
     }

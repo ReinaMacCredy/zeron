@@ -1174,6 +1174,7 @@ impl ComputerBackend for FakeComputerBackend {
         _window_id: Option<&str>,
         modifiers: &[ComputerInputModifier],
         _target: Option<&ComputerResolvedTarget>,
+        _prepared_bounds: Option<ComputerRect>,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
         let mut args = vec![json!(point), json!(delta_x), json!(delta_y)];
         if !modifiers.is_empty() {
@@ -1714,7 +1715,7 @@ mod tests {
             .await
             .unwrap();
         backend
-            .scroll(None, 0.0, 500.0, None, &[], None)
+            .scroll(None, 0.0, 500.0, None, &[], None, None)
             .await
             .unwrap();
         backend.type_text("hello", None, None).await.unwrap();

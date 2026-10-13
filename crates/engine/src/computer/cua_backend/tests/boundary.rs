@@ -123,6 +123,7 @@ async fn maps_public_scrolling_to_core_graphics_wheel_signs() {
                 Some("cua:10:20"),
                 &[],
                 None,
+                None,
             )
             .await
             .unwrap();

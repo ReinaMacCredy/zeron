@@ -815,6 +815,7 @@ async fn translates_an_unmodified_single_axis_scroll_without_dropping_unsupporte
         Some("cua:10:20"),
         &[],
         None,
+        None,
     ))
     .await
     .unwrap();
@@ -838,6 +839,7 @@ async fn translates_an_unmodified_single_axis_scroll_without_dropping_unsupporte
         Some("cua:10:20"),
         &[],
         None,
+        None,
     ))
     .await
     .unwrap_err();
@@ -849,6 +851,7 @@ async fn translates_an_unmodified_single_axis_scroll_without_dropping_unsupporte
         240.0,
         Some("cua:10:20"),
         &[ComputerInputModifier::Ctrl],
+        None,
         None,
     ))
     .await

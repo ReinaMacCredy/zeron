@@ -1,7 +1,7 @@
 use serde_json::json;
 use zeron_proto::computer::{
     ComputerAvailability, ComputerDeliveryVerification, ComputerInputModifier, ComputerPermission,
-    ComputerScrollDelta, CuaEffect,
+    ComputerRect, ComputerScrollDelta, CuaEffect,
 };
 
 use super::*;
@@ -350,6 +350,7 @@ async fn converts_pixel_deltas_to_one_bounded_wheel_operation() {
             Some("cua:10:20"),
             &[],
             None,
+            None,
         )
         .await
         .unwrap();
@@ -379,6 +380,7 @@ async fn carries_both_axes_and_modifiers_in_one_wheel_gesture() {
             250.0,
             Some("cua:10:20"),
             &[ComputerInputModifier::Meta, ComputerInputModifier::Shift],
+            None,
             None,
         )
         .await
@@ -416,6 +418,7 @@ async fn refuses_a_single_axis_beyond_the_50_notch_bound_before_dispatch() {
                 Some("cua:10:20"),
                 &[],
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -451,6 +454,7 @@ async fn prefers_the_ax_scroll_bar_route_for_an_unmodified_vertical_element_scro
             Some("cua:10:20"),
             &[],
             Some(&target),
+            None,
         )
         .await
         .unwrap();
@@ -466,12 +470,98 @@ async fn prefers_the_ax_scroll_bar_route_for_an_unmodified_vertical_element_scro
             Some("cua:10:20"),
             &[],
             Some(&target),
+            None,
         )
         .await
         .unwrap();
     let second = f.named("scroll")[1].args.clone();
     assert_subset(&second, json!({ "delta_x": 1, "delta_y": -2 }));
     assert!(second.get("element_token").is_none());
+}
+
+#[tokio::test]
+async fn scrolls_an_element_or_a_freshly_bounded_point_without_screenshot_geometry() {
+    let f = fixture();
+    f.set_elements(vec![json!({
+        "role": "AXScrollArea",
+        "label": "Content",
+        "frame": { "x": -290, "y": 30, "width": 20, "height": 20 },
+        "element_token": "scroll-token",
+    })]);
+    let root = f
+        .backend
+        .get_state(window_state("cua:10:20"))
+        .await
+        .unwrap()
+        .root
+        .unwrap();
+    let target = resolved_in("Content", Some("cua:10:20"), &root.children[0]);
+    f.backend
+        .scroll(
+            Some(target.point),
+            0.0,
+            250.0,
+            Some("cua:10:20"),
+            &[],
+            Some(&target),
+            None,
+        )
+        .await
+        .unwrap();
+    let element = f.first_args("scroll");
+    assert_subset(&element, json!({ "element_token": "scroll-token" }));
+    assert!(element.get("x").is_none(), "{element}");
+    let window = ComputerRect {
+        x: -300.0,
+        y: 20.0,
+        width: 200.0,
+        height: 100.0,
+    };
+    f.backend
+        .scroll(
+            Some(point(-200.0, 70.0)),
+            0.0,
+            250.0,
+            Some("cua:10:20"),
+            &[],
+            None,
+            Some(window),
+        )
+        .await
+        .unwrap();
+    assert_subset(
+        &f.named("scroll")[1].args,
+        json!({ "x": 100, "y": 50, "expected_window_bounds": { "x": -300, "y": 20 } }),
+    );
+}
+
+#[tokio::test]
+async fn refuses_a_scroll_point_whose_frame_no_longer_matches_the_window() {
+    let f = fixture();
+    let moved = ComputerRect {
+        x: -250.0,
+        y: 20.0,
+        width: 200.0,
+        height: 100.0,
+    };
+    for prepared in [Some(moved), None] {
+        let error = f
+            .backend
+            .scroll(
+                Some(point(-275.0, 30.0)),
+                0.0,
+                250.0,
+                Some("cua:10:20"),
+                &[],
+                None,
+                prepared,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(effect(&error), Some(CuaEffect::NotDispatched));
+        assert_eq!(code(&error), Some("stale_geometry"));
+    }
+    assert!(f.named("scroll").is_empty());
 }
 
 #[tokio::test]

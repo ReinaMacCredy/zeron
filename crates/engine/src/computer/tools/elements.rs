@@ -153,6 +153,16 @@ impl ElementState {
             .map(|(_, digest)| digest.clone())
     }
 
+    pub(super) fn listing_signature(&self, key: &str) -> Option<String> {
+        let (_, digest) = self.digests.iter().find(|(existing, _)| existing == key)?;
+        let controls: Vec<(&str, &str)> = digest
+            .items
+            .iter()
+            .map(|item| (item.role.as_str(), item.label.as_str()))
+            .collect();
+        serde_json::to_string(&controls).ok()
+    }
+
     pub(super) fn replace_ref(
         &mut self,
         thread_id: &str,
@@ -165,6 +175,18 @@ impl ElementState {
         ) && let Some(slot) = table.entries.get_mut(&element_ref)
         {
             *slot = entry;
+        }
+    }
+
+    pub(super) fn is_moved_duplicate(
+        &self,
+        thread_id: &str,
+        element_ref: u64,
+        item: &ComputerActionableElementRef,
+    ) -> bool {
+        match (self.ref_tables.get(thread_id), usize::try_from(element_ref)) {
+            (Some(table), Ok(element_ref)) => moved_duplicate(table, element_ref, item),
+            _ => true,
         }
     }
 

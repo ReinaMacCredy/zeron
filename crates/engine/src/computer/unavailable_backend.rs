@@ -295,6 +295,7 @@ impl ComputerBackend for UnavailableComputerBackend {
         _window_id: Option<&str>,
         _modifiers: &[ComputerInputModifier],
         _target: Option<&ComputerResolvedTarget>,
+        _prepared_bounds: Option<ComputerRect>,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
         self.refuse()
     }

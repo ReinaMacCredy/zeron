@@ -11,6 +11,7 @@ use super::consent::{
     COMPUTER_APP_CONSENT_DENIED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE, ConsentRefusal,
     app_consent_refusal_result, app_window_required_result,
 };
+use super::elements::digest_scope_key;
 use super::progress_guard::{ComputerProgressAction, ComputerProgressOutcome, ComputerProgressScope};
 use super::results::{
     AuditOutcome, ToolFailure, ToolValue, computer_audit_error_outcome,
@@ -184,15 +185,26 @@ impl ComputerTools {
                     _ => None,
                 }
             });
-        let target_key = match requested.and_then(Value::as_str) {
-            Some(window) => window.to_owned(),
-            None => ref_window.unwrap_or_else(|| {
-                args.get("app")
-                    .and_then(Value::as_str)
-                    .unwrap_or("selected-window")
-                    .to_owned()
-            }),
-        };
+        let window = requested
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or(ref_window);
+        let mut action_key = repeated_action_key(name, args);
+        if let Some(observed) = window.as_deref().and_then(|window| {
+            self.state().elements.listing_signature(&digest_scope_key(
+                &context.chat_id,
+                Some(window),
+                None,
+            ))
+        }) {
+            action_key.push_str(&observed);
+        }
+        let target_key = window.unwrap_or_else(|| {
+            args.get("app")
+                .and_then(Value::as_str)
+                .unwrap_or("selected-window")
+                .to_owned()
+        });
         Some(ComputerProgressAction {
             scope: ComputerProgressScope {
                 thread_id: context.chat_id.clone(),
@@ -200,7 +212,7 @@ impl ComputerTools {
                 session_key: Some(context.session_key.clone()),
             },
             target_key,
-            action_key: repeated_action_key(name, args),
+            action_key,
         })
     }
 
