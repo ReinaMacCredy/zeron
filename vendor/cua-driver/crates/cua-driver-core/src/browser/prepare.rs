@@ -1279,6 +1279,19 @@ impl BrowserEngine {
                     .abort(error)
                     .await);
             }
+            if displayed_consent_prompt {
+                return Err(self
+                    .platform
+                    .dismiss_existing_profile_consent(
+                        BrowserConsentRequest {
+                            pid,
+                            window_id,
+                            attempt: 1,
+                        },
+                        error,
+                    )
+                    .await);
+            }
             return Err(error);
         }
         if setup_pending {
