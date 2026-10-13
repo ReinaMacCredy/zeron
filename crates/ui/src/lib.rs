@@ -150,6 +150,18 @@ impl gpui::Global for ReopenState {}
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
+fn window_title() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.ancestors()
+                .find(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+                .and_then(|bundle| bundle.file_stem())
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Zeron".into())
+}
+
 pub fn run_app(config: UiConfig) {
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
@@ -453,11 +465,13 @@ fn open_main_window(
                 // macOS: frameless-inset chrome like the original Electron app
                 // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
                 // feature-inventory §1.1). The strip is custom-drawn. Windows
-                // still needs a native title for taskbar previews and Alt+Tab. On
+                // still needs a native title for taskbar previews and Alt+Tab;
+                // macOS hides it but reports it to the window server and
+                // accessibility, which is how agents tell bundles apart. On
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
                 titlebar: Some(TitlebarOptions {
-                    title: cfg!(target_os = "windows").then(|| "Zeron".into()),
+                    title: (!cfg!(target_os = "linux")).then(|| window_title().into()),
                     appears_transparent: true,
                     // Native lights are 14px tall: top 14 → center 21, matching
                     // the 38px titlebar row with 4px top-only content padding.
