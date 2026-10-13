@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Context, Entity, EntityInputHandler,
-    FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Task, Window, div,
-    percentage, prelude::*, px,
+    FocusHandle, Focusable, KeyDownEvent, ListAlignment, ListState, SharedString, Subscription,
+    Task, Window, div, list, percentage, prelude::*, px,
 };
 use zeron_proto::{
     CheckoutDiff, CommitSummary, DiffFileSummary, GenerateCommitMessageRequest,
@@ -111,6 +111,32 @@ struct Expanded {
     staged: bool,
     path: String,
     view: Loadable<(WorkingTreeFileDiff, Option<FileDiff>)>,
+    rows: Vec<DiffRow>,
+    list: ListState,
+}
+
+impl Expanded {
+    fn new(staged: bool, path: String) -> Self {
+        Self {
+            staged,
+            path,
+            view: Loadable::Loading,
+            rows: vec![DiffRow::Loading],
+            list: ListState::new(1, ListAlignment::Top, px(1024.0)),
+        }
+    }
+
+    fn set_view(&mut self, view: Loadable<(WorkingTreeFileDiff, Option<FileDiff>)>) {
+        self.view = view;
+        let rows = match &self.view {
+            Loadable::Idle | Loadable::Loading => vec![DiffRow::Loading],
+            Loadable::Error(_) => vec![DiffRow::Failed],
+            Loadable::Ready((diff, parsed)) => {
+                diff_rows(parsed.as_ref(), diff.binary, diff.truncated)
+            }
+        };
+        splice_rows(&self.list, &mut self.rows, rows);
+    }
 }
 
 struct BranchForm {
@@ -125,16 +151,69 @@ struct CommitDetail {
     open_files: HashSet<String>,
     branch_form: Option<BranchForm>,
     outcome: Option<(SharedString, bool)>,
+    rows: Vec<DetailRow>,
+    list: ListState,
 }
 
-enum DiffBody<'a> {
+impl CommitDetail {
+    fn new(commit: GitHistoryCommit) -> Self {
+        Self {
+            commit,
+            diff: Loadable::Loading,
+            open_files: HashSet::new(),
+            branch_form: None,
+            outcome: None,
+            rows: vec![DetailRow::Header, DetailRow::Status],
+            list: ListState::new(2, ListAlignment::Top, px(1024.0)),
+        }
+    }
+
+    fn sync_rows(&mut self) {
+        let mut rows = vec![DetailRow::Header];
+        match &self.diff {
+            Loadable::Ready((diff, parsed)) if !diff.files.is_empty() => {
+                for (index, file) in diff.files.iter().enumerate() {
+                    rows.push(DetailRow::File(index));
+                    if !self.open_files.contains(&file.path) {
+                        continue;
+                    }
+                    let position = parsed.iter().position(|parsed| parsed.path == file.path);
+                    let last = position.is_some_and(|at| at + 1 == parsed.len());
+                    rows.extend(
+                        diff_rows(
+                            position.map(|at| &parsed[at]),
+                            file.binary,
+                            diff.truncated && (position.is_none() || last),
+                        )
+                        .into_iter()
+                        .map(|row| DetailRow::Diff(index, row)),
+                    );
+                }
+            }
+            _ => rows.push(DetailRow::Status),
+        }
+        splice_rows(&self.list, &mut self.rows, rows);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DetailRow {
+    Header,
+    Status,
+    File(usize),
+    Diff(usize, DiffRow),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DiffRow {
     Loading,
-    Failed(SharedString),
-    Ready {
-        file: Option<&'a FileDiff>,
-        binary: bool,
-        truncated: bool,
-    },
+    Failed,
+    Hunk(usize),
+    Line(usize, usize),
+    Hidden(usize),
+    Binary,
+    Truncated,
+    NoText,
 }
 
 pub struct GitTab {
@@ -1118,13 +1197,7 @@ impl GitTab {
             self.confirm = None;
         }
         self.detail_task = None;
-        self.detail = commit.map(|commit| CommitDetail {
-            commit,
-            diff: Loadable::Loading,
-            open_files: HashSet::new(),
-            branch_form: None,
-            outcome: None,
-        });
+        self.detail = commit.map(CommitDetail::new);
         self.fetch_commit_diff(cx);
         cx.notify();
     }
@@ -1165,6 +1238,7 @@ impl GitTab {
                     }
                     Err(error) => Loadable::Error(error),
                 };
+                detail.sync_rows();
                 cx.notify();
             })
             .ok();
@@ -1372,6 +1446,7 @@ impl GitTab {
                 }
             }
         }
+        detail.sync_rows();
         cx.notify();
     }
 
@@ -1737,11 +1812,7 @@ impl GitTab {
         if !self.source_control(cx) {
             return;
         }
-        self.expanded = Some(Expanded {
-            staged,
-            path,
-            view: Loadable::Loading,
-        });
+        self.expanded = Some(Expanded::new(staged, path));
         self.fetch_diff(cx);
         cx.notify();
     }
@@ -1775,13 +1846,13 @@ impl GitTab {
                 else {
                     return;
                 };
-                open.view = match result {
+                open.set_view(match result {
                     Ok(diff) => {
                         let parsed = changes::parse_patch(&diff.patch).into_iter().next();
                         Loadable::Ready((diff, parsed))
                     }
                     Err(error) => Loadable::Error(error),
-                };
+                });
                 cx.notify();
             })
             .ok();
@@ -2859,12 +2930,42 @@ impl GitTab {
                     .debug_selector(|| "git-diff-scroll".into())
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .pt(px(8.0))
-                    .pb(px(self.bottom_clearance()))
-                    .child(render_diff(open, theme)),
+                    .child(
+                        list(open.list.clone(), cx.processor(Self::render_file_diff_row))
+                            .size_full()
+                            .pt(px(8.0))
+                            .pb(px(self.bottom_clearance())),
+                    ),
             )
             .into_any_element()
+    }
+
+    fn render_file_diff_row(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some((open, row)) = self
+            .expanded
+            .as_ref()
+            .and_then(|open| Some((open, *open.rows.get(ix)?)))
+        else {
+            return div().into_any_element();
+        };
+        let (file, error) = match &open.view {
+            Loadable::Ready((_, parsed)) => (parsed.as_ref(), None),
+            Loadable::Error(error) => (None, Some(SharedString::from(error.clone()))),
+            Loadable::Idle | Loadable::Loading => (None, None),
+        };
+        render_diff_row(
+            row,
+            file,
+            error,
+            (ix == 0).then(|| "git-file-diff".to_string()),
+            ix + 1 == open.rows.len(),
+            Theme::of(cx),
+        )
     }
 
     fn render_stash_button(
@@ -3559,6 +3660,151 @@ impl GitTab {
         let commit = &detail.commit;
         let policy = busy_policy(cx);
         let tree = self.tree.as_ref();
+        div()
+            .id("git-commit-detail")
+            .debug_selector(|| "git-commit-detail".into())
+            .map(|el| {
+                if self.compact {
+                    el.size_full()
+                } else {
+                    el.w(px(PANEL_WIDTH)).flex_none().h_full().border_l_1()
+                }
+            })
+            .border_color(theme.hairline(0.07))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .border_b_1()
+                    .border_color(theme.hairline(0.07))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Commit"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(short_sha(&commit.sha))),
+                    )
+                    .child(
+                        div()
+                            .id("git-commit-close")
+                            .debug_selector(|| "git-commit-close".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Close the commit")
+                            .tooltip(text_tooltip("Close the commit"))
+                            .size(px(22.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.ink(0.06)))
+                            .child(
+                                icon(icons::CLOSE)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(|tab, _, _, cx| tab.select_commit(None, cx))),
+                    ),
+            )
+            .when(tree.is_some_and(|tree| tree.agent_active), |el| {
+                el.child(render_agent_banner(policy, theme))
+            })
+            .child(
+                div().flex_1().min_h_0().child(
+                    list(detail.list.clone(), cx.processor(Self::render_detail_row))
+                        .size_full()
+                        .pb(px(12.0 + self.bottom_clearance())),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_detail_row(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let Some((detail, row)) = self
+            .detail
+            .as_ref()
+            .and_then(|detail| Some((detail, *detail.rows.get(ix)?)))
+        else {
+            return div().into_any_element();
+        };
+        let status = |text: SharedString, color: gpui::Hsla| {
+            div()
+                .px(px(12.0))
+                .text_size(px(12.0))
+                .text_color(color)
+                .child(text)
+                .into_any_element()
+        };
+        match (row, &detail.diff) {
+            (DetailRow::Header, _) => self.render_commit_header(detail, &theme, cx),
+            (DetailRow::File(index), Loadable::Ready((diff, _))) => {
+                self.render_commit_file(index, &diff.files[index], detail, &theme, cx)
+            }
+            (DetailRow::Diff(index, row), Loadable::Ready((diff, parsed))) => {
+                let path = &diff.files[index].path;
+                let same_file = |at: Option<usize>| {
+                    matches!(
+                        at.and_then(|at| detail.rows.get(at)),
+                        Some(DetailRow::Diff(other, _)) if *other == index
+                    )
+                };
+                render_diff_row(
+                    row,
+                    parsed.iter().find(|parsed| &parsed.path == path),
+                    None,
+                    (!same_file(ix.checked_sub(1))).then(|| format!("git-commit-diff-{index}")),
+                    !same_file(Some(ix + 1)),
+                    &theme,
+                )
+            }
+            (_, Loadable::Error(error)) => div()
+                .id("git-commit-files-error")
+                .debug_selector(|| "git-commit-files-error".into())
+                .px(px(12.0))
+                .text_size(px(12.0))
+                .text_color(theme.danger)
+                .child(error.clone())
+                .into_any_element(),
+            (_, Loadable::Ready(_)) => {
+                status("No file changes".into(), theme.text_muted.opacity(0.6))
+            }
+            (_, Loadable::Idle | Loadable::Loading) => {
+                status("Reading the commit…".into(), theme.text_muted)
+            }
+        }
+    }
+
+    fn render_commit_header(
+        &self,
+        detail: &CommitDetail,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let commit = &detail.commit;
+        let tree = self.tree.as_ref();
         let pending = self
             .pending
             .as_ref()
@@ -3778,299 +4024,155 @@ impl GitTab {
                         ),
                 )
         });
-        let mut file_rows: Vec<AnyElement> = Vec::new();
-        match &detail.diff {
-            Loadable::Idle | Loadable::Loading => file_rows.push(
-                div()
-                    .px(px(12.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child("Reading the commit…")
-                    .into_any_element(),
-            ),
-            Loadable::Error(error) => file_rows.push(
-                div()
-                    .id("git-commit-files-error")
-                    .debug_selector(|| "git-commit-files-error".into())
-                    .px(px(12.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.danger)
-                    .child(error.clone())
-                    .into_any_element(),
-            ),
-            Loadable::Ready((diff, parsed)) => {
-                for (index, file) in diff.files.iter().enumerate() {
-                    file_rows.push(self.render_commit_file(index, file, detail, theme, cx));
-                    if detail.open_files.contains(&file.path) {
-                        let position = parsed.iter().position(|parsed| parsed.path == file.path);
-                        let last = position.is_some_and(|at| at + 1 == parsed.len());
-                        file_rows.push(render_diff_body(
-                            format!("git-commit-diff-{index}"),
-                            DiffBody::Ready {
-                                file: position.map(|at| &parsed[at]),
-                                binary: file.binary,
-                                truncated: diff.truncated && (position.is_none() || last),
-                            },
-                            theme,
-                        ));
-                    }
-                }
-                if diff.files.is_empty() {
-                    file_rows.push(
-                        div()
-                            .px(px(12.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child("No file changes")
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
         let subject = if commit.subject.is_empty() {
             "(no subject)".to_string()
         } else {
             commit.subject.clone()
         };
         div()
-            .id("git-commit-detail")
-            .debug_selector(|| "git-commit-detail".into())
-            .map(|el| {
-                if self.compact {
-                    el.size_full()
-                } else {
-                    el.w(px(PANEL_WIDTH)).flex_none().h_full().border_l_1()
-                }
-            })
-            .border_color(theme.hairline(0.07))
             .flex()
             .flex_col()
+            .gap(px(10.0))
             .child(
                 div()
-                    .h(px(40.0))
                     .px(px(12.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.hairline(0.07))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("Commit"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(short_sha(&commit.sha))),
-                    )
-                    .child(
-                        div()
-                            .id("git-commit-close")
-                            .debug_selector(|| "git-commit-close".into())
-                            .role(gpui::Role::Button)
-                            .aria_label("Close the commit")
-                            .tooltip(text_tooltip("Close the commit"))
-                            .size(px(22.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.ink(0.06)))
-                            .child(
-                                icon(icons::CLOSE)
-                                    .size(px(12.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .on_click(cx.listener(|tab, _, _, cx| tab.select_commit(None, cx))),
-                    ),
-            )
-            .when(tree.is_some_and(|tree| tree.agent_active), |el| {
-                el.child(render_agent_banner(policy, theme))
-            })
-            .child(
-                div()
-                    .id("git-commit-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
+                    .pt(px(12.0))
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
-                    .pb(px(12.0 + self.bottom_clearance()))
                     .child(
                         div()
-                            .px(px(12.0))
-                            .pt(px(12.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .id("git-commit-subject")
-                                    .debug_selector(|| "git-commit-subject".into())
-                                    .text_size(px(14.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(subject)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .text_size(px(12.0))
-                                    .child(meta("Author", commit.author_name.clone()))
-                                    .child(meta(
-                                        "Date",
-                                        crate::history::format_date(&commit.authored_at),
-                                    ))
-                                    .child(meta("Parents", parents))
-                                    .child(meta("SHA", commit.sha.clone())),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(6.0))
-                                    .child(
-                                        detail_button(
-                                            "git-commit-checkout",
-                                            checkout_label,
-                                            can_checkout,
-                                            theme,
-                                        )
-                                        .when(
-                                            can_checkout,
-                                            |el| {
-                                                el.on_click(cx.listener(|tab, _, window, cx| {
-                                                    tab.start_checkout(window, cx)
-                                                }))
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        detail_button(
-                                            "git-commit-cherry-pick",
-                                            "Cherry-pick",
-                                            can_pick,
-                                            theme,
-                                        )
-                                        .when(
-                                            can_pick,
-                                            |el| {
-                                                el.on_click(cx.listener(|tab, _, window, cx| {
-                                                    tab.start_cherry_pick(window, cx)
-                                                }))
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        detail_button(
-                                            "git-commit-copy-sha",
-                                            if copied { "Copied" } else { "Copy SHA" },
-                                            true,
-                                            theme,
-                                        )
-                                        .on_click(
-                                            cx.listener(|tab, _, _, cx| tab.copy_commit_sha(cx)),
-                                        ),
-                                    )
-                                    .child(
-                                        detail_button(
-                                            "git-commit-open-diff",
-                                            if all_open { "Fold diff" } else { "Open diff" },
-                                            !files.is_empty(),
-                                            theme,
-                                        )
-                                        .when(
-                                            !files.is_empty(),
-                                            |el| {
-                                                el.on_click(cx.listener(|tab, _, _, cx| {
-                                                    tab.toggle_commit_file(None, cx)
-                                                }))
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        detail_button(
-                                            "git-commit-branch",
-                                            "Create branch",
-                                            can_branch,
-                                            theme,
-                                        )
-                                        .when(
-                                            can_branch,
-                                            |el| {
-                                                el.on_click(cx.listener(|tab, _, window, cx| {
-                                                    tab.open_branch_form(window, cx)
-                                                }))
-                                            },
-                                        ),
-                                    ),
-                            )
-                            .when_some(refusal, |el, reason| {
-                                el.child(
-                                    div()
-                                        .id("git-commit-refusal")
-                                        .debug_selector(|| "git-commit-refusal".into())
-                                        .text_size(px(12.0))
-                                        .text_color(theme.text_muted)
-                                        .child(reason),
-                                )
-                            })
-                            .children(confirm)
-                            .children(branch_form)
-                            .when(pending, |el| {
-                                el.child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.text_muted)
-                                        .child("Working…"),
-                                )
-                            })
-                            .when_some(detail.outcome.clone(), |el, (text, failed)| {
-                                el.child(
-                                    div()
-                                        .id("git-commit-outcome")
-                                        .debug_selector(|| "git-commit-outcome".into())
-                                        .text_size(px(12.0))
-                                        .text_color(if failed {
-                                            theme.danger
-                                        } else {
-                                            theme.success
-                                        })
-                                        .child(text),
-                                )
-                            }),
+                            .id("git-commit-subject")
+                            .debug_selector(|| "git-commit-subject".into())
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(subject)),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .gap(px(4.0))
+                            .text_size(px(12.0))
+                            .child(meta("Author", commit.author_name.clone()))
+                            .child(meta(
+                                "Date",
+                                crate::history::format_date(&commit.authored_at),
+                            ))
+                            .child(meta("Parents", parents))
+                            .child(meta("SHA", commit.sha.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(6.0))
                             .child(
-                                div()
-                                    .h(px(30.0))
-                                    .px(px(12.0))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!("Files ({})", files.len()))),
+                                detail_button(
+                                    "git-commit-checkout",
+                                    checkout_label,
+                                    can_checkout,
+                                    theme,
+                                )
+                                .when(can_checkout, |el| {
+                                    el.on_click(cx.listener(|tab, _, window, cx| {
+                                        tab.start_checkout(window, cx)
+                                    }))
+                                }),
                             )
-                            .children(file_rows),
-                    ),
+                            .child(
+                                detail_button(
+                                    "git-commit-cherry-pick",
+                                    "Cherry-pick",
+                                    can_pick,
+                                    theme,
+                                )
+                                .when(can_pick, |el| {
+                                    el.on_click(cx.listener(|tab, _, window, cx| {
+                                        tab.start_cherry_pick(window, cx)
+                                    }))
+                                }),
+                            )
+                            .child(
+                                detail_button(
+                                    "git-commit-copy-sha",
+                                    if copied { "Copied" } else { "Copy SHA" },
+                                    true,
+                                    theme,
+                                )
+                                .on_click(cx.listener(|tab, _, _, cx| tab.copy_commit_sha(cx))),
+                            )
+                            .child(
+                                detail_button(
+                                    "git-commit-open-diff",
+                                    if all_open { "Fold diff" } else { "Open diff" },
+                                    !files.is_empty(),
+                                    theme,
+                                )
+                                .when(!files.is_empty(), |el| {
+                                    el.on_click(
+                                        cx.listener(|tab, _, _, cx| {
+                                            tab.toggle_commit_file(None, cx)
+                                        }),
+                                    )
+                                }),
+                            )
+                            .child(
+                                detail_button(
+                                    "git-commit-branch",
+                                    "Create branch",
+                                    can_branch,
+                                    theme,
+                                )
+                                .when(can_branch, |el| {
+                                    el.on_click(cx.listener(|tab, _, window, cx| {
+                                        tab.open_branch_form(window, cx)
+                                    }))
+                                }),
+                            ),
+                    )
+                    .when_some(refusal, |el, reason| {
+                        el.child(
+                            div()
+                                .id("git-commit-refusal")
+                                .debug_selector(|| "git-commit-refusal".into())
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(reason),
+                        )
+                    })
+                    .children(confirm)
+                    .children(branch_form)
+                    .when(pending, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child("Working…"),
+                        )
+                    })
+                    .when_some(detail.outcome.clone(), |el, (text, failed)| {
+                        el.child(
+                            div()
+                                .id("git-commit-outcome")
+                                .debug_selector(|| "git-commit-outcome".into())
+                                .text_size(px(12.0))
+                                .text_color(if failed { theme.danger } else { theme.success })
+                                .child(text),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("Files ({})", files.len()))),
             )
             .into_any_element()
     }
@@ -4358,20 +4460,57 @@ fn small_button(
         })
 }
 
-fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
-    let body = match &open.view {
-        Loadable::Idle | Loadable::Loading => DiffBody::Loading,
-        Loadable::Error(error) => DiffBody::Failed(error.clone().into()),
-        Loadable::Ready((diff, parsed)) => DiffBody::Ready {
-            file: parsed.as_ref(),
-            binary: diff.binary,
-            truncated: diff.truncated,
-        },
-    };
-    render_diff_body("git-file-diff".into(), body, theme)
+fn splice_rows<T: PartialEq>(list: &ListState, rows: &mut Vec<T>, next: Vec<T>) {
+    let prefix = rows.iter().zip(&next).take_while(|(a, b)| a == b).count();
+    let suffix = rows[prefix..]
+        .iter()
+        .rev()
+        .zip(next[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    list.splice(prefix..rows.len() - suffix, next.len() - prefix - suffix);
+    *rows = next;
 }
 
-fn render_diff_body(selector: String, view: DiffBody, theme: &Theme) -> AnyElement {
+fn diff_rows(file: Option<&FileDiff>, binary: bool, truncated: bool) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    match file.filter(|_| !binary) {
+        Some(file) if !file.hunks.is_empty() => {
+            let mut budget = DIFF_LINE_LIMIT;
+            let mut hidden = 0usize;
+            for (h, hunk) in file.hunks.iter().enumerate() {
+                if budget == 0 {
+                    hidden += hunk.lines.len();
+                    continue;
+                }
+                rows.push(DiffRow::Hunk(h));
+                let shown = hunk.lines.len().min(budget);
+                rows.extend((0..shown).map(|l| DiffRow::Line(h, l)));
+                budget -= shown;
+                hidden += hunk.lines.len() - shown;
+            }
+            if hidden > 0 {
+                rows.push(DiffRow::Hidden(hidden));
+            }
+            if truncated {
+                rows.push(DiffRow::Truncated);
+            }
+        }
+        _ if binary => rows.push(DiffRow::Binary),
+        _ if truncated => rows.push(DiffRow::Truncated),
+        _ => rows.push(DiffRow::NoText),
+    }
+    rows
+}
+
+fn render_diff_row(
+    row: DiffRow,
+    file: Option<&FileDiff>,
+    error: Option<SharedString>,
+    first: Option<String>,
+    last: bool,
+    theme: &Theme,
+) -> AnyElement {
     let note = |text: SharedString, color: gpui::Hsla| {
         div()
             .px(px(8.0))
@@ -4381,85 +4520,53 @@ fn render_diff_body(selector: String, view: DiffBody, theme: &Theme) -> AnyEleme
             .child(text)
             .into_any_element()
     };
-    let mut body: Vec<AnyElement> = Vec::new();
-    match view {
-        DiffBody::Loading => body.push(note("Loading diff…".into(), theme.text_muted)),
-        DiffBody::Failed(error) => body.push(note(error, theme.danger)),
-        DiffBody::Ready {
-            file,
-            binary,
-            truncated,
-        } => match file.filter(|_| !binary) {
-            Some(file) if !file.hunks.is_empty() => {
-                let gutter = changes::gutter_width(file);
-                let mut budget = DIFF_LINE_LIMIT;
-                let mut hidden = 0usize;
-                for hunk in &file.hunks {
-                    if budget == 0 {
-                        hidden += hunk.lines.len();
-                        continue;
-                    }
-                    body.push(
-                        div()
-                            .px(px(8.0))
-                            .bg(theme.ink(0.03))
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .truncate()
-                            .child(SharedString::from(hunk.header.clone()))
-                            .into_any_element(),
-                    );
-                    for line in &hunk.lines {
-                        if budget == 0 {
-                            hidden += 1;
-                            continue;
-                        }
-                        budget -= 1;
-                        body.push(changes::diff_line_row(
-                            line,
-                            &[],
-                            theme,
-                            gutter,
-                            changes::DiffCodeWidth::Wrapped,
-                            None,
-                        ));
-                    }
-                }
-                if hidden > 0 {
-                    body.push(note(
-                        format!("{hidden} more lines not shown").into(),
-                        theme.text_muted,
-                    ));
-                }
-                if truncated {
-                    body.push(note(
-                        "The diff is too large to show in full.".into(),
-                        theme.text_muted,
-                    ));
-                }
-            }
-            _ if binary => body.push(note("Binary file, no text diff.".into(), theme.text_muted)),
-            _ if truncated => body.push(note(
-                "The diff is too large to show in full.".into(),
-                theme.text_muted,
-            )),
-            _ => body.push(note("No text changes.".into(), theme.text_muted)),
-        },
-    }
+    let content = match (row, file) {
+        (DiffRow::Hunk(h), Some(file)) => div()
+            .px(px(8.0))
+            .bg(theme.ink(0.03))
+            .font_family(theme.font_mono.clone())
+            .text_size(px(11.0))
+            .text_color(theme.text_muted)
+            .truncate()
+            .child(SharedString::from(file.hunks[h].header.clone()))
+            .into_any_element(),
+        (DiffRow::Line(h, l), Some(file)) => changes::diff_line_row(
+            &file.hunks[h].lines[l],
+            &[],
+            theme,
+            changes::gutter_width(file),
+            changes::DiffCodeWidth::Wrapped,
+            None,
+        ),
+        (DiffRow::Failed, _) => note(error.unwrap_or_default(), theme.danger),
+        (DiffRow::Hidden(hidden), _) => note(
+            format!("{hidden} more lines not shown").into(),
+            theme.text_muted,
+        ),
+        (DiffRow::Binary, _) => note("Binary file, no text diff.".into(), theme.text_muted),
+        (DiffRow::Truncated, _) => note(
+            "The diff is too large to show in full.".into(),
+            theme.text_muted,
+        ),
+        (DiffRow::NoText, _) => note("No text changes.".into(), theme.text_muted),
+        _ => note("Loading diff…".into(), theme.text_muted),
+    };
+    let top = first.is_some();
     div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
-        .ml(px(32.0))
-        .mr(px(12.0))
-        .mb(px(6.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(theme.hairline(0.09))
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .children(body)
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .when(last, |el| el.pb(px(6.0)))
+        .child(
+            div()
+                .when_some(first, |el, selector| el.debug_selector(move || selector))
+                .border_l_1()
+                .border_r_1()
+                .border_color(theme.hairline(0.09))
+                .when(top, |el| el.border_t_1().rounded_t(px(8.0)))
+                .when(last, |el| el.border_b_1().rounded_b(px(8.0)))
+                .overflow_hidden()
+                .child(content),
+        )
         .into_any_element()
 }
 
@@ -7233,6 +7340,44 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-commit-detail").is_none());
         assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
+    }
+
+    #[gpui::test]
+    fn an_open_commit_diff_lays_out_only_the_rows_near_the_viewport(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        let (cx, _calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab);
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        let lines: String = (0..DIFF_LINE_LIMIT)
+            .map(|n| format!("+line {n}\n"))
+            .collect();
+        let patch = format!(
+            "diff --git a/src/panel.rs b/src/panel.rs\n--- a/src/panel.rs\n+++ b/src/panel.rs\n@@ -0,0 +1,{DIFF_LINE_LIMIT} @@\n{lines}"
+        );
+        tab.update(cx, |tab, cx| {
+            let detail = tab.detail.as_mut().unwrap();
+            let Loadable::Ready((diff, parsed)) = &mut detail.diff else {
+                panic!("a loaded commit");
+            };
+            diff.files.truncate(1);
+            *parsed = changes::parse_patch(&patch);
+            detail.sync_rows();
+            cx.notify();
+        });
+        click(cx, "git-commit-open-diff");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-diff-0").is_some());
+        tab.read_with(cx, |tab, _| {
+            let detail = tab.detail.as_ref().unwrap();
+            assert_eq!(detail.rows.len(), DIFF_LINE_LIMIT + 3);
+            assert!(detail.list.bounds_for_item(3).is_some());
+            assert!(
+                detail.list.bounds_for_item(detail.rows.len() - 1).is_none(),
+                "rows far below the viewport are never laid out"
+            );
+        });
     }
 
     #[gpui::test]
