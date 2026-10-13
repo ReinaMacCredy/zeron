@@ -125,6 +125,29 @@ pub struct HarnessUpdateStatus {
     pub manual_command: Option<String>,
 }
 
+/// What the resume button and every automatic continuation send. A user
+/// entry carrying exactly this text renders as a "Resumed" divider.
+pub const RESUME_PROMPT: &str = "Resume without asking to continue.";
+
+/// A chat whose last turn stopped on a provider usage limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitResume {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    /// Sends [`RESUME_PROMPT`] at `resets_at` unless the user acts first.
+    pub auto: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitResumes {
+    pub auto_resume: bool,
+    #[serde(default)]
+    pub chats: Vec<LimitResume>,
+}
+
 impl HarnessUpdateStatus {
     /// Home notices describe discovered releases or an update in progress.
     /// Manual checks remain available in Settings without implying that a

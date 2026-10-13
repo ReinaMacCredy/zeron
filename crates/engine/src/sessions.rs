@@ -565,6 +565,7 @@ struct Inner {
     turn_listener: OnceLock<TurnListener>,
     computer: Mutex<Option<Arc<ComputerRuntime>>>,
     device_hub: Mutex<Option<Arc<crate::device_hub::DeviceHub>>>,
+    resume_schedule: OnceLock<crate::resume_schedule::ResumeSchedule>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -761,6 +762,7 @@ impl SessionsEngine {
                 turn_listener: OnceLock::new(),
                 computer: Mutex::new(None),
                 device_hub: Mutex::new(None),
+                resume_schedule: OnceLock::new(),
             }),
         }
     }
@@ -833,6 +835,10 @@ impl SessionsEngine {
     }
 
     /// Wire the turn-start listener (called once at engine assembly).
+    pub fn set_resume_schedule(&self, schedule: crate::resume_schedule::ResumeSchedule) {
+        let _ = self.inner.resume_schedule.set(schedule);
+    }
+
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
     }
@@ -1751,6 +1757,25 @@ impl SessionsEngine {
     /// shells, everything the agent runs. The next message resumes the
     /// conversation in a fresh process. (Sending, steering and switching
     /// models never come here: they keep the runtime and its work.)
+    /// Chats whose turn is running now, optionally only on `harnesses`.
+    pub fn working_chats(&self, harnesses: Option<&[HarnessId]>) -> Vec<String> {
+        let working: Vec<String> = lock(&self.inner.statuses)
+            .values()
+            .filter(|session| session.status == SessionStatus::Working)
+            .map(|session| session.chat_id.clone())
+            .collect();
+        let runs = lock(&self.inner.runs);
+        working
+            .into_iter()
+            .filter(|chat_id| {
+                harnesses.is_none_or(|harnesses| {
+                    runs.get(chat_id)
+                        .is_some_and(|run| harnesses.contains(&run.runtime_config.harness_id))
+                })
+            })
+            .collect()
+    }
+
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
         self.terminate(chat_id).await
     }
@@ -2555,7 +2580,12 @@ impl SessionsEngine {
                         .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
                 })
                 .unwrap_or(false);
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            let continues = self
+                .inner
+                .resume_schedule
+                .get()
+                .is_some_and(|schedule| schedule.continues_after_restart(&chat_id));
+            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME && !continues;
             if will_resume {
                 lock(&self.inner.reviving).insert(chat_id.clone());
             }
@@ -3199,6 +3229,9 @@ impl Inner {
             match status {
                 SessionStatus::Working if fresh_start || !was_active => {
                     entry.started_at = Some(now);
+                    if let Some(schedule) = self.resume_schedule.get() {
+                        schedule.clear(chat_id);
+                    }
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
@@ -4222,6 +4255,15 @@ fn cursor_unstarted_history(
     ))
 }
 
+fn last_user_entry(doc: &SessionDoc) -> Option<String> {
+    doc.read_entries()
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::User)
+        .map(|entry| entry.id)
+}
+
 fn record_session_stats(
     doc: &SessionDoc,
     chat_id: &str,
@@ -4451,6 +4493,7 @@ async fn drive_run(
     let mut clock = crate::turn_clock::TurnClock::new(std::time::Instant::now());
     clock.start(true, std::time::Instant::now());
     let mut folded: Vec<MessagePart> = Vec::new();
+    let mut turn_limit: Option<Option<i64>> = None;
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
     // long-running completions) as full ToolCall events; once the fold has
@@ -5523,7 +5566,16 @@ async fn drive_run(
             // still in place and tested.
         }
 
+        if let AgentEvent::UsageLimit { resets_at } = &event {
+            turn_limit = Some(resets_at.or(turn_limit.flatten()));
+        }
         if let AgentEvent::Done { status, .. } = &event {
+            if let Some(resets_at) = turn_limit.take()
+                && !interrupted
+                && let Some(schedule) = inner.resume_schedule.get()
+            {
+                schedule.note_limit(&chat_id, resets_at, last_user_entry(doc_ref), now_ms());
+            }
             record_session_stats(
                 doc_ref,
                 &chat_id,

@@ -23,6 +23,7 @@ pub mod capabilities {
     /// The host creates a projectless chat's scratch folder
     /// (`crate::projectless`) when it runs; older hosts only know `~`.
     pub const PROJECTLESS_SCRATCH_V1: &str = "projectless-scratch-v1";
+    pub const LIMIT_RESUME_V1: &str = "limit-resume-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -38,6 +39,7 @@ pub mod capabilities {
         SOURCE_CONTROL_SYNC_V1,
         SOURCE_CONTROL_COMMITS_V1,
         PROJECTLESS_SCRATCH_V1,
+        LIMIT_RESUME_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
