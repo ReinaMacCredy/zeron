@@ -314,11 +314,29 @@
       let pixels;
       if (distance && typeof distance === "object" && distance.pixels) pixels = distance.pixels;
       else pixels = (typeof distance === "number" ? distance : 1) * 600;
-      const args = this.target(target);
-      args.delta_x = dir === "left" ? -pixels : dir === "right" ? pixels : 0;
-      args.delta_y = dir === "up" ? -pixels : dir === "down" ? pixels : 0;
-      if (args.screenshot_id === undefined) args.screenshot_id = this.screenshotId;
-      call("computer_scroll", args);
+      const step = (px) => {
+        const args = this.target(target);
+        args.delta_x = dir === "left" ? -px : dir === "right" ? px : 0;
+        args.delta_y = dir === "up" ? -px : dir === "down" ? px : 0;
+        if (args.screenshot_id === undefined) args.screenshot_id = this.screenshotId;
+        const scroll = call("computer_scroll", args).structured.scroll || {};
+        const axis = dir === "left" || dir === "right" ? "deltaX" : "deltaY";
+        const requested = Math.abs((scroll.requested || {})[axis] || 0);
+        const limited = scroll.limitedTo ? Math.abs(scroll.limitedTo[axis] || 0) : null;
+        return { requested, limited };
+      };
+      const first = step(pixels);
+      if (first.limited && first.requested) {
+        const perPoint = pixels / first.requested;
+        // Each call moves at most half the window; a page is the window less the browser toolbar.
+        const total = distance && typeof distance === "object" ? first.requested : (pixels / 600) * first.limited * 1.75;
+        let remaining = total - first.limited;
+        // A wheel notch is 120 points and any remainder sends at least one.
+        for (let i = 0; remaining >= 60 && i < 40; i++) {
+          const moved = step(remaining * perPoint);
+          remaining -= moved.limited === null ? moved.requested : moved.limited;
+        }
+      }
       action("scroll", this.appName, dir);
     }
 
