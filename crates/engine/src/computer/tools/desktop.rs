@@ -1705,6 +1705,9 @@ fn is_stale_token_refusal(failure: &ToolFailure) -> bool {
         .computer()
         .and_then(ComputerError::cua)
         .is_some_and(|cua| {
-            cua.code == "stale_element_token" && cua.effect == CuaEffect::NotDispatched
+            matches!(
+                cua.code.as_str(),
+                "stale_element_token" | "element_outside_target_window"
+            ) && cua.effect == CuaEffect::NotDispatched
         })
 }

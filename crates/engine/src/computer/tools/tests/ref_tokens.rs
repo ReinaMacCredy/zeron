@@ -375,3 +375,68 @@ async fn a_moved_ref_whose_label_is_duplicated_still_refuses() {
     assert_eq!(outcome["body"]["error"], json!("stale_element_token"));
     manager.dispose().await;
 }
+
+fn refuse_outside_window(f: &Fixture, refusals: usize) {
+    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(refusals));
+    f.knobs().tool_handlers.insert(
+        "click".into(),
+        Arc::new(move |_| {
+            let refuse = remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok();
+            if refuse {
+                json!({
+                    "isError": true,
+                    "structuredContent": {
+                        "code": "element_outside_target_window",
+                        "effect": "refused",
+                    },
+                })
+            } else {
+                json!({ "structuredContent": { "effect": "unverifiable" } })
+            }
+        }),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_element_not_proven_in_its_window_is_reread_and_retried_once() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    page(&f, 10);
+    refuse_outside_window(&f, 1);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let element_ref = listed(&tools, &context).await;
+    let outcome = click(&tools, &context, element_ref).await;
+    assert_eq!(outcome["error"], json!(false), "{outcome}");
+    assert_eq!(f.named("click").len(), 2);
+    manager.dispose().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_element_that_stays_outside_its_window_still_refuses() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    page(&f, 10);
+    refuse_outside_window(&f, usize::MAX);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let element_ref = listed(&tools, &context).await;
+    let outcome = click(&tools, &context, element_ref).await;
+    assert_eq!(
+        outcome["body"]["error"],
+        json!("element_outside_target_window"),
+        "{outcome}"
+    );
+    assert_eq!(f.named("click").len(), 2);
+    manager.dispose().await;
+}
