@@ -33,6 +33,13 @@ mod space_churn;
 mod still_cadence;
 mod text_lanes;
 
+pub(crate) const DEV_BUNDLE_PID: u32 = 4_207;
+
+pub(crate) fn running_executable(pid: u32) -> Option<String> {
+    (pid == DEV_BUNDLE_PID)
+        .then(|| "/Users/dev/zeron/target/macos-dev7/Zeron Dev 7.app/Contents/MacOS/zeron".into())
+}
+
 pub(crate) type ToolHandler = Arc<dyn Fn(&Map<String, Value>) -> Value + Send + Sync>;
 
 #[derive(Clone)]

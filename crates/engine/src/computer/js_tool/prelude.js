@@ -160,22 +160,33 @@
         w.bounds.height > 40,
     );
 
+  const PICK_WINDOW = "cua.listWindows() then cua.getApp({ windowId })";
+
+  const isPath = (target) => typeof target === "string" && target.startsWith("/");
+
+  const atPath = (app, path) =>
+    (app.launchPath || "").replace(/\/+$/, "").toLowerCase() === path.replace(/\/+$/, "").toLowerCase();
+
   const findApp = (target) => {
     const apps = call("computer_list_apps").data.apps || [];
     const wanted = String(target).toLowerCase();
-    const info =
-      apps.find((a) => (a.bundleId || "").toLowerCase() === wanted) ||
-      apps.find((a) => (a.name || "").toLowerCase() === wanted) ||
-      apps.find((a) => (a.launchPath || "").toLowerCase() === wanted) ||
-      apps.find((a) => (a.launchPath || "").toLowerCase().endsWith("/" + wanted + ".app"));
-    const twins = info && info.running && info.bundleId ? apps.filter((a) => a.running && a.bundleId === info.bundleId) : [];
+    const byPath = isPath(target);
+    const info = byPath
+      ? apps.find((a) => a.running && atPath(a, wanted)) || apps.find((a) => atPath(a, wanted))
+      : apps.find((a) => (a.bundleId || "").toLowerCase() === wanted) ||
+        apps.find((a) => (a.name || "").toLowerCase() === wanted) ||
+        apps.find((a) => (a.launchPath || "").toLowerCase().endsWith("/" + wanted + ".app"));
+    const twins =
+      info && info.running
+        ? apps.filter((a) => a.running && (byPath ? atPath(a, wanted) : info.bundleId && a.bundleId === info.bundleId))
+        : [];
     if (twins.length > 1) {
-      const windows = visibleWindows(call("computer_list_windows", { app: info.name }).data.windows || []).filter((w) =>
+      const windows = visibleWindows(call("computer_list_windows").data.windows || []).filter((w) =>
         twins.some((t) => t.pid === w.pid),
       );
       if (!windows.length)
         throw new Error(
-          `Several ${info.name} instances are running (pids ${twins.map((t) => t.pid).join(", ")}) and none has a usable window. Use cua.listWindows() and cua.getApp({ windowId }).`,
+          `Several ${info.name} instances are running (pids ${twins.map((t) => t.pid).join(", ")}) and none has a usable window. Use ${PICK_WINDOW}.`,
         );
       throw new Error(
         `Several ${info.name} instances are running. Pick a window with cua.getApp({ windowId }): ${windows
@@ -187,7 +198,7 @@
   };
 
   const windowsFor = (appName, pid) => {
-    const windows = call("computer_list_windows", { app: appName }).data.windows || [];
+    const windows = call("computer_list_windows", pid === undefined ? { app: appName } : {}).data.windows || [];
     return visibleWindows(windows.filter((w) => pid === undefined || w.pid === pid)).sort(
       (a, b) => (a.stackingIndex || 0) - (b.stackingIndex || 0),
     );
@@ -663,12 +674,16 @@
     },
 
     listWindows(options) {
-      const windows = visibleWindows(call("computer_list_windows").data.windows || []).map((w) => ({
-        id: w.id,
-        app: w.appName,
-        title: w.title,
-      }));
-      if (!options || options.emit !== false) write(windows);
+      const opts = options || {};
+      const windows = visibleWindows(call("computer_list_windows", { app: opts.app }).data.windows || [])
+        .filter((w) => opts.pid === undefined || w.pid === opts.pid)
+        .map((w) => ({
+          id: w.id,
+          app: w.appName,
+          pid: w.pid,
+          title: w.title,
+        }));
+      if (opts.emit !== false) write(windows);
       return windows;
     },
 
@@ -678,19 +693,27 @@
       if (target && typeof target === "object" && target.windowId !== undefined) {
         const all = call("computer_list_windows").data.windows || [];
         window = all.find((w) => String(w.id) === String(target.windowId));
-        if (!window) throw new Error("No open window has id " + target.windowId + ".");
+        if (!window) throw new Error(`No open window has id ${target.windowId}. Use ${PICK_WINDOW}.`);
         appName = window.appName;
       } else {
         const info = findApp(target);
+        const byPath = isPath(target);
+        if (byPath && !info)
+          throw new Error(`No app is running from ${target}, and Zeron cannot launch an app by its path. Start it, then call cua.getApp again, or use ${PICK_WINDOW}.`);
         appName = info ? info.name : String(target);
         let windows = info && info.running ? windowsFor(appName, info.pid) : [];
-        if (!windows.length) {
+        if (!windows.length && !(byPath && info.running)) {
           const launched = call("computer_launch_app", { app: info ? info.bundleId || info.name : String(target) }).data;
+          if (byPath) {
+            const opened = (call("computer_list_apps").data.apps || []).find((a) => a.running && a.pid === launched.pid);
+            if (!opened || !atPath(opened, target))
+              throw new Error(`Launching ${info.bundleId || info.name} opened ${(opened && opened.launchPath) || "another copy"}, not ${target}. Use ${PICK_WINDOW}.`);
+          }
           if (launched.window && launched.window.id) windows = [launched.window];
           else windows = windowsFor(appName, launched.pid);
         }
         window = windows[0];
-        if (!window) throw new Error(`"${appName}" has no usable window. Open one, then call cua.getApp again.`);
+        if (!window) throw new Error(`"${appName}" has no usable window. Open one, then call cua.getApp again, or use ${PICK_WINDOW}.`);
       }
       const app = new App(window, appName);
       app.getAXState({ disableDiffing: true });

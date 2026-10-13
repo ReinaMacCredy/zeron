@@ -19,7 +19,7 @@ pub const SESSION_GUIDANCE: &str = "## Zeron computer use\nThe `computer` tool c
 pub fn definition() -> McpToolDefinition {
     McpToolDefinition {
         name: COMPUTER_JS_TOOL.into(),
-        description: "Control native apps and browsers on the user's Mac by reading and operating their UI. Runs JavaScript in a persistent per-chat session with the `cua` API. On the first call, run exactly one entry point and read the returned documentation and UI state: `await cua.getState();` for an inventory, or `let app = await cua.getApp(\"Calculator\");` for one app (name, bundle id or path; launches in the background). Then act by element number (`await app.click(12)`, `await app.setValue(4, \"text\")`, `await app.typeText(\"…\")`, `await app.pressKey(\"Return\")`) and end each call with `await app.getAXState();`, which returns only what changed. Use `nodeRepl.write(...)` for extra text and `nodeRepl.emitImage(await app.getScreenshot())` for images.".into(),
+        description: "Control native apps and browsers on the user's Mac by reading and operating their UI. Runs JavaScript in a persistent per-chat session with the `cua` API. On the first call, run exactly one entry point and read the returned documentation and UI state: `await cua.getState();` for an inventory, or `let app = await cua.getApp(\"Calculator\");` for one app (a name or bundle id launches it in the background; an absolute .app path binds that running copy). Then act by element number (`await app.click(12)`, `await app.setValue(4, \"text\")`, `await app.typeText(\"…\")`, `await app.pressKey(\"Return\")`) and end each call with `await app.getAXState();`, which returns only what changed. Use `nodeRepl.write(...)` for extra text and `nodeRepl.emitImage(await app.getScreenshot())` for images.".into(),
         input_schema: json!({
             "type": "object",
             "additionalProperties": false,
@@ -304,17 +304,20 @@ impl ReplState {
         *self.shared.lock(&self.shared.deadline) = Some(Instant::now() + timeout);
         *self.shared.lock(&self.shared.cancelled) = Some(request.cancelled);
         *self.shared.lock_sink() = Sink::default();
-        if !self.documented {
-            self.documented = true;
-            self.shared.lock_sink().content.push(McpContent::Text {
-                text: DOCUMENTATION.to_owned(),
-            });
-        }
         let error = self.evaluate(&request.code, timeout);
         *self.shared.lock(&self.shared.host) = None;
         *self.shared.lock(&self.shared.deadline) = None;
         *self.shared.lock(&self.shared.cancelled) = None;
-        let sink = std::mem::take(&mut *self.shared.lock_sink());
+        let mut sink = std::mem::take(&mut *self.shared.lock_sink());
+        if error.is_none() && !self.documented {
+            self.documented = true;
+            sink.content.insert(
+                0,
+                McpContent::Text {
+                    text: DOCUMENTATION.to_owned(),
+                },
+            );
+        }
         JsOutcome {
             content: sink.content,
             actions: sink.actions,
@@ -410,11 +413,23 @@ fn push_text(content: &mut Vec<McpContent>, text: String) {
 }
 
 fn format_error(message: &str) -> String {
-    let trimmed = message.trim();
+    let (text, frames) = message
+        .trim()
+        .lines()
+        .partition::<Vec<&str>, _>(|line| !line.starts_with("    at "));
+    let trimmed = text.join(" ");
+    let trimmed = trimmed.trim();
+    let location = frames
+        .iter()
+        .map(|frame| frame.trim_start_matches("    at "))
+        .find(|frame| frame.starts_with("<eval>") || frame.starts_with("eval_script:"))
+        .and_then(|frame| frame.rsplit("eval_script:").next())
+        .map(|position| format!(" (line {})", position.trim_end_matches(')')))
+        .unwrap_or_default();
     if trimmed.starts_with("Error") || trimmed.contains("Error:") {
-        trimmed.to_owned()
+        format!("{trimmed}{location}")
     } else {
-        format!("Error: {trimmed}")
+        format!("Error: {trimmed}{location}")
     }
 }
 

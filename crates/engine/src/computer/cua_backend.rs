@@ -169,6 +169,39 @@ fn text1024(value: Option<&Value>) -> String {
     text(value, 1024)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn app_bundle_of_executable(executable: &str) -> Option<String> {
+    let end = executable.rfind(".app/Contents/")? + ".app".len();
+    Some(executable[..end].to_owned())
+}
+
+// The driver copies a running app's launch_path from any installed app with its bundle id.
+#[cfg(all(target_os = "macos", not(test)))]
+fn running_app_bundle(pid: u32) -> Option<String> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+    app_bundle_of_executable(std::str::from_utf8(&buffer[..length]).ok()?)
+}
+
+#[cfg(all(not(target_os = "macos"), not(test)))]
+fn running_app_bundle(_pid: u32) -> Option<String> {
+    None
+}
+
+fn same_file(a: &str, b: &str) -> bool {
+    std::fs::canonicalize(a)
+        .ok()
+        .is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a))
+}
+
+#[cfg(test)]
+fn running_app_bundle(pid: u32) -> Option<String> {
+    tests::running_executable(pid).and_then(|executable| app_bundle_of_executable(&executable))
+}
+
 fn ax_press_cannot_complete(error: &ComputerError) -> bool {
     error
         .cua()
@@ -3456,7 +3489,7 @@ impl CuaInner {
         }
         if !linux && app.starts_with('/') {
             return Err(CuaActionError::new(
-                "Use an installed app's name or bundle identifier with Cua.",
+                "Cua cannot launch a macOS app by its path. Pass an installed app's name or bundle identifier, or start the app first and bind its open window.",
                 CuaEffect::NotDispatched,
             )
             .code("unsupported_operation")
@@ -3530,6 +3563,7 @@ impl CuaInner {
             .code("invalid_response")
             .into());
         };
+        let darwin = self.is_darwin();
         let mut apps = Vec::new();
         for value in rows {
             let row = record(Some(value));
@@ -3552,7 +3586,11 @@ impl CuaInner {
                 team if !team.is_empty() => team,
                 _ => text(row.get("signing_team_id"), 128),
             };
-            let launch_path = text(row.get("launch_path"), 4_096);
+            let reported = text(row.get("launch_path"), 4_096);
+            let launch_path = match (darwin && pid > 0).then(|| running_app_bundle(pid)) {
+                Some(Some(bundle)) if !same_file(&bundle, &reported) => bundle,
+                _ => reported,
+            };
             let last_used = text(row.get("last_used"), 64);
             apps.push(ComputerApp {
                 pid,

@@ -330,6 +330,13 @@ async fn lists_apps_with_pid_name_bundle_id_running_and_active_state() {
             },
             { "pid": -1, "name": "bogus" },
             { "pid": 44 },
+            {
+                "pid": DEV_BUNDLE_PID,
+                "name": "Zeron Dev",
+                "bundle_id": "sh.zeron.app",
+                "running": true,
+                "launch_path": "/Applications/Zeron.app",
+            },
         ] } })
     });
     let app = |pid: u32, name: &str, running: bool, active: bool| ComputerApp {
@@ -359,7 +366,27 @@ async fn lists_apps_with_pid_name_bundle_id_running_and_active_state() {
                 launch_path: Some("/System/Applications/Chess.app".into()),
                 ..app(0, "Chess", false, false)
             },
+            ComputerApp {
+                bundle_id: Some("sh.zeron.app".into()),
+                launch_path: Some("/Users/dev/zeron/target/macos-dev7/Zeron Dev 7.app".into()),
+                ..app(DEV_BUNDLE_PID, "Zeron Dev", true, false)
+            },
         ]
+    );
+}
+
+#[test]
+fn a_running_apps_bundle_is_the_innermost_app_around_its_executable() {
+    assert_eq!(
+        super::super::app_bundle_of_executable(
+            "/Applications/Google Chrome.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"
+        )
+        .as_deref(),
+        Some("/Applications/Google Chrome.app/Contents/Frameworks/Helper.app")
+    );
+    assert_eq!(
+        super::super::app_bundle_of_executable("/Users/dev/zeron/target/debug/zeron"),
+        None
     );
 }
 

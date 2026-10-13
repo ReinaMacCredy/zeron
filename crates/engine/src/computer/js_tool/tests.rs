@@ -110,7 +110,9 @@ impl JsHost for FakeHost {
                 { "pid": 11, "name": "Helium", "bundleId": "net.imput.helium", "running": true },
                 { "pid": 14, "name": "Helium", "bundleId": "net.imput.helium", "running": true },
                 { "pid": 12, "name": "Dia", "bundleId": "company.thebrowser.dia", "running": true },
-                { "pid": 13, "name": "Dia", "bundleId": "company.thebrowser.dia", "running": true }
+                { "pid": 13, "name": "Dia", "bundleId": "company.thebrowser.dia", "running": true },
+                { "pid": 30, "name": "Zeron", "bundleId": "sh.zeron.app", "running": true, "launchPath": "/Applications/Zeron.app" },
+                { "pid": 31, "name": "Zeron Dev", "bundleId": "sh.zeron.app", "running": true, "launchPath": "/Users/dev/zeron/target/macos-dev7/Zeron Dev 7.app" }
             ] })),
             "computer_type_text" if self.type_warning => json_result(json!({
                 "action": "type_text",
@@ -173,6 +175,10 @@ impl JsHost for FakeHost {
                       "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 6 }),
                     json!({ "id": "cua:14:5", "title": "Build PC", "appName": "Helium", "pid": 14, "visible": true,
                       "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 7 }),
+                    json!({ "id": "cua:30:1", "title": "", "appName": "Zeron", "pid": 30, "visible": true,
+                      "bounds": { "x": 0, "y": 0, "width": 1200, "height": 800 }, "stackingIndex": 8 }),
+                    json!({ "id": "cua:31:2", "title": "", "appName": "Zeron Dev", "pid": 31, "visible": true,
+                      "bounds": { "x": 0, "y": 0, "width": 1200, "height": 800 }, "stackingIndex": 9 }),
                 ];
                 if self.dialog {
                     windows.push(json!({ "id": "cua:7:9", "title": "ttgshop.vn says", "appName": "Calculator", "pid": 7,
@@ -359,12 +365,73 @@ async fn screenshots_reach_the_result_as_images_and_set_the_coordinate_frame() {
 }
 
 #[tokio::test]
-async fn the_first_call_in_a_chat_carries_the_api_documentation_once() {
+async fn the_first_successful_call_in_a_chat_carries_the_api_documentation_once() {
     let host = Arc::new(FakeHost::default());
+    let failed = exec("js-i", &host, "throw new Error(\"boom\")").await;
+    assert!(failed.error.is_some());
+    assert!(!texts(&failed).contains("## Computer use"));
     let first = exec("js-i", &host, "1").await;
     assert!(texts(&first).contains("## Computer use"));
     let second = exec("js-i", &host, "2").await;
     assert!(!texts(&second).contains("## Computer use"));
+}
+
+#[tokio::test]
+async fn get_app_by_path_binds_the_running_copy_at_that_path_and_never_launches_one() {
+    let host = Arc::new(FakeHost::default());
+    let bound = exec(
+        "js-app-path",
+        &host,
+        "var dev = await cua.getApp(\"/Users/dev/zeron/target/macos-dev7/Zeron Dev 7.app/\"); dev.windowId",
+    )
+    .await;
+    assert_eq!(bound.error, None, "{}", texts(&bound));
+    assert!(texts(&bound).ends_with("cua:31:2"), "{}", texts(&bound));
+    assert_eq!(
+        host.args("computer_get_state")[0]["window_id"],
+        json!("cua:31:2")
+    );
+    let missing = exec(
+        "js-app-path-missing",
+        &host,
+        "await cua.getApp(\"/Users/dev/zeron/target/macos-dev9/Zeron Dev 9.app\");",
+    )
+    .await;
+    let error = missing.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("No app is running from /Users/dev/zeron/target/macos-dev9/Zeron Dev 9.app, and Zeron cannot launch an app by its path."),
+        "{error}"
+    );
+    assert!(error.contains("cua.listWindows()"), "{error}");
+    assert!(!error.contains('\n'), "{error}");
+    assert!(!texts(&missing).contains("## Computer use"));
+    assert!(
+        !host
+            .names()
+            .iter()
+            .any(|name| name == "computer_launch_app")
+    );
+}
+
+#[tokio::test]
+async fn list_windows_reports_pids_and_narrows_by_app_or_pid() {
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-list-windows",
+        &host,
+        "await cua.listWindows({ app: \"Calculator\", emit: false }); JSON.stringify(await cua.listWindows({ pid: 31, emit: false }))",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert_eq!(
+        host.args("computer_list_windows")[0],
+        json!({ "app": "Calculator" })
+    );
+    assert!(
+        texts(&outcome).ends_with(r#"[{"id":"cua:31:2","app":"Zeron Dev","pid":31,"title":""}]"#),
+        "{}",
+        texts(&outcome)
+    );
 }
 
 #[tokio::test]
@@ -707,4 +774,16 @@ async fn an_unchanged_window_still_returns_its_screenshot() {
     .await;
     assert_eq!(outcome.error, None, "{}", texts(&outcome));
     assert!(texts(&outcome).ends_with("true"), "{}", texts(&outcome));
+}
+
+#[tokio::test]
+async fn a_script_error_is_one_line_that_names_the_scripts_own_line() {
+    let host = Arc::new(FakeHost::default());
+    let thrown = exec("js-one-line", &host, "1;\nmissingName.x;").await;
+    let error = thrown.error.unwrap_or_default();
+    assert_eq!(error, "Error: missingName is not defined (line 2:1)");
+    let syntax = exec("js-one-line", &host, "let = ;").await;
+    let error = syntax.error.unwrap_or_default();
+    assert!(error.contains("(line 1:"), "{error}");
+    assert!(!error.contains('\n'), "{error}");
 }
