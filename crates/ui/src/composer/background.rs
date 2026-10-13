@@ -43,6 +43,7 @@ const SUBAGENT_EFFORT_KEYS: [&str; 4] =
 pub(crate) enum RunState {
     Working,
     Completed,
+    Stopped,
     Failed,
 }
 
@@ -51,6 +52,7 @@ impl RunState {
         match self {
             RunState::Working => "Working",
             RunState::Completed => "Completed",
+            RunState::Stopped => "Stopped",
             RunState::Failed => "Failed",
         }
     }
@@ -139,7 +141,9 @@ pub(crate) fn delegate_runs(
             let state = match delegation.status {
                 zeron_proto::DelegationStatus::Running => RunState::Working,
                 zeron_proto::DelegationStatus::Completed => RunState::Completed,
-                _ => RunState::Failed,
+                zeron_proto::DelegationStatus::Cancelled
+                | zeron_proto::DelegationStatus::Interrupted => RunState::Stopped,
+                zeron_proto::DelegationStatus::Failed => RunState::Failed,
             };
             let started_ms = delegation.started_at.timestamp_millis();
             (state == RunState::Working || started_ms >= turn_start_ms).then(|| AgentRun {
@@ -179,6 +183,8 @@ pub(crate) fn aggregate(runs: &[AgentRun]) -> RunState {
         RunState::Working
     } else if runs.iter().any(|run| run.state == RunState::Failed) {
         RunState::Failed
+    } else if runs.iter().any(|run| run.state == RunState::Stopped) {
+        RunState::Stopped
     } else {
         RunState::Completed
     }
@@ -195,7 +201,14 @@ pub(crate) fn agents_label(runs: &[AgentRun]) -> String {
     match runs {
         [one] => format!("{} · {}", one.title, one.state.word()),
         _ if working > 0 => format!("{working} Working"),
-        _ => format!("{} Completed", runs.len()),
+        _ => [RunState::Completed, RunState::Stopped, RunState::Failed]
+            .into_iter()
+            .filter_map(|state| {
+                let count = runs.iter().filter(|run| run.state == state).count();
+                (count > 0).then(|| format!("{count} {}", state.word()))
+            })
+            .collect::<Vec<_>>()
+            .join(" · "),
     }
 }
 
@@ -1582,6 +1595,7 @@ fn run_state_text(run: &AgentRun, now_ms: i64) -> String {
     match run.state {
         RunState::Working => elapsed_label((now_ms - run.started_ms) / 1000),
         RunState::Completed => "Done".to_string(),
+        RunState::Stopped => "Stopped".to_string(),
         RunState::Failed => "Failed".to_string(),
     }
 }
@@ -1769,10 +1783,10 @@ fn glyph(key: impl Into<SharedString>, state: RunState, fade: f32, theme: &Theme
         layer().opacity(dots_opacity).child(grid)
     });
     let outcome = (state != RunState::Working).then(|| {
-        let (path, color) = if state == RunState::Failed {
-            (icons::CLOSE, theme.danger)
-        } else {
-            (icons::CHECK, theme.success)
+        let (path, color) = match state {
+            RunState::Failed => (icons::CLOSE, theme.danger),
+            RunState::Stopped => (icons::STOP, theme.text_muted),
+            _ => (icons::CHECK, theme.success),
         };
         layer()
             .opacity(fade)
@@ -1985,15 +1999,17 @@ mod tests {
             child("old-running", "owner", Running, 1_000),
             child("old-done", "owner", Completed, 1_000),
             child("new-failed", "owner", Failed, 5_000),
+            child("new-stopped", "owner", Interrupted, 5_000),
             child("elsewhere", "other", Running, 5_000),
         ];
         let runs = delegate_runs(&chats, "owner", 4_000);
         let ids: Vec<&str> = runs.iter().map(|run| run.doc_id.as_str()).collect();
-        assert_eq!(ids, ["old-running", "new-failed"]);
+        assert_eq!(ids, ["old-running", "new-failed", "new-stopped"]);
         assert!(runs.iter().all(|run| run.delegated));
         assert_eq!(runs[0].harness, Some(HarnessId::Codex));
         assert_eq!(runs[0].state, RunState::Working);
         assert_eq!(runs[1].state, RunState::Failed);
+        assert_eq!(runs[2].state, RunState::Stopped);
     }
 
     #[test]
@@ -2096,7 +2112,10 @@ mod tests {
         assert_eq!(roster_heading(&mixed), "2 of 3 working");
         assert_eq!(aggregate(&mixed), RunState::Working);
         let settled = [run("a", RunState::Completed), run("b", RunState::Failed)];
-        assert_eq!(agents_label(&settled), "2 Completed");
+        assert_eq!(agents_label(&settled), "1 Completed · 1 Failed");
+        let stopped = [run("a", RunState::Stopped), run("b", RunState::Stopped)];
+        assert_eq!(agents_label(&stopped), "2 Stopped");
+        assert_eq!(aggregate(&stopped), RunState::Stopped);
         assert_eq!(roster_heading(&settled), "Subagents");
         assert_eq!(aggregate(&settled), RunState::Failed);
         assert_eq!(
