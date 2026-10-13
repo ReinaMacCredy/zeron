@@ -5417,6 +5417,11 @@ impl Transcript {
         let state = self.state.read(cx);
         let chats = &state.chats;
         let harness = state.chat_harness(&chat_id);
+        let parent_model: Option<SharedString> = chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref()?.model.clone())
+            .map(Into::into);
         let mut seen = std::collections::HashSet::new();
         self.rows
             .iter()
@@ -5437,7 +5442,11 @@ impl Transcript {
                                 status: tool.subagent_status,
                                 delegated: false,
                                 harness,
-                                model: None,
+                                model: tool
+                                    .call
+                                    .subagent_model()
+                                    .map(|model| SharedString::from(model.to_owned()))
+                                    .or_else(|| parent_model.clone()),
                                 started_at: state
                                     .sub_transcript(&doc_id)
                                     .first()
