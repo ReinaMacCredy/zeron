@@ -690,6 +690,78 @@ impl HarnessesPage {
         }));
     }
 
+    fn render_limit_resume_card(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.state.read(cx);
+        let device = self
+            .target_device
+            .clone()
+            .or_else(|| state.local_device_id.clone())?;
+        let enabled = state.limit_resumes.get(&device)?.auto_resume;
+        Some(
+            widgets::section_card(theme)
+                .child(
+                    widgets::card_row(theme, true)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(widgets::row_title(theme, "Auto-resume after usage limits"))
+                                .child(widgets::meta_line(
+                                    theme,
+                                    vec![
+                                        div()
+                                            .child(
+                                                "Continue a thread stopped by a usage limit once the limit resets.",
+                                            )
+                                            .into_any_element(),
+                                    ],
+                                )),
+                        )
+                        .child(
+                            widgets::toggle_switch(theme, enabled, "auto-resume-limits-switch")
+                                .id("auto-resume-limits")
+                                .cursor_pointer()
+                                .tab_index(0)
+                                .role(gpui::Role::Switch)
+                                .aria_label("Auto-resume after usage limits")
+                                .aria_toggled(if enabled {
+                                    gpui::Toggled::True
+                                } else {
+                                    gpui::Toggled::False
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_auto_resume_limits(!enabled, cx)
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn set_auto_resume_limits(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.with_target(serde_json::json!({ "enabled": enabled }));
+        self.update_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_AUTO_RESUME_LIMITS, params)
+                .await;
+            this.update(cx, |page, cx| {
+                if let Err(error) = result {
+                    page.error = Some(error.to_string());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn set_update_policy(
         &mut self,
         harness: HarnessId,
@@ -1217,6 +1289,7 @@ impl Render for HarnessesPage {
             _ => None,
         };
         let switcher = self.render_device_switcher(&theme, cx);
+        let limits = self.render_limit_resume_card(&theme, cx);
 
         let can_control = self.can_control_updates(cx);
         let check = div()
@@ -1275,7 +1348,8 @@ impl Render for HarnessesPage {
                                         ),
                                 )
                                 .children(update_error)
-                                .child(body),
+                                .child(body)
+                                .children(limits),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

@@ -232,6 +232,34 @@ struct DismissHarnessUpdateParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct UpdateHarnessesParams {
+    harnesses: Vec<HarnessId>,
+    #[serde(default)]
+    continue_threads: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareRestartParams {
+    #[serde(default)]
+    continue_threads: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLimitResumeParams {
+    chat_id: String,
+    auto: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetAutoResumeLimitsParams {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetHarnessUpdatePolicyParams {
     harness: HarnessId,
     policy: HarnessUpdatePolicy,
@@ -829,6 +857,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
+    resume_schedule: Option<crate::resume_schedule::ResumeSchedule>,
     local_import: Option<crate::local_import::LocalImporter>,
     computer: Option<std::sync::Arc<ComputerRuntime>>,
     device_hub: Option<std::sync::Arc<crate::device_hub::DeviceHub>>,
@@ -881,6 +910,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             harness_updates: None,
+            resume_schedule: None,
             local_import: None,
             computer: None,
             device_hub: None,
@@ -925,6 +955,14 @@ impl EngineRpc {
         self
     }
 
+    pub fn with_resume_schedule(
+        mut self,
+        schedule: crate::resume_schedule::ResumeSchedule,
+    ) -> Self {
+        self.resume_schedule = Some(schedule);
+        self
+    }
+
     /// Attach the local→synced profile importer (synced runtimes only).
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
@@ -958,7 +996,8 @@ impl EngineRpc {
             .and_then(|id| self.workspace.chat_config(id))
             .map(|config| config.disabled_tools)
             .unwrap_or_default();
-        self.registry.tool_settings_state(devices_on, &chat_disabled)
+        self.registry
+            .tool_settings_state(devices_on, &chat_disabled)
     }
 
     fn device_hub(&self) -> Result<&std::sync::Arc<crate::device_hub::DeviceHub>, RpcError> {
@@ -997,6 +1036,26 @@ impl EngineRpc {
         self.harness_updates
             .as_ref()
             .ok_or_else(|| RpcError::Failed("agent updates unavailable".into()))
+    }
+
+    fn resume_schedule(&self) -> Result<&crate::resume_schedule::ResumeSchedule, RpcError> {
+        self.resume_schedule
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("resume schedule unavailable".into()))
+    }
+
+    async fn stop_for_update(&self, chats: &[String]) -> Vec<crate::resume_schedule::Continuation> {
+        let mut stopped = Vec::new();
+        for chat_id in chats {
+            match self.sessions.interrupt(chat_id).await {
+                Ok(_) => stopped.push(crate::resume_schedule::Continuation {
+                    chat_id: chat_id.clone(),
+                    after_user: self.doc_host.last_user_entry(chat_id).ok().flatten(),
+                }),
+                Err(error) => tracing::warn!(chat = %chat_id, %error, "update interrupt failed"),
+            }
+        }
+        stopped
     }
 
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
@@ -1417,6 +1476,7 @@ impl EngineRpc {
                     | methods::WATCH_CHECKOUT_CHANGE_REQUEST
                     | methods::WATCH_WORKSPACE_GIT_STATUS
                     | methods::WATCH_HARNESS_UPDATES
+                    | methods::WATCH_LIMIT_RESUMES
             ) {
                 let rx = match client.subscribe_checked(method, params).await {
                     Ok(rx) => rx,
@@ -1868,9 +1928,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::LIST_MODELS
         | methods::LIST_COMMANDS
         | methods::LIST_HARNESS_TOOLS
-        | methods::GENERATE_COMMIT_MESSAGE => {
-            Duration::from_secs(100)
-        }
+        | methods::GENERATE_COMMIT_MESSAGE => Duration::from_secs(100),
         _ => Duration::from_secs(30),
     }
 }
@@ -2083,6 +2141,11 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_HARNESS_UPDATE
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
+            | methods::UPDATE_HARNESSES
+            | methods::PREPARE_RESTART
+            | methods::WATCH_LIMIT_RESUMES
+            | methods::SET_LIMIT_RESUME
+            | methods::SET_AUTO_RESUME_LIMITS
     )
 }
 
@@ -2105,6 +2168,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::WATCH_LIMIT_RESUMES
     )
 }
 
@@ -3337,6 +3401,61 @@ impl RpcService for EngineRpc {
             methods::SET_HARNESS_UPDATE_POLICY => {
                 let p: SetHarnessUpdatePolicyParams = parse_params(params)?;
                 RpcReply::value(&self.harness_updates()?.set_policy(p.harness, p.policy))
+            }
+            methods::UPDATE_HARNESSES => {
+                let p: UpdateHarnessesParams = parse_params(params)?;
+                let coordinator = self.harness_updates()?.clone();
+                let chats = self.sessions.working_chats(Some(&p.harnesses));
+                let stopped = self.stop_for_update(&chats).await;
+                let host = self.doc_host.clone();
+                tokio::spawn(async move {
+                    for harness in p.harnesses {
+                        if let Err(error) = coordinator.apply(harness).await {
+                            tracing::warn!(?harness, %error, "update all: agent update failed");
+                        }
+                    }
+                    if p.continue_threads {
+                        for continuation in stopped {
+                            if let Err(error) = host.queue_continuation(&continuation).await {
+                                tracing::warn!(chat = %continuation.chat_id, %error, "update continuation failed");
+                            }
+                        }
+                    }
+                });
+                RpcReply::value(&serde_json::json!({ "interrupted": chats.len() }))
+            }
+            methods::PREPARE_RESTART => {
+                let p: PrepareRestartParams = parse_params(params)?;
+                let schedule = self.resume_schedule()?.clone();
+                let chats = self.sessions.working_chats(None);
+                let stopped = self.stop_for_update(&chats).await;
+                schedule.record_restart(
+                    if p.continue_threads { stopped } else { Vec::new() },
+                    chrono::Utc::now().timestamp_millis(),
+                );
+                let host = self.doc_host.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || host.flush_all()).await {
+                    tracing::warn!(%error, "restart flush failed");
+                }
+                RpcReply::value(&serde_json::json!({ "interrupted": chats.len() }))
+            }
+            methods::WATCH_LIMIT_RESUMES => Ok(RpcReply::Stream(watch_stream(
+                self.resume_schedule()?.watch(),
+            ))),
+            methods::SET_LIMIT_RESUME => {
+                let p: SetLimitResumeParams = parse_params(params)?;
+                let changed = self.resume_schedule()?.set_auto(
+                    &p.chat_id,
+                    p.auto,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+                RpcReply::value(&serde_json::json!({ "changed": changed }))
+            }
+            methods::SET_AUTO_RESUME_LIMITS => {
+                let p: SetAutoResumeLimitsParams = parse_params(params)?;
+                let schedule = self.resume_schedule()?;
+                schedule.set_auto_resume(p.enabled);
+                RpcReply::value(&schedule.snapshot())
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;

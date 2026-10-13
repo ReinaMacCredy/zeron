@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_string_attr, focused_element_of_pid, is_attribute_settable, kAXErrorSuccess,
-    set_string_attr, AXUIElementRef,
+    copy_number_attr, copy_string_attr, focused_element_of_pid, is_attribute_settable,
+    kAXErrorSuccess, set_range_attr, set_string_attr, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
@@ -1297,6 +1297,33 @@ fn await_typed_delivery(
     }
 }
 
+fn targets_web_rich_editor(
+    pid: i32,
+    element_ptr_and_idx: Option<(usize, Option<usize>)>,
+    window_id: Option<u32>,
+) -> bool {
+    let (element, owned) = match element_ptr_and_idx {
+        Some((ptr, _)) => (ptr as AXUIElementRef, false),
+        None => {
+            let focused = match window_id {
+                Some(wid) => unsafe {
+                    crate::ax::exact_target::focused_element_in_window(pid, wid)
+                },
+                None => unsafe { focused_element_of_pid(pid) },
+            };
+            let Some(element) = focused else {
+                return false;
+            };
+            (element, true)
+        }
+    };
+    let rich = unsafe { crate::ax::tree::is_web_rich_editor(element) };
+    if owned {
+        unsafe { CFRelease(element as _) };
+    }
+    rich
+}
+
 /// Best-effort-background ladder for `type_text`.
 ///
 /// - `delivery_mode == Background` (default): AX insert → read-back; on a
@@ -1435,8 +1462,21 @@ fn type_text_blocking(
         }));
     }
 
+    let rich_editor = !key_events_only
+        && keyboard_policy.semantic_refusal().is_none()
+        && targets_web_rich_editor(pid, element_ptr_and_idx, window_id);
+    if rich_editor {
+        if let Some((ptr, _)) = element_ptr_and_idx {
+            let element = ptr as AXUIElementRef;
+            let _ = crate::input::ax_actions::focus_element(ptr);
+            if let Some(end) = unsafe { copy_number_attr(element, "AXNumberOfCharacters") } {
+                unsafe { set_range_attr(element, "AXSelectedTextRange", end as i64, 0) };
+            }
+        }
+    }
+
     // --- Background rung 0: terminal emulator → CGEvent only (AX is dropped). ---
-    if key_events_only {
+    if key_events_only || rich_editor {
         // A terminal insert has no semantic AX rung: when the exact-target
         // decision restricted this request to semantic-only, there is nothing
         // safe to run — refuse before posting anything.
@@ -1461,8 +1501,13 @@ fn type_text_blocking(
         ) {
             return Ok(refused);
         }
+        let surface = if rich_editor {
+            "web rich-text editor"
+        } else {
+            "terminal emulator"
+        };
         tracing::debug!(
-            "type_text: pid {pid} is a terminal emulator; skipping AX value-set, \
+            "type_text: pid {pid} targets a {surface}; skipping AX value-set, \
              using CGEvent key-event synthesis"
         );
         let (verified, delivered_chars) = cgevent_type_verified(
@@ -1476,7 +1521,7 @@ fn type_text_blocking(
             synthesis_deadline,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
-            detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
+            detail: format!(" via CGEvent ({surface}, {delay_ms}ms delay)"),
             path: PATH_KEY_EVENTS,
             verified,
             delivered_chars,

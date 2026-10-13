@@ -3719,6 +3719,48 @@ impl DocHost {
         Ok(id)
     }
 
+    pub fn last_user_entry(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
+        Ok(self
+            .open(chat_id)?
+            .doc
+            .read_entries()?
+            .into_iter()
+            .rev()
+            .find(|entry| entry.role == MessageRole::User)
+            .map(|entry| entry.id))
+    }
+
+    pub async fn queue_continuation(
+        &self,
+        continuation: &crate::resume_schedule::Continuation,
+    ) -> Result<bool, EngineError> {
+        let chat_id = continuation.chat_id.as_str();
+        let busy = self.sessions().is_some_and(|sessions| {
+            sessions.session_status(chat_id).is_some_and(|session| {
+                matches!(
+                    session.status,
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+            })
+        });
+        let archived = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_none_or(|chat| chat.archived);
+        if busy || archived {
+            return Ok(false);
+        }
+        let handle = self.open(chat_id)?;
+        if self.last_user_entry(chat_id)? != continuation.after_user
+            || !handle.doc.read_queue()?.is_empty()
+        {
+            return Ok(false);
+        }
+        self.queue_message(chat_id, zeron_proto::RESUME_PROMPT, Vec::new())?;
+        self.drain_queue(&handle).await;
+        Ok(true)
+    }
+
     /// Thread tools: the inter-thread rows waiting on `chat_id`, moved into
     /// its transcript as read user entries. A waiting agent asked for them
     /// mid-turn; a person's own queued rows stay where they are.

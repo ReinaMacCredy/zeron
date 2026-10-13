@@ -2542,6 +2542,11 @@ pub struct Shell {
     harness_update_transition: Option<WidthTween>,
     harness_update_geometry: [Option<WidthTween>; 2],
     harness_update_scroll: settings::widgets::PageScroll,
+    /// Open Update-all dialog; the value is its "continue threads" box.
+    update_all_dialog: Option<bool>,
+    /// An Update all that restarts the app: the local agents it waits on and
+    /// whether its engine calls have returned.
+    update_all_restart: Option<(Vec<zeron_proto::HarnessId>, bool)>,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -3137,10 +3142,16 @@ impl Shell {
             harness_update_transition: None,
             harness_update_geometry: [None; 2],
             harness_update_scroll: settings::widgets::PageScroll::default(),
+            update_all_dialog: None,
+            update_all_restart: None,
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
-            _app_update_observation: crate::app_update::AppUpdate::global(cx)
-                .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
+            _app_update_observation: crate::app_update::AppUpdate::global(cx).map(|update| {
+                cx.observe(&update, |shell, _, cx| {
+                    shell.advance_update_all(cx);
+                    cx.notify();
+                })
+            }),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -3325,6 +3336,7 @@ impl Shell {
         self.prune_device_shell(cx);
         self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
+        self.advance_update_all(cx);
         self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
@@ -3375,6 +3387,12 @@ impl Shell {
         if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
             self.debug_dialog = None;
             self.open_add_space(cx);
+        }
+        if self.debug_dialog.as_deref() == Some("update-all")
+            && self.update_all_plan(cx).items() > 0
+        {
+            self.debug_dialog = None;
+            self.open_update_all(cx);
         }
         // Capture knob: pop the requested dialog once chats have landed.
         if let Some(which) = self.debug_dialog.clone()
@@ -12920,6 +12938,9 @@ impl Shell {
         }
         if let Some(update) = self.render_update_prompt(viewport, cx) {
             overlays.push(update);
+        }
+        if let Some(update_all) = self.render_update_all_dialog(viewport, cx) {
+            overlays.push(update_all);
         }
 
         overlays

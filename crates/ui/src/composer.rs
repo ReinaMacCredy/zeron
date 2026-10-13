@@ -44,6 +44,7 @@ use crate::theme::Theme;
 mod ask_pill;
 pub(crate) mod background;
 mod chip;
+mod limit_pill;
 mod review_chip;
 mod staged_comments;
 pub use chip::ChipKind;

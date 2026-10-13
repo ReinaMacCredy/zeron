@@ -242,6 +242,29 @@ impl Harness for MockHarness {
         let error_event = mock_error.then(|| AgentEvent::Error {
             message: "Claude usage limit reached — try again after the limit resets.".into(),
         });
+        // Dev/testing knob: `ZERON_MOCK_LIMIT_SECS=N` stops each turn on a
+        // usage limit that resets N seconds out; the resume turn runs clean.
+        let limit_events = std::env::var("ZERON_MOCK_LIMIT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|_| request.prompt.trim() != zeron_proto::RESUME_PROMPT)
+            .map(|secs| {
+                [
+                    AgentEvent::Error {
+                        message: "Claude 5-hour limit reached — the turn was blocked. Try again after it resets."
+                            .into(),
+                    },
+                    AgentEvent::UsageLimit {
+                        resets_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .and_then(|now| i64::try_from(now.as_millis()).ok())
+                            .map(|now| now + secs * 1000),
+                    },
+                ]
+            })
+            .into_iter()
+            .flatten();
         // Dev/testing knob: `ZERON_MOCK_CODE=1` appends rust + ts code blocks
         // (keywords, strings, numbers, comments) plus inline code — for
         // syntax-palette and inline-code styling checks against the reference.
@@ -799,6 +822,7 @@ impl Harness for MockHarness {
             .chain(table_event)
             .chain(mend_event)
             .chain(error_event)
+            .chain(limit_events)
             .chain(compact_events)
             .chain(usage_events)
             .chain(tail.iter().cloned())

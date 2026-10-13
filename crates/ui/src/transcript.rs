@@ -2802,10 +2802,7 @@ pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
     })
 }
 
-/// What the resume button sends. A user entry carrying exactly this text
-/// renders as a "Resumed" divider instead of a bubble; the text itself is
-/// the divider's hover hint.
-pub const RESUME_PROMPT: &str = "Resume without asking to continue.";
+pub use zeron_proto::RESUME_PROMPT;
 
 /// True when the chat's last turn stopped short and the chat sits idle (the
 /// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed
@@ -5417,6 +5414,11 @@ impl Transcript {
         let state = self.state.read(cx);
         let chats = &state.chats;
         let harness = state.chat_harness(&chat_id);
+        let parent_model: Option<SharedString> = chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref()?.model.clone())
+            .map(Into::into);
         let mut seen = std::collections::HashSet::new();
         self.rows
             .iter()
@@ -5437,7 +5439,11 @@ impl Transcript {
                                 status: tool.subagent_status,
                                 delegated: false,
                                 harness,
-                                model: None,
+                                model: tool
+                                    .call
+                                    .subagent_model()
+                                    .map(|model| SharedString::from(model.to_owned()))
+                                    .or_else(|| parent_model.clone()),
                                 started_at: state
                                     .sub_transcript(&doc_id)
                                     .first()

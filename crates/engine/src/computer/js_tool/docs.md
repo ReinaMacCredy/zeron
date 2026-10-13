@@ -101,6 +101,7 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 - `typeText(elementIndex, text)` focuses that field and adds the text to it; `typeText(text)` writes into the focused field. Either throws if the field is still empty afterwards; check its value in the next state.
 - `pressKey(elementIndex, key)` focuses that element first, then sends the key, for example `pressKey(combobox, "Down")` then `pressKey(combobox, "Return")` to choose a suggestion.
 - Options of custom dropdowns and listboxes are numbered like buttons: open the dropdown, then click the option's number.
+- A browser window that is not frontmost gets no focus events, so a dropdown that opens on focus stays `(collapsed)` after a click and its options may ignore clicks. Then open it with `pressKey(dropdown, "Down")` and choose with `"Down"`/`"Up"` and `"Return"`.
 - `getAXState()` and `getScreenshot()` already wait for the UI to settle, so do not add sleeps.
 
 ## When the user takes over

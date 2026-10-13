@@ -46,6 +46,7 @@ struct SidecarEntry {
     tint: Option<gpui::Hsla>,
     badge: Option<gpui::Hsla>,
     label: SharedString,
+    suffix: Option<SharedString>,
     value: Option<SidecarValue>,
     action: Option<SidecarAction>,
     edit: Option<SidecarAction>,
@@ -66,6 +67,7 @@ impl SidecarEntry {
             tint: None,
             badge: None,
             label: label.into(),
+            suffix: None,
             value: None,
             action: None,
             edit: None,
@@ -80,6 +82,11 @@ impl SidecarEntry {
 
     fn badge(mut self, badge: Option<gpui::Hsla>) -> Self {
         self.badge = badge;
+        self
+    }
+
+    fn suffix(mut self, suffix: Option<SharedString>) -> Self {
+        self.suffix = suffix;
         self
     }
 
@@ -105,14 +112,18 @@ impl SidecarEntry {
     }
 
     fn tooltip(&self) -> SharedString {
+        let label = match &self.suffix {
+            Some(suffix) => format!("{}{suffix}", self.label).into(),
+            None => self.label.clone(),
+        };
         match &self.value {
             Some(
                 SidecarValue::Text(v)
                 | SidecarValue::Mono(v)
                 | SidecarValue::Tone(v, _)
                 | SidecarValue::Dot(Some(v), _),
-            ) => format!("{}: {v}", self.label).into(),
-            _ => self.label.clone(),
+            ) => format!("{label}: {v}").into(),
+            _ => label,
         }
     }
 }
@@ -561,7 +572,18 @@ impl Shell {
                 .cmp(&b.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let subagents = self.transcript.read(cx).subagent_summaries(cx);
+        let pickers = self.composer.read(cx).pickers().read(cx);
+        let subagents: Vec<_> = self
+            .transcript
+            .read(cx)
+            .subagent_summaries(cx)
+            .into_iter()
+            .map(|agent| {
+                let suffix =
+                    agent_model_suffix(&agent, |harness, id| pickers.model_label(harness, id));
+                (agent, suffix)
+            })
+            .collect();
         let sources = self.transcript.read(cx).user_attachments();
         let instructions = chat
             .as_ref()
@@ -763,12 +785,12 @@ impl Shell {
             let (running, previous) = split_subagents(subagents);
             let failed = previous
                 .iter()
-                .filter(|agent| agent.status == Some(zeron_doc::SubagentStatus::Failed))
+                .filter(|(agent, _)| agent.status == Some(zeron_doc::SubagentStatus::Failed))
                 .count();
             let now = Utc::now().timestamp_millis();
             let next_tick = running
                 .iter()
-                .filter_map(|agent| agent.started_at)
+                .filter_map(|(agent, _)| agent.started_at)
                 .map(|started| elapsed_next_change((now - started) / 1000))
                 .min();
             if let Some(secs) = next_tick
@@ -785,38 +807,38 @@ impl Shell {
                     .ok();
                 }));
             }
-            let entry =
-                |key: &'static str, ix: usize, agent: crate::transcript::SubagentSummary| {
-                    let running = agent.status == Some(zeron_doc::SubagentStatus::Running);
-                    let badge = match agent.status {
-                        Some(zeron_doc::SubagentStatus::Running) => Some(theme.busy),
-                        Some(zeron_doc::SubagentStatus::Failed) => Some(theme.danger),
-                        _ => None,
-                    };
-                    let elapsed = agent
-                        .started_at
-                        .filter(|_| running)
-                        .map(|started| short_elapsed((now - started) / 1000));
-                    let (mark, tint) =
-                        crate::pickers::agent_brand_icon(agent.harness, agent.model.as_deref());
-                    SidecarEntry::new(key, ix, mark, agent.title.clone())
-                        .tint(tint)
-                        .badge(badge)
-                        .value(elapsed.map(|text| SidecarValue::Text(text.into())))
-                        .action(move |this, _, cx| {
-                            if agent.delegated {
-                                this.open_child_chat_tab(&agent.doc_id, cx);
-                                return;
-                            }
-                            this.add_subagent_surface(
-                                agent.chat_id.clone(),
-                                agent.doc_id.clone(),
-                                agent.title.to_string(),
-                                !running,
-                                cx,
-                            )
-                        })
+            let entry = |key: &'static str, ix: usize, (agent, suffix): LabeledSubagent| {
+                let running = agent.status == Some(zeron_doc::SubagentStatus::Running);
+                let badge = match agent.status {
+                    Some(zeron_doc::SubagentStatus::Running) => Some(theme.busy),
+                    Some(zeron_doc::SubagentStatus::Failed) => Some(theme.danger),
+                    _ => None,
                 };
+                let elapsed = agent
+                    .started_at
+                    .filter(|_| running)
+                    .map(|started| short_elapsed((now - started) / 1000));
+                let (mark, tint) =
+                    crate::pickers::agent_brand_icon(agent.harness, agent.model.as_deref());
+                SidecarEntry::new(key, ix, mark, agent.title.clone())
+                    .suffix(suffix)
+                    .tint(tint)
+                    .badge(badge)
+                    .value(elapsed.map(|text| SidecarValue::Text(text.into())))
+                    .action(move |this, _, cx| {
+                        if agent.delegated {
+                            this.open_child_chat_tab(&agent.doc_id, cx);
+                            return;
+                        }
+                        this.add_subagent_surface(
+                            agent.chat_id.clone(),
+                            agent.doc_id.clone(),
+                            agent.title.to_string(),
+                            !running,
+                            cx,
+                        )
+                    })
+            };
             let heading = match running.len() {
                 0 => "Subagents".to_string(),
                 n => format!("Subagents · {n} running"),
@@ -1218,8 +1240,15 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .child(entry.label.clone()),
+                    .flex()
+                    .flex_row()
+                    .child(div().min_w_0().truncate().child(entry.label.clone()))
+                    .children(
+                        entry
+                            .suffix
+                            .clone()
+                            .map(|suffix| div().flex_none().child(suffix)),
+                    ),
             )
             .children(value)
             .when_some(entry.edit.clone().filter(|_| interactive), |el, edit| {
@@ -1568,16 +1597,30 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
     }
 }
 
+type LabeledSubagent = (crate::transcript::SubagentSummary, Option<SharedString>);
+
 fn split_subagents(
-    mut agents: Vec<crate::transcript::SubagentSummary>,
-) -> (
-    Vec<crate::transcript::SubagentSummary>,
-    Vec<crate::transcript::SubagentSummary>,
-) {
+    mut agents: Vec<LabeledSubagent>,
+) -> (Vec<LabeledSubagent>, Vec<LabeledSubagent>) {
     agents.reverse();
     agents
         .into_iter()
-        .partition(|agent| agent.status == Some(zeron_doc::SubagentStatus::Running))
+        .partition(|(agent, _)| agent.status == Some(zeron_doc::SubagentStatus::Running))
+}
+
+fn agent_model_suffix(
+    agent: &crate::transcript::SubagentSummary,
+    model_label: impl Fn(zeron_proto::HarnessId, &str) -> Option<String>,
+) -> Option<SharedString> {
+    let id = agent.model.as_deref()?;
+    let model = agent
+        .harness
+        .and_then(|harness| model_label(harness, id))
+        .unwrap_or_else(|| id.to_owned());
+    if agent.title.to_lowercase().contains(&model.to_lowercase()) {
+        return None;
+    }
+    Some(format!(": {model}").into())
 }
 
 fn short_elapsed(secs: i64) -> String {
@@ -2110,7 +2153,7 @@ mod sidecar_regressions {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
                 let config = serde_json::json!({
-                    "harness": "codex", "model": null, "reasoning": null,
+                    "harness": "codex", "model": "gpt-5", "reasoning": null,
                     "sandbox": "workspace-write"
                 });
                 let parent = state.chats.iter_mut().find(|c| c.id == "parent").unwrap();
@@ -2162,6 +2205,12 @@ mod sidecar_regressions {
             assert_eq!(section.heading.as_ref(), "Subagents · 2 running");
             let marks: Vec<_> = section.entries.iter().map(|e| e.icon).collect();
             assert_eq!(marks, [icons::CLAUDE_MARK, icons::OPENAI_MARK]);
+            let labels: Vec<_> = section
+                .entries
+                .iter()
+                .map(|e| format!("{}{}", e.label, e.suffix.as_deref().unwrap_or_default()))
+                .collect();
+            assert_eq!(labels, ["Kid: anthropic/claude-opus-5", "task a: gpt-5"]);
             assert!(section.entries.iter().all(|e| e.badge == Some(theme.busy)));
             let fold = section.fold.as_ref().expect("previous agents fold");
             assert_eq!(fold.label.as_ref(), "Previous agents (2)");
@@ -2180,15 +2229,18 @@ mod sidecar_regressions {
     #[test]
     fn subagents_split_running_from_previous_newest_first() {
         use zeron_doc::SubagentStatus::{Done, Failed, Running};
-        let agent = |id: &str, status| crate::transcript::SubagentSummary {
-            chat_id: "parent".into(),
-            doc_id: id.into(),
-            title: id.to_string().into(),
-            status,
-            delegated: false,
-            harness: None,
-            model: None,
-            started_at: None,
+        let agent = |id: &str, status| {
+            let agent = crate::transcript::SubagentSummary {
+                chat_id: "parent".into(),
+                doc_id: id.into(),
+                title: id.to_string().into(),
+                status,
+                delegated: false,
+                harness: None,
+                model: None,
+                started_at: None,
+            };
+            (agent, None)
         };
         let (running, previous) = split_subagents(vec![
             agent("a", Some(Done)),
@@ -2197,8 +2249,11 @@ mod sidecar_regressions {
             agent("d", Some(Running)),
             agent("e", None),
         ]);
-        let ids = |agents: &[crate::transcript::SubagentSummary]| {
-            agents.iter().map(|a| a.doc_id.clone()).collect::<Vec<_>>()
+        let ids = |agents: &[LabeledSubagent]| {
+            agents
+                .iter()
+                .map(|(a, _)| a.doc_id.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(ids(&running), ["d", "b"]);
         assert_eq!(ids(&previous), ["e", "c", "a"]);
