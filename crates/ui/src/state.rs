@@ -17,7 +17,7 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -893,6 +893,7 @@ pub struct AppState {
     /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
     /// standing stream may be backed by subprocess and network probes.
     pub harness_updates: Vec<zeron_proto::HarnessUpdateStatus>,
+    pub limit_resumes: BTreeMap<String, zeron_proto::LimitResumes>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -1018,6 +1019,7 @@ impl AppState {
             quotes: HashMap::new(),
             local_device_id: None,
             harness_updates: Vec::new(),
+            limit_resumes: BTreeMap::new(),
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
@@ -1633,6 +1635,16 @@ impl AppState {
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
             .or_else(|| sorted.first().copied())
             .map(|s| s.id.clone())
+    }
+
+    pub fn limit_resume(&self, chat_id: &str) -> Option<(&str, &zeron_proto::LimitResume)> {
+        self.limit_resumes.iter().find_map(|(device, resumes)| {
+            resumes
+                .chats
+                .iter()
+                .find(|chat| chat.chat_id == chat_id)
+                .map(|chat| (device.as_str(), chat))
+        })
     }
 
     pub fn apply_harness_updates(

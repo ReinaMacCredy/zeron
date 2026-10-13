@@ -37,6 +37,7 @@ pub(super) struct DeviceUpdates {
     connected: bool,
     statuses: Vec<HarnessUpdateStatus>,
     watch: Option<Task<()>>,
+    limit_watch: Option<Task<()>>,
 }
 
 #[derive(Clone)]
@@ -60,6 +61,7 @@ fn reconcile_devices(
         updates.online = *online;
         if !online {
             updates.watch = None;
+            updates.limit_watch = None;
             updates.connected = false;
         } else if updates.watch.is_none() {
             start.push(id.clone());
@@ -457,11 +459,18 @@ impl Shell {
             None
         };
         let has_activity = activity.is_some();
-        let action_label = (!multiple)
-            .then(|| action(status))
-            .flatten()
-            .map(|(label, _)| label);
-        let compact_action = if multiple {
+        let update_all = self.update_all_plan(cx).items() >= 2;
+        let action_label = if update_all {
+            Some("Update all")
+        } else {
+            (!multiple)
+                .then(|| action(status))
+                .flatten()
+                .map(|(label, _)| label)
+        };
+        let compact_action = if update_all {
+            Some(render_update_all_button(&theme, cx))
+        } else if multiple {
             None
         } else {
             self.render_harness_update_action(row, true, cx)
@@ -473,13 +482,11 @@ impl Shell {
         };
         let marks_width =
             MARK_SIZE + MARK_STEP * marks.len().min(MAX_MARKS).saturating_sub(1) as f32;
-        let controls_width = if multiple {
-            24.0 + 8.0
-        } else {
-            action_label
+        let controls_width = if multiple { 24.0 + 8.0 } else { 0.0 }
+            + action_label
+                .filter(|_| update_all || !multiple)
                 .map(|label| text_width(label, 11.5, window, &theme) + 20.0 + 8.0)
-                .unwrap_or(0.0)
-        };
+                .unwrap_or(0.0);
         let max_width = (main_width - 32.0).max(0.0);
         let compact_width = (12.0
             + marks_width
@@ -821,8 +828,22 @@ impl Shell {
                 (id, online)
             })
             .collect();
+        let limit_devices: Vec<String> = devices
+            .keys()
+            .filter(|id| state.device_supports(id, zeron_proto::capabilities::LIMIT_RESUME_V1))
+            .cloned()
+            .collect();
+        let app_state = self.state.clone();
         for device in reconcile_devices(&mut self.harness_update_devices, &devices) {
             let updates = self.harness_update_devices.get_mut(&device).unwrap();
+            if limit_devices.contains(&device) {
+                updates.limit_watch = Some(spawn_limit_watch(
+                    engine.clone(),
+                    app_state.clone(),
+                    device.clone(),
+                    cx,
+                ));
+            }
             let engine = engine.clone();
             updates.watch = Some(cx.spawn(async move |this, cx| {
                 let mut retry = 1;
@@ -945,6 +966,7 @@ mod tests {
             connected: true,
             statuses: vec![status(phase)],
             watch: None,
+            limit_watch: None,
         }
     }
 
@@ -1045,4 +1067,402 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].device_id, "new");
     }
+}
+
+fn spawn_limit_watch(
+    engine: crate::state::EngineHandle,
+    state: Entity<AppState>,
+    device: String,
+    cx: &mut Context<Shell>,
+) -> Task<()> {
+    cx.spawn(async move |_, cx| {
+        let mut retry = 1;
+        loop {
+            let result = engine
+                .client()
+                .subscribe_checked(
+                    methods::WATCH_LIMIT_RESUMES,
+                    serde_json::json!({ "targetDeviceId": device }),
+                )
+                .await;
+            if let Ok(mut stream) = result {
+                while let Some(value) = stream.recv().await {
+                    let Ok(resumes) = serde_json::from_value::<zeron_proto::LimitResumes>(value)
+                    else {
+                        break;
+                    };
+                    state.update(cx, |state, cx| {
+                        if state.limit_resumes.get(&device) != Some(&resumes) {
+                            state.limit_resumes.insert(device.clone(), resumes);
+                            cx.notify();
+                        }
+                    });
+                    retry = 1;
+                }
+            }
+            cx.background_executor()
+                .timer(Duration::from_secs(retry))
+                .await;
+            retry = (retry * 2).min(15);
+        }
+    })
+}
+
+pub(super) struct UpdateAllPlan {
+    app: Option<String>,
+    devices: Vec<(String, String, Vec<HarnessId>)>,
+    running: usize,
+}
+
+impl UpdateAllPlan {
+    pub(super) fn items(&self) -> usize {
+        usize::from(self.app.is_some()) + self.devices.iter().map(|d| d.2.len()).sum::<usize>()
+    }
+
+    fn title(&self) -> String {
+        let agents: usize = self.devices.iter().map(|d| d.2.len()).sum();
+        let parts: Vec<String> = self
+            .app
+            .as_ref()
+            .map(|_| "this app".to_owned())
+            .into_iter()
+            .chain(
+                (agents > 0)
+                    .then(|| format!("{agents} {}", if agents == 1 { "agent" } else { "agents" })),
+            )
+            .collect();
+        format!("Update {}?", parts.join(" and "))
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.app
+            .iter()
+            .map(|version| format!("This app: {version}, restarts last"))
+            .chain(self.devices.iter().map(|(_, name, harnesses)| {
+                let agents: Vec<&str> = harnesses.iter().map(|h| agent_name(*h)).collect();
+                format!("{name}: {}", agents.join(", "))
+            }))
+            .collect()
+    }
+}
+
+fn settled(status: &HarnessUpdateStatus) -> bool {
+    matches!(
+        status.phase,
+        Phase::Current | Phase::Updated | Phase::Failed | Phase::ManualActionRequired
+    )
+}
+
+impl Shell {
+    pub(super) fn update_all_plan(&self, cx: &App) -> UpdateAllPlan {
+        let state = self.state.read(cx);
+        let local = state.local_device_id.as_deref();
+        let app = crate::app_update::AppUpdate::global(cx).and_then(|update| {
+            let update = update.read(cx);
+            match update.flow() {
+                crate::app_update::Flow::Ready { version, .. } => Some(version.clone()),
+                crate::app_update::Flow::Idle
+                    if update.blocker().is_none() && update.install().supports_desktop_update() =>
+                {
+                    update.available().map(str::to_owned)
+                }
+                _ => None,
+            }
+        });
+        let devices: Vec<(String, String, Vec<HarnessId>)> = self
+            .harness_update_devices
+            .iter()
+            .filter(|(_, device)| device.online && device.connected)
+            .filter_map(|(id, device)| {
+                let harnesses: Vec<HarnessId> = device
+                    .statuses
+                    .iter()
+                    .filter(|status| status.phase == Phase::Available && status.can_apply)
+                    .map(|status| status.harness)
+                    .collect();
+                (!harnesses.is_empty()).then(|| {
+                    (
+                        id.clone(),
+                        state.device_name(id).unwrap_or(id).to_owned(),
+                        harnesses,
+                    )
+                })
+            })
+            .collect();
+        let now = Utc::now();
+        let running = state
+            .chats
+            .iter()
+            .filter(|chat| matches!(state.indicator_for(&chat.id, now), Indicator::Working))
+            .filter(|chat| {
+                (app.is_some() && local == Some(chat.device_id.as_str()))
+                    || chat.config.as_ref().is_some_and(|config| {
+                        devices.iter().any(|(id, _, harnesses)| {
+                            *id == chat.device_id && harnesses.contains(&config.harness)
+                        })
+                    })
+            })
+            .count();
+        UpdateAllPlan {
+            app,
+            devices,
+            running,
+        }
+    }
+
+    pub(super) fn open_update_all(&mut self, cx: &mut Context<Self>) {
+        self.update_all_dialog = Some(true);
+        cx.notify();
+    }
+
+    fn start_update_all(&mut self, continue_threads: bool, cx: &mut Context<Self>) {
+        self.update_all_dialog = None;
+        let plan = self.update_all_plan(cx);
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let restarts = plan.app.is_some();
+        if restarts {
+            let local_harnesses = plan
+                .devices
+                .iter()
+                .find(|(id, _, _)| Some(id) == local.as_ref())
+                .map(|(_, _, harnesses)| harnesses.clone())
+                .unwrap_or_default();
+            self.update_all_restart = Some((local_harnesses, false));
+            if let Some(update) = crate::app_update::AppUpdate::global(cx)
+                && matches!(update.read(cx).flow(), crate::app_update::Flow::Idle)
+            {
+                update.update(cx, |update, cx| update.start_download(cx));
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            let client = engine.client();
+            let mut failures = Vec::new();
+            if restarts
+                && let Err(error) = client
+                    .call(
+                        methods::PREPARE_RESTART,
+                        serde_json::json!({ "continueThreads": continue_threads }),
+                    )
+                    .await
+            {
+                failures.push(error.to_string());
+            }
+            for (device, name, harnesses) in plan.devices {
+                let continues = continue_threads && !(restarts && Some(&device) == local.as_ref());
+                let params = serde_json::json!({
+                    "harnesses": harnesses,
+                    "continueThreads": continues,
+                    "targetDeviceId": device,
+                });
+                if let Err(error) = client.call(methods::UPDATE_HARNESSES, params).await {
+                    failures.push(format!("{name}: {error}"));
+                }
+            }
+            this.update(cx, |shell, cx| {
+                if let Some(pending) = shell.update_all_restart.as_mut() {
+                    pending.1 = true;
+                }
+                if !failures.is_empty() {
+                    shell.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Could not update everything: {}", failures.join("; ")),
+                        cx,
+                    );
+                }
+                shell.advance_update_all(cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The app restarts last: once the local agents have settled and the
+    /// download is staged.
+    pub(super) fn advance_update_all(&mut self, cx: &mut Context<Self>) {
+        let Some((harnesses, requested)) = self.update_all_restart.as_ref() else {
+            return;
+        };
+        if !requested {
+            return;
+        }
+        let local = self.state.read(cx).local_device_id.clone();
+        let agents_done = local
+            .and_then(|id| self.harness_update_devices.get(&id))
+            .is_none_or(|device| {
+                harnesses.iter().all(|harness| {
+                    device
+                        .statuses
+                        .iter()
+                        .find(|status| status.harness == *harness)
+                        .is_none_or(settled)
+                })
+            });
+        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+            self.update_all_restart = None;
+            return;
+        };
+        match update.read(cx).flow().clone() {
+            crate::app_update::Flow::Ready { staged, .. } if agents_done => {
+                self.update_all_restart = None;
+                self.apply_staged_update(staged, cx);
+            }
+            crate::app_update::Flow::Failed { message, .. } => {
+                self.update_all_restart = None;
+                self.show_notice(
+                    crate::toast::ToastKind::Error,
+                    format!("The app update failed: {message}"),
+                    cx,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn render_update_all_dialog(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let continue_threads = self.update_all_dialog?;
+        let plan = self.update_all_plan(cx);
+        if plan.items() == 0 {
+            self.update_all_dialog = None;
+            return None;
+        }
+        let theme = Theme::of(cx).for_popup();
+        let running = (plan.running > 0).then(|| {
+            let threads = if plan.running == 1 {
+                "thread"
+            } else {
+                "threads"
+            };
+            div()
+                .mt(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .text_color(theme.text)
+                        .child(format!(
+                            "{} running {threads} will be interrupted.",
+                            plan.running
+                        )),
+                )
+                .child(
+                    div()
+                        .id("update-all-continue")
+                        .debug_selector(|| "update-all-continue".into())
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .role(gpui::Role::CheckBox)
+                        .aria_label("Continue threads after restarts")
+                        .aria_toggled(if continue_threads {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.update_all_dialog = Some(!continue_threads);
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .size(px(16.0))
+                                .flex_none()
+                                .rounded(px(4.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(continue_threads, |el| el.bg(theme.accent))
+                                .when(!continue_threads, |el| {
+                                    el.border_1().border_color(theme.border_strong)
+                                })
+                                .when(continue_threads, |el| {
+                                    el.child(
+                                        icon(icons::CHECK)
+                                            .size(px(12.0))
+                                            .text_color(theme.on_solid),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_color(theme.text_muted)
+                                .child("Continue threads after restarts"),
+                        ),
+                )
+        });
+        let buttons = div()
+            .mt(px(18.0))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(8.0))
+            .child(
+                popover::btn_ghost(&theme, "Cancel", "update-all-cancel")
+                    .id("update-all-cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.update_all_dialog = None;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                popover::btn_primary(&theme, "Update")
+                    .id("update-all-confirm")
+                    .debug_selector(|| "update-all-confirm".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_update_all(continue_threads, cx)
+                    })),
+            );
+        let card = popover::dialog_card(&theme)
+            .child(popover::dialog_title(&theme, &plan.title()))
+            .child(
+                div().mt(px(6.0)).flex().flex_col().children(
+                    plan.lines()
+                        .into_iter()
+                        .map(|line| popover::dialog_body(&theme, line)),
+                ),
+            )
+            .children(running)
+            .child(buttons)
+            .into_any_element();
+        Some(popover::modal("update-all-dialog", viewport, card))
+    }
+}
+
+fn render_update_all_button(theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+    div()
+        .id("harness-update-all")
+        .debug_selector(|| "harness-update-all".into())
+        .h(px(26.0))
+        .px(px(9.0))
+        .flex_none()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(crate::typography::ui_rems(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .bg(theme.text)
+        .text_color(theme.on_solid)
+        .role(gpui::Role::Button)
+        .aria_label("Update all")
+        .tab_index(0)
+        .cursor_pointer()
+        .hover(|el| el.opacity(0.85))
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            this.open_update_all(cx);
+        }))
+        .child("Update all")
+        .into_any_element()
 }
