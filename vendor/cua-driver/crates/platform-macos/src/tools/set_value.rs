@@ -59,9 +59,9 @@ fn def() -> &'static ToolDef {
              - **All other elements**: writes AXValue directly (sliders, steppers, \
              native text fields that expose settable AXValue). Date and time \
              controls are refused with date_value_unsupported; type the date into \
-             the focused field instead. A whole-value replace on a web \
-             rich-text (contenteditable) editor is refused with \
-             rich_text_replace_unsupported; append or type into it instead. \
+             the focused field instead. A web rich-text (contenteditable) editor \
+             is refused, a replace with rich_text_replace_unsupported and an \
+             append with rich_text_needs_keys; type into it instead. \
              Unsettable numeric controls may use advertised stepping actions. \
              The route is selected before dispatch; an uncertain effect never \
              permits another write or a fallback, except that a numeric write whose \
@@ -493,6 +493,12 @@ fn set_value_blocking(
     let element = element_ptr as AXUIElementRef;
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
+    if web_content {
+        refuse_rich_text_write(
+            unsafe { crate::ax::tree::is_web_rich_editor(element) },
+            append,
+        )?;
+    }
     if append {
         let subrole = unsafe { copy_string_attr(element, "AXSubrole") };
         validate_append_target(&role, subrole.as_deref(), unsafe {
@@ -504,15 +510,6 @@ fn set_value_blocking(
         if web_content {
             let _ = crate::input::ax_actions::focus_element(element_ptr);
         }
-    }
-
-    if !append && web_content {
-        let children = unsafe { copy_children(element) };
-        let child_count = children.len();
-        for child in children {
-            unsafe { CFRelease(child as _) };
-        }
-        refuse_rich_text_replace(&role, child_count)?;
     }
 
     if role == "AXPopUpButton" {
@@ -699,10 +696,17 @@ fn set_value_blocking(
 // ordinary replacement retains its existing contract and behavior.
 const MAX_APPENDED_TEXT_UTF16: usize = 16 * 1024;
 
-// Browsers expose <input> and <textarea> as childless leaves (not yet probed live), so a
-// web text element with children is taken to be a contenteditable editor.
-fn refuse_rich_text_replace(role: &str, child_count: usize) -> anyhow::Result<()> {
-    if child_count > 0 && matches!(role, "AXTextField" | "AXTextArea" | "AXSearchField") {
+fn refuse_rich_text_write(rich_editor: bool, append: bool) -> anyhow::Result<()> {
+    if rich_editor && append {
+        return Err(AxActionFailure::refused_with_code(
+            "rich_text_needs_keys",
+            "This web text element is a rich-text (contenteditable) editor. Chromium writes \
+             its value without firing input events, so the editor would not see the text; \
+             no value was written. Type into it with type_text, which sends key events.",
+        )
+        .into());
+    }
+    if rich_editor {
         return Err(AxActionFailure::refused_with_code(
             "rich_text_replace_unsupported",
             "This web text element is a rich-text (contenteditable) editor. Replacing its \
@@ -1110,7 +1114,7 @@ mod tests {
         compose_append_value, flatten_popup_options, kAXErrorSuccess, needs_stepping,
         needs_string_retry, poll_until_moved, poll_while_unchanged, popup_needs_opening,
         popup_no_match_message, popup_option_label, popup_option_matches, popup_shows_option,
-        refuse_rich_text_replace, step_to_value_with, validate_append_target, write_ignored,
+        refuse_rich_text_write, step_to_value_with, validate_append_target, write_ignored,
         write_value_with, AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute,
         MAX_APPENDED_TEXT_UTF16,
     };
@@ -1240,16 +1244,17 @@ mod tests {
     }
 
     #[test]
-    fn a_web_editor_with_children_refuses_a_whole_value_replace() {
-        for role in ["AXTextArea", "AXTextField"] {
-            let error = refuse_rich_text_replace(role, 2).unwrap_err();
+    fn a_web_rich_editor_refuses_value_writes() {
+        for (append, code) in [
+            (false, "rich_text_replace_unsupported"),
+            (true, "rich_text_needs_keys"),
+        ] {
+            let error = refuse_rich_text_write(true, append).unwrap_err();
             let failure = error.downcast_ref::<AxActionFailure>().unwrap();
             assert!(!failure.attempted);
-            assert_eq!(failure.code(), Some("rich_text_replace_unsupported"));
-            refuse_rich_text_replace(role, 0).unwrap();
+            assert_eq!(failure.code(), Some(code));
+            refuse_rich_text_write(false, append).unwrap();
         }
-        refuse_rich_text_replace("AXPopUpButton", 3).unwrap();
-        refuse_rich_text_replace("AXSlider", 1).unwrap();
     }
 
     #[test]

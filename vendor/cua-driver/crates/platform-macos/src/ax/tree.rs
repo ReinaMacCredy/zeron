@@ -1111,6 +1111,29 @@ unsafe fn focused_node(element: AXUIElementRef, index: usize, settable: bool) ->
     }
 }
 
+/// A contenteditable editor in a web page. Chromium writes AXValue and
+/// AXSelectedText into one without firing beforeinput or input, so the page's
+/// editor never sees the text; only key events reach it.
+pub(crate) unsafe fn is_web_rich_editor(element: AXUIElementRef) -> bool {
+    let role = copy_string_attr(element, "AXRole").unwrap_or_default();
+    if !matches!(
+        role.as_str(),
+        "AXTextField" | "AXTextArea" | "AXSearchField"
+    ) || !has_web_area_ancestor(element)
+    {
+        return false;
+    }
+    let children = copy_children(element);
+    let has_children = !children.is_empty();
+    for child in children {
+        CFRelease(child as CFTypeRef);
+    }
+    // Chromium lists AXInvalid for every <input> and <textarea>, for a contenteditable only with
+    // aria-invalid; reading it answers on both.
+    let names = copy_attribute_names(element);
+    has_children || (!names.is_empty() && !names.iter().any(|name| name == "AXInvalid"))
+}
+
 pub(crate) unsafe fn has_web_area_ancestor(element: AXUIElementRef) -> bool {
     let mut current = copy_element_attr(element, "AXParent");
     let mut found = false;

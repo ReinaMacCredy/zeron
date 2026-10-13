@@ -2955,7 +2955,7 @@ impl CuaInner {
             && element.in_web_content
         {
             let node_window = target.node.window_id.clone().unwrap_or_default();
-            if observed_computer_target_node(&target.target).is_some() {
+            let written = if observed_computer_target_node(&target.target).is_some() {
                 if self.native_revision().unwrap_or(0) < 37 {
                     return Err(CuaActionError::new(
                         "This driver cannot append through a retained web element. Use computer_set_value to replace its complete value, or update the driver; no input was sent.",
@@ -2968,11 +2968,34 @@ impl CuaInner {
                 args.insert("element_token".into(), json!(element.token));
                 args.insert("value".into(), json!(value));
                 args.insert("append".into(), Value::Bool(true));
-                return self
-                    .input("set_value", args, Some(&node_window), None, None)
-                    .await;
+                self.input("set_value", args, Some(&node_window), None, None)
+                    .await
+            } else {
+                self.web_content_type_text(&target.node, value).await
+            };
+            if !written
+                .as_ref()
+                .err()
+                .and_then(ComputerError::cua)
+                .is_some_and(|cua| cua.code == "rich_text_needs_keys")
+            {
+                return written;
             }
-            return self.web_content_type_text(&target.node, value).await;
+            let token = if observed_computer_target_node(&target.target).is_some() {
+                element.token.clone()
+            } else {
+                let Some(field) = self.resolve_web_field(&node_window, &target.node).await? else {
+                    return written;
+                };
+                field.token
+            };
+            let mut args = Map::new();
+            args.insert("text".into(), json!(value));
+            args.insert("element_token".into(), json!(token));
+            args.insert("delay_ms".into(), json!(10));
+            return self
+                .input("type_text", args, Some(&node_window), None, None)
+                .await;
         }
         let macos = self.is_darwin();
         let mut args = Map::new();

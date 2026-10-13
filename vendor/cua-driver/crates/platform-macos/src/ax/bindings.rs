@@ -453,6 +453,23 @@ pub unsafe fn copy_action_names(element: AXUIElementRef) -> Vec<String> {
         .collect()
 }
 
+/// The attribute names an AX element advertises; empty on error.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn copy_attribute_names(element: AXUIElementRef) -> Vec<String> {
+    let mut names: CFArrayRef = std::ptr::null_mut();
+    let err = AXUIElementCopyAttributeNames(element, &mut names);
+    if err != kAXErrorSuccess || names.is_null() {
+        return vec![];
+    }
+    let arr = CFArray::<CFStr>::wrap_under_create_rule(names);
+    (0..arr.len())
+        .filter_map(|i| Some(arr.get(i)?.to_string()))
+        .collect()
+}
+
 /// Read the on-screen center of an AX element (AXPosition + AXSize → center).
 /// Returns `(cx, cy)` in screen coordinates, or `None` if either attribute
 /// is unavailable or the element has zero size.
