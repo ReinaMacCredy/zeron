@@ -91,7 +91,7 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
   - `~` marks a changed element and `+` an added one;
   - unchanged elements keep their numbers.
 - Pass `{ disableDiffing: true }` when you need the full tree.
-- If a read reports no change, do not repeat it without an intervening action. Use a screenshot only when you need visual context.
+- If a read reports no change, do not repeat it without an intervening action. The exception is a page load: after a click or key that submits a form or follows a link, the old page stays in the state until the new one arrives, so read again before acting. Use a screenshot only when you need visual context.
 - Prefer element numbers over coordinates.
 - Coordinates are pixels in the latest `getScreenshot()` of that app.
 - `pressKey` uses xdotool-style names: `"Return"`, `"Tab"`, `"super+c"`, `"Up"`.
