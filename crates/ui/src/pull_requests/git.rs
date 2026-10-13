@@ -4820,7 +4820,7 @@ impl Render for GitTab {
         };
         let main = div()
             .flex_1()
-            .min_w(px(HISTORY_KEEP_WIDTH))
+            .min_w_0()
             .min_h_0()
             .overflow_hidden()
             .child(main);
@@ -4835,7 +4835,7 @@ impl Render for GitTab {
                 body.child(self.render_detail_panel(detail, &theme, cx))
             }
             Some(detail) => body
-                .child(main)
+                .child(main.min_w(px(HISTORY_KEEP_WIDTH)))
                 .child(self.render_detail_panel(detail, &theme, cx)),
             None => body.child(main),
         };
