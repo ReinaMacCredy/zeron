@@ -1351,6 +1351,36 @@ impl BrowserPlatform for MacOsBrowserPlatform {
         super::consent_ui::handle(request).await
     }
 
+    async fn dismiss_existing_profile_consent(
+        &self,
+        request: BrowserConsentRequest,
+        error: BrowserRefusal,
+    ) -> BrowserRefusal {
+        let (Ok(pid), Ok(window_id)) =
+            (i32::try_from(request.pid), u32::try_from(request.window_id))
+        else {
+            return error;
+        };
+        let dismissed =
+            tokio::task::spawn_blocking(move || super::consent_ui::dismiss(pid, window_id)).await;
+        let cleanup = match dismissed {
+            Ok(Ok(dismissed_via_ax)) => serde_json::json!({
+                "status": if dismissed_via_ax { "dismissed" } else { "absent" },
+                "dismissed_via_ax": dismissed_via_ax,
+            }),
+            Ok(Err(dismiss_error)) => serde_json::json!({
+                "status": "retained",
+                "dismiss_error": dismiss_error,
+            }),
+            Err(join_error) => serde_json::json!({
+                "status": "retained",
+                "dismissed_via_ax": false,
+                "dismiss_error": join_error.to_string(),
+            }),
+        };
+        add_consent_cleanup_detail(error, cleanup)
+    }
+
     async fn process_fingerprint(&self, pid: i64) -> Result<ProcessFingerprint, BrowserRefusal> {
         let (started, executable) = process_details(pid).await?;
         Ok(ProcessFingerprint {
