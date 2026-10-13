@@ -260,7 +260,9 @@ pub const CARD_LINE_HEIGHT: f32 = 18.0;
 pub const DRAFT_CARD_HEIGHT: f32 = 116.0;
 pub const COMMENT_ADDER_SIZE: f32 = 16.0;
 const CARD_GAP: f32 = 6.0;
-const CARD_WRAP_COLUMNS: usize = 64;
+const CARD_WRAP_COLUMNS: usize = 74;
+/// Card bodies wrap inside this width so the column guess above holds on a wide pane.
+pub const CARD_BODY_MAX_WIDTH: f32 = 480.0;
 const CARD_MAX_LINES: usize = 8;
 
 /// Wraps are guessed, not measured: the changes pane sizes bodies by arithmetic

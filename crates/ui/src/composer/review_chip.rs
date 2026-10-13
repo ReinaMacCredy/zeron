@@ -1,5 +1,9 @@
-use gpui::{AnyElement, App, Context, SharedString, Task, div, prelude::*, px};
-use zeron_proto::{CheckoutDiff, HarnessId, PermissionMode};
+use std::collections::HashMap;
+
+use gpui::{
+    AnyElement, App, Bounds, Context, Pixels, Point, SharedString, Task, div, prelude::*, px,
+};
+use zeron_proto::{CheckoutDiff, HarnessId, Model, PermissionMode};
 use zeron_rpc::methods;
 
 use super::{Composer, ComposerEvent};
@@ -20,6 +24,12 @@ pub(super) struct ReviewChipUi {
     read_task: Option<Task<()>>,
     options: Option<ReviewerOptions>,
     options_task: Option<Task<()>>,
+    model_menu: Option<(usize, HarnessId)>,
+    model_intent: popover::HoverIntent<usize>,
+    model_bounds: Option<Bounds<Pixels>>,
+    model_left: bool,
+    models: HashMap<HarnessId, Vec<Model>>,
+    models_task: Option<Task<()>>,
 }
 
 #[derive(Clone)]
@@ -477,6 +487,9 @@ impl Composer {
     }
 
     fn close_review_menu(&mut self, cx: &mut Context<Self>) {
+        self.review.model_intent.reset();
+        self.review.model_menu = None;
+        self.review.model_bounds = None;
         if self.review.menu.begin_close() {
             popover::reap_popup(cx, |composer: &mut Self| &mut composer.review.menu);
             cx.notify();
@@ -815,39 +828,122 @@ impl Composer {
                         )
                     })
             });
+        let rows: Vec<_> = rows.collect();
         let effective = self.reviewer_choice(&target.chat_id, cx);
         let options = self.review.options.clone().unwrap_or_default();
         let auto_name = self.review.options.as_ref().map(|options| {
             review::resolve_reviewer(&ReviewerChoice::Auto, target.harness, options).name()
         });
+        let same_slot = |a: &ReviewerChoice, b: &ReviewerChoice| match (a, b) {
+            (
+                ReviewerChoice::Harness { harness: a, .. },
+                ReviewerChoice::Harness { harness: b, .. },
+            ) => a == b,
+            _ => a == b,
+        };
         let mut choices = options.choices();
-        if !choices.contains(&effective) {
+        if !choices.iter().any(|choice| same_slot(choice, &effective)) {
             choices.insert(1, effective.clone());
         }
-        let reviewer_rows = choices.into_iter().enumerate().map(|(ix, choice)| {
-            let label = options.label(&choice);
-            let detail = (choice == ReviewerChoice::Auto)
-                .then(|| auto_name.clone())
-                .flatten();
-            let selected = choice == effective;
-            let id = SharedString::from(format!("composer-reviewer-{ix}"));
-            popover::menu_row(&popup, false, id.clone())
-                .id(id)
-                .role(gpui::Role::MenuItemRadio)
-                .aria_label(format!("Reviewer {label}"))
-                .gap(px(8.0))
-                .child(crate::settings::widgets::select_check(&popup, selected))
-                .child(div().flex_1().min_w_0().truncate().child(label))
-                .when_some(detail, |el, detail| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(popup.text_faint)
-                            .child(detail),
+        let open_models = self.review.model_menu;
+        let reviewer_rows: Vec<AnyElement> = choices
+            .into_iter()
+            .enumerate()
+            .map(|(ix, choice)| {
+                let harness = match &choice {
+                    ReviewerChoice::Harness { harness, .. } => Some(*harness),
+                    _ => None,
+                };
+                let selected = same_slot(&choice, &effective);
+                let label = match harness {
+                    Some(harness) => options.label(&ReviewerChoice::Harness {
+                        harness,
+                        model: None,
+                    }),
+                    None => options.label(&choice),
+                };
+                let detail = match (&choice, &effective) {
+                    (ReviewerChoice::Auto, _) => auto_name.clone(),
+                    (
+                        _,
+                        ReviewerChoice::Harness {
+                            harness: h,
+                            model: Some(model),
+                        },
+                    ) if selected && harness == Some(*h) => Some(self.model_label(*h, model)),
+                    _ => None,
+                };
+                let (mark, tint) = options.brand(&choice, target.harness);
+                let id = SharedString::from(format!("composer-reviewer-{ix}"));
+                let open = harness.is_some() && open_models.map(|(key, _)| key) == Some(ix);
+                let mut row = popover::menu_row(&popup, open, id.clone())
+                    .id(id)
+                    .relative()
+                    .role(gpui::Role::MenuItemRadio)
+                    .aria_label(format!("Reviewer {}", options.label(&choice)))
+                    .gap(px(8.0))
+                    .child(crate::settings::widgets::select_check(&popup, selected))
+                    .child(
+                        crate::icons::icon(mark)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(tint.unwrap_or(popup.text_muted)),
                     )
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.set_reviewer(choice.clone(), cx)))
-        });
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .when_some(detail, |el, detail| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(popup.text_faint)
+                                .child(detail),
+                        )
+                    })
+                    .when(harness.is_some(), |el| {
+                        el.child(
+                            crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(popup.text_muted),
+                        )
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_reviewer(choice.clone(), cx)),
+                    );
+                if let Some(harness) = harness {
+                    row = row.child(self.model_menu_probe(open, cx));
+                    if open {
+                        row = row.child(popover::nested_menu(
+                            format!("composer-reviewer-models-{ix}"),
+                            self.render_model_menu(harness, &effective, theme, cx),
+                            self.review.model_left,
+                        ));
+                    }
+                }
+                div()
+                    .id(("composer-reviewer-hover", ix))
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        if *hovered {
+                            this.hover_reviewer_row(
+                                ix,
+                                harness,
+                                window.mouse_position(),
+                                false,
+                                cx,
+                            );
+                        } else {
+                            this.review.model_intent.leave(&ix);
+                        }
+                    }))
+                    .on_mouse_move(
+                        cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                            this.hover_reviewer_row(ix, harness, event.position, true, cx);
+                        }),
+                    )
+                    .child(row)
+                    .into_any_element()
+            })
+            .collect();
         let review_label = format!(
             "Review {}",
             selected.label(review.base.as_deref()).to_lowercase()
@@ -889,6 +985,202 @@ impl Composer {
             menu,
             self.review.menu.closing_since(),
         )
+    }
+
+    fn model_label(&self, harness: HarnessId, model: &str) -> String {
+        self.review
+            .models
+            .get(&harness)
+            .and_then(|models| models.iter().find(|m| m.id == model))
+            .map_or_else(|| model.to_string(), |m| m.label.clone())
+    }
+
+    fn set_model_menu(&mut self, open: Option<(usize, HarnessId)>, cx: &mut Context<Self>) {
+        if self.review.model_menu != open {
+            self.review.model_menu = open;
+            self.review.model_bounds = None;
+            cx.notify();
+        }
+        let Some((_, harness)) = open else {
+            return;
+        };
+        if self.review.models.contains_key(&harness) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.review.models_task = Some(cx.spawn(async move |this, cx| {
+            let models = review::list_models(&engine, harness).await;
+            this.update(cx, |composer, cx| {
+                composer.review.models.insert(harness, models);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn hover_reviewer_row(
+        &mut self,
+        key: usize,
+        harness: Option<HarnessId>,
+        pointer: Point<Pixels>,
+        moved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.review.menu.is_open() {
+            return;
+        }
+        let current = self.review.model_menu.map(|(open, _)| open);
+        let (bounds, left) = (self.review.model_bounds, self.review.model_left);
+        let action = if moved {
+            self.review
+                .model_intent
+                .moved(current.as_ref(), &key, pointer, bounds, left)
+        } else {
+            self.review
+                .model_intent
+                .enter(current.as_ref(), &key, pointer, bounds, left)
+        };
+        let target = harness.map(|harness| (key, harness));
+        match action {
+            popover::HoverAction::None => {}
+            popover::HoverAction::Open => {
+                self.set_model_menu(target, cx);
+                self.review.model_intent.record_origin(pointer);
+            }
+            popover::HoverAction::Defer => {
+                self.review.model_intent.defer(cx, move |this, cx| {
+                    if this.review.menu.is_open()
+                        && this.review.model_intent.pending() == Some(&key)
+                    {
+                        this.review.model_intent.cancel();
+                        this.set_model_menu(target, cx);
+                        this.review.model_intent.record_origin(pointer);
+                    }
+                });
+            }
+        }
+    }
+
+    fn model_menu_probe(&self, open: bool, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        let exit = entity.clone();
+        gpui::canvas(
+            move |bounds, window, cx| {
+                let left = bounds.right() + px(220.0) > window.viewport_size().width;
+                let _ = entity.update(cx, |this, cx| {
+                    if this.review.model_left != left {
+                        this.review.model_left = left;
+                        cx.notify();
+                    }
+                });
+            },
+            move |trigger, _, window, _| {
+                if !open {
+                    return;
+                }
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = exit.update(cx, |this, cx| {
+                        let (bounds, left) = (this.review.model_bounds, this.review.model_left);
+                        if this.review.model_intent.contains_pointer(
+                            trigger,
+                            bounds,
+                            event.position,
+                            left,
+                        ) {
+                            return;
+                        }
+                        this.review.model_intent.reset();
+                        this.set_model_menu(None, cx);
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+
+    fn render_model_menu(
+        &self,
+        harness: HarnessId,
+        effective: &ReviewerChoice,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let popup = theme.for_popup();
+        let current = match effective {
+            ReviewerChoice::Harness { harness: h, model } if *h == harness => Some(model.clone()),
+            _ => None,
+        };
+        let row = |ix: usize, label: String, model: Option<String>| {
+            let id = SharedString::from(format!("composer-reviewer-model-{ix}"));
+            let checked = current.as_ref() == Some(&model);
+            popover::menu_row(&popup, false, id.clone())
+                .id(id)
+                .role(gpui::Role::MenuItemRadio)
+                .aria_label(format!("Model {label}"))
+                .gap(px(8.0))
+                .child(crate::settings::widgets::select_check(&popup, checked))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_reviewer(
+                        ReviewerChoice::Harness {
+                            harness,
+                            model: model.clone(),
+                        },
+                        cx,
+                    )
+                }))
+                .into_any_element()
+        };
+        let models = self.review.models.get(&harness);
+        let mut rows = vec![row(0, "Default".to_string(), None)];
+        match models {
+            Some(models) => rows.extend(
+                models
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, m)| row(ix + 1, m.label.clone(), Some(m.id.clone()))),
+            ),
+            None => rows.push(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(popup.text_faint)
+                    .child("Loading…")
+                    .into_any_element(),
+            ),
+        }
+        let entity = cx.entity().downgrade();
+        popover::popover_card(&popup)
+            .id("composer-reviewer-models-card")
+            .w(px(210.0))
+            .max_h(px(360.0))
+            .overflow_y_scroll()
+            .relative()
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .children(rows)
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ =
+                            entity.update(cx, |this, _| this.review.model_bounds = Some(bounds));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
     }
 
     pub(super) fn review_menu_open(&self) -> bool {

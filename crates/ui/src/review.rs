@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{AgentProfile, HarnessId};
+use zeron_proto::{AgentProfile, HarnessId, Model};
 use zeron_rpc::methods;
 
 use crate::changes::{FileDiff, line_anchor};
@@ -110,6 +110,26 @@ impl ReviewerOptions {
         }
     }
 
+    pub fn brand(
+        &self,
+        choice: &ReviewerChoice,
+        chat: Option<HarnessId>,
+    ) -> (&'static str, Option<gpui::Hsla>) {
+        let (harness, model) = match choice {
+            ReviewerChoice::Harness { harness, model } => (Some(*harness), model.clone()),
+            ReviewerChoice::Profile { id }
+                if let Some(profile) = self.profiles.iter().find(|profile| &profile.id == id) =>
+            {
+                (Some(profile.harness), profile.model.clone())
+            }
+            _ => {
+                let reviewer = resolve_reviewer(choice, chat, self);
+                (reviewer.harness, reviewer.model)
+            }
+        };
+        crate::pickers::agent_brand_icon(harness, model.as_deref())
+    }
+
     pub fn choices(&self) -> Vec<ReviewerChoice> {
         std::iter::once(ReviewerChoice::Auto)
             .chain(self.offered.iter().map(|harness| ReviewerChoice::Harness {
@@ -121,6 +141,19 @@ impl ReviewerOptions {
             }))
             .collect()
     }
+}
+
+pub async fn list_models(engine: &crate::state::EngineHandle, harness: HarnessId) -> Vec<Model> {
+    engine
+        .client()
+        .call(
+            methods::LIST_MODELS,
+            serde_json::json!({ "harness": harness, "force": false }),
+        )
+        .await
+        .ok()
+        .and_then(|value| serde_json::from_value::<Vec<Model>>(value["models"].clone()).ok())
+        .unwrap_or_default()
 }
 
 pub async fn reviewer_options(engine: &crate::state::EngineHandle) -> ReviewerOptions {
@@ -353,9 +386,30 @@ impl Severity {
     pub fn colors(self, theme: &crate::theme::Theme) -> (gpui::Hsla, gpui::Hsla) {
         match self {
             Self::Bug => (theme.danger, theme.danger.opacity(0.14)),
-            Self::Risk => (theme.warning, theme.warning.opacity(0.14)),
+            Self::Risk => (theme.danger.opacity(0.6), theme.danger.opacity(0.08)),
             Self::Nit => (theme.text_muted, crate::theme::ink(0.08)),
         }
+    }
+}
+
+pub fn split_finding(body: &str) -> (Option<Severity>, &str, &str) {
+    let found = [Severity::Bug, Severity::Risk, Severity::Nit]
+        .into_iter()
+        .find_map(|severity| {
+            let rest = body.strip_prefix(severity.word())?.strip_prefix(": ")?;
+            Some((severity, rest))
+        });
+    let Some((severity, rest)) = found else {
+        return (None, "", body);
+    };
+    let (title, detail) = rest.split_once('\n').unwrap_or((rest, ""));
+    (Some(severity), title.trim(), detail.trim())
+}
+
+pub fn finding_card_height(body: &str) -> f32 {
+    match split_finding(body).2 {
+        "" => crate::comments::card_height("") - crate::comments::CARD_LINE_HEIGHT,
+        detail => crate::comments::card_height(detail),
     }
 }
 

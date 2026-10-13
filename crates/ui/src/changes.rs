@@ -1341,7 +1341,13 @@ impl DiffRow {
             DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
             DiffRow::CommentCard { card, .. } => comments
                 .get(card as usize)
-                .map(|comment| comments::card_height(&comment.body))
+                .map(|comment| {
+                    if comment.id.starts_with(crate::review::CARD_PREFIX) {
+                        crate::review::finding_card_height(&comment.body)
+                    } else {
+                        comments::card_height(&comment.body)
+                    }
+                })
                 .unwrap_or(0.0),
             DiffRow::CommentDraft { .. } => comments::DRAFT_CARD_HEIGHT,
             DiffRow::BodyPad { .. } => BODY_BOTTOM_PAD,

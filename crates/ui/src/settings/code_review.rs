@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use gpui::{AnyElement, Context, Entity, Subscription, Task, div, prelude::*, px};
 use zeron_proto::{HarnessId, Model};
-use zeron_rpc::methods;
 
 use crate::popover::Loadable;
 use crate::review::{ReviewerChoice, ReviewerOptions};
@@ -69,18 +68,7 @@ impl CodeReviewCard {
             return;
         };
         self.model_task = Some(cx.spawn(async move |this, cx| {
-            let models = engine
-                .client()
-                .call(
-                    methods::LIST_MODELS,
-                    serde_json::json!({ "harness": harness, "force": false }),
-                )
-                .await
-                .ok()
-                .and_then(|value| {
-                    serde_json::from_value::<Vec<Model>>(value["models"].clone()).ok()
-                })
-                .unwrap_or_default();
+            let models = crate::review::list_models(&engine, harness).await;
             this.update(cx, |card, cx| {
                 card.models.insert(harness, models);
                 cx.notify();

@@ -45,6 +45,7 @@ mod ask_pill;
 pub(crate) mod background;
 mod chip;
 mod review_chip;
+mod staged_comments;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
@@ -6877,6 +6878,7 @@ pub struct Composer {
     answered_requests: HashSet<String>,
     ask: ask_pill::AskPills,
     review: review_chip::ReviewChipUi,
+    comments_menu: crate::popover::Popup<()>,
     ask_input: Entity<ComposerInput>,
     ask_focus: FocusHandle,
     _ask_input_events: Subscription,
@@ -7401,6 +7403,7 @@ impl Composer {
             answered_requests: HashSet::new(),
             ask: Default::default(),
             review: Default::default(),
+            comments_menu: Default::default(),
             ask_input,
             ask_focus: cx.focus_handle(),
             _ask_input_events: ask_input_events,
@@ -8381,9 +8384,9 @@ impl Composer {
     }
 
     fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        let comments = self.staged_comments(cx).len();
+        let comments = self.staged_comments(cx);
         let quotes = self.staged_quotes(cx);
-        if comments == 0 && quotes.is_empty() {
+        if comments.is_empty() && quotes.is_empty() {
             return None;
         }
         let mut row = div()
@@ -8392,18 +8395,8 @@ impl Composer {
             .gap(px(STRIP_GAP))
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));
-        if comments > 0 {
-            row = row.child(crate::badges::render(
-                "composer-comments",
-                &crate::badges::MessageBadge {
-                    icon: crate::icons::CHAT_ROUND_LINE,
-                    label: crate::comments::chip_label(comments).into(),
-                    // The staged set is already on screen in the changes
-                    // pane, so a hover card would only repeat it.
-                    details: Vec::new(),
-                },
-                theme,
-            ));
+        if !comments.is_empty() {
+            row = row.child(self.render_comments_badge(&comments, theme, cx));
         }
         if !quotes.is_empty() {
             let details = quotes
@@ -14002,6 +13995,7 @@ impl Render for Composer {
                     // Open menus keep their own keyboard/search focus.
                     if !this.pickers.read(cx).is_open()
                         && !this.review_menu_open()
+                        && !this.comments_menu_open()
                         && !this.running_tab
                     {
                         window.focus(&this.input.focus_handle(cx), cx);
