@@ -102,7 +102,7 @@ impl CodeReviewCard {
 impl Render for CodeReviewCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let card = widgets::section_card(&theme);
+        let card = widgets::section_card(&theme).mt(px(8.0));
         let Some(options) = self.options.ready().cloned() else {
             return card.child(
                 widgets::card_row(&theme, true).child(div().text_color(theme.text_muted).child(
