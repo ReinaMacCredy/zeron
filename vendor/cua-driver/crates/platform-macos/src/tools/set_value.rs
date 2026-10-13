@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_action_names, copy_binary_attr, copy_children, copy_number_attr, copy_string_attr,
-    copy_value_kind, is_attribute_settable, kAXErrorSuccess, perform_action, set_bool_attr,
-    set_number_attr, set_string_attr, AXError, AXUIElementRef, CfValueKind,
+    copy_action_names, copy_binary_attr, copy_children, copy_element_attr, copy_number_attr,
+    copy_string_attr, copy_value_kind, is_attribute_settable, kAXErrorSuccess, perform_action,
+    set_bool_attr, set_number_attr, set_string_attr, AXError, AXUIElementRef, CfValueKind,
 };
 use crate::focus_guard;
 use crate::input::ax_actions::{action_failure_result, AxActionFailure};
@@ -937,6 +937,33 @@ fn popup_menu_open(element: AXUIElementRef) -> bool {
     open
 }
 
+// Chromium hangs an open <select> menu off the page's AXScrollArea, not the popup button.
+fn cancel_popup_menu(element: AXUIElementRef) {
+    let mut current = unsafe { copy_element_attr(element, "AXParent") };
+    for _ in 0..64 {
+        let Some(node) = current else {
+            return;
+        };
+        let role = unsafe { copy_string_attr(node, "AXRole") };
+        if role.as_deref() == Some("AXScrollArea") {
+            for child in unsafe { copy_children(node) } {
+                if unsafe { copy_string_attr(child, "AXRole") }.as_deref() == Some("AXMenu") {
+                    let _ = crate::input::ax_actions::perform_ax_action(child as usize, "cancel");
+                }
+                unsafe { CFRelease(child as _) };
+            }
+        }
+        current = match role.as_deref() {
+            Some("AXScrollArea" | "AXWindow") => None,
+            _ => unsafe { copy_element_attr(node, "AXParent") },
+        };
+        unsafe { CFRelease(node as _) };
+    }
+    if let Some(node) = current {
+        unsafe { CFRelease(node as _) };
+    }
+}
+
 // Chromium names <select> options by AXValue and leaves AXTitle empty.
 fn popup_option_label(title: &str, value: &str) -> String {
     if title.trim().is_empty() {
@@ -992,6 +1019,10 @@ fn select_popup_option_in(
                     copy_string_attr(element, "AXTitle"),
                 )
             });
+            // A background Chromium keeps the native menu it opened on screen after the press.
+            if opened {
+                cancel_popup_menu(element);
+            }
             let suffix = if shown {
                 ""
             } else {
@@ -1009,7 +1040,7 @@ fn select_popup_option_in(
         Ok((String::new(), None))
     } else {
         if opened {
-            let _ = crate::input::ax_actions::perform_ax_action(element as usize, "cancel");
+            cancel_popup_menu(element);
         }
         Err(AxActionFailure::refused(popup_no_match_message(
             value,
