@@ -137,17 +137,16 @@ fn is_addressable(actions_present: bool, value_settable: bool, enabled: Option<b
     (actions_present || value_settable) && enabled != Some(false)
 }
 
-fn viewport_clip([x, y, width, height]: [f64; 4]) -> [f64; 4] {
-    [x - width, y - height, width * 3.0, height * 3.0]
-}
-
-fn outside_clip([x, y, width, height]: [f64; 4], clip: Option<[f64; 4]>) -> bool {
-    let Some([cx, cy, cw, ch]) = clip else {
+fn outside_clip([x, y, width, height]: [f64; 4], viewport: Option<[f64; 4]>) -> bool {
+    let Some([vx, vy, vw, vh]) = viewport else {
         return false;
     };
-    width > 0.0
-        && height > 0.0
-        && (x + width <= cx || y + height <= cy || x >= cx + cw || y >= cy + ch)
+    // Chromium clamps an off-screen node to the viewport edge with zero size.
+    if width <= 0.0 || height <= 0.0 {
+        return y >= vy + vh || y + height <= vy || x >= vx + vw || x + width <= vx;
+    }
+    let [cx, cy, cw, ch] = [vx - vw, vy - vh, vw * 3.0, vh * 3.0];
+    x + width <= cx || y + height <= cy || x >= cx + cw || y >= cy + ch
 }
 
 pub struct TreeWalkResult {
@@ -733,13 +732,14 @@ unsafe fn walk_element(
         max_value: attr_max_value,
         selected: attr_selected,
         frame,
+        bounds,
         expanded,
         ..
     } = attrs;
 
     let role = role.unwrap_or_else(|| "AXUnknown".into());
 
-    if in_web_content && frame.is_some_and(|frame| outside_clip(frame, clip)) {
+    if in_web_content && bounds.is_some_and(|bounds| outside_clip(bounds, clip)) {
         for child in children {
             CFRelease(child as CFTypeRef);
         }
@@ -755,11 +755,7 @@ unsafe fn walk_element(
 
     let web_root = !in_web_content && is_web_content_role(&role);
     let in_web_content = in_web_content || web_root;
-    let clip = if web_root {
-        clip.or(frame.map(viewport_clip))
-    } else {
-        clip
-    };
+    let clip = if web_root { clip.or(frame) } else { clip };
 
     // Skip pure layout containers that have no interesting content.
     if role == "AXScrollArea" || role == "AXGroup" {

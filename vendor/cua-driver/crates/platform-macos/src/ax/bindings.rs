@@ -1056,6 +1056,8 @@ pub struct ElementAttrs {
     /// decoded and the size is at least 1×1, matching the acceptance test
     /// in [`element_screen_rect`].
     pub frame: Option<[f64; 4]>,
+    /// The decoded rect even when it is smaller than 1×1.
+    pub bounds: Option<[f64; 4]>,
     pub children: Vec<AXUIElementRef>,
     pub expanded: Option<bool>,
 }
@@ -1107,6 +1109,7 @@ pub unsafe fn copy_element_attrs(element: AXUIElementRef) -> ElementAttrs {
         min_value: batch_slot(&slots, 11).and_then(|v| slot_number(v)),
         max_value: batch_slot(&slots, 12).and_then(|v| slot_number(v)),
         selected: batch_slot(&slots, 13).and_then(|v| slot_bool(v)),
+        bounds: slot_bounds(batch_slot(&slots, 14), batch_slot(&slots, 15)),
         frame: slot_rect(batch_slot(&slots, 14), batch_slot(&slots, 15)),
         expanded: batch_slot(&slots, 16).and_then(|v| slot_bool(v)),
     }
@@ -1204,6 +1207,10 @@ unsafe fn slot_children(value: CFTypeRef) -> Vec<AXUIElementRef> {
 /// Decode `AXPosition` + `AXSize` slots into `[x, y, width, height]` —
 /// the same decode and ≥1×1 size acceptance test as [`element_screen_rect`].
 unsafe fn slot_rect(position: Option<CFTypeRef>, size: Option<CFTypeRef>) -> Option<[f64; 4]> {
+    slot_bounds(position, size).filter(|[_, _, width, height]| *width >= 1.0 && *height >= 1.0)
+}
+
+unsafe fn slot_bounds(position: Option<CFTypeRef>, size: Option<CFTypeRef>) -> Option<[f64; 4]> {
     let position = position?;
     if core_foundation::base::CFGetTypeID(position) != AXValueGetTypeID() {
         return None;
@@ -1228,9 +1235,7 @@ unsafe fn slot_rect(position: Option<CFTypeRef>, size: Option<CFTypeRef>) -> Opt
         size as AXValueRef,
         kAXValueCGSizeType,
         &mut sz as *mut _ as *mut c_void,
-    ) || sz.width < 1.0
-        || sz.height < 1.0
-    {
+    ) {
         return None;
     }
     Some([pos.x, pos.y, sz.width, sz.height])
