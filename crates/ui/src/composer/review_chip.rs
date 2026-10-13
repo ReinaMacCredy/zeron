@@ -30,6 +30,7 @@ pub(super) struct ReviewChipUi {
     model_left: bool,
     models: HashMap<HarnessId, Vec<Model>>,
     models_task: Option<Task<()>>,
+    busy_hover: bool,
 }
 
 #[derive(Clone)]
@@ -47,6 +48,7 @@ enum Look {
     Busy,
     Findings(usize),
     Again(u32, u32),
+    Stopped(u32, u32),
     Clean,
     Unreadable,
     Failed(String),
@@ -379,19 +381,15 @@ impl Composer {
                     .map(|(diff, _)| diff.patch),
             };
             let outcome = match view {
-                Err(err) => Err(err.to_string()),
-                Ok(view) => {
-                    let summary = view
-                        .get("summary")
+                Err(err) => review::ReadOutcome::Failed(err.to_string()),
+                Ok(view) => review::read_outcome(
+                    view.get("status")
                         .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    if view.get("status").and_then(|v| v.as_str()) == Some("failed") {
-                        Err(summary)
-                    } else {
-                        Ok(review::parse_findings(&summary))
-                    }
-                }
+                        .unwrap_or_default(),
+                    view.get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                ),
             };
             this.update(cx, |composer, cx| {
                 composer.set_run(&chat_id, cx, |run| {
@@ -399,9 +397,12 @@ impl Composer {
                         return;
                     }
                     match outcome {
-                        Err(message) => run.status = RunStatus::Failed(message),
-                        Ok(None) => run.status = RunStatus::Unreadable,
-                        Ok(Some(mut findings)) => {
+                        review::ReadOutcome::Stopped => run.status = RunStatus::Stopped,
+                        review::ReadOutcome::Failed(message) => {
+                            run.status = RunStatus::Failed(message)
+                        }
+                        review::ReadOutcome::Read(None) => run.status = RunStatus::Unreadable,
+                        review::ReadOutcome::Read(Some(mut findings)) => {
                             let files = parse_patch(reviewed.as_deref().unwrap_or_default());
                             if restored {
                                 review::refresh(&mut findings, &files);
@@ -441,11 +442,13 @@ impl Composer {
         };
         self.close_review_menu(cx);
         let chat_id = target.chat_id.clone();
+        let choice = self.reviewer_choice(&chat_id, cx);
+        let mut run = ReviewRun::new(scope);
+        run.choice = Some(choice.clone());
         self.state.update(cx, |state, cx| {
-            state.reviews.entry(chat_id.clone()).or_default().run = Some(ReviewRun::new(scope));
+            state.reviews.entry(chat_id.clone()).or_default().run = Some(run);
             cx.notify();
         });
-        let choice = self.reviewer_choice(&chat_id, cx);
         self.review.spawn_task = Some(cx.spawn(async move |this, cx| {
             let started = launch_review(&engine, &target, scope, &choice).await;
             this.update(cx, |composer, cx| {
@@ -537,6 +540,10 @@ impl Composer {
         let look = match &run.status {
             status if run.busy() && *status != RunStatus::Done => Look::Busy,
             RunStatus::Unreadable => Look::Unreadable,
+            RunStatus::Stopped => {
+                let (add, del) = counts.unwrap_or_default();
+                Look::Stopped(add, del)
+            }
             RunStatus::Failed(message) => Look::Failed(message.clone()),
             _ if run.outdated() > 0 => {
                 let (add, del) = counts.unwrap_or_default();
@@ -615,6 +622,14 @@ impl Composer {
                     None,
                     "The code changed since the review. Some findings are outdated.".into(),
                 ),
+                Look::Stopped(..) => (
+                    crate::icons::REFRESH,
+                    "Review again".into(),
+                    theme.text_muted,
+                    theme.border,
+                    None,
+                    "The review was stopped. Click to run it again.".into(),
+                ),
                 Look::Clean => (
                     crate::icons::LUCIDE_CIRCLE_CHECK,
                     "No issues".into(),
@@ -629,7 +644,7 @@ impl Composer {
                     theme.text_muted,
                     theme.border,
                     None,
-                    "The reviewer did not end with a findings block. Click to open its thread."
+                    "The reviewer did not end with a findings block. Click to review again; its thread is in the agents pill."
                         .into(),
                 ),
                 Look::Failed(message) => (
@@ -642,8 +657,34 @@ impl Composer {
                 ),
             };
         let busy = matches!(look, Look::Busy);
+        let stoppable = busy
+            && self
+                .state
+                .read(cx)
+                .reviews
+                .get(&target.chat_id)
+                .is_some_and(|review| {
+                    review.run.as_ref().is_some_and(|run| {
+                        run.status == RunStatus::Running && run.task_id.is_some()
+                    })
+                });
+        let stopping = stoppable && self.review.busy_hover;
+        let (icon, label, color) = if stopping {
+            (
+                crate::icons::STOP,
+                SharedString::from("Stop review"),
+                theme.text,
+            )
+        } else {
+            (icon, label, color)
+        };
+        let next_reviewer = (!busy && !matches!(look, Look::Findings(_)))
+            .then(|| self.next_reviewer(&target, cx))
+            .flatten();
         let trailing_counts = match look {
-            Look::Idle(add, del) | Look::Again(add, del) => Some(counts(add, del)),
+            Look::Idle(add, del) | Look::Again(add, del) | Look::Stopped(add, del) => {
+                Some(counts(add, del))
+            }
             _ => None,
         };
         let main = div()
@@ -657,17 +698,49 @@ impl Composer {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .when(!busy, |el| {
+            .when(!busy || stoppable, |el| {
                 el.cursor_pointer().hover(|s| s.bg(crate::theme::ink(0.06)))
             })
-            .tooltip(crate::settings::widgets::text_tooltip(tip))
+            .when(busy, |el| {
+                el.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.review.busy_hover != *hovered {
+                        this.review.busy_hover = *hovered;
+                        cx.notify();
+                    }
+                }))
+            })
+            .tooltip(crate::settings::widgets::text_tooltip(if stoppable {
+                SharedString::from("Stop the reviewer. The chat keeps running.")
+            } else {
+                tip
+            }))
             .child(crate::icons::icon(icon).size(px(14.0)).text_color(color))
             .child(label)
+            .children(next_reviewer.map(|(name, mark, tint)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_color(theme.text_muted)
+                    .child("·")
+                    .child(
+                        crate::icons::icon(mark)
+                            .size(px(12.0))
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
+                    .child(name)
+            }))
             .children(trailing_counts)
             .when(!busy, |el| {
                 el.on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.on_review_click(scope, cx);
+                }))
+            })
+            .when(stoppable, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.stop_review(cx);
                 }))
             });
         let caret = div()
@@ -712,8 +785,10 @@ impl Composer {
             .border_1()
             .border_color(border)
             .when_some(fill, |el, fill| el.bg(fill))
-            .when(matches!(look, Look::Again(..)), |el| el.border_dashed())
-            .when(busy, |el| el.opacity(0.55))
+            .when(matches!(look, Look::Again(..) | Look::Stopped(..)), |el| {
+                el.border_dashed()
+            })
+            .when(busy && !stopping, |el| el.opacity(0.55))
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(color)
             .child(main)
@@ -740,21 +815,53 @@ impl Composer {
         };
         match self.review_look(&target, scope, cx) {
             Some(Look::Findings(_)) => self.open_review_findings(cx),
-            Some(Look::Unreadable) => {
-                let task = self
-                    .state
-                    .read(cx)
-                    .reviews
-                    .get(&target.chat_id)
-                    .and_then(|review| review.run.as_ref())
-                    .and_then(|run| run.task_id.clone());
-                if let Some(task) = task {
-                    cx.emit(ComposerEvent::OpenChat(task));
-                }
-            }
             Some(Look::Busy) | None => {}
             Some(_) => self.start_review(scope, cx),
         }
+    }
+
+    fn stop_review(&mut self, cx: &mut Context<Self>) {
+        let task = self
+            .state
+            .read(cx)
+            .reviews
+            .get(&self.current_key)
+            .and_then(|review| review.run.as_ref())
+            .filter(|run| run.status == RunStatus::Running)
+            .and_then(|run| run.task_id.clone());
+        if let Some(task) = task {
+            self.review.busy_hover = false;
+            self.stop_agent_run(task, true, cx);
+        }
+    }
+
+    fn next_reviewer(
+        &self,
+        target: &Target,
+        cx: &App,
+    ) -> Option<(String, &'static str, Option<gpui::Hsla>)> {
+        let last = self
+            .state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)?
+            .run
+            .as_ref()?
+            .choice
+            .clone()?;
+        let next = self.reviewer_choice(&target.chat_id, cx);
+        if next == last {
+            return None;
+        }
+        let options = self.review.options.clone().unwrap_or_default();
+        let name = match next {
+            ReviewerChoice::Auto if self.review.options.is_some() => {
+                review::resolve_reviewer(&next, target.harness, &options).name()
+            }
+            _ => options.label(&next),
+        };
+        let (mark, tint) = options.brand(&next, target.harness);
+        Some((name, mark, tint))
     }
 
     fn open_review_findings(&mut self, cx: &mut Context<Self>) {
@@ -1204,6 +1311,7 @@ impl Composer {
         let run = self.review_run_for(doc_id, cx)?;
         let suffix = match run.status {
             RunStatus::Unreadable => "couldn’t read findings".to_string(),
+            RunStatus::Stopped => "stopped".to_string(),
             RunStatus::Failed(_) => "failed".to_string(),
             RunStatus::Done if run.reported == 0 => "no issues".to_string(),
             RunStatus::Done if run.findings.is_empty() => format!("{} handled", run.reported),

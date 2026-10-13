@@ -268,7 +268,23 @@ pub enum RunStatus {
     Reading,
     Done,
     Unreadable,
+    Stopped,
     Failed(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ReadOutcome {
+    Stopped,
+    Failed(String),
+    Read(Option<Vec<Finding>>),
+}
+
+pub fn read_outcome(status: &str, summary: &str) -> ReadOutcome {
+    match status {
+        "cancelled" | "interrupted" => ReadOutcome::Stopped,
+        "failed" => ReadOutcome::Failed(summary.to_string()),
+        _ => ReadOutcome::Read(parse_findings(summary)),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +296,7 @@ pub struct ReviewRun {
     pub reported: usize,
     pub reviewed: Option<String>,
     pub note: Option<String>,
+    pub choice: Option<ReviewerChoice>,
 }
 
 impl ReviewRun {
@@ -292,6 +309,7 @@ impl ReviewRun {
             reported: 0,
             reviewed: None,
             note: None,
+            choice: None,
         }
     }
 
@@ -638,6 +656,18 @@ mod tests {
 
     fn one(json: &str) -> Finding {
         parse_findings(&reply(json)).unwrap().remove(0)
+    }
+
+    #[test]
+    fn a_stopped_reviewer_reads_as_stopped_not_as_a_missing_block() {
+        let partial = "Looking at session.rs, the first thing I notice";
+        assert_eq!(read_outcome("cancelled", partial), ReadOutcome::Stopped);
+        assert_eq!(read_outcome("interrupted", partial), ReadOutcome::Stopped);
+        assert_eq!(read_outcome("completed", partial), ReadOutcome::Read(None));
+        assert_eq!(
+            read_outcome("failed", "boom"),
+            ReadOutcome::Failed("boom".to_string())
+        );
     }
 
     #[test]

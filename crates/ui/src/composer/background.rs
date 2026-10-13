@@ -1511,7 +1511,12 @@ impl Composer {
             .children(jump)
     }
 
-    fn stop_agent_run(&mut self, task_id: String, delegated: bool, cx: &mut Context<Self>) {
+    pub(super) fn stop_agent_run(
+        &mut self,
+        task_id: String,
+        delegated: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !delegated {
             self.stop_background_task(task_id, cx);
             return;
