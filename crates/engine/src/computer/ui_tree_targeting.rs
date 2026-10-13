@@ -361,6 +361,21 @@ pub fn resolve_computer_unique_text_target<'a>(
         })
         .collect();
     let visible = if allow_offscreen { "" } else { "visible " };
+    // A browser's address bar is always writable, so being unique never picks the page's field.
+    if flatten_ui_tree(root)
+        .into_iter()
+        .any(|node| in_window(&node) && node.role == "AXWebArea")
+    {
+        return Err(ComputerTargetError::new(
+            ComputerTargetErrorCode::NotFound,
+            format!(
+                "Window {} shows a web page; pass the page field's element index.",
+                quoted(window_id)
+            ),
+            candidate_descriptions(&candidates),
+        )
+        .unresolved_text_control());
+    }
     match candidates.as_slice() {
         [] => {
             let in_window_nodes: Vec<&ComputerUiNode> =
@@ -1090,6 +1105,30 @@ mod tests {
         });
         let found = resolve_computer_unique_text_target(&root, "editor", false).unwrap();
         assert!(std::ptr::eq(found.node, &root.children[0]));
+    }
+
+    #[test]
+    fn never_resolves_the_address_bar_of_a_web_page_window_by_uniqueness() {
+        let root = node(Node {
+            role: "desktop",
+            children: vec![
+                node(Node {
+                    role: "AXTextField",
+                    label: Some("Address and search bar"),
+                    window_id: Some("browser"),
+                    ..Node::default()
+                }),
+                node(Node {
+                    role: "AXWebArea",
+                    label: Some("Results"),
+                    window_id: Some("browser"),
+                    ..Node::default()
+                }),
+            ],
+            ..Node::default()
+        });
+        let error = resolve_computer_unique_text_target(&root, "browser", false).unwrap_err();
+        assert!(error.unresolved_text_control);
     }
 
     #[test]
