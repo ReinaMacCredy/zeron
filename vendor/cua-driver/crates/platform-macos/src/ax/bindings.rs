@@ -453,6 +453,23 @@ pub unsafe fn copy_action_names(element: AXUIElementRef) -> Vec<String> {
         .collect()
 }
 
+/// The attribute names an AX element advertises; empty on error.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn copy_attribute_names(element: AXUIElementRef) -> Vec<String> {
+    let mut names: CFArrayRef = std::ptr::null_mut();
+    let err = AXUIElementCopyAttributeNames(element, &mut names);
+    if err != kAXErrorSuccess || names.is_null() {
+        return vec![];
+    }
+    let arr = CFArray::<CFStr>::wrap_under_create_rule(names);
+    (0..arr.len())
+        .filter_map(|i| Some(arr.get(i)?.to_string()))
+        .collect()
+}
+
 /// Read the on-screen center of an AX element (AXPosition + AXSize → center).
 /// Returns `(cx, cy)` in screen coordinates, or `None` if either attribute
 /// is unavailable or the element has zero size.
@@ -941,7 +958,10 @@ pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool
         // fallback, and don't claim enablement happened.
         return false;
     }
-    set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess
+    let written = set_bool_attr_true(app_element, "AXEnhancedUserInterface");
+    // Chromium 154 applies the write but answers kAXErrorNotImplemented.
+    written == kAXErrorSuccess
+        || copy_bool_attr(app_element, "AXEnhancedUserInterface") == Some(true)
 }
 
 /// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.

@@ -767,6 +767,7 @@ fn matchable_label(node: &ComputerUiNode) -> &str {
         "AXTextField" => "text field",
         "AXSearchField" => "search field",
         "AXComboBox" => "combo box",
+        "AXPopUpButton" => "pop up button",
         _ => "",
     }
 }
