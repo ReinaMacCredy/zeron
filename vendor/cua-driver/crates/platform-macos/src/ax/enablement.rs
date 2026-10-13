@@ -15,12 +15,18 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use super::bindings::{enable_chromium_accessibility, AXUIElementRef};
+use core_foundation::base::{CFRelease, CFTypeRef};
 
-/// How long to let a freshly-enabled Chromium/Electron app build its
-/// web-content AX tree before we read it. Paid at most once per process
-/// lifetime.
-const CHROMIUM_SETTLE_SECONDS: f64 = 0.5;
+use super::bindings::{
+    copy_children, copy_element_attr, copy_string_attr, enable_chromium_accessibility,
+    AXUIElementRef,
+};
+
+/// How long a freshly-enabled Chromium/Electron app may take to build its
+/// web-content AX tree before we read it anyway. Paid at most once per process
+/// lifetime, and only until the focused window's page has content.
+const CHROMIUM_SETTLE_SECONDS: f64 = 3.0;
+const CHROMIUM_SETTLE_STEP_SECONDS: f64 = 0.1;
 
 type ProcessStartStamp = (u64, u64);
 
@@ -77,11 +83,42 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
         return;
     }
     if enable_chromium_accessibility(app_element) {
-        crate::permissions::panel::pump_run_loop_briefly(CHROMIUM_SETTLE_SECONDS);
+        let mut waited = 0.0;
+        while waited < CHROMIUM_SETTLE_SECONDS && !focused_page_has_content(app_element) {
+            crate::permissions::panel::pump_run_loop_briefly(CHROMIUM_SETTLE_STEP_SECONDS);
+            waited += CHROMIUM_SETTLE_STEP_SECONDS;
+        }
         if let Ok(mut cache) = enabled_processes().lock() {
             cache.insert(pid, stamp);
         }
     }
+}
+
+unsafe fn focused_page_has_content(app_element: AXUIElementRef) -> bool {
+    let Some(window) = copy_element_attr(app_element, "AXFocusedWindow") else {
+        return false;
+    };
+    let mut queue = vec![(window, 0usize)];
+    let mut found = false;
+    while let Some((node, depth)) = queue.pop() {
+        if !found {
+            let children = copy_children(node);
+            if copy_string_attr(node, "AXRole").as_deref() == Some("AXWebArea") {
+                found = !children.is_empty();
+                for child in children {
+                    CFRelease(child as CFTypeRef);
+                }
+            } else if depth < 12 {
+                queue.extend(children.into_iter().map(|child| (child, depth + 1)));
+            } else {
+                for child in children {
+                    CFRelease(child as CFTypeRef);
+                }
+            }
+        }
+        CFRelease(node as CFTypeRef);
+    }
+    found
 }
 
 #[cfg(test)]
