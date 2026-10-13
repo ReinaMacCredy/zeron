@@ -499,6 +499,10 @@ fn set_value_blocking(
         })?;
         crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, "AXValue append")
             .map_err(AxActionFailure::before_dispatch)?;
+        // Autocompletes react only to input in the focused field.
+        if web_content {
+            let _ = crate::input::ax_actions::focus_element(element_ptr);
+        }
     }
 
     if !append && web_content {

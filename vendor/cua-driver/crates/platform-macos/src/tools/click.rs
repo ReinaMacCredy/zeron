@@ -25,13 +25,13 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_action_names, copy_children, copy_string_attr, element_at_screen_position,
-    element_screen_rect, AXUIElementRef,
+    copy_action_names, copy_children, copy_element_attr, copy_string_attr,
+    element_at_screen_position, element_screen_center, element_screen_rect, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::input::ax_actions::{AxActionFailure, SelectionOutcome};
 use crate::window_change_detector::WindowChangeDetector;
-use core_foundation::base::CFRelease;
+use core_foundation::base::{CFRelease, CFTypeRef};
 
 use super::ToolState;
 
@@ -444,8 +444,7 @@ impl Tool for ClickTool {
             if !delivery_mode.is_foreground()
                 && button_str == "left"
                 && action == "press"
-                && unsafe { copy_string_attr(element_ptr as AXUIElementRef, "AXRole") }.as_deref()
-                    == Some("AXPopUpButton")
+                && unsafe { is_native_popup(element_ptr as AXUIElementRef) }
             {
                 return background_popup_refusal();
             }
@@ -538,6 +537,103 @@ impl Tool for ClickTool {
                     .cursor_registry
                     .update_position(&cursor_key, cx, cy);
                 self.state.cursor_registry.note_press(&cursor_key, cx, cy);
+            }
+
+            if effective_action == "press" && button_str == "left" && modifiers.is_empty() {
+                let pointer_guard = element_guard.clone();
+                let point = tokio::task::spawn_blocking(move || unsafe {
+                    web_pointer_point(pid, pointer_guard.as_ptr() as AXUIElementRef)
+                })
+                .await
+                .ok()
+                .flatten();
+                let admitted = match (point, _mutation_lease.as_ref()) {
+                    (None, _) => false,
+                    (Some(_), None) => true,
+                    (Some(_), Some(lease)) => lease
+                        .gate_again(
+                            wid,
+                            Some(element_ptr),
+                            cua_driver_core::background_input::BackgroundAction::WindowPointer,
+                        )
+                        .await
+                        .is_ok(),
+                };
+                if let (true, Some((sx, sy))) = (admitted, point) {
+                    let frame = match super::px_frame::resolve_or_refuse(wid).await {
+                        Ok(frame) => frame,
+                        Err(refusal) => return refusal,
+                    };
+                    let (lx, ly) = (sx - frame.bounds.x, sy - frame.bounds.y);
+                    let foreground = delivery_mode.is_foreground();
+                    let prior_front = apps::frontmost_pid();
+                    let snapshot = if foreground {
+                        WindowChangeDetector::snapshot_without_suppression(prior_front)
+                    } else {
+                        WindowChangeDetector::snapshot(prior_front)
+                    };
+                    let pulse_key = cursor_key.clone();
+                    let result = focus_guard::with_focus_suppressed(
+                        if foreground { None } else { Some(pid) },
+                        prior_front,
+                        "click.web_pointer",
+                        || async move {
+                            tokio::task::spawn_blocking(move || {
+                                crate::cursor::overlay::send_command(
+                                    pulse_key,
+                                    cursor_overlay::OverlayCommand::ClickPulse { x: sx, y: sy },
+                                );
+                                let click = || {
+                                    crate::input::mouse::click_at_xy_with_window_local(
+                                        pid,
+                                        sx,
+                                        sy,
+                                        lx,
+                                        ly,
+                                        wid,
+                                        1,
+                                        &[],
+                                        crate::input::mouse::WindowClickDelivery::from_foreground(
+                                            foreground,
+                                        ),
+                                    )
+                                };
+                                if foreground {
+                                    crate::input::skylight::with_foreground_assist(
+                                        pid as libc::pid_t,
+                                        wid,
+                                        click,
+                                    )
+                                } else {
+                                    click().map(|()| false)
+                                }
+                            })
+                            .await
+                        },
+                    )
+                    .await;
+                    let changes = super::finish_window_observation(snapshot, &args).await;
+                    return match result {
+                        Ok(Ok(fronted)) => ToolResult::text(format!(
+                            "✅ Clicked web element [{idx}] with a pointer click at its center \
+                             (custom web widgets ignore AXPress; not driver-verified).{}",
+                            changes.result_suffix()
+                        ))
+                        .with_structured(serde_json::json!({
+                            "path": if fronted { "cgevent_fg" } else { "cgevent" },
+                            "verified": false,
+                            "effect": "unverifiable",
+                            "diagnostics": {
+                                "delivery_path": "pixel",
+                                "actuator": "web_pointer",
+                                "focus_mutation": if fronted { "foreground" } else { "none" },
+                                "restore_status": if fronted { "unobservable" } else { "not-needed" }
+                            }
+                        })),
+                        Ok(Err(e)) => ToolResult::error(format!("Web pointer click failed: {e}")),
+                        Err(e) => ToolResult::error(format!("Task error: {e}")),
+                    };
+                }
             }
 
             // A read-only AX capability check may find no writable selection
@@ -916,7 +1012,7 @@ impl Tool for ClickTool {
                                 CFRelease(element as _);
                                 return Ok(false);
                             }
-                            if !focus_only && copy_string_attr(element, "AXRole").as_deref() == Some("AXPopUpButton") {
+                            if !focus_only && is_native_popup(element) {
                                 CFRelease(element as _);
                                 return Err(crate::input::ax_actions::AxActionFailure::refused_with_code(
                                     "background_popup_unavailable",
@@ -924,9 +1020,10 @@ impl Tool for ClickTool {
                                 ).into());
                             }
                             if !focus_only
-                                && !copy_action_names(element)
+                                && (!copy_action_names(element)
                                     .iter()
                                     .any(|name| name == "AXPress")
+                                    || prefers_web_pointer(pid, element))
                             {
                                 CFRelease(element as _);
                                 return Ok(false);
@@ -1223,6 +1320,81 @@ impl Tool for ClickTool {
             )
         }
     }
+}
+
+// Chromium's AXPress focuses the node first, so widgets that close on blur (react-select) drop it.
+unsafe fn prefers_web_pointer(pid: i32, element: AXUIElementRef) -> bool {
+    let Some(role) = copy_string_attr(element, "AXRole") else {
+        return false;
+    };
+    if role == "AXComboBox" && crate::ax::bindings::is_attribute_settable(element, "AXValue") {
+        return false;
+    }
+    if role == "AXPopUpButton" && is_native_popup(element) {
+        return false;
+    }
+    !matches!(
+        role.as_str(),
+        "AXButton"
+            | "AXLink"
+            | "AXCheckBox"
+            | "AXRadioButton"
+            | "AXMenuItem"
+            | "AXDisclosureTriangle"
+            | "AXTextField"
+            | "AXTextArea"
+            | "AXSlider"
+            | "AXIncrementor"
+            | "AXWebArea"
+    ) && crate::browser::platform::is_chromium_process(pid)
+        && crate::ax::tree::has_web_area_ancestor(element)
+}
+
+// Chromium reports AXPopupValue "menu" only for an HTML select; ARIA popups report their kind.
+unsafe fn is_native_popup(element: AXUIElementRef) -> bool {
+    if copy_string_attr(element, "AXRole").as_deref() != Some("AXPopUpButton") {
+        return false;
+    }
+    if !crate::ax::tree::has_web_area_ancestor(element) {
+        return true;
+    }
+    copy_string_attr(element, "AXPopupValue").is_none_or(|kind| kind == "menu")
+}
+
+// Chromium's AX hit-test ignores positioned-layer stacking, so it cannot prove occlusion.
+unsafe fn web_pointer_point(pid: i32, element: AXUIElementRef) -> Option<(f64, f64)> {
+    if !prefers_web_pointer(pid, element) {
+        return None;
+    }
+    let mut anchor = element;
+    let mut owned: Option<AXUIElementRef> = None;
+    let mut center = element_screen_center(element);
+    for _ in 0..4 {
+        if center.is_some() {
+            break;
+        }
+        let Some(parent) = copy_element_attr(anchor, "AXParent") else {
+            break;
+        };
+        if let Some(previous) = owned.replace(parent) {
+            CFRelease(previous as CFTypeRef);
+        }
+        anchor = parent;
+        center = element_screen_center(anchor);
+    }
+    let point = center.and_then(|(x, y)| {
+        let hit = element_at_screen_position(pid, x, y)?;
+        let window = crate::ax::exact_target::element_window_id(anchor);
+        let lands = window.is_some()
+            && crate::ax::exact_target::element_window_id(hit) == window
+            && crate::ax::tree::has_web_area_ancestor(hit);
+        CFRelease(hit as CFTypeRef);
+        lands.then_some((x, y))
+    });
+    if let Some(anchor) = owned {
+        CFRelease(anchor as CFTypeRef);
+    }
+    point
 }
 
 fn background_popup_refusal() -> ToolResult {

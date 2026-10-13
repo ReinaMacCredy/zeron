@@ -137,6 +137,19 @@ fn is_addressable(actions_present: bool, value_settable: bool, enabled: Option<b
     (actions_present || value_settable) && enabled != Some(false)
 }
 
+fn viewport_clip([x, y, width, height]: [f64; 4]) -> [f64; 4] {
+    [x - width, y - height, width * 3.0, height * 3.0]
+}
+
+fn outside_clip([x, y, width, height]: [f64; 4], clip: Option<[f64; 4]>) -> bool {
+    let Some([cx, cy, cw, ch]) = clip else {
+        return false;
+    };
+    width > 0.0
+        && height > 0.0
+        && (x + width <= cx || y + height <= cy || x >= cx + cw || y >= cy + ch)
+}
+
 pub struct TreeWalkResult {
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
@@ -334,6 +347,8 @@ pub fn walk_tree_bounded(
             0,
             None,
             false,
+            None,
+            None,
             &mut nodes,
             &mut lines,
             &mut index_counter,
@@ -447,7 +462,8 @@ unsafe fn fetch_element(element: AXUIElementRef) -> FetchedElement {
     // AXValue. Probe writability only for the small family of value controls —
     // the same gate the serial walk used — so display nodes pay no extra IPC.
     let role = attrs.role.as_deref().unwrap_or("AXUnknown");
-    let value_settable = actions.is_empty()
+    // A combobox advertises actions whether or not it accepts text.
+    let value_settable = (actions.is_empty() || role == "AXComboBox")
         && role_supports_value_addressing(role)
         && is_attribute_settable(element, "AXValue");
     FetchedElement {
@@ -606,6 +622,8 @@ unsafe fn walk_children(
     child_depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    clip: Option<[f64; 4]>,
+    parent_frame: Option<[f64; 4]>,
     nodes: &mut Vec<AXNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
@@ -643,6 +661,8 @@ unsafe fn walk_children(
             child_depth,
             parent_index,
             in_web_content,
+            clip,
+            parent_frame,
             nodes,
             lines,
             counter,
@@ -662,6 +682,8 @@ unsafe fn walk_element(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    clip: Option<[f64; 4]>,
+    parent_frame: Option<[f64; 4]>,
     nodes: &mut Vec<AXNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
@@ -682,7 +704,6 @@ unsafe fn walk_element(
         release_prefetched_children(prefetched);
         return;
     }
-    *visited_count += 1;
 
     // Elements the prefetch bound skipped — and any whose pooled fetch
     // failed — fetch inline here. When the pool is disabled this is the
@@ -718,7 +739,27 @@ unsafe fn walk_element(
 
     let role = role.unwrap_or_else(|| "AXUnknown".into());
 
-    let in_web_content = in_web_content || is_web_content_role(&role);
+    if in_web_content && frame.is_some_and(|frame| outside_clip(frame, clip)) {
+        for child in children {
+            CFRelease(child as CFTypeRef);
+        }
+        return;
+    }
+    *visited_count += 1;
+    // react-select draws its read-only input at scale(.01), leaving no usable frame.
+    let frame = if in_web_content {
+        frame.or(parent_frame)
+    } else {
+        frame
+    };
+
+    let web_root = !in_web_content && is_web_content_role(&role);
+    let in_web_content = in_web_content || web_root;
+    let clip = if web_root {
+        clip.or(frame.map(viewport_clip))
+    } else {
+        clip
+    };
 
     // Skip pure layout containers that have no interesting content.
     if role == "AXScrollArea" || role == "AXGroup" {
@@ -730,6 +771,8 @@ unsafe fn walk_element(
             depth,
             parent_index,
             in_web_content,
+            clip,
+            frame,
             nodes,
             lines,
             counter,
@@ -784,7 +827,9 @@ unsafe fn walk_element(
     } else {
         None
     };
-    let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled);
+    // ARIA options and custom selects act on pointer events their AX node does not advertise.
+    let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled)
+        || (in_web_content && has_content && attr_enabled != Some(false));
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
         walk_children(
@@ -792,6 +837,8 @@ unsafe fn walk_element(
             depth + 1,
             parent_index,
             in_web_content,
+            clip,
+            frame,
             nodes,
             lines,
             counter,
@@ -915,6 +962,8 @@ unsafe fn walk_element(
         depth + 1,
         next_parent,
         in_web_content,
+        clip,
+        frame,
         nodes,
         lines,
         counter,
@@ -948,7 +997,7 @@ pub struct WindowFocus {
 }
 
 // Only indexed nodes are compared: display-only element pointers are released after the walk.
-pub fn read_window_focus(pid: i32, window_id: u32, nodes: &[AXNode]) -> WindowFocus {
+pub fn read_window_focus(pid: i32, window_id: u32, nodes: &mut Vec<AXNode>) -> WindowFocus {
     let mut focus = WindowFocus::default();
     unsafe {
         let app = AXUIElementCreateApplication(pid);
@@ -962,25 +1011,39 @@ pub fn read_window_focus(pid: i32, window_id: u32, nodes: &[AXNode]) -> WindowFo
         };
         if let Some(element) = copy_element_attr(app, "AXFocusedUIElement") {
             set_messaging_timeout(element);
+            let mut retained = false;
             if super::exact_target::element_window_id(element) == Some(window_id) {
-                let element_index = nodes
+                let mut element_index = nodes
                     .iter()
                     .filter(|node| node.element_index.is_some())
                     .find(|node| CFEqual(node.element_ptr as CFTypeRef, element as CFTypeRef) != 0)
                     .and_then(|node| node.element_index);
+                let settable = is_attribute_settable(element, "AXValue");
+                if element_index.is_none() {
+                    let index = nodes
+                        .iter()
+                        .filter_map(|node| node.element_index)
+                        .max()
+                        .map_or(0, |index| index + 1);
+                    nodes.push(focused_node(element, index, settable));
+                    element_index = Some(index);
+                    retained = true;
+                }
                 focus.focused = Some(FocusedElement {
                     role: copy_string_attr(element, "AXRole").unwrap_or_else(|| "AXUnknown".into()),
                     title: present(copy_string_attr(element, "AXTitle")),
                     description: present(copy_string_attr(element, "AXDescription")),
                     value: present(copy_string_attr(element, "AXValue")),
                     identifier: present(copy_string_attr(element, "AXIdentifier")),
-                    settable: is_attribute_settable(element, "AXValue"),
+                    settable,
                     element_index,
                 });
                 focus.selected_text =
                     copy_string_attr(element, "AXSelectedText").filter(|text| !text.is_empty());
             }
-            CFRelease(element as CFTypeRef);
+            if !retained {
+                CFRelease(element as CFTypeRef);
+            }
         }
         for window in copy_ax_windows(app) {
             if focus.url.is_none() && ax_get_window_id(window) == Some(window_id) {
@@ -992,6 +1055,67 @@ pub fn read_window_focus(pid: i32, window_id: u32, nodes: &[AXNode]) -> WindowFo
         CFRelease(app as CFTypeRef);
     }
     focus
+}
+
+/// Takes ownership of the caller's +1 retain on `element`.
+unsafe fn focused_node(element: AXUIElementRef, index: usize, settable: bool) -> AXNode {
+    let FetchedElement { attrs, actions, .. } = fetch_element(element);
+    for child in attrs.children {
+        CFRelease(child as CFTypeRef);
+    }
+    let text = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let placeholder = text(attrs.placeholder_value);
+    let value = text(attrs.value.and_then(|copied| copied.string_value)).or(placeholder.clone());
+    AXNode {
+        element_index: Some(index),
+        role: attrs.role.unwrap_or_else(|| "AXUnknown".into()),
+        title: text(attrs.title),
+        value,
+        description: text(attrs.description),
+        identifier: attrs.identifier,
+        help: text(attrs.help),
+        actions,
+        element_ptr: element as usize,
+        depth: 0,
+        parent_element_index: None,
+        frame: attrs.frame,
+        value_state: None,
+        value_description: None,
+        min_value: None,
+        max_value: None,
+        enabled: attrs.enabled,
+        selected: attrs.selected,
+        in_web_content: has_web_area_ancestor(element),
+        placeholder,
+        settable,
+        expanded: attrs.expanded,
+    }
+}
+
+pub(crate) unsafe fn has_web_area_ancestor(element: AXUIElementRef) -> bool {
+    let mut current = copy_element_attr(element, "AXParent");
+    let mut found = false;
+    for _ in 0..64 {
+        let Some(node) = current else {
+            break;
+        };
+        set_messaging_timeout(node);
+        found = copy_string_attr(node, "AXRole").is_some_and(|role| is_web_content_role(&role));
+        current = if found {
+            None
+        } else {
+            copy_element_attr(node, "AXParent")
+        };
+        CFRelease(node as CFTypeRef);
+    }
+    if let Some(node) = current {
+        CFRelease(node as CFTypeRef);
+    }
+    found
 }
 
 fn is_web_content_role(role: &str) -> bool {

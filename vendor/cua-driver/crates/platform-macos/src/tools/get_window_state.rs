@@ -316,15 +316,15 @@ impl Tool for GetWindowStateTool {
             // walker also applies a native per-element messaging timeout because
             // dropping a spawn_blocking JoinHandle cannot cancel a blocked AX call.
             let walk_future = tokio::task::spawn_blocking(move || {
-                let tree = crate::ax::tree::walk_tree_bounded(
+                let mut tree = crate::ax::tree::walk_tree_bounded(
                     pid,
                     Some(window_id),
                     q.as_deref(),
                     max_elements,
                     max_depth,
                 );
+                let focus = crate::ax::tree::read_window_focus(pid, window_id, &mut tree.nodes);
                 let payload = crate::ax::cache::CachedSnapshot::from_nodes(&tree.nodes);
-                let focus = crate::ax::tree::read_window_focus(pid, window_id, &tree.nodes);
                 (tree, payload, focus)
             });
             match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {

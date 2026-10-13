@@ -361,10 +361,14 @@ impl Tool for PressKeyTool {
                     let actions = unsafe {
                         crate::ax::bindings::copy_action_names(element.as_ptr() as AXUIElementRef)
                     };
-                    actions
-                        .iter()
-                        .any(|action| action == "AXConfirm")
-                        .then_some(element)
+                    // Page scripts ignore AXConfirm and listen for the Enter keydown.
+                    (actions.iter().any(|action| action == "AXConfirm")
+                        && !unsafe {
+                            crate::ax::tree::has_web_area_ancestor(
+                                element.as_ptr() as AXUIElementRef
+                            )
+                        })
+                    .then_some(element)
                 })
                 .await;
                 if let Ok(Some(element)) = candidate {
