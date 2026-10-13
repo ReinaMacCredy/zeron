@@ -125,6 +125,27 @@ pub struct HarnessUpdateStatus {
     pub manual_command: Option<String>,
 }
 
+/// What the resume button and every automatic continuation send. A user
+/// entry carrying exactly this text renders as a "Resumed" divider.
+pub const RESUME_PROMPT: &str = "Resume without asking to continue.";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitResume {
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    pub auto: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitResumes {
+    pub auto_resume: bool,
+    #[serde(default)]
+    pub chats: Vec<LimitResume>,
+}
+
 impl HarnessUpdateStatus {
     /// Home notices describe discovered releases or an update in progress.
     /// Manual checks remain available in Settings without implying that a
@@ -896,6 +917,12 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// `resets_at`: epoch ms when every exhausted window has reset; `None` when any gave no reset time.
+    #[serde(rename_all = "camelCase")]
+    UsageLimit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<i64>,
+    },
     #[serde(rename_all = "camelCase")]
     InputRequested {
         request_id: String,
@@ -1401,8 +1428,7 @@ impl SessionStats {
 
     pub fn cache_hit_rate(&self) -> Option<f64> {
         let cached = self.cache_read_tokens + self.cache_write_tokens;
-        (cached > 0)
-            .then(|| self.cache_read_tokens as f64 / (cached + self.input_tokens) as f64)
+        (cached > 0).then(|| self.cache_read_tokens as f64 / (cached + self.input_tokens) as f64)
     }
 
     /// Millis until the prompt cache expires; negative once it has.

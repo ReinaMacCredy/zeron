@@ -124,6 +124,51 @@ pub(crate) fn turn_error_message(params: &Value) -> Option<String> {
         })
 }
 
+/// The last `account/rateLimits/updated` windows. Updates are sparse: an
+/// absent or null window keeps the value seen before.
+#[derive(Default)]
+pub(crate) struct RateLimitWindows([Option<(f64, Option<i64>)>; 2]);
+
+impl RateLimitWindows {
+    pub(crate) fn note(&mut self, params: &Value) {
+        let Some(snapshot) = params.get("rateLimits") else {
+            return;
+        };
+        for (slot, key) in self.0.iter_mut().zip(["primary", "secondary"]) {
+            if let Some(window) = snapshot.get(key).filter(|w| !w.is_null()) {
+                *slot = Some((
+                    window
+                        .get("usedPercent")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0),
+                    window.get("resetsAt").and_then(Value::as_i64),
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn usage_limit(&self, error: &Value) -> Option<AgentEvent> {
+        let code = match error.get("codexErrorInfo")? {
+            Value::String(code) => code.as_str(),
+            Value::Object(map) => map.keys().next()?.as_str(),
+            _ => return None,
+        };
+        if !matches!(code, "usageLimitExceeded" | "rateLimitExceeded") {
+            return None;
+        }
+        let resets_at = self
+            .0
+            .iter()
+            .flatten()
+            .filter(|(used, _)| *used >= 100.0)
+            .try_fold(None, |latest: Option<i64>, (_, reset)| {
+                reset.map(|secs| latest.max(Some(secs.saturating_mul(1000))))
+            })
+            .flatten();
+        Some(AgentEvent::UsageLimit { resets_at })
+    }
+}
+
 fn usage_counts(snapshot: &Value) -> [u64; 4] {
     let count = |keys: &[&str]| {
         field(snapshot, keys)
@@ -805,6 +850,36 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn usage_limit_resets_at_the_latest_exhausted_window() {
+        let mut windows = RateLimitWindows::default();
+        let limit = json!({"message": "limit", "codexErrorInfo": "usageLimitExceeded"});
+        assert_eq!(
+            windows.usage_limit(&limit),
+            Some(AgentEvent::UsageLimit { resets_at: None })
+        );
+        windows.note(&json!({"rateLimits": {
+            "primary": {"usedPercent": 100, "resetsAt": 50},
+            "secondary": {"usedPercent": 40, "resetsAt": 900}
+        }}));
+        windows.note(&json!({"rateLimits": {"primary": null}}));
+        assert_eq!(
+            windows.usage_limit(&limit),
+            Some(AgentEvent::UsageLimit {
+                resets_at: Some(50_000)
+            })
+        );
+        windows.note(&json!({"rateLimits": {"secondary": {"usedPercent": 100}}}));
+        assert_eq!(
+            windows.usage_limit(&json!({"codexErrorInfo": {"rateLimitExceeded": {}}})),
+            Some(AgentEvent::UsageLimit { resets_at: None })
+        );
+        assert_eq!(
+            windows.usage_limit(&json!({"codexErrorInfo": "serverOverloaded"})),
+            None
+        );
+    }
 
     #[test]
     fn reasoning_parts_preserve_chunking_and_existing_paragraph_breaks() {

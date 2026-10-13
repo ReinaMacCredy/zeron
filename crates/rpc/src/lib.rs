@@ -417,6 +417,19 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    /// `{harnesses, continueThreads}` → `{interrupted}`: stops the running
+    /// turns on those agents, updates them one by one, then continues the
+    /// stopped turns when asked.
+    pub const UPDATE_HARNESSES: &str = "UpdateHarnesses";
+    /// `{continueThreads}` → `{interrupted}`: stops every running turn before
+    /// an app restart and, when asked, continues them on the next boot.
+    pub const PREPARE_RESTART: &str = "PrepareRestart";
+    /// Stream of `LimitResumes`.
+    pub const WATCH_LIMIT_RESUMES: &str = "WatchLimitResumes";
+    /// `{chatId, auto}` → `{changed}`.
+    pub const SET_LIMIT_RESUME: &str = "SetLimitResume";
+    /// `{enabled}` → `LimitResumes`.
+    pub const SET_AUTO_RESUME_LIMITS: &str = "SetAutoResumeLimits";
 }
 
 /// Stable capability error codes transported without provider stderr.

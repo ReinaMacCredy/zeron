@@ -43,6 +43,7 @@ pub mod profile;
 pub mod project_actions;
 pub mod registry;
 pub mod repos;
+pub mod resume_schedule;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
@@ -145,6 +146,15 @@ pub struct EngineConfig {
 
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
+async fn send_continuation(host: &DocHost, continuation: &resume_schedule::Continuation) {
+    match host.queue_continuation(continuation).await {
+        Ok(sent) => tracing::info!(chat = %continuation.chat_id, sent, "continuation"),
+        Err(error) => {
+            tracing::warn!(chat = %continuation.chat_id, %error, "continuation failed")
+        }
+    }
+}
+
 pub struct EngineCore {
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
@@ -165,6 +175,7 @@ pub struct EngineCore {
     pub device_hub: Arc<device_hub::DeviceHub>,
     html_preview: Arc<html_render::PreviewHost>,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
+    pub resume_schedule: resume_schedule::ResumeSchedule,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -271,11 +282,25 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        let resume_schedule = resume_schedule::ResumeSchedule::open(data_dir);
+        sessions.set_resume_schedule(resume_schedule.clone());
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
         }
+        let restarted = resume_schedule.take_restart(chrono::Utc::now().timestamp_millis());
+        let host = doc_host.clone();
+        resume_schedule.spawn(move |continuation| {
+            let host = host.clone();
+            async move { send_continuation(&host, &continuation).await }
+        });
+        let host = doc_host.clone();
+        tokio::spawn(async move {
+            for continuation in restarted {
+                send_continuation(&host, &continuation).await;
+            }
+        });
         doc_host.settle_delegations_after_boot();
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
@@ -373,6 +398,7 @@ impl EngineCore {
             device_hub,
             html_preview: Arc::default(),
             harness_updates,
+            resume_schedule,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -514,7 +540,8 @@ impl EngineCore {
         .with_computer(self.computer.clone())
         .with_device_hub(self.device_hub.clone())
         .with_html_preview(self.html_preview.clone())
-        .with_harness_updates(self.harness_updates.clone());
+        .with_harness_updates(self.harness_updates.clone())
+        .with_resume_schedule(self.resume_schedule.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

@@ -336,10 +336,13 @@ impl Composer {
             self.ask.advance_task = None;
         }
         let background = self.render_background_corner(window, cx);
-        if visible.is_empty() {
+        let theme = Theme::of(cx).clone();
+        let limit = (!self.side_chat && !self.roster_open())
+            .then(|| self.render_limit_pill(&theme, cx))
+            .flatten();
+        if visible.is_empty() && limit.is_none() {
             return background;
         }
-        let theme = Theme::of(cx).clone();
         let tray = self
             .ask
             .open
@@ -349,7 +352,7 @@ impl Composer {
             self.ask.focus_pending = false;
             window.focus(&self.ask_focus, cx);
         }
-        let pill = (tray.is_none() && !self.roster_open())
+        let pill = (!visible.is_empty() && tray.is_none() && !self.roster_open())
             .then(|| self.render_ask_pill(&visible, &theme, cx));
         Some(
             div()
@@ -363,6 +366,7 @@ impl Composer {
                         .items_end()
                         .gap(px(6.0))
                         .child(div().flex_1().min_w_0().children(background))
+                        .children(limit)
                         .children(pill),
                 )
                 .children(tray)
