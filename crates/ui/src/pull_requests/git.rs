@@ -33,7 +33,8 @@ pub struct OpenSourceControlSettings;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const WATCH_RETRY: Duration = Duration::from_secs(2);
-const PANEL_WIDTH: f32 = 360.0;
+const COMMIT_FILE_ROW_HEIGHT: f32 = 26.0;
+const HISTORY_KEEP_WIDTH: f32 = 480.0;
 const SUBJECT_LIMIT: usize = 72;
 const MESSAGE_MIN_HEIGHT: f32 = 44.0;
 const TRAY_MAX_HEIGHT: f32 = 220.0;
@@ -214,6 +215,16 @@ enum DiffRow {
     Binary,
     Truncated,
     NoText,
+}
+
+struct CommitPanelResize;
+
+struct CommitPanelResizeGhost;
+
+impl Render for CommitPanelResizeGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 pub struct GitTab {
@@ -2481,6 +2492,13 @@ impl GitTab {
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{} {}",
+                if staged { "Staged" } else { "Changed" },
+                file.path
+            )))
+            .aria_expanded(open)
             .group(group.clone())
             .h(px(26.0))
             .px(px(12.0))
@@ -2622,7 +2640,12 @@ impl GitTab {
         let dirty = tree.is_some_and(|tree| !tree.files.is_empty());
         let mut notes: Vec<AnyElement> = Vec::new();
         if tree.is_some_and(|tree| tree.agent_active) {
-            notes.push(render_agent_banner(policy, theme));
+            notes.push(
+                render_agent_banner(policy, theme)
+                    .mx(px(12.0))
+                    .mt(px(8.0))
+                    .into_any_element(),
+            );
         }
         if let Some(sha) = tree.and_then(|tree| tree.cherry_pick_head.as_deref()) {
             notes.push(self.render_pick_banner(sha, policy, theme, cx));
@@ -3658,8 +3681,7 @@ impl GitTab {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let commit = &detail.commit;
-        let policy = busy_policy(cx);
-        let tree = self.tree.as_ref();
+        let sticky = self.render_sticky_commit_file(detail, theme, cx);
         div()
             .id("git-commit-detail")
             .debug_selector(|| "git-commit-detail".into())
@@ -3667,7 +3689,11 @@ impl GitTab {
                 if self.compact {
                     el.size_full()
                 } else {
-                    el.w(px(PANEL_WIDTH)).flex_none().h_full().border_l_1()
+                    el.relative()
+                        .w(px(crate::settings::git_commit_panel_width(cx)))
+                        .min_w(px(crate::settings::GIT_COMMIT_PANEL_MIN))
+                        .h_full()
+                        .border_l_1()
                 }
             })
             .border_color(theme.hairline(0.07))
@@ -3723,17 +3749,147 @@ impl GitTab {
                             .on_click(cx.listener(|tab, _, _, cx| tab.select_commit(None, cx))),
                     ),
             )
-            .when(tree.is_some_and(|tree| tree.agent_active), |el| {
-                el.child(render_agent_banner(policy, theme))
-            })
             .child(
-                div().flex_1().min_h_0().child(
-                    list(detail.list.clone(), cx.processor(Self::render_detail_row))
-                        .size_full()
-                        .pb(px(12.0 + self.bottom_clearance())),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(
+                        list(detail.list.clone(), cx.processor(Self::render_detail_row))
+                            .size_full()
+                            .pb(px(12.0 + self.bottom_clearance())),
+                    )
+                    .children(sticky),
+            )
+            .when(!self.compact, |el| {
+                el.child(self.render_panel_resize_handle(theme, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_panel_resize_handle(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let hover = theme.border_strong;
+        div()
+            .id("git-commit-resize")
+            .debug_selector(|| "git-commit-resize".into())
+            .absolute()
+            .left(px(-3.0))
+            .top_0()
+            .bottom_0()
+            .w(px(6.0))
+            .cursor_col_resize()
+            .hover(move |style| style.bg(hover.opacity(0.7)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_drag(
+                CommitPanelResize,
+                |_, _point: gpui::Point<gpui::Pixels>, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| CommitPanelResizeGhost)
+                },
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|tab, event: &gpui::MouseUpEvent, _, cx| {
+                    if event.click_count == 2 {
+                        tab.set_panel_width(
+                            crate::settings::GIT_COMMIT_PANEL_DEFAULT,
+                            crate::settings::SavePolicy::Immediate,
+                            cx,
+                        );
+                    }
+                }),
             )
             .into_any_element()
+    }
+
+    fn resize_panel(
+        &mut self,
+        event: &gpui::DragMoveEvent<CommitPanelResize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let max = (f32::from(event.bounds.size.width) - HISTORY_KEEP_WIDTH)
+            .min(crate::settings::GIT_COMMIT_PANEL_MAX)
+            .max(crate::settings::GIT_COMMIT_PANEL_MIN);
+        let width = f32::from(event.bounds.right() - event.event.position.x)
+            .clamp(crate::settings::GIT_COMMIT_PANEL_MIN, max);
+        self.set_panel_width(width, crate::settings::SavePolicy::Debounced, cx);
+    }
+
+    fn set_panel_width(
+        &mut self,
+        width: f32,
+        policy: crate::settings::SavePolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::settings::update(policy, cx, |settings| {
+            settings.git_commit_panel_width = width;
+        }) {
+            cx.notify();
+        }
+    }
+
+    fn render_sticky_commit_file(
+        &self,
+        detail: &CommitDetail,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (diff, _) = detail.diff.ready()?;
+        let starts: Vec<usize> = detail
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, row)| matches!(row, DetailRow::File(_)).then_some(ix))
+            .collect();
+        let ranges: Vec<std::ops::Range<usize>> = starts
+            .iter()
+            .enumerate()
+            .map(|(n, &start)| start..starts.get(n + 1).copied().unwrap_or(detail.rows.len()))
+            .collect();
+        let top = detail.list.logical_scroll_top();
+        let sticky =
+            changes::sticky_file_header(&ranges, top.item_ix, top.offset_in_item.as_f32())?;
+        let DetailRow::File(index) = *detail.rows.get(sticky.header_row)? else {
+            return None;
+        };
+        let file = diff.files.get(index)?;
+        if !detail.open_files.contains(&file.path) {
+            return None;
+        }
+        let next_y = sticky.next_header_row.and_then(|row| {
+            let bounds = detail.list.bounds_for_item(row)?;
+            Some((bounds.origin.y - detail.list.viewport_bounds().origin.y).as_f32())
+        });
+        let offset = next_y.map_or(0.0, |y| (y - COMMIT_FILE_ROW_HEIGHT).min(0.0));
+        let paint = changes::sticky_file_header_paint(theme);
+        let row = div()
+            .w_full()
+            .bg(paint.rest_bg)
+            .border_b_1()
+            .border_color(paint.border)
+            .child(self.render_commit_file(index, file, detail, true, theme, cx));
+        let row = match paint.frost_tint {
+            Some(tint) => div().w_full().bg(tint).child(row).into_any_element(),
+            None => row.into_any_element(),
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(offset))
+                .left_0()
+                .w_full()
+                .child(crate::frost::frosted(
+                    0.0,
+                    changes::STICKY_FILE_HEADER_BLUR,
+                    row,
+                ))
+                .into_any_element(),
+        )
     }
 
     fn render_detail_row(
@@ -3761,7 +3917,7 @@ impl GitTab {
         match (row, &detail.diff) {
             (DetailRow::Header, _) => self.render_commit_header(detail, &theme, cx),
             (DetailRow::File(index), Loadable::Ready((diff, _))) => {
-                self.render_commit_file(index, &diff.files[index], detail, &theme, cx)
+                self.render_commit_file(index, &diff.files[index], detail, false, &theme, cx)
             }
             (DetailRow::Diff(index, row), Loadable::Ready((diff, parsed))) => {
                 let path = &diff.files[index].path;
@@ -4040,6 +4196,9 @@ impl GitTab {
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
+                    .when(tree.is_some_and(|tree| tree.agent_active), |el| {
+                        el.child(render_agent_banner(busy_policy(cx), theme))
+                    })
                     .child(
                         div()
                             .id("git-commit-subject")
@@ -4182,6 +4341,7 @@ impl GitTab {
         index: usize,
         file: &DiffFileSummary,
         detail: &CommitDetail,
+        sticky: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4198,12 +4358,24 @@ impl GitTab {
             None => (String::new(), file.path.clone()),
         };
         let open = detail.open_files.contains(&file.path);
-        let selector = format!("git-commit-file-{index}");
+        let selector = if sticky {
+            "git-commit-sticky-file".to_string()
+        } else {
+            format!("git-commit-file-{index}")
+        };
+        let label = if file.binary {
+            format!("{}, binary", file.path)
+        } else {
+            format!("{}, +{} -{}", file.path, file.additions, file.deletions)
+        };
         let path = file.path.clone();
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
-            .h(px(26.0))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(label))
+            .aria_expanded(open)
+            .h(px(COMMIT_FILE_ROW_HEIGHT))
             .px(px(12.0))
             .flex()
             .items_center()
@@ -4335,12 +4507,10 @@ fn menu_option(
         )
 }
 
-fn render_agent_banner(policy: GitAgentBusyPolicy, theme: &Theme) -> AnyElement {
+fn render_agent_banner(policy: GitAgentBusyPolicy, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id("git-agent-active")
         .debug_selector(|| "git-agent-active".into())
-        .mx(px(12.0))
-        .mt(px(8.0))
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(6.0))
@@ -4348,7 +4518,6 @@ fn render_agent_banner(policy: GitAgentBusyPolicy, theme: &Theme) -> AnyElement 
         .text_size(px(12.0))
         .text_color(theme.warning)
         .child(agent_banner(policy))
-        .into_any_element()
 }
 
 fn button_shell(
@@ -4503,6 +4672,14 @@ fn diff_rows(file: Option<&FileDiff>, binary: bool, truncated: bool) -> Vec<Diff
     rows
 }
 
+fn hunk_header_parts(header: &str) -> (&str, &str) {
+    header
+        .strip_prefix("@@")
+        .and_then(|rest| rest.find("@@"))
+        .map(|end| header.split_at(end + 4))
+        .map_or((header, ""), |(range, context)| (range, context.trim()))
+}
+
 fn render_diff_row(
     row: DiffRow,
     file: Option<&FileDiff>,
@@ -4521,15 +4698,34 @@ fn render_diff_row(
             .into_any_element()
     };
     let content = match (row, file) {
-        (DiffRow::Hunk(h), Some(file)) => div()
-            .px(px(8.0))
-            .bg(theme.ink(0.03))
-            .font_family(theme.font_mono.clone())
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .truncate()
-            .child(SharedString::from(file.hunks[h].header.clone()))
-            .into_any_element(),
+        (DiffRow::Hunk(h), Some(file)) => {
+            let header = &file.hunks[h].header;
+            let (range, context) = hunk_header_parts(header);
+            div()
+                .px(px(8.0))
+                .flex()
+                .gap(px(8.0))
+                .bg(theme.ink(0.03))
+                .font_family(theme.font_mono.clone())
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(
+                    div()
+                        .flex_none()
+                        .child(SharedString::from(range.to_owned())),
+                )
+                .when(!context.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(context.to_owned())),
+                    )
+                })
+                .into_any_element()
+        }
         (DiffRow::Line(h, l), Some(file)) => changes::diff_line_row(
             &file.hunks[h].lines[l],
             &[],
@@ -4622,8 +4818,18 @@ impl Render for GitTab {
                 .child(self.history.clone())
                 .into_any_element(),
         };
-        let main = div().flex_1().min_w_0().min_h_0().child(main);
-        let body = div().flex_1().min_h_0().flex().flex_row();
+        let main = div()
+            .flex_1()
+            .min_w(px(HISTORY_KEEP_WIDTH))
+            .min_h_0()
+            .overflow_hidden()
+            .child(main);
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .on_drag_move(cx.listener(Self::resize_panel));
         let body = match &self.detail {
             Some(detail) if self.compact => {
                 body.child(self.render_detail_panel(detail, &theme, cx))
@@ -7378,6 +7584,33 @@ mod tests {
                 "rows far below the viewport are never laid out"
             );
         });
+        assert!(cx.debug_bounds("git-commit-sticky-file").is_none());
+        tab.update(cx, |tab, cx| {
+            tab.detail
+                .as_ref()
+                .unwrap()
+                .list
+                .scroll_to(gpui::ListOffset {
+                    item_ix: 40,
+                    offset_in_item: px(0.0),
+                });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("git-commit-sticky-file").is_some(),
+            "the open file's row stays pinned while its diff scrolls"
+        );
+    }
+
+    #[test]
+    fn hunk_headers_split_the_range_from_the_function_context() {
+        assert_eq!(
+            hunk_header_parts("@@ -10,7 +10,8 @@ fn render(&mut self)"),
+            ("@@ -10,7 +10,8 @@", "fn render(&mut self)")
+        );
+        assert_eq!(hunk_header_parts("@@ -0,0 +1 @@"), ("@@ -0,0 +1 @@", ""));
+        assert_eq!(hunk_header_parts("not a hunk"), ("not a hunk", ""));
     }
 
     #[gpui::test]

@@ -4218,6 +4218,8 @@ impl GitHistory {
             };
             let button = div()
                 .id("history-load-older")
+                .role(gpui::Role::Button)
+                .aria_label(label)
                 .h(px(28.0))
                 .px(px(11.0))
                 .flex()
@@ -4345,6 +4347,13 @@ impl GitHistory {
 
         let row = div()
             .id(("history-row", index))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "Commit {}: {}",
+                &sha[..sha.len().min(7)],
+                commit_subject
+            )))
+            .aria_selected(selected)
             .h(px(HISTORY_ROW_HEIGHT))
             .w_full()
             .flex_none()

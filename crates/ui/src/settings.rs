@@ -52,6 +52,10 @@ pub const FILES_PANEL_DEFAULT: f32 = 286.0;
 pub const FILES_PANEL_MIN: f32 = 220.0;
 pub const FILES_PANEL_MAX: f32 = 440.0;
 
+pub const GIT_COMMIT_PANEL_DEFAULT: f32 = 360.0;
+pub const GIT_COMMIT_PANEL_MIN: f32 = 300.0;
+pub const GIT_COMMIT_PANEL_MAX: f32 = 1200.0;
+
 /// Surface pane floor and default (px). Runtime sizing also reserves space
 /// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
@@ -616,6 +620,13 @@ pub fn device_float_frame(cx: &App) -> Option<crate::device_panel::float::Device
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .is_some_and(|store| store.current.compact_model_picker)
+}
+
+pub fn git_commit_panel_width(cx: &App) -> f32 {
+    cx.try_global::<SettingsStore>()
+        .map_or(GIT_COMMIT_PANEL_DEFAULT, |store| {
+            store.current.git_commit_panel_width
+        })
 }
 
 pub fn git_agent_busy_policy(cx: &App) -> GitAgentBusyPolicy {
@@ -1501,6 +1512,8 @@ pub struct UiSettings {
     pub git_history_column_order: GitHistoryColumnOrder,
     /// How authors are represented in Git History rows.
     pub git_history_author_display: GitHistoryAuthorDisplay,
+    /// Width of the Git page's commit panel, dragged from its left edge.
+    pub git_commit_panel_width: f32,
     /// Interface and conversational-prose family. Device-local by design.
     pub ui_font_family: crate::typography::UiFontFamily,
     /// Base size for interface and conversational prose.
@@ -1665,6 +1678,7 @@ impl Default for UiSettings {
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_column_order: GitHistoryColumnOrder::default(),
+            git_commit_panel_width: GIT_COMMIT_PANEL_DEFAULT,
             git_history_author_display: GitHistoryAuthorDisplay::default(),
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
@@ -2338,6 +2352,7 @@ impl UiSettings {
             git_history_column_widths,
             git_history_column_order,
             git_history_author_display,
+            git_commit_panel_width,
             ui_font_family,
             ui_font_size,
             terminal_font_family,
@@ -2522,6 +2537,12 @@ impl UiSettings {
         );
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
+        self.git_commit_panel_width = clamp_or(
+            self.git_commit_panel_width,
+            GIT_COMMIT_PANEL_MIN,
+            GIT_COMMIT_PANEL_MAX,
+            GIT_COMMIT_PANEL_DEFAULT,
+        );
         self.chat_background = self.chat_background.clamped();
         self.terminal_background.custom = self.terminal_background.custom.clamped();
         self.frost = self.frost.clamped();
@@ -3815,6 +3836,7 @@ mod tests {
                 GitHistoryColumn::Date,
             ]),
             git_history_author_display: GitHistoryAuthorDisplay::Name,
+            git_commit_panel_width: 540.0,
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
             theme_selection: zeron_theme::ThemeSelection {
