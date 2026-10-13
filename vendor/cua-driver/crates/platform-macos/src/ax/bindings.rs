@@ -941,7 +941,10 @@ pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool
         // fallback, and don't claim enablement happened.
         return false;
     }
-    set_bool_attr_true(app_element, "AXEnhancedUserInterface") == kAXErrorSuccess
+    let written = set_bool_attr_true(app_element, "AXEnhancedUserInterface");
+    // Chromium 154 applies the write but answers kAXErrorNotImplemented.
+    written == kAXErrorSuccess
+        || copy_bool_attr(app_element, "AXEnhancedUserInterface") == Some(true)
 }
 
 /// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.

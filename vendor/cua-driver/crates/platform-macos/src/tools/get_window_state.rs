@@ -933,11 +933,15 @@ pub(crate) fn build_elements_array_with_token(
                 .clone()
                 .or_else(|| node.description.clone())
                 .or_else(|| node.placeholder.clone())
-                // A text control's value is typed content; naming it by that renumbers it per edit.
+                // A text control or select's value is the user's choice; naming it by that renumbers it per edit.
                 .or_else(|| {
                     (!matches!(
                         node.role.as_str(),
-                        "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
+                        "AXTextField"
+                            | "AXTextArea"
+                            | "AXSearchField"
+                            | "AXComboBox"
+                            | "AXPopUpButton"
                     ))
                     .then(|| node.value.clone())
                     .flatten()
@@ -1636,6 +1640,11 @@ mod tests {
         let elements = build_elements_array_with_token(&nodes, None);
         assert!(elements[0].get("label").is_none());
         assert_eq!(elements[0]["value"], "Ada Lovelace");
+
+        let mut nodes = vec![node(Some(0), "AXPopUpButton", None, 0, None, None, vec![])];
+        nodes[0].value = Some("Cherry".into());
+        let elements = build_elements_array_with_token(&nodes, None);
+        assert!(elements[0].get("label").is_none());
     }
 
     #[test]

@@ -20,9 +20,10 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_action_names, copy_binary_attr, copy_children, copy_element_attr, copy_number_attr,
-    copy_string_attr, copy_value_kind, is_attribute_settable, kAXErrorSuccess, perform_action,
-    set_bool_attr, set_number_attr, set_string_attr, AXError, AXUIElementRef, CfValueKind,
+    copy_action_names, copy_binary_attr, copy_bool_attr, copy_children, copy_element_attr,
+    copy_number_attr, copy_string_attr, copy_value_kind, is_attribute_settable, kAXErrorSuccess,
+    perform_action, set_bool_attr, set_number_attr, set_string_attr, AXError, AXUIElementRef,
+    CfValueKind,
 };
 use crate::focus_guard;
 use crate::input::ax_actions::{action_failure_result, AxActionFailure};
@@ -986,6 +987,19 @@ fn select_popup_option_in(
     element_title: &str,
     opened: bool,
 ) -> anyhow::Result<(String, Option<bool>)> {
+    let current = unsafe { copy_string_attr(element, "AXValue") }.unwrap_or_default();
+    if !opened && current.trim().to_lowercase() == value.trim().to_lowercase() {
+        return Ok((
+            format!(
+                "✅ AXPopUpButton [{element_index}] '{element_title}' already shows '{current}'."
+            ),
+            Some(true),
+        ));
+    }
+    // Pressing a retained item of a closed Chromium <select> menu clears its selection.
+    let closed_web_menu = !opened
+        && unsafe { copy_bool_attr(element, "AXExpanded") } == Some(false)
+        && unsafe { crate::ax::tree::has_web_area_ancestor(element) };
     let children = unsafe { copy_children(element) };
     let (options, owned) = flatten_popup_options(&children, |child| {
         (unsafe { copy_string_attr(child, "AXRole") }.as_deref() == Some("AXMenu"))
@@ -1005,7 +1019,9 @@ fn select_popup_option_in(
     }
     // Keep every retained child alive through the action and release it on all
     // ordinary outcomes, including a preflight refusal or an uncertain AX error.
-    let result = if options.is_empty() {
+    let result = if closed_web_menu {
+        Ok((String::new(), None))
+    } else if options.is_empty() {
         Err(AxActionFailure::refused(format!(
             "AXPopUpButton [{element_index}] '{element_title}' has no exact AX child; \
              no mutation was submitted. An untargeted browser-document fallback is forbidden."
@@ -1058,7 +1074,8 @@ fn select_popup_option_in(
         crate::input::ax_actions::perform_ax_action(element as usize, "press")?;
         for _ in 0..12 {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            if popup_menu_open(element) {
+            let expanded = unsafe { copy_bool_attr(element, "AXExpanded") };
+            if expanded == Some(true) || (expanded.is_none() && popup_menu_open(element)) {
                 break;
             }
         }

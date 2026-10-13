@@ -18,13 +18,13 @@ use std::sync::{Mutex, OnceLock};
 use core_foundation::base::{CFRelease, CFTypeRef};
 
 use super::bindings::{
-    copy_children, copy_element_attr, copy_string_attr, enable_chromium_accessibility,
-    AXUIElementRef,
+    copy_action_names, copy_children, copy_element_attr, copy_string_attr,
+    enable_chromium_accessibility, AXUIElementRef,
 };
 
 /// How long a freshly-enabled Chromium/Electron app may take to build its
 /// web-content AX tree before we read it anyway. Paid at most once per process
-/// lifetime, and only until the focused window's page has content.
+/// lifetime, and only until the focused window's page controls can be pressed.
 const CHROMIUM_SETTLE_SECONDS: f64 = 3.0;
 const CHROMIUM_SETTLE_STEP_SECONDS: f64 = 0.1;
 
@@ -84,7 +84,7 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
     }
     if enable_chromium_accessibility(app_element) {
         let mut waited = 0.0;
-        while waited < CHROMIUM_SETTLE_SECONDS && !focused_page_has_content(app_element) {
+        while waited < CHROMIUM_SETTLE_SECONDS && !focused_page_controls_ready(app_element) {
             crate::permissions::panel::pump_run_loop_briefly(CHROMIUM_SETTLE_STEP_SECONDS);
             waited += CHROMIUM_SETTLE_STEP_SECONDS;
         }
@@ -94,22 +94,36 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
     }
 }
 
-unsafe fn focused_page_has_content(app_element: AXUIElementRef) -> bool {
+// Chromium attaches AXPress to page controls about two seconds after the page tree appears.
+unsafe fn focused_page_controls_ready(app_element: AXUIElementRef) -> bool {
     let Some(window) = copy_element_attr(app_element, "AXFocusedWindow") else {
         return false;
     };
-    let mut queue = vec![(window, 0usize)];
+    let mut queue = vec![(window, 0usize, false)];
+    let mut visited = 0usize;
     let mut found = false;
-    while let Some((node, depth)) = queue.pop() {
-        if !found {
+    while let Some((node, depth, in_page)) = queue.pop() {
+        visited += 1;
+        if !found && visited < 2_000 {
+            let role = copy_string_attr(node, "AXRole");
+            let in_page = in_page || role.as_deref() == Some("AXWebArea");
+            found = in_page
+                && role.as_deref().is_some_and(|role| {
+                    matches!(
+                        role,
+                        "AXButton" | "AXLink" | "AXTextField" | "AXTextArea" | "AXComboBox"
+                    )
+                })
+                && copy_action_names(node)
+                    .iter()
+                    .any(|action| action == "AXPress");
             let children = copy_children(node);
-            if copy_string_attr(node, "AXRole").as_deref() == Some("AXWebArea") {
-                found = !children.is_empty();
-                for child in children {
-                    CFRelease(child as CFTypeRef);
-                }
-            } else if depth < 12 {
-                queue.extend(children.into_iter().map(|child| (child, depth + 1)));
+            if !found && depth < 40 {
+                queue.extend(
+                    children
+                        .into_iter()
+                        .map(|child| (child, depth + 1, in_page)),
+                );
             } else {
                 for child in children {
                     CFRelease(child as CFTypeRef);
