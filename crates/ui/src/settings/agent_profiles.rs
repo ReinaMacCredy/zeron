@@ -89,7 +89,6 @@ pub struct AgentProfilesPage {
     system_prompt: Loadable<String>,
     system_prompt_input: Entity<ComposerInput>,
     system_prompt_task: Option<Task<()>>,
-    code_review: Entity<crate::settings::code_review::CodeReviewCard>,
     _state: Subscription,
     _changed: Subscription,
     _system_prompt_events: Subscription,
@@ -112,10 +111,6 @@ impl AgentProfilesPage {
             &system_prompt_input,
             |_: &mut Self, _, _: &ComposerInputEvent, cx| cx.notify(),
         );
-        let code_review = {
-            let state = state.clone();
-            cx.new(|cx| crate::settings::code_review::CodeReviewCard::new(state, cx))
-        };
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
@@ -146,7 +141,6 @@ impl AgentProfilesPage {
             system_prompt: Loadable::Idle,
             system_prompt_input,
             system_prompt_task: None,
-            code_review,
             _state: observer,
             _changed: changed,
             _system_prompt_events: system_prompt_events,
@@ -1524,8 +1518,6 @@ impl Render for AgentProfilesPage {
                                     )
                                 })
                                 .child(body)
-                                .child(widgets::section_label(&theme, "Code review").mt(px(28.0)))
-                                .child(self.code_review.clone())
                                 .child(self.render_system_prompt(&theme, cx)),
                         ),
                 )

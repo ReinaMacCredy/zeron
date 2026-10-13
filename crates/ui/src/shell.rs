@@ -574,6 +574,7 @@ pub enum SettingsSection {
     Harnesses,
     Tools,
     AgentProfiles,
+    CodeReview,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
@@ -594,7 +595,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 16] = [
+    pub const ALL: [SettingsSection; 17] = [
         SettingsSection::General,
         SettingsSection::Home,
         SettingsSection::Appearance,
@@ -604,6 +605,7 @@ impl SettingsSection {
         SettingsSection::Harnesses,
         SettingsSection::Tools,
         SettingsSection::AgentProfiles,
+        SettingsSection::CodeReview,
         SettingsSection::Devices,
         SettingsSection::Files,
         SettingsSection::Appshots,
@@ -646,6 +648,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "providers",
             SettingsSection::Tools => "tools",
             SettingsSection::AgentProfiles => "agent-profiles",
+            SettingsSection::CodeReview => "code-review",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
@@ -670,6 +673,7 @@ impl SettingsSection {
             "agents" => SettingsSection::Agents,
             "tools" => SettingsSection::Tools,
             "agent-profiles" | "profiles" => SettingsSection::AgentProfiles,
+            "code-review" => SettingsSection::CodeReview,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
             "notifications" => SettingsSection::Notifications,
@@ -700,6 +704,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Tools => "Tools",
             SettingsSection::AgentProfiles => "Agent profiles",
+            SettingsSection::CodeReview => "Code review",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
@@ -727,6 +732,7 @@ impl SettingsSection {
             SettingsSection::Agents => &["account", "login", "usage", "provider"],
             SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
             SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
+            SettingsSection::CodeReview => &["review", "reviewer", "findings", "model"],
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
@@ -2416,6 +2422,7 @@ pub struct Shell {
         std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     devices_page: Option<Entity<DevicesPage>>,
     agent_profiles_page: Option<Entity<crate::settings::agent_profiles::AgentProfilesPage>>,
+    code_review_page: Option<Entity<crate::settings::code_review::CodeReviewPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
     home_settings_page: Option<Entity<HomeSettingsPage>>,
@@ -3064,6 +3071,7 @@ impl Shell {
             pull_request_cache: Default::default(),
             devices_page: None,
             agent_profiles_page: None,
+            code_review_page: None,
             archived_page: None,
             source_control_page: None,
             home_settings_page: None,
@@ -7003,6 +7011,15 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::CodeReview => {
+                let state = self.state.clone();
+                self.code_review_page
+                    .get_or_insert_with(|| {
+                        cx.new(|cx| crate::settings::code_review::CodeReviewPage::new(state, cx))
+                    })
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
                     let state = self.state.clone();
@@ -9467,6 +9484,7 @@ impl Shell {
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Tools => icons::LUCIDE_HAMMER,
             SettingsSection::AgentProfiles => icons::BOT,
+            SettingsSection::CodeReview => icons::CHECKLIST,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,

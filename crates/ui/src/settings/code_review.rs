@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 
-use gpui::{AnyElement, Context, Entity, Subscription, Task, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, Subscription, Task, Window, div, prelude::*, px};
 use zeron_proto::{HarnessId, Model};
 
-use crate::popover::Loadable;
+use crate::popover::{self, Loadable};
 use crate::review::{ReviewerChoice, ReviewerOptions};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-pub struct CodeReviewCard {
+pub struct CodeReviewPage {
     state: Entity<AppState>,
+    scroll: widgets::PageScroll,
     options: Loadable<ReviewerOptions>,
     models: HashMap<HarnessId, Vec<Model>>,
     reviewer_select: widgets::SelectState,
@@ -20,7 +21,7 @@ pub struct CodeReviewCard {
     _state: Subscription,
 }
 
-impl CodeReviewCard {
+impl CodeReviewPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let state_sub = cx.observe(&state, |this: &mut Self, _, cx| {
             if matches!(this.options, Loadable::Idle) {
@@ -29,6 +30,7 @@ impl CodeReviewCard {
         });
         let mut card = Self {
             state,
+            scroll: widgets::PageScroll::default(),
             options: Loadable::Idle,
             models: HashMap::new(),
             reviewer_select: widgets::SelectState::default(),
@@ -85,6 +87,12 @@ impl CodeReviewCard {
         cx.notify();
     }
 
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
     fn row(theme: &Theme, first: bool, title: &str, description: String) -> gpui::Div {
         widgets::card_row(theme, first).child(
             div()
@@ -99,10 +107,10 @@ impl CodeReviewCard {
     }
 }
 
-impl Render for CodeReviewCard {
-    fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).for_settings_surface();
-        let card = widgets::section_card(&theme).mt(px(8.0));
+impl CodeReviewPage {
+    fn render_card(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = theme.clone();
+        let card = widgets::section_card(&theme).mt(px(0.0));
         let Some(options) = self.options.ready().cloned() else {
             return card.child(
                 widgets::card_row(&theme, true).child(div().text_color(theme.text_muted).child(
@@ -134,7 +142,14 @@ impl Render for CodeReviewCard {
         )
         .options(
             choices.iter().map(|choice| {
-                let option = widgets::SelectOption::new(options.label(choice));
+                let (mark, tint) = options.brand(choice, None);
+                let color = tint.unwrap_or(theme.text_muted);
+                let option = widgets::SelectOption::new(options.label(choice)).leading(move || {
+                    crate::icons::icon(mark)
+                        .size(px(13.0))
+                        .text_color(color)
+                        .into_any_element()
+                });
                 match choice {
                     ReviewerChoice::Auto => option.detail(auto.clone()),
                     ReviewerChoice::Profile { .. } => option.detail("Profile"),
@@ -187,7 +202,7 @@ impl Render for CodeReviewCard {
                         &theme,
                         false,
                         "Model",
-                        "The model the reviewer runs on.".to_string(),
+                        "Shown when the reviewer is an agent.".to_string(),
                     )
                     .child(select),
                 )
@@ -198,13 +213,70 @@ impl Render for CodeReviewCard {
             Self::row(
                 &theme,
                 true,
-                "Code reviewer",
-                "Who reviews changes from the composer's Review button. Auto prefers a profile \
-                 named reviewer, then the other agent family."
+                "Reviewer",
+                "Auto picks a profile named reviewer, else the other agent family from the \
+                 chat's."
                     .to_string(),
             )
             .child(reviewer_select),
         )
         .children(model_row)
+    }
+}
+
+impl popover::ScrollRailHost for CodeReviewPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
+}
+
+impl Render for CodeReviewPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).for_settings_surface();
+        let card = self.render_card(&theme, cx);
+        let scrollbar = popover::rail(self, "code-review-scrollbar", &theme, cx);
+        div()
+            .id("code-review-host")
+            .relative()
+            .size_full()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .child(
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("code-review-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .child(
+                            widgets::page_column()
+                                .child(widgets::page_header(&theme, "Code review", None))
+                                .child(widgets::page_subtitle(
+                                    &theme,
+                                    "Who reviews changes when you press Review in the composer.",
+                                ))
+                                .child(card.mt(px(16.0)))
+                                .child(
+                                    div()
+                                        .mt(px(10.0))
+                                        .px(px(8.0))
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(
+                                            "A pick in the Review button's menu applies to that \
+                                             chat only and overrides this default.",
+                                        ),
+                                ),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
+            )
+            .children(scrollbar)
     }
 }
