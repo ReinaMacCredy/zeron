@@ -333,15 +333,34 @@ impl ComputerTools {
                 .as_ref()
                 .map(|observed| observed.node.frame.clone())
         };
-        // Only the same element may take over the ref: a same-label control in
-        // another place (a tab's Close once a popup's Close is gone) must not.
-        let fresh = listing.ref_index.iter().find(|candidate| {
+        // Only the same element may take over the ref: a moved control keeps it
+        // only when its label is unique, so a same-label control in another
+        // place (a tab's Close once a popup's Close is gone) never does.
+        let same = |candidate: &&ComputerActionableElementRef| {
             candidate.role == entry.role
                 && candidate.label == entry.label
-                && frame(candidate).is_some()
-                && frame(candidate) == frame(&entry)
-        });
-        match fresh.filter(|fresh| fresh.observed.is_some()) {
+                && candidate.observed.is_some()
+        };
+        let fresh = listing
+            .ref_index
+            .iter()
+            .filter(same)
+            .find(|candidate| frame(candidate).is_some() && frame(candidate) == frame(&entry))
+            .or_else(|| {
+                let mut labelled = listing.ref_index.iter().filter(same);
+                labelled
+                    .next()
+                    .filter(|candidate| {
+                        labelled.next().is_none() && candidate.ordinal == entry.ordinal
+                    })
+                    .filter(|candidate| {
+                        !self
+                            .state()
+                            .elements
+                            .is_moved_duplicate(thread_id, element_ref, candidate)
+                    })
+            });
+        match fresh {
             Some(fresh) => {
                 let fresh = fresh.clone();
                 self.state()

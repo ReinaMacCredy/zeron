@@ -178,6 +178,18 @@ impl ElementState {
         }
     }
 
+    pub(super) fn is_moved_duplicate(
+        &self,
+        thread_id: &str,
+        element_ref: u64,
+        item: &ComputerActionableElementRef,
+    ) -> bool {
+        match (self.ref_tables.get(thread_id), usize::try_from(element_ref)) {
+            (Some(table), Ok(element_ref)) => moved_duplicate(table, element_ref, item),
+            _ => true,
+        }
+    }
+
     pub(super) fn lookup_ref(&self, thread_id: &str, element_ref: u64) -> RefLookup {
         let Some(table) = self.ref_tables.get(thread_id) else {
             return RefLookup::NoListing;

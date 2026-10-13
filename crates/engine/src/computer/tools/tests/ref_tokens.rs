@@ -314,3 +314,64 @@ async fn the_third_same_click_on_an_unchanged_page_is_still_refused() {
     assert_eq!(f.named("click").len(), 2);
     manager.dispose().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_moved_unique_ref_rebinds_after_an_internal_reread() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    page(&f, 10);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let element_ref = listed(&tools, &context).await;
+    f.knobs().elements[5]["frame"]["y"] = json!(80);
+    *f.knobs().token_generation.as_mut().unwrap() += 1;
+    let outcome = click(&tools, &context, element_ref).await;
+    assert_eq!(outcome["error"], json!(false), "{outcome}");
+    let clicks = f.named("click");
+    assert_eq!(clicks.len(), 2);
+    assert!(
+        clicks[1].args["element_token"]
+            .as_str()
+            .is_some_and(|token| token.starts_with("b5#")),
+        "{:?}",
+        clicks[1].args
+    );
+    manager.dispose().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_moved_ref_whose_label_is_duplicated_still_refuses() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    let close = |token: &str, y: i64| {
+        json!({
+            "role": "AXButton",
+            "label": "Close",
+            "frame": { "x": -290, "y": y, "width": 40, "height": 10 },
+            "element_token": token,
+            "actions": ["AXPress"],
+        })
+    };
+    f.set_elements(vec![close("first-close", 30), close("second-close", 60)]);
+    f.knobs().token_generation = Some(0);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let listing = tools
+        .call(
+            "computer_get_state",
+            args(json!({ "window_id": WINDOW })),
+            &context,
+        )
+        .await;
+    let first = ref_for(&result_json(&listing), "Close");
+    f.knobs().elements[0]["frame"]["y"] = json!(90);
+    *f.knobs().token_generation.as_mut().unwrap() += 1;
+    let outcome = click(&tools, &context, first).await;
+    assert_eq!(outcome["error"], json!(true), "{outcome}");
+    assert_eq!(outcome["body"]["error"], json!("stale_element_token"));
+    manager.dispose().await;
+}
