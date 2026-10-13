@@ -73,6 +73,7 @@ pub mod pull_requests;
 pub mod queue;
 pub mod quotes;
 pub mod rail;
+pub mod review;
 mod roll_text;
 pub mod running_pill;
 mod session_stats;
