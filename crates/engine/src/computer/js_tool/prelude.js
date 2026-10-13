@@ -212,6 +212,8 @@
     inner.x + inner.width <= outer.x + outer.width &&
     inner.y + inner.height <= outer.y + outer.height;
 
+  const lastImages = {};
+
   class App {
     constructor(window, appName) {
       this.windowId = window.id;
@@ -254,9 +256,10 @@
         this.screenshotId = shot.data.screenshot.screenshotId;
       const first = shot.images[0];
       const unchanged = shot.data && shot.data.screenshotUnchanged;
-      if (!first && !(unchanged && this.lastImage)) throw new Error("No screenshot was returned for " + this.appName + ".");
-      const image = first ? new ZeronImage(first.mimeType, first.data) : this.lastImage;
-      this.lastImage = image;
+      const last = lastImages[this.windowId];
+      if (!first && !(unchanged && last)) throw new Error("No screenshot was returned for " + this.appName + ".");
+      const image = first ? new ZeronImage(first.mimeType, first.data) : last;
+      lastImages[this.windowId] = image;
       if (!options || options.emit !== false) emitImage(image);
       return image;
     }
@@ -355,21 +358,19 @@
       action("paste", this.appName, text);
     }
 
-    pressKey(key) {
-      call("computer_press_key", {
-        window_id: this.windowId,
-        key: normalizeKey(key),
-        include_screenshot: false,
-      });
+    pressKey(elementIndex, key) {
+      if (arguments.length < 2) [elementIndex, key] = [null, elementIndex];
+      const args = { window_id: this.windowId, key: normalizeKey(key), include_screenshot: false };
+      if (elementIndex !== null && elementIndex !== undefined) args.ref = elementIndex;
+      call("computer_press_key", args);
       action("press_key", this.appName, key);
     }
 
-    typeText(text) {
-      const { data } = call("computer_type_text", {
-        window_id: this.windowId,
-        text: String(text),
-        include_screenshot: false,
-      });
+    typeText(elementIndex, text) {
+      if (arguments.length < 2) [elementIndex, text] = [null, elementIndex];
+      const args = { window_id: this.windowId, text: String(text), include_screenshot: false };
+      if (elementIndex !== null && elementIndex !== undefined) args.ref = elementIndex;
+      const { data } = call("computer_type_text", args);
       action("type_text", this.appName, text);
       if (data && data.warning) write("Warning: " + data.warning);
     }

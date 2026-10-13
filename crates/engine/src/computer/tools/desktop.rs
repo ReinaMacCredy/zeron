@@ -323,6 +323,7 @@ impl ComputerTools {
             &ComputerActionableElementFilter {
                 window_id: Some(window_id),
                 label_contains: None,
+                any_role: true,
             },
             self.native_identity(),
             TREE_REF_LIMIT,
@@ -550,6 +551,7 @@ impl ComputerTools {
             &ComputerActionableElementFilter {
                 window_id: Some(window_id.to_owned()),
                 label_contains: None,
+                any_role: true,
             },
             self.native_identity(),
             TREE_REF_LIMIT,
@@ -645,6 +647,7 @@ impl ComputerTools {
                 &ComputerActionableElementFilter {
                     window_id: window_id.clone(),
                     label_contains: label_contains.clone(),
+                    any_role: false,
                 },
                 self.native_identity(),
             )
@@ -1488,6 +1491,7 @@ impl ComputerTools {
                     &ComputerActionableElementFilter {
                         window_id: Some(window_id),
                         label_contains: None,
+                        any_role: false,
                     },
                     self.native_identity(),
                 );

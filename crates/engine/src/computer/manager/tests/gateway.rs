@@ -57,6 +57,7 @@ async fn observe(f: &Fixture) -> ComputerActionableElements {
         &ComputerActionableElementFilter {
             window_id: Some(WINDOW.to_owned()),
             label_contains: None,
+            any_role: false,
         },
         |node| f.backend.native_element_identity(node),
     )

@@ -5,7 +5,7 @@ use zeron_proto::computer::{ComputerAxLine, ComputerAxTree, ComputerUiNode, Comp
 use crate::computer::ui_tree_targeting::ComputerActionableElements;
 use crate::computer::utf8_truncation::clamp_text_to_length;
 
-pub(super) const TREE_REF_LIMIT: usize = 1024;
+pub(super) const TREE_REF_LIMIT: usize = 2048;
 const TREE_TEXT_MAX_CHARS: usize = 40_000;
 const TREE_VALUE_MAX_CHARS: usize = 1_000;
 const QUIET_ACTIONS: &[&str] = &[
@@ -148,21 +148,15 @@ pub(super) fn build_tree(
 
 pub(super) fn render_full(tree: &TreeSnapshot) -> String {
     let mut out = tree.header.clone();
-    let mut shown = 0;
-    for line in &tree.lines {
-        let row = format!("\n{}{}", "\t".repeat(line.depth), line.numbered());
-        if out.len() + row.len() > TREE_TEXT_MAX_CHARS {
-            break;
-        }
-        out.push_str(&row);
-        shown += 1;
-    }
-    if shown < tree.lines.len() {
-        out.push_str(&format!(
-            "\n… {} more lines not shown: the tree exceeds {TREE_TEXT_MAX_CHARS} characters. Narrow with label_contains on the elements listing.",
-            tree.lines.len() - shown
-        ));
-    }
+    let rows: Vec<(bool, String)> = tree
+        .lines
+        .iter()
+        .map(|line| {
+            let row = format!("\n{}{}", "\t".repeat(line.depth), line.numbered());
+            (line.element_ref.is_some(), row)
+        })
+        .collect();
+    push_within_budget(&mut out, &rows);
     if tree.truncated {
         out.push_str(
             "\nThe accessibility walk stopped early; elements past this point are missing.",
@@ -190,7 +184,7 @@ pub(super) fn render_diff(previous: &TreeSnapshot, current: &TreeSnapshot) -> St
     }
     let mut rows = Vec::new();
     if previous.header != current.header {
-        rows.push(format!("~ {}", current.header));
+        rows.push((true, format!("~ {}", current.header)));
     }
     let current_texts: HashSet<(usize, &str)> = current
         .lines
@@ -207,20 +201,21 @@ pub(super) fn render_diff(previous: &TreeSnapshot, current: &TreeSnapshot) -> St
             *count -= 1;
             continue;
         }
+        let numbered = line.element_ref.is_some();
         match before.get(line.identity.as_str()) {
-            None => rows.push(format!("+ {}", line.numbered())),
+            None => rows.push((numbered, format!("+ {}", line.numbered()))),
             Some(text)
                 if *text != line.text
                     && line.element_ref.is_none()
                     && current_texts.contains(&(line.depth, *text)) =>
             {
-                rows.push(format!("+ {}", line.numbered()));
+                rows.push((numbered, format!("+ {}", line.numbered())));
             }
             Some(text) if *text != line.text => {
                 if line.element_ref.is_none() {
                     changed_unnumbered += 1;
                 }
-                rows.push(format!("~ {}", line.numbered()));
+                rows.push((numbered, format!("~ {}", line.numbered())));
             }
             Some(_) => {}
         }
@@ -254,23 +249,11 @@ pub(super) fn render_diff(previous: &TreeSnapshot, current: &TreeSnapshot) -> St
         "The following is a diff from the previous accessibility tree for {} with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.",
         current.window
     );
-    let mut length = out.len();
-    let mut shown = 0;
-    for row in &rows {
-        if length + row.len() + 1 > TREE_TEXT_MAX_CHARS {
-            break;
-        }
-        out.push('\n');
-        out.push_str(row);
-        length += row.len() + 1;
-        shown += 1;
-    }
-    if shown < rows.len() {
-        out.push_str(&format!(
-            "\n… {} more changed lines not shown; pass full:true for the whole tree.",
-            rows.len() - shown
-        ));
-    }
+    let rows: Vec<(bool, String)> = rows
+        .into_iter()
+        .map(|(numbered, row)| (numbered, format!("\n{row}")))
+        .collect();
+    push_within_budget(&mut out, &rows);
     if !removed_refs.is_empty() {
         out.push_str(&format!("\nRemoved: {}", id_ranges(&mut removed_refs)));
     }
@@ -286,6 +269,31 @@ pub(super) fn render_diff(previous: &TreeSnapshot, current: &TreeSnapshot) -> St
         push_footer(&mut out, current);
     }
     out
+}
+
+fn push_within_budget(out: &mut String, rows: &[(bool, String)]) {
+    let numbered: usize = rows
+        .iter()
+        .filter(|(numbered, _)| *numbered)
+        .map(|(_, row)| row.len())
+        .sum();
+    let mut room = TREE_TEXT_MAX_CHARS.saturating_sub(out.len() + numbered);
+    let mut omitted = 0;
+    for (numbered, row) in rows {
+        if !numbered {
+            if row.len() > room {
+                omitted += 1;
+                continue;
+            }
+            room -= row.len();
+        }
+        out.push_str(row);
+    }
+    if omitted > 0 {
+        out.push_str(&format!(
+            "\n… {omitted} unnumbered lines omitted to stay near {TREE_TEXT_MAX_CHARS} characters; every numbered element is listed."
+        ));
+    }
 }
 
 fn push_footer(out: &mut String, tree: &TreeSnapshot) {

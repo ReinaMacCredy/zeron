@@ -533,6 +533,7 @@ pub struct ComputerActionableElements {
 pub struct ComputerActionableElementFilter {
     pub window_id: Option<String>,
     pub label_contains: Option<String>,
+    pub any_role: bool,
 }
 
 pub fn actionable_elements(
@@ -564,7 +565,7 @@ pub fn actionable_elements_limited(
             digest.source_incomplete = true;
         }
         let label = matchable_label(node);
-        let collectible = ACTIONABLE_ROLES.contains(&node.role.as_str())
+        let collectible = (filter.any_role || ACTIONABLE_ROLES.contains(&node.role.as_str()))
             && node.on_screen
             && node.window_id.is_some()
             && !label.is_empty()
@@ -1310,6 +1311,7 @@ mod tests {
             &ComputerActionableElementFilter {
                 window_id: Some("browser".into()),
                 label_contains: Some("FIRST NAME *".into()),
+                ..ComputerActionableElementFilter::default()
             },
             |_| None,
         );

@@ -28,7 +28,9 @@ interface App {
   performSecondaryAction(elementIndex: number, action: string): Promise<void>;
   paste(text: string, options?: { format?: "text" | "md" | "html" }): Promise<void>;
   pressKey(key: string): Promise<void>;
+  pressKey(elementIndex: number | null, key: string): Promise<void>;
   typeText(text: string): Promise<void>;
+  typeText(elementIndex: number | null, text: string): Promise<void>;
 }
 
 interface Tab {
@@ -96,7 +98,9 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 - `performSecondaryAction` takes only an action listed for that element in the state.
 - `(expanded)` and `(collapsed)` show whether a menu, row or disclosure is open. Click such an element like any button.
 - A page alert or another dialog appears in the state of the window it covers, with a `Dialog open over this window` line. Press its buttons by element number. Keys wait until it closes. Close every dialog your actions opened.
-- `typeText` writes into the focused field and throws if that field is still empty afterwards. Click the field first, then check its value in the next state.
+- `typeText(elementIndex, text)` focuses that field and adds the text to it; `typeText(text)` writes into the focused field. Either throws if the field is still empty afterwards; check its value in the next state.
+- `pressKey(elementIndex, key)` focuses that element first, then sends the key, for example `pressKey(combobox, "Down")` then `pressKey(combobox, "Return")` to choose a suggestion.
+- Options of custom dropdowns and listboxes are numbered like buttons: open the dropdown, then click the option's number.
 - `getAXState()` and `getScreenshot()` already wait for the UI to settle, so do not add sleeps.
 
 ## When the user takes over

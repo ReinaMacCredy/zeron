@@ -73,6 +73,9 @@ pub const CUA_SHIELD_TIMEOUT_MS: u64 = 5_000;
 pub const CUA_BROWSER_STILL_TIMEOUT_MS: u64 = 20_000;
 pub const CUA_STILL_FRAME_INTERVAL_MS: u64 = 1_000;
 const RECENT_TREE_TTL: Duration = Duration::from_millis(5_000);
+// The driver culls web content to about three viewports, so this cap still reaches on-screen controls.
+const CUA_WALK_MAX_ELEMENTS: u64 = 3_000;
+const CUA_TREE_ELEMENT_LIMIT: usize = 2_048;
 const RECENT_TREE_LIMIT: usize = 8;
 const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
 const NATIVE_ELEMENT_LIMIT: usize = RECENT_TREE_LIMIT * 1_024;
@@ -2037,7 +2040,7 @@ impl CuaInner {
             "include_accessibility_tree".into(),
             Value::Bool(options.include_tree),
         );
-        args.insert("max_elements".into(), json!(1024));
+        args.insert("max_elements".into(), json!(CUA_WALK_MAX_ELEMENTS));
         args.insert("max_depth".into(), json!(25));
         let result = match async {
             let result = self.call("get_window_state", args, false, true).await?;
@@ -2059,8 +2062,16 @@ impl CuaInner {
         let mut children = Vec::new();
         let mut elements = Vec::new();
         let mut targets = HashMap::new();
+        let settable: HashSet<u64> = data
+            .get("tree_nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|node| node.get("settable") == Some(&Value::Bool(true)))
+            .filter_map(|node| node.get("element_index").and_then(Value::as_u64))
+            .collect();
         if let Some(values) = data.get("elements").and_then(Value::as_array) {
-            for value in values.iter().take(1024) {
+            for value in values.iter().take(CUA_TREE_ELEMENT_LIMIT) {
                 let element = record(Some(value));
                 match element.get("frame") {
                     None | Some(Value::Null) => continue,
@@ -2069,13 +2080,18 @@ impl CuaInner {
                 let Some(frame) = optional_rect(element.get("frame")) else {
                     continue;
                 };
-                if let Some(index) = element.get("element_index").and_then(Value::as_u64) {
+                let index = element.get("element_index").and_then(Value::as_u64);
+                if let Some(index) = index {
                     targets.insert(index, children.len() as u32);
                 }
                 let label = text1024(element.get("label"));
                 let description = text1024(element.get("value_description"));
+                let role = text(element.get("role"), 128);
+                // Only a settable AXComboBox accepts text; a read-only one is a select.
+                let editable = (role == "AXComboBox")
+                    .then(|| index.is_some_and(|index| settable.contains(&index)));
                 let node = ComputerUiNode {
-                    role: text(element.get("role"), 128),
+                    role,
                     label: (!label.is_empty()).then_some(label),
                     value: element
                         .get("value")
@@ -2091,7 +2107,7 @@ impl CuaInner {
                     window_id: Some(window.id.clone()),
                     accessibility_root: None,
                     node_path: Some(vec![children.len() as u32]),
-                    editable: None,
+                    editable,
                     truncated: None,
                     children: Vec::new(),
                 };
@@ -3077,7 +3093,7 @@ impl CuaInner {
         let mut args = Self::window_args(resolved.pid, resolved.window_id);
         args.insert("include_screenshot".into(), Value::Bool(false));
         args.insert("include_accessibility_tree".into(), Value::Bool(true));
-        args.insert("max_elements".into(), json!(1024));
+        args.insert("max_elements".into(), json!(CUA_WALK_MAX_ELEMENTS));
         args.insert("max_depth".into(), json!(25));
         let result = self.call("get_window_state", args, false, true).await?;
         let Some(elements) = result
@@ -3256,9 +3272,13 @@ impl CuaInner {
         let Some(spec) = cua_element_action(action) else {
             return false;
         };
-        self.native_element(target)
-            .and_then(|element| element.actions)
-            .is_some_and(|actions| actions.contains(spec.ax_action))
+        // The driver pointer-clicks web elements that ignore AXPress.
+        self.native_element(target).is_some_and(|element| {
+            (element.in_web_content && spec.ax_action == "AXPress")
+                || element
+                    .actions
+                    .is_some_and(|actions| actions.contains(spec.ax_action))
+        })
     }
 
     async fn perform_action(

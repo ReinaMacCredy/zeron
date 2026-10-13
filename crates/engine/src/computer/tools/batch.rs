@@ -428,6 +428,7 @@ impl ComputerTools {
                             &ComputerActionableElementFilter {
                                 window_id: window_id.clone(),
                                 label_contains: label_contains.clone(),
+                                any_role: false,
                             },
                             self.native_identity(),
                         )
@@ -765,6 +766,7 @@ impl ComputerTools {
                         &ComputerActionableElementFilter {
                             window_id: last_window_id.map(str::to_owned),
                             label_contains: None,
+                            any_role: false,
                         },
                         self.native_identity(),
                     )
