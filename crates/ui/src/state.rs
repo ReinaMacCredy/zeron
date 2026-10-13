@@ -885,6 +885,7 @@ pub struct AppState {
     /// revision that has not reached disk yet. A chat remains blocked until
     /// every surface waiting on a workspace write has finished or cancelled.
     review_comment_flushes: HashMap<String, HashSet<u64>>,
+    pub reviews: HashMap<String, crate::review::ChatReview>,
     /// Written by the transcript's "Add to chat", read by the composer.
     quotes: HashMap<String, Vec<Quote>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
@@ -1015,6 +1016,7 @@ impl AppState {
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
             review_comment_flushes: HashMap::new(),
+            reviews: HashMap::new(),
             quotes: HashMap::new(),
             local_device_id: None,
             harness_updates: Vec::new(),

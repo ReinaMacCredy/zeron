@@ -250,7 +250,8 @@ impl Shell {
                         | ComposerEvent::OpenSidechat { .. }
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenSubagent { .. }
-                        | ComposerEvent::OpenChat(_) => {}
+                        | ComposerEvent::OpenChat(_)
+                        | ComposerEvent::OpenChanges => {}
                         ComposerEvent::UnsentChanged => cx.notify(),
                         ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenComputerSetup { missing } => {

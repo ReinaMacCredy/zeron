@@ -592,6 +592,13 @@ impl Composer {
                 cx,
             )
         });
+        let agents_text = match agents.as_slice() {
+            [one] => self
+                .review_pill_suffix(&one.doc_id, cx)
+                .map(|suffix| format!("{} · {suffix}", one.title)),
+            _ => None,
+        }
+        .unwrap_or_else(|| agents_label(&agents));
         let agents_pill = (rise.is_none() && !agents.is_empty()).then(|| {
             let pill = pill_frame("background-agents-pill", &theme)
                 .debug_selector(|| "background-agents-pill".into())
@@ -601,15 +608,8 @@ impl Composer {
                     fade,
                     &theme,
                 )))
-                .child(div().child(SharedString::from(agents_label(&agents))))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_ask_tray(cx);
-                    this.background.roster_opened = Some(Instant::now());
-                    if this.background.shells.begin_close() {
-                        popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
-                    }
-                    cx.notify();
-                }));
+                .child(div().child(SharedString::from(agents_text)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_roster(cx)));
             frosted_pill(pill)
         });
         let shell_pill = (!shells.is_empty())
@@ -640,6 +640,15 @@ impl Composer {
 
     pub(super) fn close_roster(&mut self) {
         self.background.roster_opened = None;
+    }
+
+    pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
+        self.close_ask_tray(cx);
+        self.background.roster_opened = Some(Instant::now());
+        if self.background.shells.begin_close() {
+            popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
+        }
+        cx.notify();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -738,7 +747,8 @@ impl Composer {
                     },
                 ))
             });
-            div()
+            let findings = self.render_review_findings(&run.doc_id, theme, cx);
+            let row = div()
                 .id(("background-roster-row", ix))
                 .debug_selector(move || format!("background-roster-row-{ix}"))
                 .flex()
@@ -783,7 +793,8 @@ impl Composer {
                         .child(SharedString::from(state_text)),
                 )
                 .child(div().size(px(20.0)).flex_none().children(stop))
-                .on_click(open)
+                .on_click(open);
+            div().flex().flex_col().child(row).children(findings)
         });
         let opened = match self.background.detail.as_ref().map(|d| &d.target) {
             Some(DetailTarget::Agent(part)) => agents.iter().find(|run| &run.part_id == part),

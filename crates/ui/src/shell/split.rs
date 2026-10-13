@@ -358,7 +358,8 @@ impl Shell {
                 | ComposerEvent::BackgroundStarted
                 | ComposerEvent::WorkspaceCommand(_)
                 | ComposerEvent::WorktreeSetup { .. }
-                | ComposerEvent::OpenChat(_) => {}
+                | ComposerEvent::OpenChat(_)
+                | ComposerEvent::OpenChanges => {}
                 ComposerEvent::OpenSubagent {
                     chat_id,
                     doc_id,

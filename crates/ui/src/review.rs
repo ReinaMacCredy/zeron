@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::changes::{FileDiff, line_anchor};
@@ -7,6 +9,74 @@ pub const REQUEST_PREFIX: &str = "zeron-review:";
 const FENCE: &str = "```zeron-review";
 const MAX_PATCH_BYTES: usize = 120_000;
 const REANCHOR_WINDOW: u32 = 40;
+
+#[derive(Debug, Clone, Default)]
+pub struct ChatReview {
+    pub scope: Option<ReviewScope>,
+    pub base: Option<String>,
+    pub stats: HashMap<ReviewScope, Result<(u32, u32), String>>,
+    pub stats_key: Option<String>,
+    pub run: Option<ReviewRun>,
+}
+
+impl ChatReview {
+    pub fn changes(&self, scope: ReviewScope) -> Option<(u32, u32)> {
+        self.stats.get(&scope)?.as_ref().ok().copied()
+    }
+
+    pub fn unavailable(&self, scope: ReviewScope) -> Option<&str> {
+        self.stats.get(&scope)?.as_ref().err().map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunStatus {
+    Starting,
+    Running,
+    Reading,
+    Done,
+    Unreadable,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewRun {
+    pub scope: ReviewScope,
+    pub task_id: Option<String>,
+    pub status: RunStatus,
+    pub findings: Vec<Finding>,
+    pub reported: usize,
+    pub reviewed: Option<String>,
+    pub note: Option<String>,
+}
+
+impl ReviewRun {
+    pub fn new(scope: ReviewScope) -> Self {
+        Self {
+            scope,
+            task_id: None,
+            status: RunStatus::Starting,
+            findings: Vec::new(),
+            reported: 0,
+            reviewed: None,
+            note: None,
+        }
+    }
+
+    pub fn busy(&self) -> bool {
+        matches!(
+            self.status,
+            RunStatus::Starting | RunStatus::Running | RunStatus::Reading
+        )
+    }
+
+    pub fn outdated(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.placement == Placement::Outdated)
+            .count()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReviewScope {

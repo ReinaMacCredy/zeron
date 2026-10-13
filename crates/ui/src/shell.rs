@@ -2832,6 +2832,10 @@ impl Shell {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
                 ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
+                ComposerEvent::OpenChanges => this
+                    .defer_in_active_window(cx, |shell, window, cx| {
+                        shell.focus_changes(window, cx)
+                    }),
                 ComposerEvent::OpenSubagent {
                     chat_id,
                     doc_id,
@@ -5475,7 +5479,8 @@ impl Shell {
                 | ComposerEvent::BackgroundStarted
                 | ComposerEvent::WorkspaceCommand(_)
                 | ComposerEvent::WorktreeSetup { .. }
-                | ComposerEvent::OpenChat(_) => {}
+                | ComposerEvent::OpenChat(_)
+                | ComposerEvent::OpenChanges => {}
                 ComposerEvent::OpenSubagent {
                     chat_id,
                     doc_id,

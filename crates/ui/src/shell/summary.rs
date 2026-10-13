@@ -285,7 +285,7 @@ impl Shell {
 
     /// The Changes row: focus the working-tree diff tab, else the first diff
     /// tab, else open one.
-    fn focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.right_surface_rows(cx);
         let diffs: Vec<u64> = rows
             .iter()

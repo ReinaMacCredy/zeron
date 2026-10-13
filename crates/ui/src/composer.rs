@@ -44,6 +44,7 @@ use crate::theme::Theme;
 mod ask_pill;
 pub(crate) mod background;
 mod chip;
+mod review_chip;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
@@ -5830,6 +5831,7 @@ pub enum ComposerEvent {
         frozen: bool,
     },
     OpenChat(String),
+    OpenChanges,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6874,6 +6876,7 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     ask: ask_pill::AskPills,
+    review: review_chip::ReviewChipUi,
     ask_input: Entity<ComposerInput>,
     ask_focus: FocusHandle,
     _ask_input_events: Subscription,
@@ -7397,6 +7400,7 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             ask: Default::default(),
+            review: Default::default(),
             ask_input,
             ask_focus: cx.focus_handle(),
             _ask_input_events: ask_input_events,
@@ -10541,6 +10545,7 @@ impl Composer {
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_asks(cx);
+        self.sync_review(cx);
         self.ensure_compaction_kind(cx);
         self.prefetch_slash_catalog(cx);
         self.prune_drafts(cx);
@@ -13983,6 +13988,7 @@ impl Render for Composer {
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_staged_chips(&theme, cx);
+        let review_chip = self.render_review_chip(&theme, cx);
         let pr_chips = self.render_pr_chips(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
@@ -13994,7 +14000,10 @@ impl Render for Composer {
                 cx.listener(|this, _, window, cx| {
                     // Padding and action controls are part of the text composer.
                     // Open menus keep their own keyboard/search focus.
-                    if !this.pickers.read(cx).is_open() && !this.running_tab {
+                    if !this.pickers.read(cx).is_open()
+                        && !this.review_menu_open()
+                        && !this.running_tab
+                    {
                         window.focus(&this.input.focus_handle(cx), cx);
                         window.prevent_default();
                     }
@@ -14134,7 +14143,10 @@ impl Render for Composer {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach),
+                                .child(attach)
+                                .children(review_chip.map(|chip| {
+                                    div().ml(px(4.0)).opacity(beneath_voice).child(chip)
+                                })),
                         )
                         .child(model_picker)
                         .child(
@@ -14192,7 +14204,10 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach),
+                                .child(attach)
+                                .children(review_chip.map(|chip| {
+                                    div().ml(px(4.0)).opacity(beneath_voice).child(chip)
+                                })),
                         )
                         .child(
                             div()
