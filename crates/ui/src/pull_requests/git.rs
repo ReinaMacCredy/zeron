@@ -2685,6 +2685,9 @@ impl GitTab {
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(gpui::Role::Button)
+                .aria_label(SharedString::from(
+                    label.trim_start_matches(['▸', '▾', ' ']).to_owned(),
+                ))
                 .aria_expanded(self.tray_open)
                 .flex_none()
                 .h(px(crate::composer::PR_CHIP_HEIGHT))
