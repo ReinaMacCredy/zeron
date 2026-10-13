@@ -2254,21 +2254,12 @@ fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize
     }
 }
 
-/// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
-/// over rolling windows of [`FRAME_STATS_WINDOW`] samples) at `warn` level —
-/// the smoothness measurement knob. Off by default; zero cost when off.
-fn frame_stats_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("ZERON_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
-}
-
 const FRAME_STATS_WINDOW: usize = 240;
 
 /// Opt-in cadence counters complement per-row timings: inexpensive rows can
 /// still exhaust a battery when an unrelated animation rebuilds them at 120Hz.
 pub(crate) fn record_view_frame(view: &'static str) -> bool {
-    if !frame_stats_enabled() {
+    if !crate::frame_stats::enabled() {
         return false;
     }
     thread_local! {
@@ -9212,7 +9203,7 @@ impl Transcript {
                     }
                 }
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
-                let timer = frame_stats_enabled().then(Instant::now);
+                let timer = crate::frame_stats::enabled().then(Instant::now);
                 let el = render::render_block(
                     &top.block,
                     *block_ix,

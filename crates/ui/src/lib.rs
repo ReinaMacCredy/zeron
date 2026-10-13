@@ -39,6 +39,7 @@ pub mod edge_fade;
 pub mod rounded_clip;
 pub mod file_icons;
 pub mod files;
+mod frame_stats;
 pub mod frost;
 mod glass;
 mod haptics;
@@ -183,6 +184,7 @@ pub fn run_app(config: UiConfig) {
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
         computer::preview::init(cx);
+        frame_stats::init(cx);
         #[cfg(target_os = "macos")]
         {
             let _ = std::thread::Builder::new()
