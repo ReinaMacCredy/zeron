@@ -343,6 +343,8 @@ pub(crate) struct Normalizer {
     /// assistant error was followed by a result frame (journals 2026-09-19);
     /// the run loop drains a survivor into its synthetic Done.
     pub pending_error: Option<String>,
+    rejected_windows: std::collections::BTreeMap<String, Option<i64>>,
+    rate_limited: bool,
 }
 
 impl Normalizer {
@@ -362,7 +364,20 @@ impl Normalizer {
             assistant_message_id: new_message_id(),
             session_id: None,
             pending_error: None,
+            rejected_windows: std::collections::BTreeMap::new(),
+            rate_limited: false,
         }
+    }
+
+    fn usage_limit_event(&self) -> AgentEvent {
+        let resets_at = self
+            .rejected_windows
+            .values()
+            .try_fold(None, |latest: Option<i64>, reset| {
+                reset.map(|secs| latest.max(Some(secs.saturating_mul(1000))))
+            })
+            .flatten();
+        AgentEvent::UsageLimit { resets_at }
     }
 
     /// The CLI's task id for a subagent spawn: what `stop_task` addresses.
@@ -894,6 +909,7 @@ impl Normalizer {
                 // and no `result` error — so it must surface; held for the
                 // result frame, which may carry the fuller `API Error:` text.
                 if let Some(code) = &f.error {
+                    self.rate_limited |= code == "rate_limit";
                     self.pending_error = Some(assistant_error_text(code));
                 }
                 // The enclosing assistant frame closes the streamed message
@@ -1022,16 +1038,27 @@ impl Normalizer {
             // turn — make it visible; allowed/allowed_warning stay quiet, and
             // so does a reject the account's overage carries past.
             Frame::RateLimit(f) => {
+                let kind = f
+                    .rate_limit_info
+                    .rate_limit_type
+                    .clone()
+                    .unwrap_or_default();
                 if !f.rate_limit_info.blocks() {
+                    self.rejected_windows.remove(&kind);
                     return Vec::new();
                 }
-                let window =
-                    rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
-                vec![AgentEvent::Error {
-                    message: format!(
-                        "Claude {window} limit reached — the turn was blocked. Try again after it resets."
-                    ),
-                }]
+                let window = rate_window_label(&kind);
+                self.rejected_windows
+                    .insert(kind, f.rate_limit_info.resets_at);
+                self.rate_limited = true;
+                vec![
+                    AgentEvent::Error {
+                        message: format!(
+                            "Claude {window} limit reached — the turn was blocked. Try again after it resets."
+                        ),
+                    },
+                    self.usage_limit_event(),
+                ]
             }
 
             Frame::Result(f) => {
@@ -1058,36 +1085,42 @@ impl Normalizer {
                 if let Some(id) = &f.session_id {
                     self.session_id = Some(id.clone());
                 }
-                let cost = f
-                    .total_cost_usd
-                    .zip(self.session_id.clone())
-                    .map(|(total_usd, session_id)| AgentEvent::Cost {
-                        session_id,
-                        total_usd,
-                    });
+                let cost =
+                    f.total_cost_usd
+                        .zip(self.session_id.clone())
+                        .map(|(total_usd, session_id)| AgentEvent::Cost {
+                            session_id,
+                            total_usd,
+                        });
                 let usage = AgentEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
                 let cache = (f.usage.cache_read_input_tokens + f.usage.cache_creation_input_tokens
                     > 0)
-                    .then(|| AgentEvent::PromptCache {
-                        read_tokens: f.usage.cache_read_input_tokens,
-                        write_tokens: f.usage.cache_creation_input_tokens,
-                        ttl_secs: if f.usage.cache_creation.ephemeral_1h_input_tokens > 0 {
-                            Some(3600)
-                        } else if f.usage.cache_creation.ephemeral_5m_input_tokens > 0 {
-                            Some(300)
-                        } else {
-                            None
-                        },
-                    });
+                .then(|| AgentEvent::PromptCache {
+                    read_tokens: f.usage.cache_read_input_tokens,
+                    write_tokens: f.usage.cache_creation_input_tokens,
+                    ttl_secs: if f.usage.cache_creation.ephemeral_1h_input_tokens > 0 {
+                        Some(3600)
+                    } else if f.usage.cache_creation.ephemeral_5m_input_tokens > 0 {
+                        Some(300)
+                    } else {
+                        None
+                    },
+                });
                 let api_error = f
                     .result
                     .as_deref()
                     .filter(|_| f.subtype == "success")
                     .filter(|text| text.starts_with(API_ERROR_PREFIX))
                     .map(api_error_text);
+                self.rate_limited |= api_error
+                    .as_deref()
+                    .is_some_and(|text| text.contains("rate_limit_error"));
+                let usage_limit =
+                    std::mem::take(&mut self.rate_limited).then(|| self.usage_limit_event());
+                self.rejected_windows.clear();
                 let pending_error = self.pending_error.take().filter(|_| api_error.is_none());
                 let done = if let Some(text) = api_error {
                     AgentEvent::Done {
@@ -1165,6 +1198,7 @@ impl Normalizer {
                 if let Some(message) = pending_error {
                     out.push(AgentEvent::Error { message });
                 }
+                out.extend(usage_limit);
                 if let Some(window) = window {
                     out.push(AgentEvent::ContextUsage {
                         tokens: None,
@@ -1291,7 +1325,13 @@ mod tests {
         let blocked = normalize_one(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#,
         );
-        assert!(matches!(blocked.as_slice(), [AgentEvent::Error { .. }]));
+        assert!(matches!(
+            blocked.as_slice(),
+            [
+                AgentEvent::Error { .. },
+                AgentEvent::UsageLimit { resets_at: None }
+            ]
+        ));
         for overage in [
             r#""overageStatus":"allowed""#,
             r#""overageStatus":"allowed_warning""#,
@@ -1302,6 +1342,62 @@ mod tests {
             );
             assert!(normalize_one(&raw).is_empty(), "{overage}");
         }
+    }
+
+    #[test]
+    fn usage_limit_resets_when_every_rejected_window_has() {
+        let mut n = Normalizer::new();
+        let mut frame = |status: &str, kind: &str, reset: &str| {
+            let raw = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"{status}","rateLimitType":"{kind}"{reset}}}}}"#
+            );
+            n.normalize(crate::claude::wire::parse_frame(&raw).unwrap(), false)
+                .into_iter()
+                .find_map(|event| match event {
+                    AgentEvent::UsageLimit { resets_at } => Some(resets_at),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            frame("rejected", "five_hour", r#","resetsAt":100"#),
+            Some(Some(100_000))
+        );
+        assert_eq!(
+            frame("rejected", "seven_day", r#","resetsAt":200"#),
+            Some(Some(200_000))
+        );
+        assert_eq!(frame("rejected", "seven_day_opus", ""), Some(None));
+        assert_eq!(frame("allowed", "seven_day_opus", ""), None);
+        let result = n.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"result","subtype":"success","result":""}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert!(result.contains(&AgentEvent::UsageLimit {
+            resets_at: Some(200_000)
+        }));
+    }
+
+    #[test]
+    fn rate_limit_assistant_code_reports_a_limit_without_a_reset() {
+        let mut n = Normalizer::new();
+        n.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"assistant","error":"rate_limit","message":{"id":"m","content":[]}}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        let result = n.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"result","subtype":"success","result":""}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert!(result.contains(&AgentEvent::UsageLimit { resets_at: None }));
     }
 
     fn result_done(raw: &str) -> AgentEvent {

@@ -896,6 +896,12 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// `resets_at`: epoch ms when every exhausted window has reset; `None` when any gave no reset time.
+    #[serde(rename_all = "camelCase")]
+    UsageLimit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<i64>,
+    },
     #[serde(rename_all = "camelCase")]
     InputRequested {
         request_id: String,
@@ -1401,8 +1407,7 @@ impl SessionStats {
 
     pub fn cache_hit_rate(&self) -> Option<f64> {
         let cached = self.cache_read_tokens + self.cache_write_tokens;
-        (cached > 0)
-            .then(|| self.cache_read_tokens as f64 / (cached + self.input_tokens) as f64)
+        (cached > 0).then(|| self.cache_read_tokens as f64 / (cached + self.input_tokens) as f64)
     }
 
     /// Millis until the prompt cache expires; negative once it has.

@@ -78,8 +78,8 @@ use catalog::{
     static_models, to_effort,
 };
 use normalize::{
-    ChildRoute, Phase, ReasoningStream, UsageTally, delta_text, item_id, item_type,
-    notification_thread_id, route_child_notification, turn_error_message, turn_id,
+    ChildRoute, Phase, RateLimitWindows, ReasoningStream, UsageTally, delta_text, item_id,
+    item_type, notification_thread_id, route_child_notification, turn_error_message, turn_id,
 };
 
 /// Locate the device's installed Codex CLI: `CODEX_EXECUTABLE`, then our own
@@ -1502,6 +1502,7 @@ async fn run_session(session: Session) {
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut turn_usage = UsageTally::default();
+    let mut rate_limits = RateLimitWindows::default();
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     // Each carries the configuration it was sent with, adopted when its own
@@ -1755,7 +1756,11 @@ async fn run_session(session: Session) {
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
                         streamed_text.clear();
-                        for ev in turn_usage.take() {
+                        for ev in turn_usage.take().into_iter().chain(
+                            params
+                                .pointer("/turn/error")
+                                .and_then(|error| rate_limits.usage_limit(error)),
+                        ) {
                             if !send(&event_tx, ev).await {
                                 break 'main;
                             }
@@ -1833,7 +1838,11 @@ async fn run_session(session: Session) {
                         router.note_completed(&id);
                         stop_when_announced = false;
                         accepted_steers.clear();
-                        for ev in turn_usage.take() {
+                        for ev in turn_usage.take().into_iter().chain(
+                            params
+                                .pointer("/turn/error")
+                                .and_then(|error| rate_limits.usage_limit(error)),
+                        ) {
                             if !send(&event_tx, ev).await {
                                 break 'main;
                             }
@@ -1930,7 +1939,18 @@ async fn run_session(session: Session) {
                         if !send(&event_tx, AgentEvent::Error { message }).await {
                             break 'main;
                         }
+                        let final_error = params.get("willRetry").and_then(Value::as_bool) != Some(true);
+                        if let Some(limit) = params
+                            .get("error")
+                            .filter(|_| final_error)
+                            .and_then(|error| rate_limits.usage_limit(error))
+                            && !send(&event_tx, limit).await
+                        {
+                            break 'main;
+                        }
                     }
+
+                    "account/rateLimits/updated" => rate_limits.note(&params),
 
                     // thread/status, mcpServer startup, account noise, … —
                     // unknown notification methods are tolerated by design.
