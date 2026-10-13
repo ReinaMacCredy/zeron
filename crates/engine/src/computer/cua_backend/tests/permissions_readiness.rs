@@ -869,6 +869,7 @@ async fn dispatches_logical_coordinate_input_without_a_preparation_png() {
             Some("cua:10:20"),
             &[],
             None,
+            None,
         )
         .await
         .unwrap();

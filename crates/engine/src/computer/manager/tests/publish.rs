@@ -784,6 +784,7 @@ async fn pauses_calibrated_scrolling_before_any_second_input_or_launch_and_prese
                     window.as_deref(),
                     &modifiers,
                     target.as_ref(),
+                    None,
                 )
                 .await
             }

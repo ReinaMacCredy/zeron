@@ -440,3 +440,41 @@ async fn an_element_that_stays_outside_its_window_still_refuses() {
     assert_eq!(f.named("click").len(), 2);
     manager.dispose().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn ref_and_window_scrolls_need_no_screenshot_after_the_desktop_changed() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(37)),
+        ..FixtureOptions::default()
+    });
+    page(&f, 10);
+    let (manager, tools) = tools(&f);
+    let context = context();
+    let shot = tools
+        .call(
+            "computer_screenshot",
+            args(json!({ "window_id": WINDOW })),
+            &context,
+        )
+        .await;
+    assert!(!shot.is_error, "{shot:?}");
+    let element_ref = listed(&tools, &context).await;
+    f.knobs().desktop_epoch += 1;
+    for scroll in [
+        json!({ "window_id": WINDOW, "ref": element_ref, "delta_y": 300, "include_screenshot": false }),
+        json!({ "window_id": WINDOW, "delta_y": 300, "include_screenshot": false }),
+    ] {
+        let result = tools
+            .call("computer_scroll", args(scroll.clone()), &context)
+            .await;
+        assert!(!result.is_error, "{scroll}: {:?}", result_json(&result));
+    }
+    let scrolls = f.named("scroll");
+    assert_eq!(scrolls.len(), 2);
+    assert!(
+        scrolls[0].args["element_token"]
+            .as_str()
+            .is_some_and(|token| token.starts_with("b5#"))
+    );
+    manager.dispose().await;
+}

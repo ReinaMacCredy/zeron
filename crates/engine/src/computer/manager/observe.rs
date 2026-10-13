@@ -378,13 +378,13 @@ impl ComputerManager {
             .as_ref()
             .and_then(|target| target.target.window_id.clone());
         self.with_background_process_control(thread_id, window_id.as_deref(), || async {
-            let resolved = timed_computer_leg(
+            let (resolved, bounds) = timed_computer_leg(
                 "resolve",
                 self.prepare_scroll_target(target.as_ref(), thread_id),
             )
             .await?;
             let result = self
-                .inject_scroll(resolved.as_ref(), delta_x, delta_y, &[])
+                .inject_scroll(resolved.as_ref(), bounds, delta_x, delta_y, &[])
                 .await?;
             Ok(self.action_result(
                 thread_id,
@@ -423,7 +423,7 @@ impl ComputerManager {
                 None => self.agent_focus_window_id().await,
                 Some(_) => None,
             };
-            let resolved = timed_computer_leg(
+            let (resolved, bounds) = timed_computer_leg(
                 "resolve",
                 self.prepare_scroll_target(target.as_ref(), thread_id),
             )
@@ -528,7 +528,7 @@ impl ComputerManager {
             {
                 let probe = delta_y.signum() * SCROLL_PROBE_PX;
                 let probe_result = self
-                    .inject_scroll(resolved.as_ref(), 0.0, probe, &options.modifiers)
+                    .inject_scroll(resolved.as_ref(), bounds, 0.0, probe, &options.modifiers)
                     .await?;
                 let probe_injected = probe_result
                     .scroll_delta
@@ -561,7 +561,7 @@ impl ComputerManager {
                 let leg_y = plan(planned_route(delta_x), remainder);
                 if leg_x != 0.0 || leg_y != 0.0 {
                     let remainder_result = self
-                        .inject_scroll(resolved.as_ref(), leg_x, leg_y, &options.modifiers)
+                        .inject_scroll(resolved.as_ref(), bounds, leg_x, leg_y, &options.modifiers)
                         .await?;
                     injected_x += remainder_result.scroll_delta.map_or(leg_x, |d| d.delta_x);
                     let leg_injected_y = remainder_result.scroll_delta.map_or(leg_y, |d| d.delta_y);
@@ -596,6 +596,7 @@ impl ComputerManager {
                 result = self
                     .inject_scroll(
                         resolved.as_ref(),
+                        bounds,
                         injected_x,
                         injected_y,
                         &options.modifiers,
@@ -676,31 +677,36 @@ impl ComputerManager {
         &self,
         target: Option<&ObservedComputerTarget>,
         thread_id: Option<&str>,
-    ) -> Result<Option<ResolvedPointTarget>, ComputerError> {
-        let resolved = match target {
-            Some(target) => Some(self.resolve_scroll_point_target(target, thread_id).await?),
-            None => None,
+    ) -> Result<(Option<ResolvedPointTarget>, Option<ComputerRect>), ComputerError> {
+        let (resolved, bounds) = match target {
+            Some(target) => {
+                let (resolved, bounds) =
+                    self.resolve_scroll_point_target(target, thread_id).await?;
+                (Some(resolved), bounds)
+            }
+            None => (None, None),
         };
         let prepared = resolved
             .as_ref()
             .map(super::targeting::PreparedTarget::from);
         self.prepare_resolved_target(prepared.as_ref(), thread_id)
             .await?;
-        Ok(resolved)
+        Ok((resolved, bounds))
     }
 
     async fn resolve_scroll_point_target(
         &self,
         target: &ObservedComputerTarget,
         thread_id: Option<&str>,
-    ) -> Result<ResolvedPointTarget, ComputerError> {
+    ) -> Result<(ResolvedPointTarget, Option<ComputerRect>), ComputerError> {
         let plain: &ComputerTarget = &target.target;
         let Some(window_id) = plain
             .window_id
             .as_deref()
             .filter(|_| plain.x.is_none() && plain.y.is_none() && !has_label_fields(plain))
         else {
-            return self.resolve_point_target(target, thread_id).await;
+            let resolved = self.resolve_point_target(target, thread_id).await?;
+            return Ok((resolved, target.observed_window_bounds));
         };
         self.assert_window_input_allowed(thread_id, window_id)
             .await?;
@@ -709,18 +715,20 @@ impl ComputerManager {
             .get_state(ComputerStateOptions::default())
             .await?;
         let matched = match &state.root {
-            Some(root) => {
-                resolve_computer_window_target(root, window_id)?.map(|matched| matched.point)
-            }
+            Some(root) => resolve_computer_window_target(root, window_id)?
+                .map(|matched| (matched.point, matched.node.frame)),
             None => None,
         };
-        if let Some(point) = matched {
-            return Ok(ResolvedPointTarget {
-                point,
-                window_id: Some(window_id.to_owned()),
-                covering: None,
-                semantic: None,
-            });
+        if let Some((point, bounds)) = matched {
+            return Ok((
+                ResolvedPointTarget {
+                    point,
+                    window_id: Some(window_id.to_owned()),
+                    covering: None,
+                    semantic: None,
+                },
+                Some(bounds),
+            ));
         }
         let window = match self
             .read_windows()
@@ -745,20 +753,24 @@ impl ComputerManager {
             )
             .into());
         };
-        Ok(ResolvedPointTarget {
-            point: ComputerPoint {
-                x: bounds.x + bounds.width / 2.0,
-                y: bounds.y + bounds.height / 2.0,
+        Ok((
+            ResolvedPointTarget {
+                point: ComputerPoint {
+                    x: bounds.x + bounds.width / 2.0,
+                    y: bounds.y + bounds.height / 2.0,
+                },
+                window_id: Some(window_id.to_owned()),
+                covering: None,
+                semantic: None,
             },
-            window_id: Some(window_id.to_owned()),
-            covering: None,
-            semantic: None,
-        })
+            Some(bounds),
+        ))
     }
 
     async fn inject_scroll(
         &self,
         resolved: Option<&ResolvedPointTarget>,
+        bounds: Option<ComputerRect>,
         delta_x: f64,
         delta_y: f64,
         modifiers: &[zeron_proto::computer::ComputerInputModifier],
@@ -774,6 +786,7 @@ impl ComputerManager {
                 resolved.and_then(|resolved| resolved.window_id.as_deref()),
                 modifiers,
                 resolved.and_then(|resolved| resolved.semantic.as_ref()),
+                bounds,
             )
         })
         .await
