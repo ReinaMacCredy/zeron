@@ -99,9 +99,15 @@ async fn renders_a_calculator_tree_with_its_static_value_and_usable_refs() {
         lines.next(),
         Some("Window: \"Calculator\", App: org.kde.kcalc.")
     );
-    assert_eq!(lines.next(), Some("window Calculator"));
+    let window_line = lines.next().unwrap_or_default();
     assert!(
-        tree.contains("\n\ttext Description: Edit field, Value: 408\n"),
+        window_line
+            .strip_suffix(" window Calculator")
+            .is_some_and(|number| number.parse::<u64>().is_ok()),
+        "{tree}"
+    );
+    assert!(
+        tree.contains(" text Description: Edit field, Value: 408\n"),
         "{tree}"
     );
     assert!(
