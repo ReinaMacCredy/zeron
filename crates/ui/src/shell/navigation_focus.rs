@@ -92,7 +92,9 @@ impl Shell {
             (self.settings_focus.clone(), self.unfocused.clone())
         } else if matches!(self.route, Route::PullRequests) {
             (self.unfocused.clone(), self.unfocused.clone())
-        } else if self.right_pane_open(cx) && self.navigation_focus.right_was_focused {
+        } else if self.right_pane_open(cx)
+            && (self.navigation_focus.right_was_focused || self.right_pane_expanded)
+        {
             (
                 self.navigation_focus.right.clone(),
                 self.navigation_focus.right.clone(),
