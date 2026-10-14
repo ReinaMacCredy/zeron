@@ -768,6 +768,10 @@ pub struct AgentAccounts {
 }
 
 impl AgentAccounts {
+    pub fn config(&self) -> &AgentAccountsConfig {
+        &self.inner.config
+    }
+
     pub fn new(config: AgentAccountsConfig) -> Self {
         Self::with_endpoints(config, ProbeEndpoints::default(), Default::default())
     }

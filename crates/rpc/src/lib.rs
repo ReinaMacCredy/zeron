@@ -119,6 +119,9 @@ pub mod methods {
     pub const TASK_WAKE_ALWAYS: &str = "TaskWakeAlways";
     /// Compact joined transcript count, last role and bounded prose preview. `{chatId}`.
     pub const GET_THREAD_SUMMARY: &str = "GetThreadSummary";
+    /// `{days}` → `UsageSummary`: tokens and API-priced cost from the Claude,
+    /// Codex and Grok CLI transcripts; `days: 1` is the past 24 hours by hour.
+    pub const GET_USAGE_SUMMARY: &str = "GetUsageSummary";
     /// Move the inter-thread messages waiting on `chatId`'s queue into its
     /// transcript, for an agent that asked for them mid-turn.
     /// `{chatId}` → `{messages: [{id, fromChatId, text}]}`.

@@ -20,6 +20,7 @@ pub mod projectless;
 pub mod sidebar_pins;
 pub mod source_control;
 pub mod tools;
+pub mod usage;
 pub mod view;
 pub mod voice;
 pub mod workspace;

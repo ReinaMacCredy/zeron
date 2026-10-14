@@ -252,7 +252,7 @@ fn rows(stats: &SessionStats, cache: Option<Cache>) -> Vec<(&'static str, String
     rows
 }
 
-fn tokens(n: u64) -> String {
+pub(crate) fn tokens(n: u64) -> String {
     let trim = |s: String| {
         if s.contains('.') {
             s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -261,7 +261,11 @@ fn tokens(n: u64) -> String {
         }
     };
     let n = n as f64;
-    if n >= 1e7 {
+    if n >= 1e10 {
+        format!("{}B", trim(format!("{:.1}", n / 1e9)))
+    } else if n >= 999_500_000.0 {
+        format!("{}B", trim(format!("{:.2}", n / 1e9)))
+    } else if n >= 1e7 {
         format!("{}M", trim(format!("{:.1}", n / 1e6)))
     } else if n >= 999_500.0 {
         format!("{}M", trim(format!("{:.2}", n / 1e6)))
@@ -274,12 +278,20 @@ fn tokens(n: u64) -> String {
     }
 }
 
-fn usd(x: f64) -> String {
+pub(crate) fn usd(x: f64) -> String {
     if x < 1.0 {
-        format!("${x:.3}")
-    } else {
-        format!("${x:.2}")
+        return format!("${x:.3}");
     }
+    let fixed = format!("{x:.2}");
+    let (whole, cents) = fixed.split_once('.').unwrap_or((&fixed, "00"));
+    let mut grouped = String::new();
+    for (i, ch) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    format!("${grouped}.{cents}")
 }
 
 fn cost_headline(stats: &SessionStats) -> Option<String> {
@@ -552,6 +564,8 @@ mod tests {
         assert_eq!(tokens(999_999), "1M");
         assert_eq!(tokens(9_812_000), "9.81M");
         assert_eq!(tokens(38_620_000), "38.6M");
+        assert_eq!(tokens(3_271_436_831), "3.27B");
+        assert_eq!(tokens(16_703_622_261), "16.7B");
     }
 
     #[test]
@@ -596,6 +610,7 @@ mod tests {
             [("Input", 9_812_000), ("Output", 211_400)]
         );
         assert_eq!(usd(0.0811149), "$0.081");
+        assert_eq!(usd(9352.924), "$9,352.92");
     }
 
     #[test]

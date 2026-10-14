@@ -100,6 +100,7 @@ icon_assets![
     (FORK, "fork"),
     (GIT_BRANCH, "git-branch"),
     (PULL_REQUEST, "pull-request"),
+    (USAGE_CHART, "usage-chart"),
     (WORKTREE, "worktree"),
     (PLUS, "plus"),
     (ARROW_LEFT, "arrow-left"),

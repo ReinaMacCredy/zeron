@@ -450,6 +450,11 @@ struct DeleteProjectActionParams {
     action_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct UsageSummaryParams {
+    days: u32,
+}
+
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, crate::EngineError> + Send + 'static,
 ) -> Result<T, RpcError> {
@@ -2951,6 +2956,21 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({}))
+            }
+            methods::GET_USAGE_SUMMARY => {
+                let p: UsageSummaryParams = parse_params(params)?;
+                let config = self.agent_accounts.config();
+                let roots = crate::usage::UsageRoots::new(
+                    &config.claude_config_dir,
+                    &config.codex_home,
+                    &config.grok_home,
+                );
+                let summary = tokio::task::spawn_blocking(move || {
+                    crate::usage::summary(&roots, p.days, chrono::Local::now())
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&summary)
             }
             methods::GET_THREAD_SUMMARY => {
                 let p: ChatParams = parse_params(params)?;

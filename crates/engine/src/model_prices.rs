@@ -26,11 +26,29 @@ pub(crate) struct Price {
 
 impl Price {
     fn micros(&self, stats: &SessionStats) -> u64 {
-        let cost = stats.input_tokens as f64 * self.input
-            + stats.output_tokens as f64 * self.output
-            + stats.cache_read_tokens as f64 * self.cache_read.unwrap_or(self.input)
-            + stats.cache_write_tokens as f64 * self.cache_write.unwrap_or(self.input);
-        cost.max(0.0).round() as u64
+        self.per_million(
+            stats.input_tokens,
+            stats.output_tokens,
+            stats.cache_read_tokens,
+            stats.cache_write_tokens,
+        )
+        .max(0.0)
+        .round() as u64
+    }
+
+    fn per_million(&self, input: u64, output: u64, cache_read: u64, cache_write: u64) -> f64 {
+        input as f64 * self.input
+            + output as f64 * self.output
+            + cache_read as f64 * self.cache_read.unwrap_or(self.input)
+            + cache_write as f64 * self.cache_write.unwrap_or(self.input)
+    }
+
+    pub(crate) fn usd(&self, input: u64, output: u64, cache_read: u64, cache_write: u64) -> f64 {
+        self.per_million(input, output, cache_read, cache_write) / 1e6
+    }
+
+    pub(crate) fn cache_savings_usd(&self, cache_read: u64) -> f64 {
+        cache_read as f64 * (self.input - self.cache_read.unwrap_or(self.input)) / 1e6
     }
 }
 
@@ -162,6 +180,15 @@ pub(crate) fn estimate(
 ) -> Option<u64> {
     let table = TABLE.read().unwrap_or_else(|e| e.into_inner()).clone()?;
     Some(lookup(&table, harness, model?)?.micros(stats))
+}
+
+pub(crate) fn loaded() -> bool {
+    TABLE.read().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+pub(crate) fn price(harness: HarnessId, model: &str) -> Option<Price> {
+    let table = TABLE.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+    lookup(&table, harness, model)
 }
 
 #[cfg(test)]

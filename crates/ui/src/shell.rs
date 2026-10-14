@@ -912,6 +912,7 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 pub enum Route {
     Chat,
     PullRequests,
+    Usage,
     Settings(SettingsSection),
     Terminal,
 }
@@ -1078,6 +1079,7 @@ pub enum NavEntry {
         device: Option<String>,
     },
     Settings(SettingsSection),
+    Usage,
 }
 
 /// Browser-style navigation history for the titlebar back/forward buttons
@@ -2408,6 +2410,7 @@ pub struct Shell {
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
+    usage_page: Option<Entity<crate::usage::UsagePage>>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -2890,6 +2893,7 @@ impl Shell {
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
+            Some("usage") => Route::Usage,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -2932,6 +2936,7 @@ impl Shell {
         let nav = NavHistory::new(match route {
             Route::Chat | Route::Terminal => NavEntry::Chat(String::new()),
             Route::PullRequests => NavEntry::PullRequests,
+            Route::Usage => NavEntry::Usage,
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -3061,6 +3066,7 @@ impl Shell {
             settings_return_route: Route::Chat,
             nav,
             pull_requests_page: None,
+            usage_page: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -6750,6 +6756,24 @@ impl Shell {
         self.nav.push(NavEntry::PullRequests);
     }
 
+    fn open_usage(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Usage) {
+            return;
+        }
+        self.enter_usage_route(cx);
+        self.nav.push(NavEntry::Usage);
+    }
+
+    fn enter_usage_route(&mut self, cx: &mut Context<Self>) {
+        self.set_route(Route::Usage, cx);
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        if let Some(page) = &self.usage_page {
+            page.update(cx, |page, cx| page.load(cx));
+        }
+        cx.notify();
+    }
+
     /// Show the board's route without recording a navigation.
     fn enter_pull_requests_route(&mut self, cx: &mut Context<Self>) {
         if matches!(self.route, Route::PullRequests) {
@@ -6983,6 +7007,7 @@ impl Shell {
                 // The detail view needs the window; the next render opens it.
                 self.pending_pull_request = Some((url, device));
             }
+            NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -11688,6 +11713,17 @@ impl Shell {
                         .child(self.render_usage_section(&sidebar_accounts, theme, cx))
                         .child(popover::menu_separator())
                 })
+                .child(
+                    popover::menu_row(theme, false, "user-menu-usage")
+                        .id("user-menu-usage")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_usage(cx)))
+                        .child(
+                            icon(icons::USAGE_CHART)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Usage")),
+                )
                 .when_some(action, |menu, action| {
                     let row = match action {
                         AccountMenuAction::EnableSync => {
@@ -13216,6 +13252,20 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
+
+        if matches!(self.route, Route::Usage) {
+            let state = self.state.clone();
+            let page = self
+                .usage_page
+                .get_or_insert_with(|| cx.new(|cx| crate::usage::UsagePage::new(state, cx)))
+                .clone();
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(page)
+                .into_any_element();
+        }
 
         if matches!(self.route, Route::PullRequests) {
             if let Some((url, device)) = self.pending_pull_request.take() {
@@ -16190,7 +16240,7 @@ impl Render for Shell {
                         this.toggle_pr_chat(cx)
                     }
                     Route::PullRequests => {}
-                    Route::Settings(_) | Route::Terminal => {}
+                    Route::Settings(_) | Route::Terminal | Route::Usage => {}
                 }),
             )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
@@ -16574,7 +16624,8 @@ impl Render for Shell {
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
                 let pr_route = matches!(self.route, Route::PullRequests);
-                let page_route = pr_route || matches!(self.route, Route::Terminal);
+                let page_route =
+                    pr_route || matches!(self.route, Route::Terminal | Route::Usage);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     // A call started from Settings opens its stage here too.
