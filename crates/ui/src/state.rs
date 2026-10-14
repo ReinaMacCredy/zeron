@@ -844,7 +844,7 @@ pub struct AppState {
     /// would claim every other chat was compacting too.
     pub compacting_chat: Option<String>,
     /// Sidechat ids with an open right-pane tab. The source chat's composer
-    /// reads it to decide whether to offer its reopen pill; the shell owns
+    /// reads it to mark its sidechat tab as open; the shell owns
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
     pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,

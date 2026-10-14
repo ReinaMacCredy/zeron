@@ -5366,7 +5366,7 @@ impl Shell {
             .then(|| chat.id.clone())
     }
 
-    /// The footer pill and `/sidechat` reopen the newest side conversation,
+    /// The composer's sidechat tab and `/sidechat` reopen the newest side conversation,
     /// creating one only when none exists. Explicit New sidechat actions
     /// call `create_sidechat` directly.
     /// `prompt` starts the sidechat's first turn once its tab exists.
@@ -5555,7 +5555,7 @@ impl Shell {
                 _composer_events: composer_events,
             },
         );
-        // The source composer's pill watches this set.
+        // The source composer's sidechat tab watches this set.
         self.state.update(cx, |state, cx| {
             state.open_sidechat_tabs.insert(chat_id);
             cx.notify();
@@ -5586,6 +5586,8 @@ impl Shell {
             if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
                 composer.send_prompt(prompt, cx);
             }
+            composer.focus_pending = true;
+            cx.notify();
         });
     }
 
@@ -5752,10 +5754,10 @@ impl Shell {
                 }
             }
             RightSurface::Sidechat(id) => {
-                // Same teardown; the source composer's pill takes over as the
+                // Same teardown; the source composer's sidechat tab stays the
                 // way back in. A tab closed before anything was sent leaves
                 // an unstarted row behind that no sidebar shows: archive it
-                // so the pill mints a fresh one instead of reopening it.
+                // so the tab mints a fresh one instead of reopening it.
                 if let Some(tab) = self.sidechat_tabs.remove(&id) {
                     let unstarted = self.state.update(cx, |s, cx| {
                         s.unwatch_subagent_doc(&tab.chat_id);
@@ -21099,6 +21101,7 @@ mod right_tab_mouse_regressions {
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
             assert_eq!(shell.sidechat_tabs.len(), 1);
             assert!(shell.state.read(cx).open_sidechat_tabs.contains("side"));
+            assert!(shell.sidechat_tabs[&1].composer.read(cx).focus_pending);
             // A second ask reuses the tab instead of opening another, and its
             // prompt is handed to the TAB's composer (which, with no engine
             // here, fails on its own chat rather than building a Run).

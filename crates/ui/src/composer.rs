@@ -89,6 +89,8 @@ const QUEUE_SIDE_INSET: f32 = 16.0;
 /// The composer covers the tray's lower padding so the queue reads as emerging
 /// from behind it instead of as a separate rounded pill.
 pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
+const SIDECHAT_TAB_HEIGHT: f32 = 24.0;
+const SIDECHAT_TAB_RADIUS: f32 = 10.0;
 /// The original floating selector rows use the same 20px chip height as the
 /// established-thread footer. Their surrounding rows own no plate or border.
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
@@ -5834,7 +5836,7 @@ pub enum ComposerEvent {
         chat_id: String,
         message_id: String,
     },
-    /// `/sidechat` (or the footer pill): open the source chat's side
+    /// `/sidechat` (or the sidechat tab): open the source chat's side
     /// conversation in the right pane, creating it when there is none, and
     /// start its first turn with `prompt` when one was typed. The shell owns
     /// the tab, so the composer can only ask.
@@ -10288,7 +10290,7 @@ impl Composer {
     // ---- sidechats ---------------------------------------------------------
 
     /// Ask the shell to open this chat's side conversation — from `/sidechat`
-    /// or from the footer pill. The shell owns the right pane, the creation
+    /// or from the sidechat tab. The shell owns the right pane, the creation
     /// RPC and the first turn; the composer only names the source.
     pub(crate) fn request_sidechat(
         &mut self,
@@ -10334,43 +10336,90 @@ impl Composer {
         }
     }
 
-    /// The reopen pill: this chat's newest sidechat, while its tab is closed.
-    fn render_sidechat_pill(
+    /// Expired sidechats are left to the sidecar, so they read as "New sidechat" here.
+    fn render_sidechat_tab(
         &self,
+        trays: usize,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if self.chat_override.is_some() {
+        if self.chat_override.is_some() || self.side_chat || self.pr_chat {
             return None;
         }
-        let chat_id = self.bound_chat_id(cx)?;
+        let chat = self.bound_chat_row(cx)?;
+        if chat.sidechat_source_chat_id.is_some() {
+            return None;
+        }
         let state = self.state.read(cx);
-        let sidechat = state.latest_sidechat_of(&chat_id)?;
-        if state.open_sidechat_tabs.contains(&sidechat.id) {
-            return None;
-        }
-        let label: SharedString = sidechat_pill_label(sidechat.title.as_deref()).into();
+        let sidechat = state.latest_sidechat_of(&chat.id);
+        let open = sidechat.is_some_and(|s| state.open_sidechat_tabs.contains(&s.id));
+        let dot = sidechat
+            .and_then(|s| state.session_for(&s.id))
+            .and_then(|session| match session.status {
+                zeron_proto::SessionStatus::Working => Some(theme.busy),
+                zeron_proto::SessionStatus::AwaitingInput => Some(theme.warning),
+                zeron_proto::SessionStatus::Errored => Some(theme.danger),
+                zeron_proto::SessionStatus::Idle => None,
+            });
+        let label: SharedString = match sidechat {
+            Some(s) => sidechat_pill_label(s.title.as_deref()).into(),
+            None => "New sidechat".into(),
+        };
+        let icon = if sidechat.is_some() {
+            crate::icons::CHAT_ROUND_LINE
+        } else {
+            crate::icons::ASTRA_PLUS
+        };
+        let text = if open { theme.text } else { theme.text_muted };
+        let surface = crate::queue::queue_panel_surface(theme, cx.has_active_drag())
+            .rounded_t(px(SIDECHAT_TAB_RADIUS))
+            .px(px(8.0))
+            .pt(px(0.0))
+            .pb(px(QUEUE_COMPOSER_OVERLAP))
+            .when(open, |el| el.border_color(theme.accent.opacity(0.55)))
+            .child(
+                div()
+                    .h(px(SIDECHAT_TAB_HEIGHT))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(11.0))
+                    .text_color(text)
+                    .child(
+                        crate::icons::icon(icon)
+                            .flex_none()
+                            .size(px(12.0))
+                            .text_color(text),
+                    )
+                    .children(
+                        dot.map(|color| div().flex_none().size(px(6.0)).rounded_full().bg(color)),
+                    )
+                    .child(div().min_w_0().truncate().child(label)),
+            );
         Some(
             div()
-                .id("composer-sidechat-pill")
-                .flex_none()
                 .flex()
-                .items_center()
-                .gap(px(5.0))
-                .h(px(24.0))
-                .px(px(6.0))
-                .rounded(px(6.0))
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .cursor_pointer()
+                .justify_end()
+                .px(px(QUEUE_SIDE_INSET * (trays + 1) as f32))
+                .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
                 .child(
-                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
+                    div()
+                        .id("composer-sidechat-tab")
+                        .debug_selector(|| "composer-sidechat-tab".into())
+                        .min_w_0()
+                        .max_w(relative(0.45))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.85))
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)),
+                        )
+                        .child(crate::frost::frosted(
+                            SIDECHAT_TAB_RADIUS,
+                            crate::frost::MENU_BLUR,
+                            surface,
+                        )),
                 )
-                .child(label)
-                .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)))
                 .into_any_element(),
         )
     }
@@ -13679,24 +13728,25 @@ impl Render for Composer {
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = !self.state.read(cx).queue.is_empty();
-        let container = container.when_some(
-            self.render_todo_panel(has_queue, window, cx),
-            |el, panel| el.child(motion::fade_quick("composer-todo", div().child(panel))),
-        );
-        let container = container.when_some(
-            self.render_queue_panel(show_queue_latest_shortcut, window, cx),
-            |el, panel| {
-                el.child(motion::fade_quick(
-                    "composer-queue",
-                    div()
-                        .mx(px(QUEUE_SIDE_INSET))
-                        // Cancel the column gap, then tuck the tray one pixel
-                        // behind the composer painted after it.
-                        .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
-                        .child(panel),
-                ))
-            },
-        );
+        let todo = self.render_todo_panel(has_queue, window, cx);
+        let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
+        let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
+        let container =
+            container.children(self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx));
+        let container = container.when_some(todo, |el, panel| {
+            el.child(motion::fade_quick("composer-todo", div().child(panel)))
+        });
+        let container = container.when_some(queue, |el, panel| {
+            el.child(motion::fade_quick(
+                "composer-queue",
+                div()
+                    .mx(px(QUEUE_SIDE_INSET))
+                    // Cancel the column gap, then tuck the tray one pixel
+                    // behind the composer painted after it.
+                    .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
+                    .child(panel),
+            ))
+        });
         let container = container.on_action(cx.listener(|this, _: &MentionTab, _, cx| {
             if !this.accept_prediction(cx) {
                 cx.propagate();
@@ -14416,7 +14466,6 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let sidechat_pill = self.render_sidechat_pill(&theme, cx);
             let permission_chip = (session_chrome_opacity > 0.0).then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
@@ -14477,7 +14526,6 @@ impl Render for Composer {
                                         .flex()
                                         .items_center()
                                         .gap(px(4.0))
-                                        .children(sidechat_pill)
                                         .children(permission_chip)
                                         .child(self.account_usage.clone())
                                         .children(terminal_button),
