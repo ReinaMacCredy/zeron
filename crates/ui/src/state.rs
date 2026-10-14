@@ -1707,15 +1707,9 @@ impl AppState {
             self.prepared_transcripts.remove(id);
         }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        // Doc frames supersede optimistic echoes carrying the same id.
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
-        }
         self.transcript = entries;
         self.transcript_replayed = true;
-        self.ack_pending_send_from_transcript();
+        self.confirm_selected_sends();
     }
 
     /// Apply a `WatchDocMessages` delta frame in place. `Err` = this copy has
@@ -1733,13 +1727,7 @@ impl AppState {
         if is_reset {
             self.transcript_replayed = true;
         }
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            let transcript = &self.transcript;
-            echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
-        }
-        self.ack_pending_send_from_transcript();
+        self.confirm_selected_sends();
         Ok(())
     }
 
@@ -1834,6 +1822,22 @@ impl AppState {
             .get(doc_id)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Sidechat and split panes send through this state into a watched doc,
+    /// so their sends confirm here, not only on the selected transcript.
+    fn apply_sub_transcript_frame(
+        &mut self,
+        doc_id: &str,
+        frame: TranscriptFrame,
+    ) -> Result<(), TranscriptDesync> {
+        let Some(rows) = self.sub_transcripts.get_mut(doc_id) else {
+            return Ok(());
+        };
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        let applied = zeron_doc::apply_transcript_frame(rows, frame);
+        confirm_landed_sends(&mut self.echoes, &mut self.pending_sends, doc_id, rows);
+        applied
     }
 
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
@@ -2185,15 +2189,14 @@ impl AppState {
             .map(|p| p.started)
     }
 
-    /// The host executed the queued command iff the sent message's id showed
-    /// up in the transcript (it writes the message before — causally with —
-    /// the Working status; sessions.rs dispatch paths).
-    fn ack_pending_send_from_transcript(&mut self) {
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(pending) = self.pending_sends.get(chat_id)
-            && self.transcript.iter().any(|e| e.id == pending.message_id)
-        {
-            self.pending_sends.remove(chat_id);
+    fn confirm_selected_sends(&mut self) {
+        if let Some(chat_id) = self.selected_chat.as_deref() {
+            confirm_landed_sends(
+                &mut self.echoes,
+                &mut self.pending_sends,
+                chat_id,
+                &self.transcript,
+            );
         }
     }
 
@@ -4115,6 +4118,27 @@ fn spawn_queue_watch(
     })
 }
 
+/// Doc frames supersede optimistic echoes carrying the same id, and the host
+/// executed a pending send iff its message id showed up in the transcript (it
+/// writes the message before — causally with — the Working status;
+/// sessions.rs dispatch paths).
+fn confirm_landed_sends(
+    echoes: &mut HashMap<String, Vec<SessionMessageEntry>>,
+    pending_sends: &mut HashMap<String, PendingSend>,
+    chat_id: &str,
+    rows: &[SessionMessageEntry],
+) {
+    if let Some(echoes) = echoes.get_mut(chat_id) {
+        echoes.retain(|echo| !rows.iter().any(|e| e.id == echo.id));
+    }
+    if pending_sends
+        .get(chat_id)
+        .is_some_and(|pending| rows.iter().any(|e| e.id == pending.message_id))
+    {
+        pending_sends.remove(chat_id);
+    }
+}
+
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
 /// instead of the selected chat's transcript. The apply guard is per key so a
 /// subagent tab can outlive chat switches.
@@ -4165,7 +4189,7 @@ fn spawn_subagent_watch(
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // A stale pump racing a snapshot/unwatch finds no key.
-                    if let Some(rows) = state.sub_transcripts.get_mut(&doc_id) {
+                    if state.sub_transcripts.contains_key(&doc_id) {
                         let usage_changed = match update.context_usage {
                             Some(usage) => {
                                 state.sub_context_usage.insert(doc_id.clone(), usage) != Some(usage)
@@ -4180,9 +4204,10 @@ fn spawn_subagent_watch(
                         };
                         let usage_changed = usage_changed || stats_changed;
                         let frame = update.frame;
-                        let text_only = is_text_append(&frame) && !usage_changed;
-                        state.transcript_revision = state.transcript_revision.wrapping_add(1);
-                        if let Err(err) = zeron_doc::apply_transcript_frame(rows, frame) {
+                        let text_only = is_text_append(&frame)
+                            && !usage_changed
+                            && !state.pending_sends.contains_key(&doc_id);
+                        if let Err(err) = state.apply_sub_transcript_frame(&doc_id, frame) {
                             tracing::warn!(%doc_id, error = %err, "resubscribing subagent watch");
                             desync = true;
                         }
@@ -5334,6 +5359,19 @@ mod tests {
         // The host executed the command: our id comes back in the doc.
         s.apply_transcript(vec![user_entry("other"), user_entry("m1")]);
         assert!(!s.send_pending("c", now));
+
+        // A sidechat or split pane sends into a watched doc, not the selection.
+        s.sub_transcripts.insert("side".into(), Vec::new());
+        s.begin_pending_send("side", "m2", now);
+        s.apply_sub_transcript_frame(
+            "side",
+            TranscriptFrame::Reset {
+                reset: vec![user_entry("m2")],
+            },
+        )
+        .unwrap();
+        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        assert!(!s.send_undelivered("side", later));
     }
 
     #[test]
