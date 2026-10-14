@@ -476,6 +476,7 @@ pub(crate) struct SubagentSummary {
     pub delegated: bool,
     pub harness: Option<zeron_proto::HarnessId>,
     pub model: Option<SharedString>,
+    pub kind: Option<SharedString>,
     /// Epoch ms; a native subagent's is known only once its doc is loaded.
     pub started_at: Option<i64>,
 }
@@ -5414,11 +5415,6 @@ impl Transcript {
         let state = self.state.read(cx);
         let chats = &state.chats;
         let harness = state.chat_harness(&chat_id);
-        let parent_model: Option<SharedString> = chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.config.as_ref()?.model.clone())
-            .map(Into::into);
         let mut seen = std::collections::HashSet::new();
         self.rows
             .iter()
@@ -5442,8 +5438,8 @@ impl Transcript {
                                 model: tool
                                     .call
                                     .subagent_model()
-                                    .map(|model| SharedString::from(model.to_owned()))
-                                    .or_else(|| parent_model.clone()),
+                                    .map(|model| SharedString::from(model.to_owned())),
+                                kind: spawn_agent_type(&tool.call),
                                 started_at: state
                                     .sub_transcript(&doc_id)
                                     .first()
@@ -5463,6 +5459,7 @@ impl Transcript {
                             delegated: true,
                             harness: view.harness,
                             model: view.model,
+                            kind: None,
                             started_at: chats
                                 .iter()
                                 .find(|chat| chat.id == doc_id)
@@ -10390,10 +10387,10 @@ impl Transcript {
                         tool.subagent_status,
                         Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
                     );
-                    let mark = crate::pickers::agent_brand_icon(
-                        self.state.read(cx).chat_harness(&chat_id),
-                        None,
-                    );
+                    let harness = self.state.read(cx).chat_harness(&chat_id);
+                    let (glyph, tint) =
+                        crate::pickers::agent_brand_icon(harness, tool.call.subagent_model());
+                    let mark = (glyph, tint, spawn_tag(harness, &tool.call));
                     return subagent_chip(
                         tool,
                         mark,
@@ -11968,7 +11965,7 @@ fn device_chip_content(tool: &ToolItem) -> Option<(SharedString, String)> {
 
 fn chip_header_row(
     tool: &ToolItem,
-    mark: Option<(&'static str, Option<gpui::Hsla>)>,
+    mark: Option<(&'static str, Option<gpui::Hsla>, Option<SharedString>)>,
     trail: Option<ChipTrail>,
     file_opener: Option<&ToolFileOpener>,
     theme: &Theme,
@@ -12001,6 +11998,10 @@ fn chip_header_row(
         .zip(file_opener)
         .filter(|(path, opener)| opener.opens(path))
         .map(|(path, opener)| (path.to_owned(), opener.clone()));
+    let tag = match &mark {
+        Some((_, _, tag)) => tag.clone(),
+        None => spawn_tag(None, &tool.call),
+    };
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
@@ -12043,11 +12044,14 @@ fn chip_header_row(
                     .items_center()
                     .justify_center()
                     .child({
-                        let (glyph, tint) = mark.unwrap_or(match tool.kind {
-                            ToolItemKind::Thought => (crate::icons::CHAT_ROUND_LINE, None),
-                            ToolItemKind::Note => (crate::icons::PEN, None),
-                            ToolItemKind::Call => (tool_icon_path(&tool.call), None),
-                        });
+                        let (glyph, tint) = mark
+                            .as_ref()
+                            .map(|(glyph, tint, _)| (*glyph, *tint))
+                            .unwrap_or(match tool.kind {
+                                ToolItemKind::Thought => (crate::icons::CHAT_ROUND_LINE, None),
+                                ToolItemKind::Note => (crate::icons::PEN, None),
+                                ToolItemKind::Call => (tool_icon_path(&tool.call), None),
+                            });
                         crate::icons::icon(glyph)
                             .size(px(12.0))
                             .text_color(tint.unwrap_or(theme.text_muted))
@@ -12208,8 +12212,8 @@ fn chip_header_row(
                 )
             },
         )
-        .when_some(tool.call.subagent_model(), |row, model| {
-            // Which model the child runs on, when the spawn named one.
+        .when_some(tag, |row, tag| {
+            // Which model the child runs on, else its agent type.
             //
             // In the trailing slot rather than suffixed onto the detail: the
             // detail is the truncating slot, and the model is exactly what a
@@ -12229,7 +12233,7 @@ fn chip_header_row(
                     .items_center()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(model.to_owned())),
+                    .child(tag),
             )
         })
         .when(running, |row| {
@@ -12305,6 +12309,37 @@ fn chip_header(
         view,
         cx,
     )
+}
+
+/// What a spawn chip names its child by: the model the spawn named, else its
+/// agent type. An unnamed spawn's model is never guessed from the parent's:
+/// an agent type can pin a model of its own.
+fn spawn_tag(harness: Option<zeron_proto::HarnessId>, call: &ToolCall) -> Option<SharedString> {
+    match call.subagent_model() {
+        Some(id) => Some(
+            harness
+                .and_then(|harness| crate::pickers::curated_model_label(harness, id))
+                .unwrap_or_else(|| id.to_owned())
+                .into(),
+        ),
+        None => spawn_agent_type(call),
+    }
+}
+
+pub(crate) fn spawn_agent_type(call: &ToolCall) -> Option<SharedString> {
+    if !call.is_subagent_spawn() {
+        return None;
+    }
+    let (ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }) = call else {
+        return None;
+    };
+    input
+        .as_ref()?
+        .get("subagent_type")?
+        .as_str()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(|kind| SharedString::from(kind.to_owned()))
 }
 
 /// Max chars a subagent tab title keeps. The strip chip is fixed-width and
@@ -12779,7 +12814,7 @@ pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
 /// collapse header for it to hang from).
 fn subagent_chip(
     tool: &ToolItem,
-    mark: (&'static str, Option<gpui::Hsla>),
+    mark: (&'static str, Option<gpui::Hsla>, Option<SharedString>),
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     rail: bool,

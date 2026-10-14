@@ -8222,6 +8222,30 @@ fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
         .into_any_element()
 }
 
+/// Curated label for an id: exact normalized match, else — for bare
+/// alphabetic aliases like `opus` — the first (flagship-ordered) family row.
+/// Versioned foreign ids never fuzzy-match.
+pub(crate) fn curated_model_label(harness: HarnessId, id: &str) -> Option<String> {
+    fn norm(id: &str) -> String {
+        id.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase()
+    }
+    let catalog = match harness {
+        HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
+        _ => return None,
+    };
+    let id_norm = norm(id);
+    if let Some(row) = catalog.iter().find(|m| norm(&m.id) == id_norm) {
+        return Some(row.label.clone());
+    }
+    (!id_norm.is_empty() && id_norm.chars().all(|c| c.is_ascii_alphabetic()))
+        .then(|| catalog.iter().find(|m| norm(&m.id).contains(&id_norm)))
+        .flatten()
+        .map(|m| m.label.clone())
+}
+
 /// Display-side model-list hygiene, mirroring the engine's discovery-side
 /// fold (`models_from_session`) for catalogs served by OLDER engines (the
 /// space's device may run any version): the `default` alias row drops when a
@@ -8235,29 +8259,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
     }
-    fn norm(id: &str) -> String {
-        id.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_lowercase()
-    }
-    let catalog = match harness {
-        HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
-        _ => Vec::new(),
-    };
-    // Curated label for an id: exact normalized match, else — for bare
-    // alphabetic aliases like `opus` — the first (flagship-ordered) family
-    // row. Versioned foreign ids never fuzzy-match.
-    let curated_label = |id: &str| -> Option<String> {
-        let id_norm = norm(id);
-        if let Some(row) = catalog.iter().find(|m| norm(&m.id) == id_norm) {
-            return Some(row.label.clone());
-        }
-        (!id_norm.is_empty() && id_norm.chars().all(|c| c.is_ascii_alphabetic()))
-            .then(|| catalog.iter().find(|m| norm(&m.id).contains(&id_norm)))
-            .flatten()
-            .map(|m| m.label.clone())
-    };
+    let curated_label = |id: &str| curated_model_label(harness, id);
     let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
     let has_real = ids.iter().any(|id| !id.eq_ignore_ascii_case("default"));
     models

@@ -579,8 +579,11 @@ impl Shell {
             .subagent_summaries(cx)
             .into_iter()
             .map(|agent| {
-                let suffix =
-                    agent_model_suffix(&agent, |harness, id| pickers.model_label(harness, id));
+                let suffix = agent_tag_suffix(&agent, |harness, id| {
+                    pickers
+                        .model_label(harness, id)
+                        .or_else(|| crate::pickers::curated_model_label(harness, id))
+                });
                 (agent, suffix)
             })
             .collect();
@@ -1608,19 +1611,21 @@ fn split_subagents(
         .partition(|(agent, _)| agent.status == Some(zeron_doc::SubagentStatus::Running))
 }
 
-fn agent_model_suffix(
+fn agent_tag_suffix(
     agent: &crate::transcript::SubagentSummary,
     model_label: impl Fn(zeron_proto::HarnessId, &str) -> Option<String>,
 ) -> Option<SharedString> {
-    let id = agent.model.as_deref()?;
-    let model = agent
-        .harness
-        .and_then(|harness| model_label(harness, id))
-        .unwrap_or_else(|| id.to_owned());
-    if agent.title.to_lowercase().contains(&model.to_lowercase()) {
+    let tag = match agent.model.as_deref() {
+        Some(id) => agent
+            .harness
+            .and_then(|harness| model_label(harness, id))
+            .unwrap_or_else(|| id.to_owned()),
+        None => agent.kind.as_ref()?.to_string(),
+    };
+    if agent.title.to_lowercase().contains(&tag.to_lowercase()) {
         return None;
     }
-    Some(format!(": {model}").into())
+    Some(format!(": {tag}").into())
 }
 
 fn short_elapsed(secs: i64) -> String {
@@ -2134,7 +2139,7 @@ mod sidecar_regressions {
                 id,
                 zeron_proto::ToolCall::Unknown {
                     name: format!("Agent: task {id}"),
-                    input: None,
+                    input: Some(serde_json::json!({ "subagent_type": "Explore" })),
                 },
                 &format!("parent--sub--{id}"),
                 Some(status),
@@ -2210,7 +2215,7 @@ mod sidecar_regressions {
                 .iter()
                 .map(|e| format!("{}{}", e.label, e.suffix.as_deref().unwrap_or_default()))
                 .collect();
-            assert_eq!(labels, ["Kid: anthropic/claude-opus-5", "task a: gpt-5"]);
+            assert_eq!(labels, ["Kid: anthropic/claude-opus-5", "task a: Explore"]);
             assert!(section.entries.iter().all(|e| e.badge == Some(theme.busy)));
             let fold = section.fold.as_ref().expect("previous agents fold");
             assert_eq!(fold.label.as_ref(), "Previous agents (2)");
@@ -2238,6 +2243,7 @@ mod sidecar_regressions {
                 delegated: false,
                 harness: None,
                 model: None,
+                kind: None,
                 started_at: None,
             };
             (agent, None)
