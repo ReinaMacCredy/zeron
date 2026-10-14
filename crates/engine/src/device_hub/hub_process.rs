@@ -842,11 +842,13 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         );
     }
 
+    // first_reply drops an upgraded socket with its frame unread; an unhandled reset would kill node.
     const FAKE_WS_HUB: &str = r#"import http from "node:http";
 import crypto from "node:crypto";
 const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
 const server = http.createServer((req, res) => { res.writeHead(200); res.end("ok"); });
 server.on("upgrade", (req, socket) => {
+  socket.on("error", () => {});
   const accept = crypto.createHash("sha1")
     .update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
