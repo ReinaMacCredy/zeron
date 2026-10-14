@@ -990,14 +990,24 @@ pub fn apply_diff_frame(diffs: &mut Vec<CheckoutDiff>, value: serde_json::Value)
     }
 }
 
-fn shows_review(pane: DiffScope, review: crate::review::ReviewScope) -> bool {
+fn shows_review(
+    pane: DiffScope,
+    pane_commit: Option<&str>,
+    run: &crate::review::ReviewRun,
+) -> bool {
     use crate::review::ReviewScope;
-    matches!(
-        (pane, review),
+    match (pane, run.scope) {
         (DiffScope::WorkingTree, ReviewScope::Uncommitted)
-            | (DiffScope::Branch, ReviewScope::Branch)
-            | (DiffScope::LatestTurn, ReviewScope::LatestTurn)
-    )
+        | (DiffScope::Branch, ReviewScope::Branch)
+        | (DiffScope::LatestTurn, ReviewScope::LatestTurn) => true,
+        (DiffScope::Commit, ReviewScope::Commit) => match (pane_commit, run.commit.as_deref()) {
+            (Some(pane), Some(review)) if !pane.is_empty() && !review.is_empty() => {
+                pane.starts_with(review) || review.starts_with(pane)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn comment_state_key(
@@ -2454,6 +2464,7 @@ impl Changes {
                 changes.folds.clear();
                 changes.highlights.clear();
                 let scope = changes.scope;
+                let commit = changes.commit.as_ref().map(|commit| commit.sha.clone());
                 changes.state.update(cx, |state, cx| {
                     let key = state.composer_key();
                     if let Some(run) = state
@@ -2462,7 +2473,7 @@ impl Changes {
                         .and_then(|review| review.run.as_mut())
                         .filter(|run| {
                             run.status == crate::review::RunStatus::Done
-                                && shows_review(scope, run.scope)
+                                && shows_review(scope, commit.as_deref(), run)
                         })
                         && crate::review::refresh(&mut run.findings, &files)
                     {
@@ -2848,10 +2859,13 @@ impl Changes {
             .reviews
             .get(&key)
             .filter(|review| {
-                review
-                    .run
-                    .as_ref()
-                    .is_some_and(|run| shows_review(self.scope, run.scope))
+                review.run.as_ref().is_some_and(|run| {
+                    shows_review(
+                        self.scope,
+                        self.commit.as_ref().map(|commit| commit.sha.as_str()),
+                        run,
+                    )
+                })
             })
             .map(crate::review::ChatReview::cards)
             .unwrap_or_default();
@@ -6785,5 +6799,28 @@ rename to new_name.rs
         };
         assert!(!sources_match_patch(&file, &response));
         assert!(full_highlights(&file, Lang::Rust, &response).is_none());
+    }
+
+    #[test]
+    fn commit_review_shows_only_on_the_same_commit_pane() {
+        use crate::review::{ReviewRun, ReviewScope};
+        let full = "db618f4a2c9e0b7d31f5e8a6c4b2d0e9f7a5c3b1";
+        let mut run = ReviewRun::new(ReviewScope::Commit);
+        run.commit = Some("db618f4".into());
+        assert!(shows_review(DiffScope::Commit, Some(full), &run));
+        assert!(!shows_review(
+            DiffScope::Commit,
+            Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"),
+            &run
+        ));
+        assert!(!shows_review(DiffScope::Commit, None, &run));
+        assert!(!shows_review(DiffScope::WorkingTree, Some(full), &run));
+        run.commit = Some(full.into());
+        assert!(shows_review(DiffScope::Commit, Some("db618f4"), &run));
+        run.commit = None;
+        assert!(!shows_review(DiffScope::Commit, Some(full), &run));
+        let branch = ReviewRun::new(ReviewScope::Branch);
+        assert!(!shows_review(DiffScope::Commit, Some(full), &branch));
+        assert!(shows_review(DiffScope::Branch, None, &branch));
     }
 }
