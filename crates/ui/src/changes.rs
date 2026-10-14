@@ -943,22 +943,7 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
 /// `ListBranches` with the repo's default branch first — but a repo with no
 /// `origin/HEAD` falls back to the *checked-out* branch there, and comparing a
 /// branch with itself is useless; prefer `main`/`master` in that case.
-pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<String> {
-    let first = branches.first()?;
-    if current != Some(first.as_str()) {
-        return Some(first.clone());
-    }
-    for candidate in ["main", "master"] {
-        if branches.iter().any(|b| b == candidate) {
-            return Some(candidate.to_string());
-        }
-    }
-    branches
-        .iter()
-        .find(|b| current != Some(b.as_str()))
-        .or(Some(first))
-        .cloned()
-}
+pub use zeron_engine::review::default_base_ref;
 
 /// Empty-state copy per scope.
 pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {

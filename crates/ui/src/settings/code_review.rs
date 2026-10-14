@@ -5,7 +5,7 @@ use zeron_proto::{HarnessId, Model};
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
-use crate::review::{ReviewerChoice, ReviewerOptions};
+use crate::review::{ReviewSettings, ReviewerChoice, ReviewerOptions};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -14,6 +14,8 @@ pub struct CodeReviewPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     options: Loadable<ReviewerOptions>,
+    settings: ReviewSettings,
+    save_task: Option<Task<()>>,
     models: HashMap<HarnessId, Vec<Model>>,
     reviewer_select: widgets::SelectState,
     model_select: widgets::SelectState,
@@ -35,8 +37,6 @@ impl CodeReviewPage {
         let instructions = cx.new(|cx| {
             ComposerInput::new("Focus on correctness and security. Ignore formatting.", cx)
         });
-        let saved = crate::settings::review_instructions(cx);
-        instructions.update(cx, |input, cx| input.set_text(saved, cx));
         let instructions_events = cx.subscribe(
             &instructions,
             |_: &mut Self, _, _: &ComposerInputEvent, cx| cx.notify(),
@@ -47,6 +47,8 @@ impl CodeReviewPage {
             _instructions: instructions_events,
             scroll: widgets::PageScroll::default(),
             options: Loadable::Idle,
+            settings: ReviewSettings::default(),
+            save_task: None,
             models: HashMap::new(),
             reviewer_select: widgets::SelectState::default(),
             model_select: widgets::SelectState::default(),
@@ -66,7 +68,12 @@ impl CodeReviewPage {
         self.options = Loadable::Loading;
         self.task = Some(cx.spawn(async move |this, cx| {
             let options = crate::review::reviewer_options(&engine).await;
+            let settings = crate::review::review_settings(&engine).await;
             this.update(cx, |card, cx| {
+                card.instructions.update(cx, |input, cx| {
+                    input.set_text(settings.instructions.clone(), cx)
+                });
+                card.settings = settings;
                 card.options = Loadable::Ready(options);
                 card.ensure_models(cx);
                 cx.notify();
@@ -76,7 +83,7 @@ impl CodeReviewPage {
     }
 
     fn ensure_models(&mut self, cx: &mut Context<Self>) {
-        let ReviewerChoice::Harness { harness, .. } = crate::settings::review_reviewer(cx) else {
+        let ReviewerChoice::Harness { harness, .. } = self.settings.reviewer.clone() else {
             return;
         };
         if self.models.contains_key(&harness) {
@@ -96,11 +103,33 @@ impl CodeReviewPage {
     }
 
     fn save(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
-        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
-            settings.review_reviewer = choice
-        });
+        self.settings.reviewer = choice;
+        self.store(cx);
         self.ensure_models(cx);
         cx.notify();
+    }
+
+    fn store(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let settings = self.settings.clone();
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            let saved = engine
+                .client()
+                .call_as::<ReviewSettings>(
+                    zeron_rpc::methods::SET_REVIEW_SETTINGS,
+                    serde_json::to_value(&settings).unwrap_or_default(),
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                if let Ok(saved) = saved {
+                    page.settings = saved;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
@@ -142,7 +171,7 @@ impl CodeReviewPage {
                 )),
             );
         };
-        let current = crate::settings::review_reviewer(cx);
+        let current = self.settings.reviewer.clone();
         let mut choices = options.choices();
         let same_slot = |choice: &ReviewerChoice| match (choice, &current) {
             (
@@ -164,7 +193,7 @@ impl CodeReviewPage {
         )
         .options(
             choices.iter().map(|choice| {
-                let (mark, tint) = options.brand(choice, None);
+                let (mark, tint) = crate::review::brand(&options, choice, None);
                 let color = tint.unwrap_or(theme.text_muted);
                 let option = widgets::SelectOption::new(options.label(choice)).leading(move || {
                     crate::icons::icon(mark)
@@ -324,7 +353,7 @@ impl CodeReviewPage {
 
 impl CodeReviewPage {
     fn render_instructions(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let saved = crate::settings::review_instructions(cx);
+        let saved = self.settings.instructions.clone();
         let current = self.instructions.read(cx).text().trim().to_string();
         let dirty = saved.trim() != current;
         div()
@@ -368,11 +397,8 @@ impl CodeReviewPage {
                                                 .text()
                                                 .trim()
                                                 .to_string();
-                                            crate::settings::update(
-                                                crate::settings::SavePolicy::Immediate,
-                                                cx,
-                                                |settings| settings.review_instructions = text,
-                                            );
+                                            this.settings.instructions = text;
+                                            this.store(cx);
                                             cx.notify();
                                         }))
                                     }),

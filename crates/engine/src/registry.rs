@@ -98,6 +98,7 @@ struct HarnessPrefsFile {
     predictions: PredictionSettings,
     delegation: DelegationSettings,
     tools: zeron_proto::tools::ToolSettings,
+    review: Option<crate::review::ReviewSettings>,
     system_prompt: String,
     seen_models: Vec<SeenModels>,
     /// The allow-list written back when enablement was a fixed default set.
@@ -429,6 +430,33 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(path);
         self.migrate_legacy_prefs();
+        self.adopt_ui_review_settings(data_dir);
+    }
+
+    /// Review settings lived in ui-settings.json before the engine owned them.
+    fn adopt_ui_review_settings(&self, data_dir: &Path) {
+        if self.prefs().review.is_some() {
+            return;
+        }
+        let Some(ui) = std::fs::read_to_string(data_dir.join("ui-settings.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        else {
+            return;
+        };
+        let reviewer = ui
+            .get("reviewReviewer")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let instructions = ui.get("reviewInstructions").and_then(|v| v.as_str());
+        if reviewer.is_none() && instructions.is_none() {
+            return;
+        }
+        self.prefs().review = Some(crate::review::ReviewSettings {
+            reviewer: reviewer.unwrap_or_default(),
+            instructions: instructions.unwrap_or_default().to_string(),
+        });
+        self.persist_prefs();
     }
 
     /// Fold a legacy allow-list into the opt-out shape: a registered harness
@@ -603,6 +631,28 @@ impl HarnessRegistry {
             ));
         }
         self.prefs().system_prompt = prompt.to_string();
+        self.persist_prefs();
+        Ok(())
+    }
+
+    pub fn review_settings(&self) -> crate::review::ReviewSettings {
+        self.prefs().review.clone().unwrap_or_default()
+    }
+
+    pub fn set_review_settings(
+        &self,
+        settings: crate::review::ReviewSettings,
+    ) -> Result<(), String> {
+        if settings.instructions.chars().count() > crate::agent_profiles::MAX_INSTRUCTIONS_CHARS {
+            return Err(format!(
+                "Review instructions must not exceed {} characters",
+                crate::agent_profiles::MAX_INSTRUCTIONS_CHARS
+            ));
+        }
+        self.prefs().review = Some(crate::review::ReviewSettings {
+            instructions: settings.instructions.trim().to_string(),
+            ..settings
+        });
         self.persist_prefs();
         Ok(())
     }

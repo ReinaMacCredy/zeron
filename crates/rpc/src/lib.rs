@@ -60,6 +60,9 @@ pub mod methods {
     /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
+    pub const GET_REVIEW_SETTINGS: &str = "GetReviewSettings";
+    pub const SET_REVIEW_SETTINGS: &str = "SetReviewSettings";
+    pub const START_REVIEW: &str = "StartReview";
     /// Settings > Tools opt-outs. No params / `ToolSettings` → `ToolSettingsState`.
     pub const GET_TOOL_SETTINGS: &str = "GetToolSettings";
     pub const SET_TOOL_SETTINGS: &str = "SetToolSettings";

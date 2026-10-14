@@ -618,18 +618,6 @@ pub fn device_float_frame(cx: &App) -> Option<crate::device_panel::float::Device
 }
 
 /// Read the picker preference without cloning the full settings for each model row.
-pub fn review_reviewer(cx: &App) -> crate::review::ReviewerChoice {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.current.review_reviewer.clone())
-        .unwrap_or_default()
-}
-
-pub fn review_instructions(cx: &App) -> String {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.current.review_instructions.clone())
-        .unwrap_or_default()
-}
-
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .is_some_and(|store| store.current.compact_model_picker)
@@ -1403,8 +1391,6 @@ pub struct UiSettings {
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
     pub compact_effort_slider: EffortSliderStyle,
-    pub review_reviewer: crate::review::ReviewerChoice,
-    pub review_instructions: String,
     pub computer_click_sounds: ComputerClickSounds,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
@@ -1682,8 +1668,6 @@ impl Default for UiSettings {
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
-            review_reviewer: crate::review::ReviewerChoice::Auto,
-            review_instructions: String::new(),
             computer_click_sounds: ComputerClickSounds::Foreground,
             appshots_enabled: false,
             appshot_sound_enabled: true,
@@ -2323,8 +2307,6 @@ impl UiSettings {
             skills_in_slash_menu,
             skill_completion_by_harness,
             compact_model_picker,
-            review_reviewer,
-            review_instructions,
             sidebar_width,
             sidebar_collapsed,
             sidebar_hover_enabled,
@@ -3824,8 +3806,6 @@ mod tests {
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
-            review_reviewer: crate::review::ReviewerChoice::Auto,
-            review_instructions: String::new(),
             computer_click_sounds: ComputerClickSounds::Foreground,
             appshots_enabled: false,
             appshot_sound_enabled: true,

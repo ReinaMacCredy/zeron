@@ -27,6 +27,23 @@ pub enum HarnessId {
     Mock,
 }
 
+impl HarnessId {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "Claude Code",
+            HarnessId::Codex => "Codex",
+            HarnessId::Cursor => "Cursor",
+            HarnessId::Devin => "Devin",
+            HarnessId::Grok => "Grok",
+            HarnessId::Hermes => "Hermes",
+            HarnessId::Pi => "Pi",
+            HarnessId::Opencode => "OpenCode",
+            HarnessId::Antigravity => "Antigravity",
+            HarnessId::Mock => "Mock",
+        }
+    }
+}
+
 /// Durable user preference for one agent's independently-installed CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

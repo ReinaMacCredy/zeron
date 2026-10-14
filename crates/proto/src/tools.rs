@@ -134,6 +134,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "Delegate one task to a Zeron-owned child agent of this chat.",
             ),
             tool(
+                "review_changes",
+                "Have a fresh reviewer agent review this chat's changes, as the Review button does.",
+            ),
+            tool(
                 "agent_profiles",
                 "Create, change or remove the agent profiles in the model picker when asked.",
             ),
