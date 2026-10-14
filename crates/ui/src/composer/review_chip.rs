@@ -105,6 +105,7 @@ async fn launch_review(
     target: &Target,
     scope: ReviewScope,
     choice: &ReviewerChoice,
+    instructions: &str,
 ) -> Result<(String, String, Option<String>), String> {
     let (diff, base) = checkout_diff(engine, target, scope).await?;
     let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
@@ -127,6 +128,7 @@ async fn launch_review(
         patch: &diff.patch,
         truncated: diff.truncated,
         files: &files,
+        instructions,
     });
     let params = serde_json::json!({
         "ownerChatId": target.chat_id,
@@ -448,6 +450,7 @@ impl Composer {
         self.close_review_menu(cx);
         let chat_id = target.chat_id.clone();
         let choice = self.reviewer_choice(&chat_id, cx);
+        let instructions = crate::settings::review_instructions(cx);
         let mut run = ReviewRun::new(scope);
         run.choice = Some(choice.clone());
         let previous = self.state.update(cx, |state, cx| {
@@ -461,7 +464,7 @@ impl Composer {
             previous.filter(|run| run.status == RunStatus::Done && !run.findings.is_empty())
         });
         cx.spawn(async move |this, cx| {
-            let started = launch_review(&engine, &target, scope, &choice).await;
+            let started = launch_review(&engine, &target, scope, &choice, &instructions).await;
             this.update(cx, |composer, cx| {
                 composer.set_run(&chat_id, cx, |run| {
                     if run.status != RunStatus::Starting {

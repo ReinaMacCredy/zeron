@@ -645,6 +645,7 @@ pub struct PromptInput<'a> {
     pub patch: &'a str,
     pub truncated: bool,
     pub files: &'a [String],
+    pub instructions: &'a str,
 }
 
 pub fn prompt(input: PromptInput) -> String {
@@ -679,6 +680,14 @@ pub fn prompt(input: PromptInput) -> String {
     out.push_str(concat!(
         "Look for correctness bugs, regressions, security problems, and risky assumptions. ",
         "Skip style preferences unless they hide a bug.\n\n",
+    ));
+    let instructions = input.instructions.trim();
+    if !instructions.is_empty() {
+        out.push_str("Additional instructions from the user:\n");
+        out.push_str(instructions);
+        out.push_str("\n\n");
+    }
+    out.push_str(concat!(
         "End your reply with exactly one fenced code block whose info string is zeron-review, ",
         "holding a JSON array of findings (an empty array when you found nothing):\n\n",
         "```zeron-review\n",
@@ -743,6 +752,23 @@ mod tests {
         assert_eq!(found.path, "src/a.rs");
         assert_eq!(found.side, CommentSide::Old);
         assert_eq!(found.severity, Severity::Bug);
+    }
+
+    #[test]
+    fn user_instructions_go_before_the_findings_format() {
+        let files = vec!["a.rs".to_string()];
+        let input = |instructions| PromptInput {
+            scope: ReviewScope::Uncommitted,
+            base: None,
+            patch: "diff",
+            truncated: false,
+            files: &files,
+            instructions,
+        };
+        let with = prompt(input("Write findings in Vietnamese."));
+        let at = with.find("Write findings in Vietnamese.").unwrap();
+        assert!(at < with.find("End your reply").unwrap());
+        assert!(!prompt(input("  ")).contains("Additional instructions"));
     }
 
     #[test]

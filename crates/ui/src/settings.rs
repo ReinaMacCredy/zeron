@@ -624,6 +624,12 @@ pub fn review_reviewer(cx: &App) -> crate::review::ReviewerChoice {
         .unwrap_or_default()
 }
 
+pub fn review_instructions(cx: &App) -> String {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.review_instructions.clone())
+        .unwrap_or_default()
+}
+
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .is_some_and(|store| store.current.compact_model_picker)
@@ -1398,6 +1404,7 @@ pub struct UiSettings {
     pub compact_model_picker: bool,
     pub compact_effort_slider: EffortSliderStyle,
     pub review_reviewer: crate::review::ReviewerChoice,
+    pub review_instructions: String,
     pub computer_click_sounds: ComputerClickSounds,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
@@ -1676,6 +1683,7 @@ impl Default for UiSettings {
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
             review_reviewer: crate::review::ReviewerChoice::Auto,
+            review_instructions: String::new(),
             computer_click_sounds: ComputerClickSounds::Foreground,
             appshots_enabled: false,
             appshot_sound_enabled: true,
@@ -2316,6 +2324,7 @@ impl UiSettings {
             skill_completion_by_harness,
             compact_model_picker,
             review_reviewer,
+            review_instructions,
             sidebar_width,
             sidebar_collapsed,
             sidebar_hover_enabled,
@@ -3816,6 +3825,7 @@ mod tests {
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
             review_reviewer: crate::review::ReviewerChoice::Auto,
+            review_instructions: String::new(),
             computer_click_sounds: ComputerClickSounds::Foreground,
             appshots_enabled: false,
             appshot_sound_enabled: true,

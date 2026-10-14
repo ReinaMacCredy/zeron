@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use gpui::{AnyElement, Context, Entity, Subscription, Task, Window, div, prelude::*, px};
 use zeron_proto::{HarnessId, Model};
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::review::{ReviewerChoice, ReviewerOptions};
 use crate::settings::widgets;
@@ -17,9 +18,11 @@ pub struct CodeReviewPage {
     reviewer_select: widgets::SelectState,
     model_select: widgets::SelectState,
     thinking: crate::pickers::LevelSlider,
+    instructions: Entity<ComposerInput>,
     task: Option<Task<()>>,
     model_task: Option<Task<()>>,
     _state: Subscription,
+    _instructions: Subscription,
 }
 
 impl CodeReviewPage {
@@ -29,8 +32,19 @@ impl CodeReviewPage {
                 this.load(cx);
             }
         });
+        let instructions = cx.new(|cx| {
+            ComposerInput::new("Focus on correctness and security. Ignore formatting.", cx)
+        });
+        let saved = crate::settings::review_instructions(cx);
+        instructions.update(cx, |input, cx| input.set_text(saved, cx));
+        let instructions_events = cx.subscribe(
+            &instructions,
+            |_: &mut Self, _, _: &ComposerInputEvent, cx| cx.notify(),
+        );
         let mut card = Self {
             state,
+            instructions,
+            _instructions: instructions_events,
             scroll: widgets::PageScroll::default(),
             options: Loadable::Idle,
             models: HashMap::new(),
@@ -308,6 +322,66 @@ impl CodeReviewPage {
     }
 }
 
+impl CodeReviewPage {
+    fn render_instructions(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let saved = crate::settings::review_instructions(cx);
+        let current = self.instructions.read(cx).text().trim().to_string();
+        let dirty = saved.trim() != current;
+        div()
+            .flex()
+            .flex_col()
+            .child(widgets::section_label(theme, "Review instructions").mt(px(28.0)))
+            .child(
+                widgets::section_card(theme).mt(px(8.0)).child(
+                    widgets::card_row(theme, true)
+                        .flex_col()
+                        .items_stretch()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child(
+                                    "Added to every review prompt, for every reviewer, before the \
+                                     findings format it must follow.",
+                                ),
+                        )
+                        .child(popover::dialog_field(
+                            div()
+                                .h(px(72.0))
+                                .overflow_hidden()
+                                .child(self.instructions.clone())
+                                .into_any_element(),
+                        ))
+                        .child(
+                            div().flex().justify_end().child(
+                                widgets::text_action(theme, widgets::ActionTone::Filled, "Save")
+                                    .id("code-review-instructions-save")
+                                    .when(!dirty, |el| el.opacity(0.4).cursor_default())
+                                    .when(dirty, |el| {
+                                        el.on_click(cx.listener(|this, _, _, cx| {
+                                            let text = this
+                                                .instructions
+                                                .read(cx)
+                                                .text()
+                                                .trim()
+                                                .to_string();
+                                            crate::settings::update(
+                                                crate::settings::SavePolicy::Immediate,
+                                                cx,
+                                                |settings| settings.review_instructions = text,
+                                            );
+                                            cx.notify();
+                                        }))
+                                    }),
+                            ),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+}
+
 impl popover::ScrollRailHost for CodeReviewPage {
     fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
         self.scroll.rail_bar()
@@ -356,7 +430,8 @@ impl Render for CodeReviewPage {
                                             "A pick in the Review button's menu applies to that \
                                              chat only and overrides this default.",
                                         ),
-                                ),
+                                )
+                                .child(self.render_instructions(&theme, cx)),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),
