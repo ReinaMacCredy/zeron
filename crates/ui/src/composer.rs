@@ -6235,18 +6235,7 @@ fn sidechat_pill_label(title: Option<&str>) -> String {
 /// The catalog's names live on the engine's harness descriptors, which the
 /// composer never holds; this is the same list, for one sentence of copy.
 pub(crate) fn harness_display_name(harness: HarnessId) -> &'static str {
-    match harness {
-        HarnessId::ClaudeCode => "Claude Code",
-        HarnessId::Codex => "Codex",
-        HarnessId::Cursor => "Cursor",
-        HarnessId::Devin => "Devin",
-        HarnessId::Grok => "Grok",
-        HarnessId::Hermes => "Hermes",
-        HarnessId::Pi => "Pi",
-        HarnessId::Opencode => "OpenCode",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Mock => "Mock",
-    }
+    harness.display_name()
 }
 
 // Claude's prompt cache lives at most an hour; the thresholds match Claude's own resume dialog.

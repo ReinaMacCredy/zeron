@@ -150,6 +150,19 @@ struct CreateThreadParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StartReviewParams {
+    owner_chat_id: String,
+    scope: String,
+    #[serde(default)]
+    commit_sha: Option<String>,
+    #[serde(default)]
+    reviewer: Option<crate::review::ReviewerChoice>,
+    #[serde(default)]
+    wake: Option<zeron_proto::DelegationWake>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TaskParams {
     chat_id: String,
     task_id: String,
@@ -1084,6 +1097,163 @@ impl EngineRpc {
         Ok(())
     }
 
+    async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
+        use crate::review::{PromptInput, ReviewScope, ReviewerOptions};
+        let failed = |message: &str| RpcError::Failed(message.to_string());
+        let chat = self
+            .workspace
+            .chat(&p.owner_chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .ok_or_else(|| failed("chat not found"))?;
+        if chat.device_id != self.doc_host.device_id() {
+            return Err(failed("chat is not hosted by this device"));
+        }
+        let space = match chat.space_id.as_deref() {
+            Some(id) => self
+                .workspace
+                .space(id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?,
+            None => None,
+        }
+        .filter(|space| space.git_detected)
+        .ok_or_else(|| failed("this chat's project is not a git repository"))?;
+        let cwd = chat.cwd.clone().unwrap_or(space.path);
+        let scope =
+            ReviewScope::from_key(&p.scope).ok_or_else(|| failed("unknown review scope"))?;
+        let commit = match scope {
+            ReviewScope::Commit => Some(
+                p.commit_sha
+                    .clone()
+                    .filter(|sha| !sha.trim().is_empty())
+                    .ok_or_else(|| failed("commitSha required"))?,
+            ),
+            _ => None,
+        };
+        let value = |reply: RpcReply| match reply {
+            RpcReply::Value(value) => Ok(value),
+            RpcReply::Stream(_) => Err(failed("unexpected stream")),
+        };
+        let base = match scope {
+            ReviewScope::Branch => {
+                let branches = value(
+                    self.handle(
+                        methods::LIST_BRANCHES,
+                        serde_json::json!({ "repoPath": cwd }),
+                    )
+                    .await?,
+                )?;
+                let branches: Vec<String> = serde_json::from_value(branches).unwrap_or_default();
+                Some(
+                    crate::review::default_base_ref(&branches, chat.branch.as_deref())
+                        .ok_or_else(|| failed("No base branch to compare against"))?,
+                )
+            }
+            _ => None,
+        };
+        let diff = value(
+            self.handle(
+                methods::GET_CHECKOUT_DIFF,
+                serde_json::json!({
+                    "cwd": cwd,
+                    "mode": scope.mode(),
+                    "chatId": chat.id,
+                    "baseRef": base,
+                    "commitSha": commit,
+                }),
+            )
+            .await?,
+        )?;
+        let diff: zeron_proto::CheckoutDiff =
+            serde_json::from_value(diff).map_err(|e| RpcError::Failed(e.to_string()))?;
+        let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
+        if files.is_empty() {
+            return Err(failed("Nothing to review"));
+        }
+        let settings = self.registry.review_settings();
+        let mock = std::env::var("ZERON_HARNESS").is_ok_and(|v| v.trim() == "mock");
+        let descriptors: Vec<_> = self
+            .registry
+            .descriptors()
+            .into_iter()
+            .filter(|d| {
+                d.installed
+                    && (crate::registry::descriptor_enabled(d) || (mock && d.id == HarnessId::Mock))
+                    && (mock || d.id != HarnessId::Mock)
+            })
+            .collect();
+        let options = ReviewerOptions {
+            offered: descriptors.iter().map(|d| d.id).collect(),
+            levels: descriptors
+                .into_iter()
+                .map(|d| (d.id, d.reasoning_levels))
+                .collect(),
+            profiles: self
+                .agent_profiles
+                .as_ref()
+                .map(|store| store.snapshot().profiles)
+                .unwrap_or_default(),
+        };
+        let chat_harness = chat.config.as_ref().map(|config| config.harness);
+        let owner_permission = chat.config.as_ref().map(|config| config.permission_mode);
+        let choice = p.reviewer.clone().unwrap_or(settings.reviewer);
+        let reviewer = crate::review::resolve_reviewer(&choice, chat_harness, &options);
+        let profile = reviewer.profile.as_ref();
+        let permission_mode = profile
+            .and_then(|profile| profile.permission_mode)
+            .filter(|mode| owner_permission.is_some_and(|owner| mode.rank() <= owner.rank()));
+        let task = crate::review::prompt(PromptInput {
+            scope,
+            base: base.as_deref(),
+            commit: commit.as_deref(),
+            patch: &diff.patch,
+            truncated: diff.truncated,
+            files: &files,
+            instructions: &settings.instructions,
+        });
+        let request =
+            crate::review::request_id(scope, commit.as_deref(), &uuid::Uuid::new_v4().to_string());
+        let view = self
+            .doc_host
+            .delegate_task(
+                crate::doc_host::DelegateTaskParams {
+                    owner_chat_id: chat.id.clone(),
+                    task,
+                    title: Some("Review changes".to_string()),
+                    role: Some("review".to_string()),
+                    harness: reviewer.harness,
+                    model: reviewer.model.clone(),
+                    reasoning: reviewer.reasoning,
+                    permission_mode,
+                    model_options: profile
+                        .filter(|profile| !profile.model_options.is_empty())
+                        .map(|profile| profile.model_options.clone()),
+                    instructions: profile.map(|profile| profile.instructions.clone()),
+                    profile_id: profile.map(|profile| profile.id.clone()),
+                    disabled_tools: profile
+                        .map(|profile| profile.disabled_tools.clone())
+                        .unwrap_or_default(),
+                    wait: false,
+                    wake: Some(p.wake.unwrap_or(zeron_proto::DelegationWake::Never)),
+                    client_request_id: Some(request),
+                },
+                self.registry.delegation_settings(),
+            )
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let task_id = serde_json::to_value(&view)
+            .ok()
+            .and_then(|view| view.get("taskId")?.as_str().map(str::to_string))
+            .ok_or_else(|| failed("The reviewer did not start"))?;
+        Ok(serde_json::json!({
+            "taskId": task_id,
+            "patch": diff.patch,
+            "note": reviewer.note,
+            "reviewer": reviewer.name(),
+            "scope": scope.key(),
+            "commitSha": commit,
+        }))
+    }
+
     fn agent_profiles_store(&self) -> Result<AgentProfilesStore, RpcError> {
         self.agent_profiles
             .clone()
@@ -2012,6 +2182,9 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PREDICTION_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
+            | methods::GET_REVIEW_SETTINGS
+            | methods::SET_REVIEW_SETTINGS
+            | methods::START_REVIEW
             | methods::GET_TOOL_SETTINGS
             | methods::SET_TOOL_SETTINGS
             | methods::SET_HARNESS_ENABLED
@@ -2488,6 +2661,18 @@ impl RpcService for EngineRpc {
             }
             methods::GET_DELEGATION_SETTINGS => {
                 RpcReply::value(&self.registry.delegation_settings())
+            }
+            methods::GET_REVIEW_SETTINGS => RpcReply::value(&self.registry.review_settings()),
+            methods::SET_REVIEW_SETTINGS => {
+                let p: crate::review::ReviewSettings = parse_params(params)?;
+                self.registry
+                    .set_review_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.review_settings())
+            }
+            methods::START_REVIEW => {
+                let p: StartReviewParams = parse_params(params)?;
+                RpcReply::value(&Box::pin(self.start_review(p)).await?)
             }
             methods::SET_DELEGATION_SETTINGS => {
                 let p: crate::registry::DelegationSettings = parse_params(params)?;

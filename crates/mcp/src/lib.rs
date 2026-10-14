@@ -466,6 +466,21 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "review_changes",
+            "description": "Have a fresh reviewer agent review this chat's code changes, exactly as the user's Review button does. The reviewer, model, thinking level and review instructions default to the user's Settings > Code review. It returns at once; the findings show on the Review chip and in the Changes pane, and this chat is woken with the reviewer's findings when it finishes, so end the turn instead of polling. Call it when you finish a change you want checked.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string", "enum": ["uncommitted", "branch", "turn", "commit"], "description": "What to review. uncommitted: the working tree; branch: this branch against its base; turn: your latest turn's changes; commit: one commit (needs commit). Default uncommitted." },
+                    "commit": { "type": "string", "description": "Commit sha, for scope=commit." },
+                    "harness": { "type": "string", "description": "Reviewer harness id from list_harnesses; default: the user's setting." },
+                    "model": { "type": "string", "description": "Reviewer model, with harness." },
+                    "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reviewer reasoning level, with harness." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "task_status",
             "description": "Read a Zeron-owned delegated task. A task another chat on this device delegated (its taskId is the child thread id, as list_threads names it) is read without touching that chat's wake, and the view adds `ownerChatId`. workState distinguishes working, waiting_for_children, and result_available; a finished turn with live nested work is not a finished task. summary is the final task result, including the error on failure, and stays stable once published. hasPendingChildRuns reports a later turn the child is running. Reading a finished result of this chat's own task acknowledges its automatic wake.",
             "inputSchema": {
@@ -625,6 +640,7 @@ impl ThreadTools {
             "list_models" => self.list_models(args).await,
             "orchestrator_capabilities" => self.orchestrator_capabilities().await,
             "delegate_task" => self.delegate_task(args).await,
+            "review_changes" => self.review_changes(args).await,
             "task_status" => self.task_status(args).await,
             "task_cancel" => self.task_cancel(args).await,
             other => Err(format!("unknown tool: {other}")),
@@ -1173,6 +1189,38 @@ impl ThreadTools {
             .into_iter()
             .find(|profile| profile.id == id)
             .ok_or(missing)
+    }
+
+    pub async fn review_changes(&self, args: &Value) -> Result<Value, String> {
+        let scope = args["scope"].as_str().unwrap_or("uncommitted");
+        let reviewer = args["harness"].as_str().map(|harness| {
+            json!({
+                "kind": "harness",
+                "harness": harness,
+                "model": args["model"],
+                "reasoning": args["reasoning"],
+            })
+        });
+        let started = self
+            .call_engine(
+                methods::START_REVIEW,
+                json!({
+                    "ownerChatId": self.chat_id,
+                    "scope": scope,
+                    "commitSha": args["commit"],
+                    "reviewer": reviewer,
+                    "wake": "always",
+                }),
+            )
+            .await?;
+        Ok(json!({
+            "taskId": started["taskId"],
+            "reviewer": started["reviewer"],
+            "scope": started["scope"],
+            "commitSha": started["commitSha"],
+            "note": started["note"],
+            "next": "The review runs in the background and this chat is woken with its findings when it finishes. End the turn instead of polling.",
+        }))
     }
 
     pub async fn delegate_task(&self, args: &Value) -> Result<Value, String> {
@@ -2685,7 +2733,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 28] = [
+    const THREAD_TOOLS: [&str; 29] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2712,6 +2760,7 @@ mod tests {
         "list_models",
         "orchestrator_capabilities",
         "delegate_task",
+        "review_changes",
         "task_status",
         "task_cancel",
     ];

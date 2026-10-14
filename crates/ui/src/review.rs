@@ -1,19 +1,48 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{AgentProfile, HarnessId, Model, ReasoningLevel};
+pub use zeron_engine::review::{
+    REQUEST_PREFIX, ReviewScope, ReviewSettings, ReviewerChoice, ReviewerOptions, parse_request,
+    resolve_reviewer,
+};
+use zeron_proto::{HarnessId, Model, ReasoningLevel};
 use zeron_rpc::methods;
 
 use crate::changes::{FileDiff, line_anchor};
 use crate::comments::{CommentSide, ReviewComment};
-use crate::composer::harness_display_name;
 
-pub const REQUEST_PREFIX: &str = "zeron-review:";
 pub const CARD_PREFIX: &str = "review-finding:";
 const FENCE: &str = "```zeron-review";
-const MAX_PATCH_BYTES: usize = 120_000;
 const REANCHOR_WINDOW: u32 = 40;
+
+pub fn brand(
+    options: &ReviewerOptions,
+    choice: &ReviewerChoice,
+    chat: Option<HarnessId>,
+) -> (&'static str, Option<gpui::Hsla>) {
+    let (harness, model) = match choice {
+        ReviewerChoice::Harness { harness, model, .. } => (Some(*harness), model.clone()),
+        ReviewerChoice::Profile { id }
+            if let Some(profile) = options.profiles.iter().find(|profile| &profile.id == id) =>
+        {
+            (Some(profile.harness), profile.model.clone())
+        }
+        _ => {
+            let reviewer = resolve_reviewer(choice, chat, options);
+            (reviewer.harness, reviewer.model)
+        }
+    };
+    crate::pickers::agent_brand_icon(harness, model.as_deref())
+}
+
+pub async fn review_settings(engine: &crate::state::EngineHandle) -> ReviewSettings {
+    engine
+        .client()
+        .call_as::<ReviewSettings>(methods::GET_REVIEW_SETTINGS, serde_json::json!({}))
+        .await
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatReview {
@@ -23,6 +52,19 @@ pub struct ChatReview {
     pub stats_key: Option<String>,
     pub run: Option<ReviewRun>,
     pub reviewer: Option<ReviewerChoice>,
+    pub commit: Option<CommitPick>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitPick {
+    pub sha: String,
+    pub subject: String,
+}
+
+impl CommitPick {
+    pub fn short(&self) -> &str {
+        &self.sha[..self.sha.len().min(7)]
+    }
 }
 
 impl ChatReview {
@@ -70,83 +112,6 @@ impl ChatReview {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ReviewerChoice {
-    #[default]
-    Auto,
-    Harness {
-        harness: HarnessId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning: Option<ReasoningLevel>,
-    },
-    Profile {
-        id: String,
-    },
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ReviewerOptions {
-    pub offered: Vec<HarnessId>,
-    pub profiles: Vec<AgentProfile>,
-    pub levels: HashMap<HarnessId, Vec<ReasoningLevel>>,
-}
-
-impl ReviewerOptions {
-    pub fn label(&self, choice: &ReviewerChoice) -> String {
-        match choice {
-            ReviewerChoice::Auto => "Auto".to_string(),
-            ReviewerChoice::Harness { harness, model, .. } => match model {
-                Some(model) => format!("{} · {model}", harness_display_name(*harness)),
-                None => harness_display_name(*harness).to_string(),
-            },
-            ReviewerChoice::Profile { id } => self
-                .profiles
-                .iter()
-                .find(|profile| &profile.id == id)
-                .map_or_else(
-                    || "Missing profile".to_string(),
-                    |profile| profile.name.clone(),
-                ),
-        }
-    }
-
-    pub fn brand(
-        &self,
-        choice: &ReviewerChoice,
-        chat: Option<HarnessId>,
-    ) -> (&'static str, Option<gpui::Hsla>) {
-        let (harness, model) = match choice {
-            ReviewerChoice::Harness { harness, model, .. } => (Some(*harness), model.clone()),
-            ReviewerChoice::Profile { id }
-                if let Some(profile) = self.profiles.iter().find(|profile| &profile.id == id) =>
-            {
-                (Some(profile.harness), profile.model.clone())
-            }
-            _ => {
-                let reviewer = resolve_reviewer(choice, chat, self);
-                (reviewer.harness, reviewer.model)
-            }
-        };
-        crate::pickers::agent_brand_icon(harness, model.as_deref())
-    }
-
-    pub fn choices(&self) -> Vec<ReviewerChoice> {
-        std::iter::once(ReviewerChoice::Auto)
-            .chain(self.offered.iter().map(|harness| ReviewerChoice::Harness {
-                harness: *harness,
-                model: None,
-                reasoning: None,
-            }))
-            .chain(self.profiles.iter().map(|profile| ReviewerChoice::Profile {
-                id: profile.id.clone(),
-            }))
-            .collect()
-    }
-}
-
 pub async fn list_models(engine: &crate::state::EngineHandle, harness: HarnessId) -> Vec<Model> {
     engine
         .client()
@@ -191,101 +156,6 @@ pub fn reasoning_stops(
         .or_else(|| options.levels.get(&harness).cloned())
         .unwrap_or_default()
 }
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Reviewer {
-    pub harness: Option<HarnessId>,
-    pub model: Option<String>,
-    pub reasoning: Option<ReasoningLevel>,
-    pub profile: Option<AgentProfile>,
-    pub note: Option<String>,
-}
-
-impl Reviewer {
-    pub fn name(&self) -> String {
-        match (&self.profile, self.harness) {
-            (Some(profile), _) => profile.name.clone(),
-            (None, Some(harness)) => harness_display_name(harness).to_string(),
-            (None, None) => "the chat's agent".to_string(),
-        }
-    }
-}
-
-pub fn other_family(chat: Option<HarnessId>, offered: &[HarnessId]) -> Option<HarnessId> {
-    let wanted: &[HarnessId] = match chat {
-        Some(HarnessId::ClaudeCode) => &[HarnessId::Codex],
-        Some(HarnessId::Codex) => &[HarnessId::ClaudeCode],
-        _ => &[HarnessId::ClaudeCode, HarnessId::Codex],
-    };
-    wanted.iter().copied().find(|id| offered.contains(id))
-}
-
-pub fn resolve_reviewer(
-    choice: &ReviewerChoice,
-    chat: Option<HarnessId>,
-    options: &ReviewerOptions,
-) -> Reviewer {
-    let usable = |profile: &AgentProfile| options.offered.contains(&profile.harness);
-    let from_profile = |profile: &AgentProfile| Reviewer {
-        harness: Some(profile.harness),
-        model: profile.model.clone(),
-        reasoning: profile.reasoning,
-        profile: Some(profile.clone()),
-        note: None,
-    };
-    let skipped = match choice {
-        ReviewerChoice::Auto => None,
-        ReviewerChoice::Harness {
-            harness,
-            model,
-            reasoning,
-        } if options.offered.contains(harness) => {
-            return Reviewer {
-                harness: Some(*harness),
-                model: model.clone(),
-                reasoning: *reasoning,
-                ..Reviewer::default()
-            };
-        }
-        ReviewerChoice::Harness { harness, .. } => {
-            Some(format!("{} is unavailable", harness_display_name(*harness)))
-        }
-        ReviewerChoice::Profile { id } => match options.profiles.iter().find(|p| &p.id == id) {
-            Some(profile) if usable(profile) => return from_profile(profile),
-            Some(profile) => Some(format!("{} is unavailable", profile.name)),
-            None => Some("The chosen profile was deleted".to_string()),
-        },
-    };
-    let named = options
-        .profiles
-        .iter()
-        .find(|profile| profile.name.trim().eq_ignore_ascii_case("reviewer") && usable(profile));
-    let mut reviewer = match (named, other_family(chat, &options.offered)) {
-        (Some(profile), _) => from_profile(profile),
-        (None, Some(harness)) => Reviewer {
-            harness: Some(harness),
-            ..Reviewer::default()
-        },
-        (None, None) => {
-            let own = Reviewer {
-                harness: chat,
-                ..Reviewer::default()
-            };
-            Reviewer {
-                note: Some(format!(
-                    "No other agent is available, so {} reviews its own work",
-                    own.name()
-                )),
-                ..own
-            }
-        }
-    };
-    if let Some(skipped) = skipped {
-        reviewer.note = Some(format!("{skipped}, so {} reviews instead", reviewer.name()));
-    }
-    reviewer
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunStatus {
     Starting,
@@ -323,6 +193,7 @@ pub struct ReviewRun {
     pub note: Option<String>,
     pub choice: Option<ReviewerChoice>,
     pub retry_error: Option<String>,
+    pub commit: Option<String>,
 }
 
 impl ReviewRun {
@@ -337,6 +208,7 @@ impl ReviewRun {
             note: None,
             choice: None,
             retry_error: None,
+            commit: None,
         }
     }
 
@@ -353,62 +225,6 @@ impl ReviewRun {
             .filter(|finding| finding.placement == Placement::Outdated)
             .count()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReviewScope {
-    Uncommitted,
-    Branch,
-    LatestTurn,
-}
-
-impl ReviewScope {
-    pub const ALL: [ReviewScope; 3] = [Self::Branch, Self::Uncommitted, Self::LatestTurn];
-
-    pub fn default_for(worktree: bool) -> Self {
-        if worktree {
-            Self::Branch
-        } else {
-            Self::Uncommitted
-        }
-    }
-
-    pub fn mode(self) -> &'static str {
-        match self {
-            Self::Uncommitted => "workingTree",
-            Self::Branch => "branch",
-            Self::LatestTurn => "turn",
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Uncommitted => "uncommitted",
-            Self::Branch => "branch",
-            Self::LatestTurn => "turn",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|scope| scope.key() == key)
-    }
-
-    pub fn label(self, base: Option<&str>) -> String {
-        match self {
-            Self::Uncommitted => "Uncommitted".into(),
-            Self::Branch => format!("Branch vs {}", base.unwrap_or("base")),
-            Self::LatestTurn => "Latest turn".into(),
-        }
-    }
-}
-
-pub fn request_id(scope: ReviewScope, nonce: &str) -> String {
-    format!("{REQUEST_PREFIX}{}:{nonce}", scope.key())
-}
-
-pub fn request_scope(request_id: &str) -> Option<ReviewScope> {
-    let rest = request_id.strip_prefix(REQUEST_PREFIX)?;
-    ReviewScope::from_key(rest.split(':').next()?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -639,69 +455,6 @@ pub fn refresh(findings: &mut [Finding], files: &[FileDiff]) -> bool {
     changed
 }
 
-pub struct PromptInput<'a> {
-    pub scope: ReviewScope,
-    pub base: Option<&'a str>,
-    pub patch: &'a str,
-    pub truncated: bool,
-    pub files: &'a [String],
-    pub instructions: &'a str,
-}
-
-pub fn prompt(input: PromptInput) -> String {
-    let scope = input.scope.label(input.base);
-    let mut out = format!(
-        "Review these code changes ({scope}). Report problems only: never edit, create, or delete files, and never commit. You may read files in this checkout for context.\n\n"
-    );
-    let fits = !input.truncated && input.patch.len() <= MAX_PATCH_BYTES;
-    if fits {
-        out.push_str("```diff\n");
-        out.push_str(input.patch.trim_end());
-        out.push_str("\n```\n\n");
-    } else {
-        let how = match input.scope {
-            ReviewScope::Uncommitted => {
-                "Read it with `git diff HEAD`, plus `git status --porcelain` for new files.".into()
-            }
-            ReviewScope::Branch => format!(
-                "Read it with `git diff $(git merge-base {} HEAD)`, plus `git status --porcelain` for new files.",
-                input.base.unwrap_or("main")
-            ),
-            ReviewScope::LatestTurn => "Read the changed files listed below.".into(),
-        };
-        out.push_str(&format!(
-            "The diff is too large to include. {how}\nChanged files:\n"
-        ));
-        for file in input.files {
-            out.push_str(&format!("- {file}\n"));
-        }
-        out.push('\n');
-    }
-    out.push_str(concat!(
-        "Look for correctness bugs, regressions, security problems, and risky assumptions. ",
-        "Skip style preferences unless they hide a bug.\n\n",
-    ));
-    let instructions = input.instructions.trim();
-    if !instructions.is_empty() {
-        out.push_str("Additional instructions from the user:\n");
-        out.push_str(instructions);
-        out.push_str("\n\n");
-    }
-    out.push_str(concat!(
-        "End your reply with exactly one fenced code block whose info string is zeron-review, ",
-        "holding a JSON array of findings (an empty array when you found nothing):\n\n",
-        "```zeron-review\n",
-        "[{\"path\": \"src/lib.rs\", \"side\": \"R\", \"line\": 42, \"text\": \"let run = snapshot.run.unwrap();\", ",
-        "\"severity\": \"bug\", \"title\": \"One line summary\", \"body\": \"Why it is wrong and how to fix it.\"}]\n",
-        "```\n\n",
-        "path is the file path exactly as the diff shows it. side is \"R\" for an added or unchanged line ",
-        "(line = its number in the changed file) and \"L\" for a removed line (line = its number in the ",
-        "original file). text is that line's exact content without the +/- marker. ",
-        "severity is \"bug\", \"risk\", or \"nit\"."
-    ));
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,23 +505,6 @@ mod tests {
         assert_eq!(found.path, "src/a.rs");
         assert_eq!(found.side, CommentSide::Old);
         assert_eq!(found.severity, Severity::Bug);
-    }
-
-    #[test]
-    fn user_instructions_go_before_the_findings_format() {
-        let files = vec!["a.rs".to_string()];
-        let input = |instructions| PromptInput {
-            scope: ReviewScope::Uncommitted,
-            base: None,
-            patch: "diff",
-            truncated: false,
-            files: &files,
-            instructions,
-        };
-        let with = prompt(input("Write findings in Vietnamese."));
-        let at = with.find("Write findings in Vietnamese.").unwrap();
-        assert!(at < with.find("End your reply").unwrap());
-        assert!(!prompt(input("  ")).contains("Additional instructions"));
     }
 
     #[test]
@@ -870,85 +606,5 @@ mod tests {
         let comment = finding.comment();
         assert_eq!(comment.body, "Risk: Leaks\nClose it.");
         assert_eq!(comment.location(), "src/a.rs:7");
-    }
-
-    fn profile(id: &str, name: &str, harness: HarnessId) -> AgentProfile {
-        serde_json::from_value(serde_json::json!({
-            "id": id,
-            "name": name,
-            "harness": harness,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn the_reviewer_resolves_by_choice_then_falls_back_with_a_note() {
-        let options = ReviewerOptions {
-            offered: vec![HarnessId::ClaudeCode, HarnessId::Codex],
-            profiles: vec![profile("p1", "Reviewer", HarnessId::Codex)],
-            levels: HashMap::new(),
-        };
-        let picked = resolve_reviewer(
-            &ReviewerChoice::Harness {
-                harness: HarnessId::ClaudeCode,
-                model: None,
-                reasoning: Some(ReasoningLevel::High),
-            },
-            Some(HarnessId::ClaudeCode),
-            &options,
-        );
-        assert_eq!(
-            (picked.harness, picked.reasoning),
-            (Some(HarnessId::ClaudeCode), Some(ReasoningLevel::High))
-        );
-        let auto = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &options);
-        assert_eq!(auto.profile.map(|p| p.id), Some("p1".to_string()));
-        assert_eq!(auto.note, None);
-
-        let no_profiles = ReviewerOptions {
-            profiles: Vec::new(),
-            ..options.clone()
-        };
-        let auto = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &no_profiles);
-        assert_eq!(auto.harness, Some(HarnessId::ClaudeCode));
-
-        let alone = ReviewerOptions {
-            offered: vec![HarnessId::Codex],
-            profiles: Vec::new(),
-            levels: HashMap::new(),
-        };
-        let own = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &alone);
-        assert_eq!(own.harness, Some(HarnessId::Codex));
-        assert!(own.note.is_some());
-
-        let gone = resolve_reviewer(
-            &ReviewerChoice::Profile {
-                id: "deleted".into(),
-            },
-            Some(HarnessId::ClaudeCode),
-            &no_profiles,
-        );
-        assert_eq!(gone.harness, Some(HarnessId::Codex));
-        assert!(gone.note.unwrap().contains("deleted"));
-
-        let unavailable = resolve_reviewer(
-            &ReviewerChoice::Harness {
-                harness: HarnessId::Mock,
-                model: None,
-                reasoning: None,
-            },
-            Some(HarnessId::ClaudeCode),
-            &no_profiles,
-        );
-        assert_eq!(unavailable.harness, Some(HarnessId::Codex));
-        assert!(unavailable.note.is_some());
-    }
-
-    #[test]
-    fn the_request_id_carries_the_scope() {
-        let id = request_id(ReviewScope::Branch, "abc");
-        assert!(id.starts_with(REQUEST_PREFIX));
-        assert_eq!(request_scope(&id), Some(ReviewScope::Branch));
-        assert_eq!(request_scope("other:branch:x"), None);
     }
 }

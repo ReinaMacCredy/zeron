@@ -3,28 +3,40 @@ use std::collections::HashMap;
 use gpui::{
     AnyElement, App, Bounds, Context, Pixels, Point, SharedString, Task, div, prelude::*, px,
 };
-use zeron_proto::{CheckoutDiff, HarnessId, Model, PermissionMode};
+use zeron_proto::{CheckoutDiff, HarnessId, Model};
 use zeron_rpc::methods;
 
 use super::{Composer, ComposerEvent};
 use crate::changes::{default_base_ref, parse_patch};
 use crate::popover::{self, Popup};
 use crate::review::{
-    self, PromptInput, ReviewRun, ReviewScope, ReviewerChoice, ReviewerOptions, RunStatus,
+    self, ReviewRun, ReviewScope, ReviewSettings, ReviewerChoice, ReviewerOptions, RunStatus,
 };
 use crate::theme::Theme;
 
 const CHIP_HEIGHT: f32 = 28.0;
+const COMMITS_ROW: usize = usize::MAX;
+const COMMIT_LIST_LIMIT: usize = 30;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Submenu {
+    Models(HarnessId),
+    Commits,
+}
 
 #[derive(Default)]
 pub(super) struct ReviewChipUi {
     pub(super) menu: Popup<()>,
     options: Option<ReviewerOptions>,
+    settings: Option<ReviewSettings>,
     options_task: Option<Task<()>>,
-    model_menu: Option<(usize, HarnessId)>,
-    model_intent: popover::HoverIntent<usize>,
-    model_bounds: Option<Bounds<Pixels>>,
-    model_left: bool,
+    submenu: Option<(usize, Submenu)>,
+    submenu_intent: popover::HoverIntent<usize>,
+    submenu_bounds: Option<Bounds<Pixels>>,
+    submenu_left: bool,
+    commits: Option<Vec<zeron_proto::GitHistoryCommit>>,
+    commits_task: Option<Task<()>>,
+    commit_filter: Option<gpui::Entity<super::ComposerInput>>,
     models: HashMap<HarnessId, Vec<Model>>,
     models_task: Option<Task<()>>,
     busy_hover: bool,
@@ -38,7 +50,6 @@ struct Target {
     branch: Option<String>,
     worktree: bool,
     harness: Option<HarnessId>,
-    permission: Option<PermissionMode>,
 }
 
 enum Look {
@@ -56,7 +67,11 @@ async fn checkout_diff(
     engine: &crate::state::EngineHandle,
     target: &Target,
     scope: ReviewScope,
+    commit: Option<&str>,
 ) -> Result<(CheckoutDiff, Option<String>), String> {
+    if scope == ReviewScope::Commit && commit.is_none() {
+        return Err("Pick a commit".to_string());
+    }
     let base = match scope {
         ReviewScope::Branch => {
             let branches = engine
@@ -79,6 +94,7 @@ async fn checkout_diff(
         "cwd": target.cwd,
         "mode": scope.mode(),
         "chatId": target.chat_id,
+        "commitSha": commit,
     });
     if let Some(base) = &base {
         params["baseRef"] = serde_json::Value::String(base.clone());
@@ -104,61 +120,37 @@ async fn launch_review(
     engine: &crate::state::EngineHandle,
     target: &Target,
     scope: ReviewScope,
-    choice: &ReviewerChoice,
-    instructions: &str,
+    commit: Option<&str>,
+    choice: Option<&ReviewerChoice>,
 ) -> Result<(String, String, Option<String>), String> {
-    let (diff, base) = checkout_diff(engine, target, scope).await?;
-    let files: Vec<String> = diff.files.iter().map(|file| file.path.clone()).collect();
-    if files.is_empty() {
-        return Err("Nothing to review".to_string());
-    }
-    let options = review::reviewer_options(engine).await;
-    let reviewer = review::resolve_reviewer(choice, target.harness, &options);
-    let profile = reviewer.profile.as_ref();
-    let permission_mode = profile
-        .and_then(|profile| profile.permission_mode)
-        .filter(|mode| {
-            target
-                .permission
-                .is_some_and(|owner| mode.rank() <= owner.rank())
-        });
-    let task = review::prompt(PromptInput {
-        scope,
-        base: base.as_deref(),
-        patch: &diff.patch,
-        truncated: diff.truncated,
-        files: &files,
-        instructions,
-    });
-    let params = serde_json::json!({
-        "ownerChatId": target.chat_id,
-        "task": task,
-        "title": "Review changes",
-        "role": "review",
-        "wake": "never",
-        "clientRequestId": review::request_id(scope, &uuid::Uuid::new_v4().to_string()),
-        "harness": reviewer.harness,
-        "model": reviewer.model,
-        "reasoning": reviewer.reasoning,
-        "permissionMode": permission_mode,
-        "modelOptions": profile
-            .filter(|profile| !profile.model_options.is_empty())
-            .map(|profile| profile.model_options.clone()),
-        "instructions": profile.map(|profile| profile.instructions.clone()),
-        "profileId": profile.map(|profile| profile.id.clone()),
-        "disabledTools": profile.map(|profile| profile.disabled_tools.clone()).unwrap_or_default(),
-    });
-    let view = engine
+    let started = engine
         .client()
-        .call(methods::DELEGATE_TASK, params)
+        .call(
+            methods::START_REVIEW,
+            serde_json::json!({
+                "ownerChatId": target.chat_id,
+                "scope": scope.key(),
+                "commitSha": commit,
+                "reviewer": choice,
+            }),
+        )
         .await
         .map_err(|err| err.to_string())?;
-    let task_id = view
+    let task_id = started
         .get("taskId")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "The reviewer did not start".to_string())?
         .to_string();
-    Ok((task_id, diff.patch, reviewer.note))
+    let patch = started
+        .get("patch")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let note = started
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Ok((task_id, patch, note))
 }
 
 impl Composer {
@@ -185,7 +177,6 @@ impl Composer {
             cwd,
             branch: chat.branch.clone(),
             harness: chat.config.as_ref().map(|config| config.harness),
-            permission: chat.config.as_ref().map(|config| config.permission_mode),
         })
     }
 
@@ -228,24 +219,48 @@ impl Composer {
         let Some(target) = self.review_target(cx) else {
             return;
         };
-        if self
+        let current = self
             .state
             .read(cx)
             .reviews
             .get(&target.chat_id)
-            .is_none_or(|review| review.run.is_none())
-            && let Some(child) = self.reviewer_child(&target.chat_id, None, cx)
-            && let Some(scope) = child
+            .and_then(|review| review.run.as_ref())
+            .map(|run| run.task_id.clone());
+        let started_at = |chat: &zeron_proto::Chat| chat.delegation.as_ref().map(|d| d.started_at);
+        let adoptable = |child: &zeron_proto::Chat| match &current {
+            None => true,
+            Some(None) => false,
+            Some(Some(task)) => {
+                task != &child.id
+                    && self
+                        .reviewer_child(&target.chat_id, Some(task), cx)
+                        .is_none_or(|own| started_at(child) > started_at(&own))
+            }
+        };
+        if let Some(child) = self.reviewer_child(&target.chat_id, None, cx)
+            && adoptable(&child)
+            && let Some((scope, commit)) = child
                 .delegation
                 .as_ref()
                 .and_then(|d| d.client_request_id.as_deref())
-                .and_then(review::request_scope)
+                .and_then(review::parse_request)
         {
             let mut run = ReviewRun::new(scope);
             run.task_id = Some(child.id.clone());
+            run.commit = commit.clone();
             run.status = RunStatus::Running;
             self.state.update(cx, |state, _| {
-                state.reviews.entry(target.chat_id.clone()).or_default().run = Some(run);
+                let review = state.reviews.entry(target.chat_id.clone()).or_default();
+                if current.is_some() {
+                    review.scope = Some(scope);
+                    if let Some(sha) = commit {
+                        review.commit = Some(review::CommitPick {
+                            subject: sha.clone(),
+                            sha,
+                        });
+                    }
+                }
+                review.run = Some(run);
             });
         }
         self.read_finished_review(&target, cx);
@@ -268,8 +283,15 @@ impl Composer {
                 .unwrap_or_default();
             (run_scope, marker)
         };
+        let commit = self
+            .state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)
+            .and_then(|review| review.commit.as_ref().map(|pick| pick.sha.clone()))
+            .unwrap_or_default();
         let key = format!(
-            "{}|{}|{scope:?}|{run_scope:?}|{marker}",
+            "{}|{}|{scope:?}|{run_scope:?}|{marker}|{commit}",
             target.chat_id, target.cwd
         );
         let current = self
@@ -304,10 +326,19 @@ impl Composer {
                     .stats_key = Some(key.clone());
             });
         }
+        let commit = self
+            .state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)
+            .and_then(|review| review.commit.as_ref().map(|pick| pick.sha.clone()));
         cx.spawn(async move |this, cx| {
             let mut fetched = Vec::new();
             for scope in scopes {
-                fetched.push((scope, checkout_diff(&engine, &target, scope).await));
+                fetched.push((
+                    scope,
+                    checkout_diff(&engine, &target, scope, commit.as_deref()).await,
+                ));
             }
             this.update(cx, |composer, cx| {
                 composer.state.update(cx, |state, cx| {
@@ -346,14 +377,21 @@ impl Composer {
     }
 
     fn read_finished_review(&mut self, target: &Target, cx: &mut Context<Self>) {
-        let Some((task_id, scope, reviewed)) = self
+        let Some((task_id, scope, reviewed, commit)) = self
             .state
             .read(cx)
             .reviews
             .get(&target.chat_id)
             .and_then(|review| review.run.as_ref())
             .filter(|run| run.status == RunStatus::Running)
-            .and_then(|run| Some((run.task_id.clone()?, run.scope, run.reviewed.clone())))
+            .and_then(|run| {
+                Some((
+                    run.task_id.clone()?,
+                    run.scope,
+                    run.reviewed.clone(),
+                    run.commit.clone(),
+                ))
+            })
         else {
             return;
         };
@@ -381,7 +419,7 @@ impl Composer {
             let restored = reviewed.is_none();
             let reviewed = match reviewed {
                 Some(patch) => Some(patch),
-                None => checkout_diff(&engine, &target, scope)
+                None => checkout_diff(&engine, &target, scope, commit.as_deref())
                     .await
                     .ok()
                     .map(|(diff, _)| diff.patch),
@@ -450,9 +488,22 @@ impl Composer {
         self.close_review_menu(cx);
         let chat_id = target.chat_id.clone();
         let choice = self.reviewer_choice(&chat_id, cx);
-        let instructions = crate::settings::review_instructions(cx);
+        let (chosen, commit) = self
+            .state
+            .read(cx)
+            .reviews
+            .get(&chat_id)
+            .map(|review| {
+                (
+                    review.reviewer.clone(),
+                    review.commit.as_ref().map(|pick| pick.sha.clone()),
+                )
+            })
+            .unwrap_or_default();
+        let commit = commit.filter(|_| scope == ReviewScope::Commit);
         let mut run = ReviewRun::new(scope);
         run.choice = Some(choice.clone());
+        run.commit = commit.clone();
         let previous = self.state.update(cx, |state, cx| {
             let previous = state
                 .reviews
@@ -464,7 +515,8 @@ impl Composer {
             previous.filter(|run| run.status == RunStatus::Done && !run.findings.is_empty())
         });
         cx.spawn(async move |this, cx| {
-            let started = launch_review(&engine, &target, scope, &choice, &instructions).await;
+            let started =
+                launch_review(&engine, &target, scope, commit.as_deref(), chosen.as_ref()).await;
             this.update(cx, |composer, cx| {
                 composer.set_run(&chat_id, cx, |run| {
                     if run.status != RunStatus::Starting {
@@ -498,7 +550,13 @@ impl Composer {
             .reviews
             .get(chat_id)
             .and_then(|review| review.reviewer.clone())
-            .unwrap_or_else(|| crate::settings::review_reviewer(cx))
+            .or_else(|| {
+                self.review
+                    .settings
+                    .as_ref()
+                    .map(|settings| settings.reviewer.clone())
+            })
+            .unwrap_or_default()
     }
 
     fn set_reviewer(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
@@ -515,9 +573,9 @@ impl Composer {
     }
 
     fn close_review_menu(&mut self, cx: &mut Context<Self>) {
-        self.review.model_intent.reset();
-        self.review.model_menu = None;
-        self.review.model_bounds = None;
+        self.review.submenu_intent.reset();
+        self.review.submenu = None;
+        self.review.submenu_bounds = None;
         if self.review.menu.begin_close() {
             popover::reap_popup(cx, |composer: &mut Self| &mut composer.review.menu);
             cx.notify();
@@ -540,8 +598,10 @@ impl Composer {
         };
         self.review.options_task = Some(cx.spawn(async move |this, cx| {
             let options = review::reviewer_options(&engine).await;
+            let settings = review::review_settings(&engine).await;
             this.update(cx, |composer, cx| {
                 composer.review.options = Some(options);
+                composer.review.settings = Some(settings);
                 cx.notify();
             })
             .ok();
@@ -598,6 +658,12 @@ impl Composer {
         let target = self.review_target(cx)?;
         let scope = self.review_scope(&target, cx);
         let look = self.review_look(&target, scope, cx)?;
+        let picked = self
+            .state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)
+            .and_then(|review| review.commit.as_ref().map(|pick| pick.short().to_string()));
         let counts = |add: u32, del: u32| {
             div()
                 .flex()
@@ -618,7 +684,10 @@ impl Composer {
             match &look {
                 Look::Idle(..) => (
                     crate::icons::CHECKLIST,
-                    "Review".into(),
+                    match (scope, &picked) {
+                        (ReviewScope::Commit, Some(short)) => format!("Review {short}").into(),
+                        _ => "Review".into(),
+                    },
                     theme.text,
                     theme.border,
                     None,
@@ -890,7 +959,7 @@ impl Composer {
             }
             _ => options.label(&next),
         };
-        let (mark, tint) = options.brand(&next, target.harness);
+        let (mark, tint) = review::brand(&options, &next, target.harness);
         Some((name, mark, tint))
     }
 
@@ -966,7 +1035,8 @@ impl Composer {
                         )
                     })
             });
-        let rows: Vec<_> = rows.collect();
+        let mut rows: Vec<AnyElement> = rows.map(IntoElement::into_any_element).collect();
+        rows.push(self.render_commit_row(&review, selected, &popup, window, cx));
         let effective = self.reviewer_choice(&target.chat_id, cx);
         let options = self.review.options.clone().unwrap_or_default();
         let auto_name = self.review.options.as_ref().map(|options| {
@@ -983,7 +1053,7 @@ impl Composer {
         if !choices.iter().any(|choice| same_slot(choice, &effective)) {
             choices.insert(1, effective.clone());
         }
-        let open_models = self.review.model_menu;
+        let open_models = self.review.submenu;
         let reviewer_rows: Vec<AnyElement> = choices
             .into_iter()
             .enumerate()
@@ -1027,7 +1097,7 @@ impl Composer {
                     }
                     _ => None,
                 };
-                let (mark, tint) = options.brand(&choice, target.harness);
+                let (mark, tint) = review::brand(&options, &choice, target.harness);
                 let id = SharedString::from(format!("composer-reviewer-{ix}"));
                 let open = harness.is_some() && open_models.map(|(key, _)| key) == Some(ix);
                 let mut row = popover::menu_row(&popup, open, id.clone())
@@ -1065,12 +1135,12 @@ impl Composer {
                         cx.listener(move |this, _, _, cx| this.set_reviewer(choice.clone(), cx)),
                     );
                 if let Some(harness) = harness {
-                    row = row.child(self.model_menu_probe(open, cx));
+                    row = row.child(self.submenu_probe(open, cx));
                     if open {
                         row = row.child(popover::nested_menu(
                             format!("composer-reviewer-models-{ix}"),
                             self.render_model_menu(harness, &effective, theme, window, cx),
-                            self.review.model_left,
+                            self.review.submenu_left,
                         ));
                     }
                 }
@@ -1078,30 +1148,39 @@ impl Composer {
                     .id(("composer-reviewer-hover", ix))
                     .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                         if *hovered {
-                            this.hover_reviewer_row(
+                            this.hover_menu_row(
                                 ix,
-                                harness,
+                                harness.map(Submenu::Models),
                                 window.mouse_position(),
                                 false,
                                 cx,
                             );
                         } else {
-                            this.review.model_intent.leave(&ix);
+                            this.review.submenu_intent.leave(&ix);
                         }
                     }))
                     .on_mouse_move(
                         cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                            this.hover_reviewer_row(ix, harness, event.position, true, cx);
+                            this.hover_menu_row(
+                                ix,
+                                harness.map(Submenu::Models),
+                                event.position,
+                                true,
+                                cx,
+                            );
                         }),
                     )
                     .child(row)
                     .into_any_element()
             })
             .collect();
-        let review_label = format!(
-            "Review {}",
-            selected.label(review.base.as_deref()).to_lowercase()
-        );
+        let review_label = match (selected, &review.commit) {
+            (ReviewScope::Commit, Some(pick)) => format!("Review commit {}", pick.short()),
+            _ => format!(
+                "Review {}",
+                selected.label(review.base.as_deref()).to_lowercase()
+            ),
+        };
         let review_now = popover::menu_row(&popup, false, "composer-review-now")
             .id("composer-review-now")
             .debug_selector(|| "composer-review-now".into())
@@ -1129,7 +1208,7 @@ impl Composer {
                 // The model submenu floats outside this card: a press on it is inside the menu.
                 if this
                     .review
-                    .model_bounds
+                    .submenu_bounds
                     .is_some_and(|bounds| bounds.contains(&event.position))
                 {
                     return;
@@ -1159,14 +1238,16 @@ impl Composer {
             .map_or_else(|| model.to_string(), |m| m.label.clone())
     }
 
-    fn set_model_menu(&mut self, open: Option<(usize, HarnessId)>, cx: &mut Context<Self>) {
-        if self.review.model_menu != open {
-            self.review.model_menu = open;
-            self.review.model_bounds = None;
+    fn set_submenu(&mut self, open: Option<(usize, Submenu)>, cx: &mut Context<Self>) {
+        if self.review.submenu != open {
+            self.review.submenu = open;
+            self.review.submenu_bounds = None;
             cx.notify();
         }
-        let Some((_, harness)) = open else {
-            return;
+        let harness = match open {
+            Some((_, Submenu::Models(harness))) => harness,
+            Some((_, Submenu::Commits)) => return self.load_commits(cx),
+            None => return,
         };
         if self.review.models.contains_key(&harness) {
             return;
@@ -1184,10 +1265,10 @@ impl Composer {
         }));
     }
 
-    fn hover_reviewer_row(
+    fn hover_menu_row(
         &mut self,
         key: usize,
-        harness: Option<HarnessId>,
+        target: Option<Submenu>,
         pointer: Point<Pixels>,
         moved: bool,
         cx: &mut Context<Self>,
@@ -1195,47 +1276,47 @@ impl Composer {
         if !self.review.menu.is_open() {
             return;
         }
-        let current = self.review.model_menu.map(|(open, _)| open);
-        let (bounds, left) = (self.review.model_bounds, self.review.model_left);
+        let current = self.review.submenu.map(|(open, _)| open);
+        let (bounds, left) = (self.review.submenu_bounds, self.review.submenu_left);
         let action = if moved {
             self.review
-                .model_intent
+                .submenu_intent
                 .moved(current.as_ref(), &key, pointer, bounds, left)
         } else {
             self.review
-                .model_intent
+                .submenu_intent
                 .enter(current.as_ref(), &key, pointer, bounds, left)
         };
-        let target = harness.map(|harness| (key, harness));
+        let target = target.map(|submenu| (key, submenu));
         match action {
             popover::HoverAction::None => {}
             popover::HoverAction::Open => {
-                self.set_model_menu(target, cx);
-                self.review.model_intent.record_origin(pointer);
+                self.set_submenu(target, cx);
+                self.review.submenu_intent.record_origin(pointer);
             }
             popover::HoverAction::Defer => {
-                self.review.model_intent.defer(cx, move |this, cx| {
+                self.review.submenu_intent.defer(cx, move |this, cx| {
                     if this.review.menu.is_open()
-                        && this.review.model_intent.pending() == Some(&key)
+                        && this.review.submenu_intent.pending() == Some(&key)
                     {
-                        this.review.model_intent.cancel();
-                        this.set_model_menu(target, cx);
-                        this.review.model_intent.record_origin(pointer);
+                        this.review.submenu_intent.cancel();
+                        this.set_submenu(target, cx);
+                        this.review.submenu_intent.record_origin(pointer);
                     }
                 });
             }
         }
     }
 
-    fn model_menu_probe(&self, open: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn submenu_probe(&self, open: bool, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let exit = entity.clone();
         gpui::canvas(
             move |bounds, window, cx| {
                 let left = bounds.right() + px(220.0) > window.viewport_size().width;
                 let _ = entity.update(cx, |this, cx| {
-                    if this.review.model_left != left {
-                        this.review.model_left = left;
+                    if this.review.submenu_left != left {
+                        this.review.submenu_left = left;
                         cx.notify();
                     }
                 });
@@ -1249,8 +1330,8 @@ impl Composer {
                         return;
                     }
                     let _ = exit.update(cx, |this, cx| {
-                        let (bounds, left) = (this.review.model_bounds, this.review.model_left);
-                        if this.review.model_intent.contains_pointer(
+                        let (bounds, left) = (this.review.submenu_bounds, this.review.submenu_left);
+                        if this.review.submenu_intent.contains_pointer(
                             trigger,
                             bounds,
                             event.position,
@@ -1258,8 +1339,8 @@ impl Composer {
                         ) {
                             return;
                         }
-                        this.review.model_intent.reset();
-                        this.set_model_menu(None, cx);
+                        this.review.submenu_intent.reset();
+                        this.set_submenu(None, cx);
                     });
                 });
             },
@@ -1359,7 +1440,7 @@ impl Composer {
                 gpui::canvas(
                     move |bounds, _, cx| {
                         let _ =
-                            entity.update(cx, |this, _| this.review.model_bounds = Some(bounds));
+                            entity.update(cx, |this, _| this.review.submenu_bounds = Some(bounds));
                     },
                     |_, _, _, _| {},
                 )
@@ -1448,11 +1529,273 @@ impl Composer {
         )
     }
 
+    fn render_commit_row(
+        &self,
+        review: &review::ChatReview,
+        selected: ReviewScope,
+        popup: &Theme,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = matches!(self.review.submenu, Some((_, Submenu::Commits)));
+        let picked = review.commit.clone();
+        let has_pick = picked.is_some();
+        let mut row = popover::menu_row(popup, open, "composer-review-scope-commit")
+            .id("composer-review-scope-commit")
+            .relative()
+            .role(gpui::Role::MenuItemRadio)
+            .aria_label("Commit")
+            .gap(px(8.0))
+            .child(crate::settings::widgets::select_check(
+                popup,
+                selected == ReviewScope::Commit,
+            ))
+            .child(div().flex_1().child("Commit"))
+            .children(picked.map(|pick| {
+                div()
+                    .font_family(popup.font_mono.clone())
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(popup.text_faint)
+                    .child(pick.short().to_string())
+            }))
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(popup.text_muted),
+            )
+            .child(self.submenu_probe(open, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if has_pick {
+                    this.set_review_scope(ReviewScope::Commit, cx);
+                } else {
+                    this.set_submenu(Some((COMMITS_ROW, Submenu::Commits)), cx);
+                }
+            }));
+        if open {
+            row = row.child(popover::nested_menu(
+                "composer-review-commits",
+                self.render_commit_menu(review, popup, window, cx),
+                self.review.submenu_left,
+            ));
+        }
+        div()
+            .id("composer-review-commit-hover")
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                if *hovered {
+                    this.hover_menu_row(
+                        COMMITS_ROW,
+                        Some(Submenu::Commits),
+                        window.mouse_position(),
+                        false,
+                        cx,
+                    );
+                } else {
+                    this.review.submenu_intent.leave(&COMMITS_ROW);
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                this.hover_menu_row(
+                    COMMITS_ROW,
+                    Some(Submenu::Commits),
+                    event.position,
+                    true,
+                    cx,
+                );
+            }))
+            .child(row)
+            .into_any_element()
+    }
+
+    fn load_commits(&mut self, cx: &mut Context<Self>) {
+        if self.review.commit_filter.is_none() {
+            let input =
+                cx.new(|cx| super::ComposerInput::new("Filter commits…", cx).with_single_line());
+            cx.subscribe(&input, |_, _, _: &super::ComposerInputEvent, cx| {
+                cx.notify()
+            })
+            .detach();
+            self.review.commit_filter = Some(input);
+        }
+        let Some(target) = self.review_target(cx) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.review.commits_task = Some(cx.spawn(async move |this, cx| {
+            let page = engine
+                .client()
+                .call_as::<zeron_proto::GitHistoryPage>(
+                    methods::LIST_GIT_HISTORY,
+                    serde_json::json!({
+                        "cwd": target.cwd,
+                        "cursor": 0,
+                        "limit": COMMIT_LIST_LIMIT,
+                    }),
+                )
+                .await;
+            this.update(cx, |composer, cx| {
+                composer.review.commits = Some(page.map(|page| page.commits).unwrap_or_default());
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn pick_commit(&mut self, pick: review::CommitPick, cx: &mut Context<Self>) {
+        let Some(target) = self.review_target(cx) else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            let review = state.reviews.entry(target.chat_id.clone()).or_default();
+            review.commit = Some(pick);
+            review.scope = Some(ReviewScope::Commit);
+            review.stats.remove(&ReviewScope::Commit);
+            cx.notify();
+        });
+        self.review.submenu_intent.reset();
+        self.set_submenu(None, cx);
+        self.fetch_review_stats(target, vec![ReviewScope::Commit], None, cx);
+    }
+
+    fn render_commit_menu(
+        &self,
+        review: &review::ChatReview,
+        popup: &Theme,
+        _window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let query = self
+            .review
+            .commit_filter
+            .as_ref()
+            .map(|input| input.read(cx).text().trim().to_lowercase())
+            .unwrap_or_default();
+        let current = review.commit.as_ref().map(|pick| pick.sha.clone());
+        let now = chrono::Utc::now();
+        let rows: Vec<AnyElement> = match &self.review.commits {
+            None => vec![
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(popup.text_faint)
+                    .child("Loading…")
+                    .into_any_element(),
+            ],
+            Some(commits) => commits
+                .iter()
+                .filter(|commit| {
+                    query.is_empty()
+                        || commit.subject.to_lowercase().contains(&query)
+                        || commit.sha.starts_with(&query)
+                })
+                .enumerate()
+                .map(|(ix, commit)| {
+                    let pick = review::CommitPick {
+                        sha: commit.sha.clone(),
+                        subject: commit.subject.clone(),
+                    };
+                    let age = chrono::DateTime::parse_from_rfc3339(&commit.authored_at)
+                        .map(|at| {
+                            crate::pull_requests::relative_time(at.with_timezone(&chrono::Utc), now)
+                        })
+                        .unwrap_or_default();
+                    let id = SharedString::from(format!("composer-review-commit-{ix}"));
+                    popover::menu_row(popup, false, id.clone())
+                        .id(id)
+                        .role(gpui::Role::MenuItemRadio)
+                        .aria_label(format!("Commit {}", commit.subject))
+                        .gap(px(8.0))
+                        .child(crate::settings::widgets::select_check(
+                            popup,
+                            current.as_deref() == Some(commit.sha.as_str()),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(commit.subject.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(popup.font_mono.clone())
+                                .text_size(crate::typography::ui_rems(10.5))
+                                .text_color(popup.text_faint)
+                                .child(format!("{} · {age}", pick.short())),
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.pick_commit(pick.clone(), cx)),
+                        )
+                        .into_any_element()
+                })
+                .collect(),
+        };
+        let empty = rows.is_empty();
+        let entity = cx.entity().downgrade();
+        popover::popover_card(popup)
+            .id("composer-review-commits-card")
+            .w(px(360.0))
+            .relative()
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .children(self.review.commit_filter.clone().map(|input| {
+                div()
+                    .mx(px(4.0))
+                    .mt(px(2.0))
+                    .mb(px(4.0))
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(popup.border)
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .child(input)
+            }))
+            .child(
+                div()
+                    .id("composer-review-commits-list")
+                    .max_h(px(320.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(popover::MENU_GAP))
+                    .children(rows)
+                    .when(empty, |el| {
+                        el.child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(popup.text_faint)
+                                .child("No matching commits"),
+                        )
+                    }),
+            )
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ =
+                            entity.update(cx, |this, _| this.review.submenu_bounds = Some(bounds));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn drop_review_menu(&mut self) {
         self.review.menu = Default::default();
-        self.review.model_intent.reset();
-        self.review.model_menu = None;
-        self.review.model_bounds = None;
+        self.review.submenu_intent.reset();
+        self.review.submenu = None;
+        self.review.submenu_bounds = None;
     }
 
     pub(super) fn review_menu_open(&self) -> bool {
