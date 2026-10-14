@@ -127,6 +127,7 @@ mod tests {
                     "source-control-sync-v1",
                     "source-control-commits-v1",
                     "projectless-scratch-v1",
+                    "limit-resume-v1",
                     "voice-client-media-v1"
                 ],
             })
