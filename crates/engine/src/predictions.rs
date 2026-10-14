@@ -120,7 +120,10 @@ fn tail(text: &str, chars: usize) -> String {
 }
 
 pub(crate) fn clean_prediction(raw: &str) -> String {
-    let paragraph = raw.trim().split("\n\n").next().unwrap_or("");
+    let Some((_, message)) = raw.rsplit_once("Message:") else {
+        return String::new();
+    };
+    let paragraph = message.trim().split("\n\n").next().unwrap_or("");
     let text = paragraph
         .trim()
         .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '“' | '”'))
@@ -458,13 +461,20 @@ mod tests {
     #[test]
     fn predictions_are_cleaned() {
         assert_eq!(
-            clean_prediction("\"Fix the spacing.\"\n\nExplanation"),
+            clean_prediction("Next: approves\nMessage: \"Fix the spacing.\"\n\nExplanation"),
             "Fix the spacing."
         );
-        assert_eq!(clean_prediction("  ok ship it  "), "ok ship it");
-        assert_eq!(clean_prediction("   "), "");
         assert_eq!(
-            clean_prediction(&"x".repeat(400)).chars().count(),
+            clean_prediction("Next: reports done\nMessage:  ok ship it  "),
+            "ok ship it"
+        );
+        assert_eq!(clean_prediction("Next: unknown\nMessage:\n"), "");
+        assert_eq!(clean_prediction("Next: reports done"), "");
+        assert_eq!(clean_prediction("ok ship it"), "");
+        assert_eq!(
+            clean_prediction(&format!("Message: {}", "x".repeat(400)))
+                .chars()
+                .count(),
             PREDICTION_CHARS
         );
     }
@@ -514,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_watched_completed_turn_publishes_the_cleaned_prediction() {
-        let registry = mock_registry("\"Fix the spacing.\"");
+        let registry = mock_registry("Next: approves\nMessage: \"Fix the spacing.\"");
         registry
             .set_prediction_settings(crate::registry::PredictionSettings {
                 enabled: true,
@@ -598,7 +608,7 @@ mod tests {
                 .unwrap();
             let mut body = vec![0; length];
             socket.read_exact(&mut body).await.unwrap();
-            let reply = br#"{"choices":[{"message":{"role":"assistant","content":"\"Fix the spacing.\""}}]}"#;
+            let reply = br#"{"choices":[{"message":{"role":"assistant","content":"Next: approves\nMessage: \"Fix the spacing.\""}}]}"#;
             socket
                 .write_all(
                     format!(
