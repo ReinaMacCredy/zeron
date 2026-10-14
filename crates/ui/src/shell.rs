@@ -12487,7 +12487,8 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if self.type_into_composer(event, window, cx) {
+        if self.type_into_composer(event, window, cx) || self.paste_into_composer(event, window, cx)
+        {
             cx.stop_propagation();
             return;
         }
@@ -12560,28 +12561,63 @@ impl Shell {
         else {
             return false;
         };
-        // A focused input inserts through the platform text path after this
-        // listener returns, so only the shell's parking handles qualify.
-        let in_right = self.navigation_focus.right.is_focused(window)
-            || self.navigation_focus.tabs.is_focused(window);
-        if !in_right && !self.shell_focus_parked(window, cx) {
+        let Some(composer) = self.typing_target(window, cx) else {
+            return false;
+        };
+        composer.update(cx, |composer, cx| composer.type_into(text, window, cx));
+        true
+    }
+
+    fn paste_into_composer(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key != "v"
+            || event.is_held
+            || modifiers.platform == modifiers.control
+            || modifiers.shift
+            || modifiers.alt
+            || modifiers.function
+        {
             return false;
         }
+        let Some(composer) = self.typing_target(window, cx) else {
+            return false;
+        };
+        composer.update(cx, |composer, cx| composer.paste_into(window, cx));
+        true
+    }
+
+    fn typing_target(&self, window: &Window, cx: &App) -> Option<Entity<Composer>> {
+        // A focused input inserts through the platform text path after the
+        // key listener returns, so only parking handles and plain sidebar
+        // controls qualify.
+        let in_right = self.navigation_focus.right.is_focused(window)
+            || self.navigation_focus.tabs.is_focused(window);
+        let on_sidebar_control = self.sidebar_peek_focus.contains_focused(window, cx)
+            && self.chat_rename.is_none()
+            && self.spaces_menu.get().is_none();
+        if !in_right
+            && !on_sidebar_control
+            && !self.sidebar_view_trigger_focus.is_focused(window)
+            && !self.shell_focus_parked(window, cx)
+        {
+            return None;
+        }
+        let right_takeover = self.right_pane_expanded && self.right_pane_open(cx);
         let side_chat = match self.resolved_right_active(cx) {
-            RightSurface::SideChat(id) if in_right => {
+            RightSurface::SideChat(id) if in_right || right_takeover => {
                 self.side_chats.get(&id).map(|tab| tab.composer.clone())
             }
             _ => None,
         };
         let composer = side_chat.unwrap_or_else(|| self.composer.clone());
-        if !self
-            .shortcut_focus
+        self.shortcut_focus
             .contains(&composer.focus_handle(cx), window)
-        {
-            return false;
-        }
-        composer.update(cx, |composer, cx| composer.type_into(text, window, cx));
-        true
+            .then_some(composer)
     }
 
     fn render_overlays(

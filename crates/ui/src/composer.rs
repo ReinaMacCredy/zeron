@@ -12130,6 +12130,12 @@ impl Composer {
         });
     }
 
+    pub(crate) fn paste_into(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.input.focus_handle(cx), cx);
+        self.input
+            .update(cx, |input, cx| input.paste(&Paste, window, cx));
+    }
+
     pub(crate) fn interrupt_selected(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.bound_chat_id(cx) else {
             return;
