@@ -28,6 +28,7 @@ pub(super) struct ReviewChipUi {
     models: HashMap<HarnessId, Vec<Model>>,
     models_task: Option<Task<()>>,
     busy_hover: bool,
+    thinking: crate::pickers::LevelSlider,
 }
 
 #[derive(Clone)]
@@ -136,7 +137,7 @@ async fn launch_review(
         "clientRequestId": review::request_id(scope, &uuid::Uuid::new_v4().to_string()),
         "harness": reviewer.harness,
         "model": reviewer.model,
-        "reasoning": profile.and_then(|profile| profile.reasoning),
+        "reasoning": reviewer.reasoning,
         "permissionMode": permission_mode,
         "modelOptions": profile
             .filter(|profile| !profile.model_options.is_empty())
@@ -498,12 +499,16 @@ impl Composer {
     }
 
     fn set_reviewer(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
+        self.store_reviewer(choice, cx);
+        self.close_review_menu(cx);
+    }
+
+    fn store_reviewer(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
         let key = self.current_key.clone();
         self.state.update(cx, |state, cx| {
             state.reviews.entry(key).or_default().reviewer = Some(choice);
             cx.notify();
         });
-        self.close_review_menu(cx);
     }
 
     fn close_review_menu(&mut self, cx: &mut Context<Self>) {
@@ -581,6 +586,7 @@ impl Composer {
     pub(super) fn render_review_chip(
         &mut self,
         theme: &Theme,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.hosts_review() {
@@ -819,7 +825,7 @@ impl Composer {
             .menu
             .get()
             .is_some()
-            .then(|| self.render_review_menu(&target, scope, theme, cx));
+            .then(|| self.render_review_menu(&target, scope, theme, window, cx));
         Some(
             div()
                 .relative()
@@ -894,6 +900,7 @@ impl Composer {
         target: &Target,
         selected: ReviewScope,
         theme: &Theme,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let popup = theme.for_popup();
@@ -987,6 +994,7 @@ impl Composer {
                     Some(harness) => options.label(&ReviewerChoice::Harness {
                         harness,
                         model: None,
+                        reasoning: None,
                     }),
                     None => options.label(&choice),
                 };
@@ -996,9 +1004,24 @@ impl Composer {
                         _,
                         ReviewerChoice::Harness {
                             harness: h,
-                            model: Some(model),
+                            model,
+                            reasoning,
                         },
-                    ) if selected && harness == Some(*h) => Some(self.model_label(*h, model)),
+                    ) if selected
+                        && harness == Some(*h)
+                        && (model.is_some() || reasoning.is_some()) =>
+                    {
+                        let parts: Vec<String> =
+                            model
+                                .as_deref()
+                                .map(|model| self.model_label(*h, model))
+                                .into_iter()
+                                .chain(reasoning.map(|level| {
+                                    crate::pickers::reasoning_label(level).to_string()
+                                }))
+                                .collect();
+                        Some(parts.join(" · "))
+                    }
                     _ => None,
                 };
                 let (mark, tint) = options.brand(&choice, target.harness);
@@ -1043,7 +1066,7 @@ impl Composer {
                     if open {
                         row = row.child(popover::nested_menu(
                             format!("composer-reviewer-models-{ix}"),
-                            self.render_model_menu(harness, &effective, theme, cx),
+                            self.render_model_menu(harness, &effective, theme, window, cx),
                             self.review.model_left,
                         ));
                     }
@@ -1099,7 +1122,17 @@ impl Composer {
             .flex()
             .flex_col()
             .gap(px(popover::MENU_GAP))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_review_menu(cx)))
+            .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                // The model submenu floats outside this card: a press on it is inside the menu.
+                if this
+                    .review
+                    .model_bounds
+                    .is_some_and(|bounds| bounds.contains(&event.position))
+                {
+                    return;
+                }
+                this.close_review_menu(cx);
+            }))
             .child(popover::menu_heading(&popup, "Scope"))
             .children(rows)
             .child(popover::menu_separator())
@@ -1238,12 +1271,17 @@ impl Composer {
         harness: HarnessId,
         effective: &ReviewerChoice,
         theme: &Theme,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let popup = theme.for_popup();
-        let current = match effective {
-            ReviewerChoice::Harness { harness: h, model } if *h == harness => Some(model.clone()),
-            _ => None,
+        let (current, reasoning) = match effective {
+            ReviewerChoice::Harness {
+                harness: h,
+                model,
+                reasoning,
+            } if *h == harness => (Some(model.clone()), *reasoning),
+            _ => (None, None),
         };
         let row = |ix: usize, label: String, model: Option<String>| {
             let id = SharedString::from(format!("composer-reviewer-model-{ix}"));
@@ -1260,6 +1298,7 @@ impl Composer {
                         ReviewerChoice::Harness {
                             harness,
                             model: model.clone(),
+                            reasoning,
                         },
                         cx,
                     )
@@ -1285,6 +1324,14 @@ impl Composer {
                     .into_any_element(),
             ),
         }
+        let thinking = self.render_thinking(
+            harness,
+            current.clone().flatten(),
+            reasoning,
+            &popup,
+            window,
+            cx,
+        );
         let entity = cx.entity().downgrade();
         popover::popover_card(&popup)
             .id("composer-reviewer-models-card")
@@ -1297,6 +1344,7 @@ impl Composer {
             .flex_col()
             .gap(px(popover::MENU_GAP))
             .children(rows)
+            .children(thinking)
             .child(
                 gpui::canvas(
                     move |bounds, _, cx| {
@@ -1309,6 +1357,85 @@ impl Composer {
                 .inset_0(),
             )
             .into_any_element()
+    }
+
+    fn render_thinking(
+        &self,
+        harness: HarnessId,
+        model: Option<String>,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+        popup: &Theme,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let options = self.review.options.as_ref()?;
+        let model_entry = model.as_deref().and_then(|id| {
+            self.review
+                .models
+                .get(&harness)
+                .and_then(|models| models.iter().find(|m| m.id == id))
+        });
+        let levels = review::reasoning_stops(options, harness, model_entry);
+        if levels.is_empty() {
+            return None;
+        }
+        let labels: Vec<SharedString> = std::iter::once(SharedString::from("Default"))
+            .chain(
+                levels
+                    .iter()
+                    .map(|level| SharedString::from(crate::pickers::reasoning_label(*level))),
+            )
+            .collect();
+        let selected = reasoning
+            .and_then(|level| levels.iter().position(|l| *l == level))
+            .map_or(0, |ix| ix + 1);
+        let value = labels[selected].clone();
+        let slider = self.review.thinking.render(
+            "composer-reviewer-thinking",
+            "Reviewer thinking",
+            &labels,
+            selected,
+            |composer: &mut Self| &mut composer.review.thinking,
+            move |this, ix, cx| {
+                this.store_reviewer(
+                    ReviewerChoice::Harness {
+                        harness,
+                        model: model.clone(),
+                        reasoning: ix.checked_sub(1).and_then(|ix| levels.get(ix).copied()),
+                    },
+                    cx,
+                );
+            },
+            popup,
+            window,
+            cx,
+        );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(popover::menu_separator())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(popover::menu_heading(popup, "Thinking")),
+                        )
+                        .child(
+                            div()
+                                .pr(px(8.0))
+                                .pt(px(2.0))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(popup.text_muted)
+                                .child(value),
+                        ),
+                )
+                .child(div().px(px(8.0)).pt(px(4.0)).pb(px(8.0)).child(slider))
+                .into_any_element(),
+        )
     }
 
     pub(super) fn drop_review_menu(&mut self) {

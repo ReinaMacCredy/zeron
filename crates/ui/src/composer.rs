@@ -13987,7 +13987,7 @@ impl Render for Composer {
             self.comments_menu = Default::default();
         }
         let comments_chip = self.render_staged_chips(&theme, cx);
-        let review_chip = self.render_review_chip(&theme, cx);
+        let review_chip = self.render_review_chip(&theme, window, cx);
         if review_chip.is_none() {
             self.drop_review_menu();
         }

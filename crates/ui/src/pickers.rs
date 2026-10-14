@@ -13,7 +13,9 @@
 //! rendered as skeletons / inline errors with Retry.
 
 mod compact;
+mod level_slider;
 mod profiles;
+pub(crate) use level_slider::LevelSlider;
 
 use crate::roll_text::{roll_text, rolling};
 use std::collections::{HashMap, HashSet};

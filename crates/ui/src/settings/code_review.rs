@@ -16,6 +16,7 @@ pub struct CodeReviewPage {
     models: HashMap<HarnessId, Vec<Model>>,
     reviewer_select: widgets::SelectState,
     model_select: widgets::SelectState,
+    thinking: crate::pickers::LevelSlider,
     task: Option<Task<()>>,
     model_task: Option<Task<()>>,
     _state: Subscription,
@@ -35,6 +36,7 @@ impl CodeReviewPage {
             models: HashMap::new(),
             reviewer_select: widgets::SelectState::default(),
             model_select: widgets::SelectState::default(),
+            thinking: Default::default(),
             task: None,
             model_task: None,
             _state: state_sub,
@@ -108,7 +110,12 @@ impl CodeReviewPage {
 }
 
 impl CodeReviewPage {
-    fn render_card(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_card(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let theme = theme.clone();
         let card = widgets::section_card(&theme).mt(px(0.0));
         let Some(options) = self.options.ready().cloned() else {
@@ -167,9 +174,77 @@ impl CodeReviewPage {
         })
         .render(&self.reviewer_select, cx)
         .into_any_element();
+        let mut thinking_row = None;
         let model_row = match &current {
-            ReviewerChoice::Harness { harness, model } => {
+            ReviewerChoice::Harness {
+                harness,
+                model,
+                reasoning,
+            } => {
                 let harness = *harness;
+                let reasoning = *reasoning;
+                let model_entry = model
+                    .as_deref()
+                    .and_then(|id| self.models.get(&harness)?.iter().find(|m| m.id == id));
+                let levels = crate::review::reasoning_stops(&options, harness, model_entry);
+                if !levels.is_empty() {
+                    let labels: Vec<gpui::SharedString> =
+                        std::iter::once(gpui::SharedString::from("Default"))
+                            .chain(levels.iter().map(|level| {
+                                gpui::SharedString::from(crate::pickers::reasoning_label(*level))
+                            }))
+                            .collect();
+                    let selected = reasoning
+                        .and_then(|level| levels.iter().position(|l| *l == level))
+                        .map_or(0, |ix| ix + 1);
+                    let value = labels[selected].clone();
+                    let chosen_model = model.clone();
+                    let slider = self.thinking.render(
+                        "code-review-thinking",
+                        "Reviewer thinking",
+                        &labels,
+                        selected,
+                        |page: &mut Self| &mut page.thinking,
+                        move |page, ix, cx| {
+                            page.save(
+                                ReviewerChoice::Harness {
+                                    harness,
+                                    model: chosen_model.clone(),
+                                    reasoning: ix
+                                        .checked_sub(1)
+                                        .and_then(|ix| levels.get(ix).copied()),
+                                },
+                                cx,
+                            );
+                        },
+                        &theme,
+                        window,
+                        cx,
+                    );
+                    thinking_row = Some(
+                        Self::row(
+                            &theme,
+                            false,
+                            "Thinking",
+                            "How hard the reviewer thinks. Default leaves it to the agent."
+                                .to_string(),
+                        )
+                        .child(
+                            div()
+                                .w(px(196.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(slider)
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(value),
+                                ),
+                        ),
+                    );
+                }
                 let models = self.models.get(&harness).cloned().unwrap_or_default();
                 let model_ix = model
                     .as_deref()
@@ -195,7 +270,14 @@ impl CodeReviewPage {
                         .checked_sub(1)
                         .and_then(|ix| models.get(ix))
                         .map(|m| m.id.clone());
-                    card.save(ReviewerChoice::Harness { harness, model }, cx);
+                    card.save(
+                        ReviewerChoice::Harness {
+                            harness,
+                            model,
+                            reasoning,
+                        },
+                        cx,
+                    );
                 })
                 .render(&self.model_select, cx);
                 Some(
@@ -222,6 +304,7 @@ impl CodeReviewPage {
             .child(reviewer_select),
         )
         .children(model_row)
+        .children(thinking_row)
     }
 }
 
@@ -236,9 +319,9 @@ impl popover::ScrollRailHost for CodeReviewPage {
 }
 
 impl Render for CodeReviewPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let card = self.render_card(&theme, cx);
+        let card = self.render_card(&theme, window, cx);
         let scrollbar = popover::rail(self, "code-review-scrollbar", &theme, cx);
         div()
             .id("code-review-host")

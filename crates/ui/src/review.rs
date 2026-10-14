@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{AgentProfile, HarnessId, Model};
+use zeron_proto::{AgentProfile, HarnessId, Model, ReasoningLevel};
 use zeron_rpc::methods;
 
 use crate::changes::{FileDiff, line_anchor};
@@ -79,6 +79,8 @@ pub enum ReviewerChoice {
         harness: HarnessId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<ReasoningLevel>,
     },
     Profile {
         id: String,
@@ -89,13 +91,14 @@ pub enum ReviewerChoice {
 pub struct ReviewerOptions {
     pub offered: Vec<HarnessId>,
     pub profiles: Vec<AgentProfile>,
+    pub levels: HashMap<HarnessId, Vec<ReasoningLevel>>,
 }
 
 impl ReviewerOptions {
     pub fn label(&self, choice: &ReviewerChoice) -> String {
         match choice {
             ReviewerChoice::Auto => "Auto".to_string(),
-            ReviewerChoice::Harness { harness, model } => match model {
+            ReviewerChoice::Harness { harness, model, .. } => match model {
                 Some(model) => format!("{} · {model}", harness_display_name(*harness)),
                 None => harness_display_name(*harness).to_string(),
             },
@@ -116,7 +119,7 @@ impl ReviewerOptions {
         chat: Option<HarnessId>,
     ) -> (&'static str, Option<gpui::Hsla>) {
         let (harness, model) = match choice {
-            ReviewerChoice::Harness { harness, model } => (Some(*harness), model.clone()),
+            ReviewerChoice::Harness { harness, model, .. } => (Some(*harness), model.clone()),
             ReviewerChoice::Profile { id }
                 if let Some(profile) = self.profiles.iter().find(|profile| &profile.id == id) =>
             {
@@ -135,6 +138,7 @@ impl ReviewerOptions {
             .chain(self.offered.iter().map(|harness| ReviewerChoice::Harness {
                 harness: *harness,
                 model: None,
+                reasoning: None,
             }))
             .chain(self.profiles.iter().map(|profile| ReviewerChoice::Profile {
                 id: profile.id.clone(),
@@ -157,27 +161,42 @@ pub async fn list_models(engine: &crate::state::EngineHandle, harness: HarnessId
 }
 
 pub async fn reviewer_options(engine: &crate::state::EngineHandle) -> ReviewerOptions {
-    let offered = engine
+    let descriptors = engine
         .client()
         .call_as::<Vec<HarnessDescriptor>>(methods::LIST_HARNESSES, serde_json::json!({}))
         .await
-        .map(|list| {
-            crate::pickers::offered_harnesses(&list)
-                .into_iter()
-                .map(|descriptor| descriptor.id)
-                .collect()
-        })
+        .map(|list| crate::pickers::offered_harnesses(&list))
         .unwrap_or_default();
     let profiles = crate::agent_profiles::list(engine, None)
         .await
         .unwrap_or_default();
-    ReviewerOptions { offered, profiles }
+    ReviewerOptions {
+        offered: descriptors.iter().map(|descriptor| descriptor.id).collect(),
+        levels: descriptors
+            .into_iter()
+            .map(|descriptor| (descriptor.id, descriptor.reasoning_levels))
+            .collect(),
+        profiles,
+    }
+}
+
+pub fn reasoning_stops(
+    options: &ReviewerOptions,
+    harness: HarnessId,
+    model: Option<&Model>,
+) -> Vec<ReasoningLevel> {
+    model
+        .map(|model| model.reasoning_levels.clone())
+        .filter(|levels| !levels.is_empty())
+        .or_else(|| options.levels.get(&harness).cloned())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Reviewer {
     pub harness: Option<HarnessId>,
     pub model: Option<String>,
+    pub reasoning: Option<ReasoningLevel>,
     pub profile: Option<AgentProfile>,
     pub note: Option<String>,
 }
@@ -210,15 +229,21 @@ pub fn resolve_reviewer(
     let from_profile = |profile: &AgentProfile| Reviewer {
         harness: Some(profile.harness),
         model: profile.model.clone(),
+        reasoning: profile.reasoning,
         profile: Some(profile.clone()),
         note: None,
     };
     let skipped = match choice {
         ReviewerChoice::Auto => None,
-        ReviewerChoice::Harness { harness, model } if options.offered.contains(harness) => {
+        ReviewerChoice::Harness {
+            harness,
+            model,
+            reasoning,
+        } if options.offered.contains(harness) => {
             return Reviewer {
                 harness: Some(*harness),
                 model: model.clone(),
+                reasoning: *reasoning,
                 ..Reviewer::default()
             };
         }
@@ -835,7 +860,21 @@ mod tests {
         let options = ReviewerOptions {
             offered: vec![HarnessId::ClaudeCode, HarnessId::Codex],
             profiles: vec![profile("p1", "Reviewer", HarnessId::Codex)],
+            levels: HashMap::new(),
         };
+        let picked = resolve_reviewer(
+            &ReviewerChoice::Harness {
+                harness: HarnessId::ClaudeCode,
+                model: None,
+                reasoning: Some(ReasoningLevel::High),
+            },
+            Some(HarnessId::ClaudeCode),
+            &options,
+        );
+        assert_eq!(
+            (picked.harness, picked.reasoning),
+            (Some(HarnessId::ClaudeCode), Some(ReasoningLevel::High))
+        );
         let auto = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &options);
         assert_eq!(auto.profile.map(|p| p.id), Some("p1".to_string()));
         assert_eq!(auto.note, None);
@@ -850,6 +889,7 @@ mod tests {
         let alone = ReviewerOptions {
             offered: vec![HarnessId::Codex],
             profiles: Vec::new(),
+            levels: HashMap::new(),
         };
         let own = resolve_reviewer(&ReviewerChoice::Auto, Some(HarnessId::Codex), &alone);
         assert_eq!(own.harness, Some(HarnessId::Codex));
@@ -869,6 +909,7 @@ mod tests {
             &ReviewerChoice::Harness {
                 harness: HarnessId::Mock,
                 model: None,
+                reasoning: None,
             },
             Some(HarnessId::ClaudeCode),
             &no_profiles,
