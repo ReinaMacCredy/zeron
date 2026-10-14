@@ -283,10 +283,7 @@ impl AgentProfilesPage {
                                 .child("Added to every agent's system prompt on this device, before a profile's own instructions."),
                         )
                         .child(popover::dialog_field(
-                            div()
-                                .h(px(72.0))
-                                .overflow_hidden()
-                                .child(self.system_prompt_input.clone())
+                            crate::composer::growing_field(self.system_prompt_input.clone(), 72.0, 320.0, cx)
                                 .into_any_element(),
                         ))
                         .child(

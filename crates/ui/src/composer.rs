@@ -4944,6 +4944,34 @@ pub fn scrolling_field(input: Entity<ComposerInput>) -> gpui::Div {
     )
 }
 
+pub fn growing_field<V: 'static>(
+    input: Entity<ComposerInput>,
+    min: f32,
+    max: f32,
+    cx: &Context<V>,
+) -> gpui::Div {
+    let used = input.read(cx).measured_content_height();
+    let view = cx.entity().downgrade();
+    let measured = input.clone();
+    div()
+        .relative()
+        .h(px(used.clamp(min, max)))
+        .child(scrolling_field(input))
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |_, _, _, cx| {
+                    // The text is measured while it lays out, after this frame's height was set.
+                    if (measured.read(cx).measured_content_height() - used).abs() > 0.5 {
+                        let _ = view.update(cx, |_, cx| cx.notify());
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+}
+
 impl EntityInputHandler for ComposerInput {
     fn text_for_range(
         &mut self,

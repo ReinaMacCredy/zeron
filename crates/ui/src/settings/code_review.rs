@@ -347,11 +347,13 @@ impl CodeReviewPage {
                                 ),
                         )
                         .child(popover::dialog_field(
-                            div()
-                                .h(px(72.0))
-                                .overflow_hidden()
-                                .child(self.instructions.clone())
-                                .into_any_element(),
+                            crate::composer::growing_field(
+                                self.instructions.clone(),
+                                72.0,
+                                320.0,
+                                cx,
+                            )
+                            .into_any_element(),
                         ))
                         .child(
                             div().flex().justify_end().child(
