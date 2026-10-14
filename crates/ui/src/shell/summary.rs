@@ -2434,6 +2434,9 @@ mod sidecar_regressions {
         let forks = called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 1);
         assert_eq!(forks[0]["sourceChatId"], "parent");
         assert_eq!(forks[0]["createdByChatId"], "parent");
+        crate::device_panel::tests::wait(cx, |cx| {
+            shell.read_with(cx, |shell, _| !shell.side_chat_creating)
+        });
 
         click(cx, "sidecar-collapse");
         click(cx, "sidecar-rail-fork-chat-0");
