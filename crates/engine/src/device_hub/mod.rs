@@ -1971,6 +1971,10 @@ mod tests {
                     let request = read_request(&mut socket).await;
                     let line = request.lines().next().unwrap_or_default().to_string();
                     let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    // A running Zeron's preview discovery probes test listeners with `HEAD /`.
+                    if line.starts_with("HEAD / ") {
+                        return;
+                    }
                     seen.lock().unwrap().push(format!("{line} {body}"));
                     if line.starts_with("GET /vendor/serve-sim/helper/SIM-1/stream.mjpeg ") {
                         let head = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nConnection: close\r\n\r\n";
