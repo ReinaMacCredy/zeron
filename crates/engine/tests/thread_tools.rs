@@ -58,6 +58,7 @@ impl Harness for RecordingHarness {
         mut controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
+        let interrupt = controls.interrupt.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
         let steers = self.steers.clone();
         let confirm = tx.clone();
@@ -96,7 +97,20 @@ impl Harness for RecordingHarness {
                 },
             ];
             for event in script {
-                tokio::time::sleep(delay).await;
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = interrupt.cancelled() => {
+                        let _ = tx
+                            .send(Ok(AgentEvent::Done {
+                                status: DoneStatus::Interrupted,
+                                result: None,
+                                error: None,
+                                session_id: Some("hs-rec".into()),
+                            }))
+                            .await;
+                        return;
+                    }
+                }
                 if tx.send(Ok(event)).await.is_err() {
                     return;
                 }
