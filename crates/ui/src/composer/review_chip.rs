@@ -1336,14 +1336,21 @@ impl Composer {
         popover::popover_card(&popup)
             .id("composer-reviewer-models-card")
             .w(px(210.0))
-            .max_h(px(360.0))
-            .overflow_y_scroll()
             .relative()
             .p(px(4.0))
             .flex()
             .flex_col()
             .gap(px(popover::MENU_GAP))
-            .children(rows)
+            .child(
+                div()
+                    .id("composer-reviewer-models-list")
+                    .max_h(px(300.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(popover::MENU_GAP))
+                    .children(rows),
+            )
             .children(thinking)
             .child(
                 gpui::canvas(
