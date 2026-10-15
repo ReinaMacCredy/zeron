@@ -177,7 +177,7 @@ pub fn run_app(config: UiConfig) {
         .with_assets(icons::Assets)
         .with_http_client(asset_http::AssetHttpClient::new(runtime_handle.clone()));
     let text_system = app.text_system();
-    // Reading every installed font file takes ~150 ms; overlap it with launch.
+    // Scanning the installed fonts takes ~90 ms; overlap it with launch.
     let installed_fonts = app
         .background_executor()
         .spawn(async move { typography::scan_installed_fonts(&text_system) });

@@ -352,10 +352,13 @@ pub struct InstalledFonts(BTreeMap<String, bool>);
 pub fn scan_installed_fonts(text_system: &gpui::TextSystem) -> InstalledFonts {
     // Capture device fonts before adding ours so the Installed section only
     // contains families supplied by the OS/user, not our embedded assets.
-    let families_with_latin_metrics = installed_families_with_latin_metrics();
+    let (families_with_latin_metrics, names) = std::thread::scope(|scope| {
+        let families = scope.spawn(installed_families_with_latin_metrics);
+        let names = text_system.all_font_names();
+        (families.join().unwrap(), names)
+    });
     InstalledFonts(
-        text_system
-            .all_font_names()
+        names
             .into_iter()
             .filter(|name| !name.starts_with('.'))
             .filter(|name| name != "Geist" && name != "Geist Mono")
