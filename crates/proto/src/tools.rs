@@ -155,8 +155,8 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
     },
     ToolGroupInfo {
         group: ToolGroup::Pages,
-        title: "HTML pages",
-        summary: "Show live HTML pages (charts, tables, mockups) inline in the thread.",
+        title: "Pages and visuals",
+        summary: "Show live HTML pages and native visuals (charts, tables, mockups) inline in the thread.",
         tools: &[
             needs(
                 "html_preview",
@@ -166,6 +166,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "html_render",
                 "Show a finished HTML page inline in this thread, above the reply.",
+            ),
+            tool(
+                "show_visual",
+                "Show a native interactive visual (chart, table, 3D view) inline in this thread.",
             ),
         ],
     },

@@ -64,6 +64,7 @@ mod working_tree;
 pub mod workspace_files;
 pub mod workspace_host;
 pub mod workspace_search;
+mod worktree_settings;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use agent_profiles::AgentProfilesStore;

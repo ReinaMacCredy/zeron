@@ -24,12 +24,14 @@ members = [
     "crates/client",
     "crates/mcp",
     "crates/text",
+    "crates/visual",
+    "crates/visual-gpu",
     "apps/zeron",
 ]
 exclude = ["vendor/cua-driver"]
 
 [workspace.package]
-version = "0.2.112"
+version = "0.2.113"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -56,6 +58,8 @@ zeron-mobile = { path = "crates/mobile" }
 zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-text = { path = "crates/text" }
+zeron-visual = { path = "crates/visual" }
+zeron-visual-gpu = { path = "crates/visual-gpu" }
 
 # CRDT
 loro = "1.13"
@@ -175,6 +179,13 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Scenes rasterize in software every frame the camera moves.
+[profile.dev.package.zeron-visual]
+opt-level = 3
+
+[profile.dev.package.zeron-visual-gpu]
+opt-level = 3
 
 # Mobile core (scripts/ios/build-core.sh). Always optimized — layout and sync
 # run on the phone's hot paths, so even Debug app builds link an -O core.

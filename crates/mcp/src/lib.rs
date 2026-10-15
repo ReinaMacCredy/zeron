@@ -32,6 +32,8 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcClient, methods};
 
+mod visual;
+
 /// The MCP revision this server was written against; a client's own value
 /// is echoed back when it names one.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -76,6 +78,16 @@ const REASONING_LEVELS: [&str; 9] = [
 
 /// The tool catalog as `tools/list` reports it.
 pub fn tool_list() -> Value {
+    let mut tools = thread_tool_list();
+    if let Some(list) = tools.as_array_mut()
+        && let Some(at) = list.iter().position(|tool| tool["name"] == "html_render")
+    {
+        list.insert(at + 1, visual::tool());
+    }
+    tools
+}
+
+fn thread_tool_list() -> Value {
     let thread_id = json!({ "type": "string" });
     let wait = json!({ "type": "boolean", "description": "Block until the thread's turn ends and add its outcome as `turn`." });
     let timeout = json!({ "type": "integer", "minimum": 0, "maximum": 1800 });
@@ -634,6 +646,7 @@ impl ThreadTools {
             "agent_profiles" => self.manage_agent_profiles(args).await,
             "context_settings" => self.context_settings(args).await,
             "html_render" => self.html_render(args).await,
+            visual::TOOL => self.show_visual(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
@@ -1565,6 +1578,27 @@ impl ThreadTools {
             json!({ "chatId": self.chat_id, "runSecret": secret, "html": html, "title": title, "height": height }),
         )
         .await
+    }
+
+    async fn show_visual(&self, args: &Value) -> Result<Value, String> {
+        let script = args["script"].as_str().ok_or("script must be a string")?;
+        let title = args["title"].as_str().ok_or("title must be a string")?;
+        let assets: std::collections::BTreeMap<String, String> = match &args["assets"] {
+            Value::Null => Default::default(),
+            raw => serde_json::from_value(raw.clone())
+                .map_err(|_| "assets must map names to file paths")?,
+        };
+        let assets = visual::read_assets(&assets).await?;
+        let shown = self
+            .call_engine(
+                methods::PUBLISH_VISUAL,
+                json!({ "chatId": self.chat_id, "title": title, "script": script, "assets": assets }),
+            )
+            .await?;
+        Ok(json!({
+            "visual": shown,
+            "message": "Shown to the reader above your reply. Don't mention or describe the visual; reply with only what it doesn't already say.",
+        }))
     }
 
     pub async fn ask_user(&self, args: &Value) -> Result<Value, String> {
@@ -2733,7 +2767,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 29] = [
+    const THREAD_TOOLS: [&str; 30] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2751,6 +2785,7 @@ mod tests {
         "context_settings",
         "html_preview",
         "html_render",
+        "show_visual",
         "device_list",
         "device_open",
         "device_screenshot",
@@ -3079,6 +3114,15 @@ mod tests {
                         "htmlRender": { "path": "/u/html/c1/ab.html", "title": params["title"], "height": 420 },
                         "message": html_render::RENDERED_MESSAGE,
                     })))
+                }
+                methods::PUBLISH_VISUAL => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    Ok(RpcReply::Value(
+                        json!({ "id": "v:1", "title": params["title"] }),
+                    ))
                 }
                 methods::HTML_PREVIEW => {
                     self.calls
@@ -4279,6 +4323,35 @@ mod tests {
             json!(["html", "title", "height"])
         );
         assert!(tool["description"].as_str().unwrap().contains("--chart-1"));
+    }
+
+    #[tokio::test]
+    async fn show_visual_publishes_into_the_callers_own_chat() {
+        let rig = computer_rig(Some("live"));
+        let shown = rig
+            .tools
+            .call(
+                "show_visual",
+                &json!({ "script": "return ui.text 'chart'", "title": "Chart", "chatId": "other" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shown["visual"]["title"], "Chart");
+        let sent = logged(&rig.calls, methods::PUBLISH_VISUAL);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["chatId"], "a");
+        assert_eq!(sent[0]["script"], "return ui.text 'chart'");
+        assert_eq!(sent[0]["assets"], json!({}));
+        assert!(
+            rig.tools
+                .call(
+                    "show_visual",
+                    &json!({ "script": "x", "title": "T", "assets": { "../a.png": "a.png" } })
+                )
+                .await
+                .unwrap_err()
+                .contains("plain file name")
+        );
     }
 
     #[tokio::test]

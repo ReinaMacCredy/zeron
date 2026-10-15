@@ -105,6 +105,7 @@ pub struct ShortcutsPage {
     predictions: Entity<crate::settings::predictions::PredictionsCard>,
     delegation: Entity<crate::settings::delegation::DelegationCard>,
     idle_compaction: Entity<crate::settings::idle_compaction::IdleCompactionCard>,
+    worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
 
@@ -169,6 +170,7 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::idle_compaction::IdleCompactionCard::new(state, cx))
             },
+            worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
             _state: state,
         }
     }
@@ -1429,7 +1431,8 @@ impl Render for ShortcutsPage {
                                     .child(self.thread_naming.clone())
                                     .child(self.predictions.clone())
                                     .child(self.delegation.clone())
-                                    .child(self.idle_compaction.clone()),
+                                    .child(self.idle_compaction.clone())
+                                    .child(self.worktrees.clone()),
                             ),
                     )
                     .fade_overflow_y(&self.scroll.scroll),

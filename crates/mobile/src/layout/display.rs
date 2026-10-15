@@ -212,6 +212,8 @@ pub enum WidgetKind {
     Shimmer,
     /// `payload` is the button's label.
     CardButton { action: CardAction },
+    /// An agent visual; `TranscriptView::visual(id)` is its live session.
+    Visual { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

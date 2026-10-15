@@ -369,7 +369,7 @@ pub(crate) fn raw_blocks(entries: &[SessionMessageEntry], hide_thinking: bool) -
                     &serde_json::to_string(questions).unwrap_or_default(),
                 ),
                 MessagePart::Error { message, .. } => push(RawRole::Error, message),
-                MessagePart::Fork { .. } => {}
+                MessagePart::Fork { .. } | MessagePart::Visual { .. } => {}
             }
         }
     }

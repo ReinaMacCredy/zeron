@@ -373,7 +373,14 @@ mod tests {
         let ceiling = rules(&["html_preview"]);
         let mut disabled = rules(&["WebFetch"]);
         set_zeron_group(&mut disabled, pages, &ceiling, false);
-        assert_eq!(disabled, rules(&["WebFetch", "mcp__zeron__html_render"]));
+        assert_eq!(
+            disabled,
+            rules(&[
+                "WebFetch",
+                "mcp__zeron__html_render",
+                "mcp__zeron__show_visual"
+            ])
+        );
         assert_eq!(rules_on(&disabled, &zeron_unlocked(pages, &ceiling)), 0);
 
         disabled.push("mcp__zeron__html_preview".into());

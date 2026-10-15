@@ -11,10 +11,12 @@ zeron-rpc.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+base64 = "0.22"
 chrono.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 zeron-doc.workspace = true
+zeron-visual.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

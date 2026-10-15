@@ -1127,6 +1127,12 @@ pub enum RowKind {
         name: String,
         mime_type: String,
     },
+    /// An agent's `show_visual` script, rendered inline by [`crate::visuals`].
+    Visual {
+        owner: String,
+        path: String,
+        title: String,
+    },
     User {
         /// Visible prompt (attachment-ref trailer already stripped). When the
         /// prompt carries file mentions this is the *projected* display text —
@@ -1947,6 +1953,28 @@ pub fn rows_for_entry(
                                 path: path.clone(),
                                 name: name.clone(),
                                 mime_type: mime_type.clone(),
+                            },
+                        });
+                    }
+                    MessagePart::Visual {
+                        id: part_id,
+                        path,
+                        title,
+                    } => {
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("{}\0{path}\0{title}", entry.device_id).as_bytes(),
+                            ),
+                            turn_start: false,
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                            kind: RowKind::Visual {
+                                owner: entry.device_id.clone(),
+                                path: path.clone(),
+                                title: title.clone(),
                             },
                         });
                     }
@@ -3910,6 +3938,8 @@ pub struct Transcript {
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
+    /// Inline `show_visual` visuals, keyed by row id.
+    visuals: HashMap<SharedString, Entity<crate::visuals::VisualFrame>>,
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
     /// Sidecar blob fetches keyed by doc ref (`chatId/partId[.diff]`,
@@ -4386,6 +4416,7 @@ impl Transcript {
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
             attachment_loads: HashMap::new(),
+            visuals: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
@@ -8294,6 +8325,51 @@ impl Transcript {
             .into_any_element()
     }
 
+    fn render_visual(
+        &mut self,
+        row_id: &SharedString,
+        owner: &str,
+        path: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let link_ui = self.link_ui(cx);
+        let frame = match self.visuals.get(row_id) {
+            Some(frame) => frame.clone(),
+            None => {
+                let state = self.state.read(cx);
+                let engine = state.engine().cloned();
+                // Relay-forward only for a genuinely remote owner.
+                let target =
+                    (state.local_device_id.as_deref() != Some(owner)).then(|| owner.to_owned());
+                let frame = cx.new(|cx| {
+                    crate::visuals::VisualFrame::new(
+                        row_id.clone(),
+                        title.to_owned(),
+                        path.to_owned(),
+                        engine,
+                        target,
+                        cx,
+                    )
+                });
+                // A visual whose tree changes shape (a tab switch, a load)
+                // resizes its row, like a diagram finishing.
+                let id = row_id.clone();
+                cx.subscribe(
+                    &frame,
+                    move |this, _, _: &crate::visuals::VisualLayoutChanged, cx| {
+                        this.diagram_layout_changed(std::slice::from_ref(&id), cx);
+                    },
+                )
+                .detach();
+                self.visuals.insert(row_id.clone(), frame.clone());
+                frame
+            }
+        };
+        frame.update(cx, |frame, _| frame.set_link_ui(link_ui));
+        div().w_full().child(frame).into_any_element()
+    }
+
     /// The right-aligned thumbnail strip above a user bubble.
     fn render_user_attachments(
         &mut self,
@@ -9270,6 +9346,9 @@ impl Transcript {
                 title,
                 height,
             } => self.render_html_render(&row.id, owner, path, title, *height, window, cx),
+            RowKind::Visual { owner, path, title } => {
+                self.render_visual(&row.id, owner, path, title, cx)
+            }
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ComputerConsent {
                 request_id,
@@ -12942,6 +13021,12 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.push(0);
             }
         }
+        if let MessagePart::Visual { path, title, .. } = part {
+            for field in [path, title] {
+                acc.extend_from_slice(field.as_bytes());
+                acc.push(0);
+            }
+        }
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
         }
@@ -13175,9 +13260,13 @@ impl Render for Transcript {
         self.update_runway_minimum(cx);
         self.html_pages.viewport = self.list.viewport_bounds();
         self.html_pages.frame += 1;
-        let list_el = list(self.list.clone(), cx.processor(Self::render_row))
-            .size_full()
-            .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
+        let list_el = crate::overscroll::overscroll(
+            "transcript-overscroll",
+            crate::overscroll::OverscrollSource::List(self.list.clone()),
+            list(self.list.clone(), cx.processor(Self::render_row))
+                .size_full()
+                .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+        );
         let content: AnyElement = if self.doc_override.is_some() {
             // The primary transcript's fade lives on the SHELL's outlet
             // wrapper (it spans the titlebar/composer chrome); an override
