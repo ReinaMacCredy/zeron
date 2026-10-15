@@ -42,7 +42,7 @@ pub(super) struct AskPills {
     awaiting: HashSet<String>,
     fetches: HashMap<String, Task<()>>,
     entries: Vec<AskEntry>,
-    open: Option<String>,
+    pub(super) open: Option<String>,
     answered: HashMap<String, String>,
     submits: HashMap<String, Task<()>>,
     pub(super) advance_task: Option<Task<()>>,

@@ -10372,6 +10372,11 @@ impl Composer {
         };
         let text = if open { theme.text } else { theme.text_muted };
         let surface = crate::queue::queue_panel_surface(theme, cx.has_active_drag())
+            .id("composer-sidechat-tab")
+            .debug_selector(|| "composer-sidechat-tab".into())
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.85))
+            .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)))
             .rounded_t(px(SIDECHAT_TAB_RADIUS))
             .px(px(8.0))
             .pt(px(0.0))
@@ -10399,27 +10404,15 @@ impl Composer {
             );
         Some(
             div()
-                .flex()
-                .justify_end()
-                .px(px(QUEUE_SIDE_INSET * (trays + 1) as f32))
+                .min_w_0()
+                .max_w(relative(0.45))
+                .mr(px(QUEUE_SIDE_INSET * (trays + 1) as f32))
                 .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
-                .child(
-                    div()
-                        .id("composer-sidechat-tab")
-                        .debug_selector(|| "composer-sidechat-tab".into())
-                        .min_w_0()
-                        .max_w(relative(0.45))
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.85))
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)),
-                        )
-                        .child(crate::frost::frosted(
-                            SIDECHAT_TAB_RADIUS,
-                            crate::frost::MENU_BLUR,
-                            surface,
-                        )),
-                )
+                .child(crate::frost::frosted(
+                    SIDECHAT_TAB_RADIUS,
+                    crate::frost::MENU_BLUR,
+                    surface,
+                ))
                 .into_any_element(),
         )
     }
@@ -13722,17 +13715,27 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
-        let container = container.when_some(self.render_corner(window, cx), |el, corner| {
-            el.child(corner)
-        });
+        let corner = self.render_corner(window, cx);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = !self.state.read(cx).queue.is_empty();
         let todo = self.render_todo_panel(has_queue, window, cx);
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
-        let container =
-            container.children(self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx));
+        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx);
+        let container = match tab {
+            Some(tab) if self.ask.open.is_none() => container.child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(Theme::SPACE_SM))
+                    .child(div().flex_1().min_w_0().children(corner))
+                    .child(tab),
+            ),
+            tab => container
+                .children(corner)
+                .children(tab.map(|tab| div().flex().justify_end().child(tab))),
+        };
         let container = container.when_some(todo, |el, panel| {
             el.child(motion::fade_quick("composer-todo", div().child(panel)))
         });
@@ -18631,6 +18634,32 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[gpui::test]
+    fn clicking_the_sidechat_tab_asks_for_a_sidechat(cx: &mut gpui::TestAppContext) {
+        let (_dir, _) = composer_focus_window(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![chat_row("src", None)];
+            state.selected_chat = Some("src".into());
+        });
+        let (composer, cx) = cx.add_window_view(|_, cx| Composer::new(state, cx));
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        cx.update(|_, cx| {
+            let seen = seen.clone();
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                if matches!(event, ComposerEvent::OpenSidechat { .. }) {
+                    seen.set(seen.get() + 1);
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        let tab = cx.debug_bounds("composer-sidechat-tab").unwrap();
+        cx.simulate_click(tab.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(seen.get(), 1);
     }
 
     #[gpui::test]
