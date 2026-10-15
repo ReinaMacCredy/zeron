@@ -168,6 +168,7 @@ fn window_title() -> String {
 }
 
 pub fn run_app(config: UiConfig) {
+    zeron_harness::shell_env::prewarm();
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");

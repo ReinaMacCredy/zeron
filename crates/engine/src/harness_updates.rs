@@ -410,19 +410,19 @@ impl HarnessUpdateCoordinator {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        // Installed probes wait on the login-shell PATH snapshot, which can
+        // take seconds; the first check_all settles rows that are not enabled.
         let order: Vec<_> = registry
-            .descriptors()
+            .ids()
             .into_iter()
-            .filter(|descriptor| descriptor.id != HarnessId::Mock)
-            .map(|descriptor| descriptor.id)
+            .filter(|id| *id != HarnessId::Mock)
             .collect();
-        let enabled = registry.enabled_set();
         let statuses: HashMap<_, _> = order
             .iter()
             .copied()
             .map(|harness| {
                 let policy = prefs.policies.get(&harness).copied().unwrap_or_default();
-                let phase = if enabled.contains(&harness) && policy != HarnessUpdatePolicy::Off {
+                let phase = if policy != HarnessUpdatePolicy::Off {
                     HarnessUpdatePhase::Checking
                 } else {
                     HarnessUpdatePhase::Dormant
@@ -521,7 +521,10 @@ impl HarnessUpdateCoordinator {
     }
 
     pub async fn check_all(&self) -> Vec<HarnessUpdateStatus> {
-        let enabled = self.inner.registry.enabled_set();
+        let registry = self.inner.registry.clone();
+        let enabled = tokio::task::spawn_blocking(move || registry.enabled_set())
+            .await
+            .unwrap_or_default();
         // Disabled rows remain visible in Settings but never spawn a probe.
         for id in &self.inner.order {
             let policy = self.policy(*id);
