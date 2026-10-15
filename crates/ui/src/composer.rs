@@ -13715,7 +13715,7 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
-        let corner = self.render_corner(window, cx);
+        let (card, corner) = self.render_corner(window, cx);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = !self.state.read(cx).queue.is_empty();
@@ -13723,18 +13723,31 @@ impl Render for Composer {
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
         let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx);
+        // Out of flow: the shell measures this stack for transcript clearance.
+        let card = card.map(|card| {
+            div()
+                .absolute()
+                .bottom_full()
+                .left_0()
+                .right_0()
+                .pb(px(Theme::SPACE_SM))
+                .child(card)
+        });
         let container = match tab {
-            Some(tab) if self.ask.open.is_none() => container.child(
+            Some(tab) => container.child(
                 div()
+                    .relative()
                     .flex()
                     .items_end()
                     .gap(px(Theme::SPACE_SM))
                     .child(div().flex_1().min_w_0().children(corner))
-                    .child(tab),
+                    .child(tab)
+                    .children(card),
             ),
-            tab => container
-                .children(corner)
-                .children(tab.map(|tab| div().flex().justify_end().child(tab))),
+            None if corner.is_some() || card.is_some() => {
+                container.child(div().relative().children(corner).children(card))
+            }
+            None => container,
         };
         let container = container.when_some(todo, |el, panel| {
             el.child(motion::fade_quick("composer-todo", div().child(panel)))

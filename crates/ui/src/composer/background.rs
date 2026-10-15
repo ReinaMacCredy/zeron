@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, SharedString, Stateful,
-    Window, div, point, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, MouseDownEvent,
+    SharedString, Stateful, Window, div, point, prelude::*, px,
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry, SubagentStatus};
 use zeron_proto::{
@@ -28,7 +28,11 @@ const DOT_BOX: f32 = DOT_SIZE * 3.0 + DOT_GAP * 2.0;
 const GLYPH_SIZE: f32 = 12.0;
 const PILL_HEIGHT: f32 = 28.0;
 const SETTLE_FADE: Duration = Duration::from_millis(160);
-const ROSTER_RISE: Duration = Duration::from_millis(150);
+const CARD_RISE: f32 = 10.0;
+const CARD_DROP: f32 = 4.0;
+const PILL_RISE: f32 = 4.0;
+const AGENTS_PILL_FLOOR: f32 = 140.0;
+const AGENTS_PILL_SHRINK: f32 = 100.0;
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const SHELLS_MENU_WIDTH: f32 = 420.0;
@@ -198,19 +202,22 @@ fn working_count(runs: &[AgentRun]) -> usize {
         .count()
 }
 
-pub(crate) fn agents_label(runs: &[AgentRun]) -> String {
+pub(crate) fn agents_label(runs: &[AgentRun]) -> (Option<SharedString>, String) {
     let working = working_count(runs);
     match runs {
-        [one] => format!("{} · {}", one.title, one.state.word()),
-        _ if working > 0 => format!("{working} Working"),
-        _ => [RunState::Completed, RunState::Stopped, RunState::Failed]
-            .into_iter()
-            .filter_map(|state| {
-                let count = runs.iter().filter(|run| run.state == state).count();
-                (count > 0).then(|| format!("{count} {}", state.word()))
-            })
-            .collect::<Vec<_>>()
-            .join(" · "),
+        [one] => (Some(one.title.clone()), format!("· {}", one.state.word())),
+        _ if working > 0 => (None, format!("{working} Working")),
+        _ => (
+            None,
+            [RunState::Completed, RunState::Stopped, RunState::Failed]
+                .into_iter()
+                .filter_map(|state| {
+                    let count = runs.iter().filter(|run| run.state == state).count();
+                    (count > 0).then(|| format!("{count} {}", state.word()))
+                })
+                .collect::<Vec<_>>()
+                .join(" · "),
+        ),
     }
 }
 
@@ -440,7 +447,9 @@ pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
 #[derive(Default)]
 pub(crate) struct BackgroundUi {
     chat: Option<String>,
-    roster_opened: Option<Instant>,
+    roster: Popup<Instant>,
+    agents_pill_since: Option<Instant>,
+    shells_pill_since: Option<Instant>,
     shells: Popup<()>,
     agents_glyph: Option<(RunState, Option<Instant>)>,
     tick: Option<gpui::Task<()>>,
@@ -488,12 +497,78 @@ fn tween_progress(since: Option<Instant>, span: Duration, reduced: bool, now: In
     }
 }
 
+fn eased(spec: &motion::MotionSpec, since: Option<Instant>, reduced: bool, now: Instant) -> f32 {
+    spec.progress(tween_progress(since, spec.total(), reduced, now))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CardMotion {
+    pub opacity: f32,
+    pub offset: f32,
+    pub animating: bool,
+    pub live: bool,
+    pub gone: bool,
+}
+
+pub(super) fn card_motion(
+    opened: Instant,
+    closing: Option<Instant>,
+    reduced: bool,
+    now: Instant,
+) -> CardMotion {
+    let slide = eased(&motion::SIDECAR_POPOVER_SLIDE, Some(opened), reduced, now);
+    let fade = eased(&motion::SIDECAR_POPOVER_FADE, Some(opened), reduced, now);
+    let exit = closing.map(|since| eased(&motion::MENU_OUT, Some(since), reduced, now));
+    let out = exit.unwrap_or(0.0);
+    CardMotion {
+        opacity: fade * (1.0 - out),
+        offset: CARD_RISE * (1.0 - slide) + CARD_DROP * out,
+        animating: slide < 1.0 || fade < 1.0 || exit.is_some_and(|t| t < 1.0),
+        live: closing.is_none(),
+        gone: exit.is_some_and(|t| t >= 1.0),
+    }
+}
+
+pub(super) fn presence(since: &mut Option<Instant>, shown: bool, now: Instant) -> Option<Instant> {
+    if !shown {
+        *since = None;
+        return None;
+    }
+    Some(*since.get_or_insert(now))
+}
+
+pub(super) fn pill_enter(since: Option<Instant>, reduced: bool, now: Instant) -> f32 {
+    eased(&motion::FADE_QUICK, since, reduced, now)
+}
+
+pub(super) fn pill_exit(since: Instant, reduced: bool, now: Instant) -> f32 {
+    eased(&motion::MENU_OUT, Some(since), reduced, now)
+}
+
+pub(super) fn entering(pill: Stateful<Div>, t: f32) -> Stateful<Div> {
+    pill.relative().top(px(PILL_RISE * (1.0 - t))).opacity(t)
+}
+
+pub(super) fn card_frame<E>(card: E, motion: CardMotion) -> crate::frost::Frosted
+where
+    E: Styled + ParentElement + IntoElement,
+{
+    let mut card = card
+        .relative()
+        .top(px(motion.offset))
+        .opacity(motion.opacity);
+    if !motion.live {
+        card = card.child(div().absolute().inset_0().occlude());
+    }
+    crate::frost::frosted(14.0, crate::frost::MENU_BLUR * motion.opacity, card)
+}
+
 impl Composer {
     pub(super) fn render_background_corner(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> Option<(Vec<AnyElement>, Option<AnyElement>)> {
         let (chat_id, harness, chat_reasoning) = self.bound_chat_row(cx).map(|chat| {
             let config = chat.config.as_ref();
             (
@@ -534,7 +609,7 @@ impl Composer {
             };
         }
         if agents.is_empty() {
-            self.background.roster_opened = None;
+            self.background.roster = Popup::default();
             self.background.agents_glyph = None;
         }
         if shells.is_empty() {
@@ -545,7 +620,7 @@ impl Composer {
                 self.background.shells.get().is_none() || !shells.iter().any(|t| &t.id == id)
             }
             Some(DetailTarget::Agent(part)) => {
-                self.background.roster_opened.is_none()
+                self.background.roster.get().is_none()
                     || !agents.iter().any(|run| &run.part_id == part)
             }
             None => false,
@@ -576,21 +651,42 @@ impl Composer {
             }
         };
         let fade = tween_progress(settled_since, SETTLE_FADE, reduced, now);
-        let rise = self
-            .background
-            .roster_opened
-            .map(|opened| tween_progress(Some(opened), ROSTER_RISE, reduced, now));
-        if fade < 1.0 || rise.is_some_and(|rise| rise < 1.0) {
+        let roster_motion = self.background.roster.get().map(|opened| {
+            card_motion(
+                *opened,
+                self.background.roster.closing_since(),
+                reduced,
+                now,
+            )
+        });
+        let roster_open = self.background.roster.is_open();
+        let agents_since = presence(
+            &mut self.background.agents_pill_since,
+            !agents.is_empty(),
+            now,
+        );
+        let shells_since = presence(
+            &mut self.background.shells_pill_since,
+            !shells.is_empty(),
+            now,
+        );
+        let agents_in = pill_enter(agents_since, reduced, now);
+        let shells_in = pill_enter(shells_since, reduced, now);
+        if fade < 1.0
+            || roster_motion.is_some_and(|motion| motion.animating)
+            || agents_in < 1.0
+            || shells_in < 1.0
+        {
             window.request_animation_frame();
         }
         let shells_mounted = self.background.shells.get().is_some();
         self.sync_output_watches(if shells_mounted { &shells } else { &[] }, cx);
-        let token_docs: Vec<&str> = match rise {
+        let token_docs: Vec<&str> = match roster_motion {
             Some(_) => agents.iter().map(|run| run.doc_id.as_str()).collect(),
             None => Vec::new(),
         };
         self.sync_token_watches(&token_docs, cx);
-        let ticking = (rise.is_some() && overall == RunState::Working) || shells_mounted;
+        let ticking = (roster_motion.is_some() && overall == RunState::Working) || shells_mounted;
         if ticking && self.background.tick.is_none() {
             self.background.tick = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(ELAPSED_TICK).await;
@@ -602,71 +698,77 @@ impl Composer {
             }));
         }
 
-        let roster = rise.map(|rise| {
+        let roster = roster_motion.map(|motion| {
             self.render_roster(
                 &agents,
                 harness,
                 chat_reasoning,
                 stoppable,
-                rise,
+                motion,
                 now_ms,
                 &theme,
                 cx,
             )
         });
-        let agents_text = match agents.as_slice() {
-            [one] => self
-                .review_pill_suffix(&one.doc_id, cx)
-                .map(|suffix| format!("{} · {suffix}", one.title)),
-            _ => None,
-        }
-        .unwrap_or_else(|| agents_label(&agents));
-        let agents_pill = (rise.is_none() && !agents.is_empty()).then(|| {
+        let (agents_title, agents_tail) = match agents.as_slice() {
+            [one] => match self.review_pill_suffix(&one.doc_id, cx) {
+                Some(suffix) => (Some(one.title.clone()), format!("· {suffix}")),
+                None => agents_label(&agents),
+            },
+            _ => agents_label(&agents),
+        };
+        let agents_pill = (!agents.is_empty()).then(|| {
             let pill = pill_frame("background-agents-pill", &theme)
                 .debug_selector(|| "background-agents-pill".into())
+                .when(roster_open, |el| {
+                    el.border_color(theme.border_strong).text_color(theme.text)
+                })
                 .child(pill_leading(glyph(
                     "background-agents-glyph",
                     overall,
                     fade,
                     &theme,
                 )))
-                .child(div().child(SharedString::from(agents_text)))
-                .on_click(cx.listener(|this, _, _, cx| this.open_roster(cx)));
-            frosted_pill(pill)
+                .when_some(agents_title, |el, title| {
+                    el.flex_shrink(AGENTS_PILL_SHRINK)
+                        .min_w(px(AGENTS_PILL_FLOOR))
+                        .child(div().min_w_0().truncate().child(title))
+                })
+                .child(div().flex_none().child(SharedString::from(agents_tail)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.background.roster.note_trigger_press()),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.background.roster.take_press_was_open() {
+                        this.open_roster(cx);
+                    }
+                }));
+            frosted_pill(entering(pill, agents_in), agents_in).into_any_element()
         });
         let shell_pill = (!shells.is_empty())
-            .then(|| self.render_shell_pill(&shells, stoppable, now_ms, &theme, cx));
-
-        let row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .children(agents_pill)
-            .children(shell_pill);
-        Some(
-            div()
-                .debug_selector(|| "background-corner".into())
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .when(rise.is_none() || !shells.is_empty(), |el| el.child(row))
-                .children(roster)
-                .into_any_element(),
-        )
+            .then(|| self.render_shell_pill(&shells, stoppable, now_ms, shells_in, &theme, cx));
+        Some((agents_pill.into_iter().chain(shell_pill).collect(), roster))
     }
 
     pub(super) fn roster_open(&self) -> bool {
-        self.background.roster_opened.is_some()
+        self.background.roster.is_open()
     }
 
-    pub(super) fn close_roster(&mut self) {
-        self.background.roster_opened = None;
+    pub(super) fn close_roster(&mut self, cx: &mut Context<Self>) {
+        if self.background.roster.begin_close() {
+            popover::reap_popup(cx, |this: &mut Composer| &mut this.background.roster);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn drop_roster(&mut self) {
+        self.background.roster = Popup::default();
     }
 
     pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
-        self.close_ask_tray(cx);
-        self.background.roster_opened = Some(Instant::now());
+        self.drop_ask_tray(cx);
+        self.background.roster.open(Instant::now());
         if self.background.shells.begin_close() {
             popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
         }
@@ -680,7 +782,7 @@ impl Composer {
         harness: Option<HarnessId>,
         chat_reasoning: Option<ReasoningLevel>,
         stoppable: bool,
-        rise: f32,
+        motion: CardMotion,
         now_ms: i64,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -741,11 +843,11 @@ impl Composer {
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.background.roster_opened = None;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.close_roster(cx))),
             );
+        let dismiss = motion.live.then(|| {
+            cx.listener(|this: &mut Self, _: &MouseDownEvent, _, cx| this.close_roster(cx))
+        });
         let rows = agents.iter().enumerate().map(|(ix, run)| {
             let open = {
                 let part_id = run.part_id.clone();
@@ -823,11 +925,12 @@ impl Composer {
             _ => None,
         };
         let card = div()
-            .debug_selector(|| "background-roster".into())
+            .when_some(dismiss, |el, dismiss| {
+                el.debug_selector(|| "background-roster".into())
+                    .on_mouse_down_out(dismiss)
+            })
+            .occlude()
             .w_full()
-            .relative()
-            .top(px(4.0 * (1.0 - rise)))
-            .opacity(rise)
             .rounded(px(14.0))
             .border_1()
             .border_color(theme.border)
@@ -847,7 +950,7 @@ impl Composer {
             )),
             None => card.child(header).children(rows),
         };
-        crate::frost::frosted(14.0, crate::frost::MENU_BLUR * rise, card).into_any_element()
+        card_frame(card, motion).into_any_element()
     }
 
     fn render_shell_pill(
@@ -855,6 +958,7 @@ impl Composer {
         shells: &[BackgroundTask],
         stoppable: bool,
         now_ms: i64,
+        enter: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1015,7 +1119,7 @@ impl Composer {
         });
         div()
             .relative()
-            .child(frosted_pill(pill))
+            .child(frosted_pill(entering(pill, enter), enter))
             .children(menu)
             .into_any_element()
     }
@@ -1748,8 +1852,8 @@ pub(super) fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
         .active(|s| s.opacity(0.85))
 }
 
-pub(super) fn frosted_pill(pill: impl IntoElement) -> crate::frost::Frosted {
-    crate::frost::frosted(PILL_HEIGHT / 2.0, crate::frost::MENU_BLUR, pill)
+pub(super) fn frosted_pill(pill: impl IntoElement, opacity: f32) -> crate::frost::Frosted {
+    crate::frost::frosted(PILL_HEIGHT / 2.0, crate::frost::MENU_BLUR * opacity, pill)
 }
 
 pub(super) fn pill_leading(glyph: AnyElement) -> Div {
@@ -2106,28 +2210,31 @@ mod tests {
     fn labels_for_one_many_and_settled_runs() {
         assert_eq!(
             agents_label(&[run("Audit drag", RunState::Working)]),
-            "Audit drag · Working"
+            (Some("Audit drag".into()), "· Working".to_string())
         );
         assert_eq!(
             agents_label(&[run("Audit drag", RunState::Completed)]),
-            "Audit drag · Completed"
+            (Some("Audit drag".into()), "· Completed".to_string())
         );
         assert_eq!(
             agents_label(&[run("Audit drag", RunState::Failed)]),
-            "Audit drag · Failed"
+            (Some("Audit drag".into()), "· Failed".to_string())
         );
         let mixed = [
             run("a", RunState::Working),
             run("b", RunState::Completed),
             run("c", RunState::Working),
         ];
-        assert_eq!(agents_label(&mixed), "2 Working");
+        assert_eq!(agents_label(&mixed), (None, "2 Working".to_string()));
         assert_eq!(roster_heading(&mixed), "2 of 3 working");
         assert_eq!(aggregate(&mixed), RunState::Working);
         let settled = [run("a", RunState::Completed), run("b", RunState::Failed)];
-        assert_eq!(agents_label(&settled), "1 Completed · 1 Failed");
+        assert_eq!(
+            agents_label(&settled),
+            (None, "1 Completed · 1 Failed".to_string())
+        );
         let stopped = [run("a", RunState::Stopped), run("b", RunState::Stopped)];
-        assert_eq!(agents_label(&stopped), "2 Stopped");
+        assert_eq!(agents_label(&stopped), (None, "2 Stopped".to_string()));
         assert_eq!(aggregate(&stopped), RunState::Stopped);
         assert_eq!(roster_heading(&settled), "Subagents");
         assert_eq!(aggregate(&settled), RunState::Failed);
@@ -2322,7 +2429,7 @@ mod tests {
         cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster").is_some());
-        assert!(cx.debug_bounds("background-agents-pill").is_none());
+        assert!(cx.debug_bounds("background-agents-pill").is_some());
         assert!(cx.debug_bounds("background-roster-stop-all").is_some());
         assert!(cx.debug_bounds("background-roster-stop-0").is_some());
         assert!(cx.debug_bounds("background-roster-tokens-0").is_none());
@@ -2394,9 +2501,31 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster").is_none());
         assert!(cx.debug_bounds("background-agents-pill").is_some());
+        finish_exit(cx, &composer);
         composer.read_with(cx, |composer, _| {
             assert!(composer.background.tokens.is_empty())
         });
+
+        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-roster").is_some());
+        cx.simulate_click(gpui::point(px(4.0), px(4.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("background-roster").is_none(),
+            "a click outside the roster closes it"
+        );
+        finish_exit(cx, &composer);
+        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("background-roster").is_none(),
+            "escape closes it"
+        );
+        assert!(!composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)));
+        finish_exit(cx, &composer);
 
         let shells_pill = cx
             .debug_bounds("background-shells-pill")
@@ -2453,6 +2582,14 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-detail").is_none());
         assert!(cx.debug_bounds("background-shell-row-0").is_some());
+    }
+
+    fn finish_exit(cx: &mut gpui::VisualTestContext, composer: &Entity<Composer>) {
+        let span = motion::MENU_OUT.total() + Duration::from_millis(30);
+        std::thread::sleep(span);
+        cx.executor().advance_clock(span);
+        composer.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
     }
 
     #[test]
