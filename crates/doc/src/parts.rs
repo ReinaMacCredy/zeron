@@ -656,10 +656,27 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
-            input: spawn_badge(call),
+            input: spawn_badge(call).or_else(|| skill_badge(call)),
         },
         other => other.clone(),
     }
+}
+
+/// A `Skill` call keeps the skill's name for its chip; its `args` stay in the
+/// journal like a spawn's prompt.
+fn skill_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    let ToolCall::Unknown {
+        name,
+        input: Some(input),
+    } = call
+    else {
+        return None;
+    };
+    if name != "Skill" {
+        return None;
+    }
+    let skill = input.get("skill")?.as_str()?.trim();
+    (!skill.is_empty()).then(|| serde_json::json!({ "skill": skill }))
 }
 
 /// The only slice of a tool input allowed into the doc: a subagent spawn's
@@ -1091,6 +1108,23 @@ mod tests {
             }
         );
         assert_eq!(clean.subagent_model(), None);
+    }
+
+    #[test]
+    fn sanitize_keeps_a_skills_name_and_drops_its_args() {
+        let call = ToolCall::Unknown {
+            name: "Skill".into(),
+            input: Some(serde_json::json!({ "skill": "maestro-bundle", "args": "secret" })),
+        };
+        let clean = sanitize_tool_call(&call);
+        assert_eq!(
+            clean,
+            ToolCall::Unknown {
+                name: "Skill".into(),
+                input: Some(serde_json::json!({ "skill": "maestro-bundle" })),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
     }
 
     #[test]
