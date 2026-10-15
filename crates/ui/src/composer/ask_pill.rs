@@ -1,13 +1,17 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Context, KeyDownEvent, SharedString, Task, Window, div, prelude::*, px,
+    AnyElement, App, Context, Div, KeyDownEvent, MouseButton, SharedString, Stateful, Task, Window,
+    div, prelude::*, px,
 };
 use zeron_proto::{SessionStatus, UserInputAnswer};
 use zeron_rpc::methods;
 
-use super::background::{frosted_pill, pill_frame, pill_leading};
+use super::background::{
+    CardMotion, card_frame, card_motion, entering, frosted_pill, pill_enter, pill_exit, pill_frame,
+    pill_leading, presence,
+};
 use super::{
     Composer, ComposerEvent, Wizard, WizardHost, WizardStep, pending_input_request, respond_input,
 };
@@ -20,6 +24,7 @@ pub(super) const PLACEHOLDER: &str = "Type your own answer, or pick an option ab
 const PICKED_PLACEHOLDER: &str =
     "Type your own answer, or leave this blank to use the selected option";
 const PILL_TITLE_WIDTH: f32 = 220.0;
+const ASK_PILL_FLOOR: f32 = 120.0;
 const FETCH_ATTEMPTS: usize = 10;
 const FETCH_RETRY: Duration = Duration::from_millis(400);
 const TAB_TITLE_WIDTH: f32 = 180.0;
@@ -47,6 +52,12 @@ pub(super) struct AskPills {
     submits: HashMap<String, Task<()>>,
     pub(super) advance_task: Option<Task<()>>,
     focus_pending: bool,
+    opened_at: Option<Instant>,
+    leaving: Option<(String, Instant)>,
+    pressed_while_open: bool,
+    pill_since: Option<Instant>,
+    pill_label: Option<(String, bool)>,
+    pill_ghost: Option<(String, bool, Instant)>,
 }
 
 impl Composer {
@@ -221,23 +232,44 @@ impl Composer {
     fn open_ask_tray(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.stash_ask_typed(cx);
         self.ask.advance_task = None;
+        if self.ask.open.is_none() {
+            self.ask.opened_at = Some(Instant::now());
+        }
+        self.ask.leaving = None;
         self.ask.open = Some(chat_id);
         self.load_ask_typed(cx);
-        self.close_roster();
+        self.drop_roster();
         self.ask.focus_pending = true;
         cx.notify();
     }
 
     /// Defer, never cancel: the wizard keeps its page, picks, and typed text.
     pub(super) fn close_ask_tray(&mut self, cx: &mut Context<Self>) {
-        if self.ask.open.is_none() {
+        let Some(chat_id) = self.ask.open.take() else {
             return;
-        }
+        };
         self.stash_ask_typed(cx);
-        self.ask.open = None;
+        self.ask.leaving = Some((chat_id, Instant::now()));
         self.ask.advance_task = None;
         self.focus_pending = true;
         cx.notify();
+    }
+
+    pub(super) fn drop_ask_tray(&mut self, cx: &mut Context<Self>) {
+        self.close_ask_tray(cx);
+        self.ask.leaving = None;
+    }
+
+    pub(crate) fn dismiss_corner_card(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.ask.open.is_some() {
+            self.close_ask_tray(cx);
+            return true;
+        }
+        if self.roster_open() {
+            self.close_roster(cx);
+            return true;
+        }
+        false
     }
 
     pub(super) fn ask_advance(&mut self, cx: &mut Context<Self>) {
@@ -294,6 +326,7 @@ impl Composer {
                 self.ask.focus_pending = true;
             }
             None => {
+                self.ask.leaving = Some((chat_id.clone(), Instant::now()));
                 self.ask_input
                     .update(cx, |input, cx| input.set_text(String::new(), cx));
                 self.focus_pending = true;
@@ -324,89 +357,158 @@ impl Composer {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> (Option<AnyElement>, Option<AnyElement>) {
         let visible = self.visible_asks(cx);
-        if self
-            .ask
-            .open
-            .as_ref()
-            .is_some_and(|chat_id| !visible.contains(chat_id))
-        {
-            self.ask.open = None;
-            self.ask.advance_task = None;
-        }
-        let background = self.render_background_corner(window, cx);
-        let theme = Theme::of(cx).clone();
-        let limit = (!self.side_chat && !self.roster_open())
-            .then(|| self.render_limit_pill(&theme, cx))
-            .flatten();
-        if visible.is_empty() && limit.is_none() {
-            return background;
-        }
-        let tray = self
+        if let Some(chat_id) = self
             .ask
             .open
             .clone()
-            .and_then(|chat_id| self.render_ask_tray(&chat_id, &visible, &theme, cx));
-        if tray.is_some() && self.ask.focus_pending {
+            .filter(|chat_id| !visible.contains(chat_id))
+        {
+            self.ask.open = None;
+            self.ask.advance_task = None;
+            self.ask.leaving = Some((chat_id, Instant::now()));
+        }
+        let (pills, roster) = self
+            .render_background_corner(window, cx)
+            .unwrap_or_default();
+        let theme = Theme::of(cx).clone();
+        let limit = (!self.side_chat)
+            .then(|| self.render_limit_pill(&theme, cx))
+            .flatten();
+        let now = Instant::now();
+        let reduced = crate::motion::reduced_motion(cx);
+
+        let tray_motion = match (&self.ask.open, &self.ask.leaving) {
+            (Some(chat_id), _) => Some((
+                chat_id.clone(),
+                card_motion(self.ask.opened_at.unwrap_or(now), None, reduced, now),
+            )),
+            (None, Some((chat_id, since))) => Some((
+                chat_id.clone(),
+                card_motion(
+                    self.ask.opened_at.unwrap_or(*since),
+                    Some(*since),
+                    reduced,
+                    now,
+                ),
+            )),
+            _ => None,
+        };
+        let tray = tray_motion
+            .filter(|(_, motion)| !motion.gone)
+            .and_then(|(chat_id, motion)| {
+                self.render_ask_tray(&chat_id, &visible, motion, &theme, cx)
+                    .map(|tray| (tray, motion))
+            });
+        if tray.is_none() {
+            self.ask.leaving = None;
+        }
+        if tray.as_ref().is_some_and(|(_, motion)| motion.live) && self.ask.focus_pending {
             self.ask.focus_pending = false;
             window.focus(&self.ask_focus, cx);
         }
-        let pill = (!visible.is_empty() && tray.is_none() && !self.roster_open())
-            .then(|| self.render_ask_pill(&visible, &theme, cx));
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_end()
-                        .gap(px(6.0))
-                        .child(div().flex_1().min_w_0().children(background))
-                        .children(limit)
-                        .children(pill),
-                )
-                .children(tray)
-                .into_any_element(),
-        )
+
+        let label = match visible.as_slice() {
+            [] => None,
+            [one] => Some((self.ask_title(one, cx), true)),
+            _ => Some((format!("{} questions", visible.len()), false)),
+        };
+        match (&label, self.ask.pill_label.take()) {
+            (None, Some((text, single))) => self.ask.pill_ghost = Some((text, single, now)),
+            (Some(_), _) => self.ask.pill_ghost = None,
+            _ => {}
+        }
+        self.ask.pill_label = label.clone();
+        let pill_in = pill_enter(
+            presence(&mut self.ask.pill_since, label.is_some(), now),
+            reduced,
+            now,
+        );
+        let ghost_out = self
+            .ask
+            .pill_ghost
+            .as_ref()
+            .map(|(_, _, since)| pill_exit(*since, reduced, now));
+        if ghost_out.is_some_and(|out| out >= 1.0) {
+            self.ask.pill_ghost = None;
+        }
+        let ghost = self
+            .ask
+            .pill_ghost
+            .as_ref()
+            .zip(ghost_out)
+            .map(|((text, single, _), out)| {
+                let shown = 1.0 - out;
+                let pill = ask_pill_body(
+                    pill_frame("ask-pill-ghost", &theme).opacity(shown),
+                    text.clone(),
+                    *single,
+                    false,
+                    &theme,
+                );
+                frosted_pill(pill, shown).into_any_element()
+            });
+        let pill = label.map(|(text, single)| {
+            self.render_ask_pill(&visible, text, single, pill_in, &theme, cx)
+        });
+        if tray.as_ref().is_some_and(|(_, motion)| motion.animating)
+            || pill_in < 1.0
+            || ghost.is_some()
+        {
+            window.request_animation_frame();
+        }
+
+        let row = (!pills.is_empty() || limit.is_some() || pill.is_some() || ghost.is_some()).then(
+            || {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .gap(px(6.0))
+                    .children(pills)
+                    .child(div().flex_1().min_w_0())
+                    .children(limit)
+                    .children(pill)
+                    .children(ghost)
+                    .into_any_element()
+            },
+        );
+        (tray.map(|(tray, _)| tray).or(roster), row)
     }
 
     fn render_ask_pill(
         &self,
         visible: &[String],
+        text: String,
+        single: bool,
+        enter: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let first = visible.first().cloned().unwrap_or_default();
-        let label = match visible {
-            [one] => self.ask_title(one, cx),
-            _ => format!("{} questions", visible.len()),
-        };
-        let pill = pill_frame("ask-pill", theme)
-            .debug_selector(|| "ask-pill".into())
-            .border_color(theme.accent.opacity(0.45))
-            .text_color(theme.text)
-            .child(pill_leading(question_glyph(theme)))
-            .child(
-                div()
-                    .max_w(px(PILL_TITLE_WIDTH))
-                    .truncate()
-                    .child(SharedString::from(label)),
+        let pill = pill_frame("ask-pill", theme).debug_selector(|| "ask-pill".into());
+        let pill = ask_pill_body(pill, text, single, self.ask.open.is_some(), theme)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.ask.pressed_while_open =
+                        this.ask.open.is_some() || this.ask.leaving.is_some();
+                }),
             )
-            .when(visible.len() == 1, |el| {
-                el.child(div().text_color(theme.text_muted).child("· Input"))
-            })
-            .on_click(cx.listener(move |this, _, _, cx| this.open_ask_tray(first.clone(), cx)));
-        frosted_pill(pill).into_any_element()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !std::mem::take(&mut this.ask.pressed_while_open) {
+                    this.open_ask_tray(first.clone(), cx);
+                }
+            }));
+        frosted_pill(entering(pill, enter), enter).into_any_element()
     }
 
     fn render_ask_tray(
         &self,
         chat_id: &str,
         visible: &[String],
+        motion: CardMotion,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -530,11 +632,14 @@ impl Composer {
             });
         let tray = div()
             .id("ask-tray")
-            .debug_selector(|| "ask-tray".into())
-            .track_focus(&self.ask_focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_wizard_key(WizardHost::Ask, event, window, cx)
-            }))
+            .when(motion.live, |el| {
+                el.debug_selector(|| "ask-tray".into())
+                    .track_focus(&self.ask_focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        this.on_wizard_key(WizardHost::Ask, event, window, cx)
+                    }))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_ask_tray(cx)))
+            })
             .occlude()
             .w_full()
             .rounded(px(14.0))
@@ -549,8 +654,41 @@ impl Composer {
             .children(tabs)
             .child(body)
             .child(footer);
-        Some(crate::frost::frosted(14.0, crate::frost::MENU_BLUR, tray).into_any_element())
+        Some(card_frame(tray, motion).into_any_element())
     }
+}
+
+fn ask_pill_body(
+    pill: Stateful<Div>,
+    text: String,
+    single: bool,
+    active: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    pill.flex_shrink(1.0)
+        .min_w(px(ASK_PILL_FLOOR))
+        .border_color(if active {
+            theme.accent
+        } else {
+            theme.accent.opacity(0.45)
+        })
+        .text_color(theme.text)
+        .child(pill_leading(question_glyph(theme)))
+        .child(
+            div()
+                .min_w_0()
+                .max_w(px(PILL_TITLE_WIDTH))
+                .truncate()
+                .child(SharedString::from(text)),
+        )
+        .when(single, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .child("· Input"),
+            )
+        })
 }
 
 /// Dropping the scoped subscription after one frame stops the engine building the full mirror.
@@ -644,6 +782,14 @@ mod tests {
         composer.update(cx, |composer, cx| {
             composer.land_ask(chat_id.into(), Wizard::new(request_id, questions), cx)
         });
+        cx.run_until_parked();
+    }
+
+    fn finish_exit(cx: &mut VisualTestContext, composer: &Entity<Composer>) {
+        let span = crate::motion::MENU_OUT.total() + Duration::from_millis(30);
+        std::thread::sleep(span);
+        cx.executor().advance_clock(span);
+        composer.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
     }
 
@@ -765,12 +911,24 @@ mod tests {
         cx.simulate_click(pill.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("ask-tray").is_some());
-        assert!(cx.debug_bounds("ask-pill").is_none());
+        assert!(cx.debug_bounds("ask-pill").is_some(), "the pill stays put");
+
+        cx.simulate_click(gpui::point(px(4.0), px(4.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("ask-tray").is_none(),
+            "a click outside defers"
+        );
+        finish_exit(cx, &composer);
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("ask-tray").is_some());
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(cx.debug_bounds("ask-tray").is_none(), "escape defers");
         let pill = cx.debug_bounds("ask-pill").expect("deferred, still asking");
+        finish_exit(cx, &composer);
         cx.simulate_click(pill.center(), gpui::Modifiers::default());
         cx.run_until_parked();
 
@@ -791,6 +949,63 @@ mod tests {
         assert_eq!(answers[0]["params"]["command"], command);
         assert!(cx.debug_bounds("ask-tray").is_none());
         assert!(cx.debug_bounds("ask-pill").is_none());
+    }
+
+    #[gpui::test]
+    fn a_long_subagent_title_truncates_before_the_question_pill(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (composer, _engine, cx) = mount(cx, "a");
+        let title = "Audit pstack sub-skills against every maestro skill and router path";
+        let state = cx.update(|_, cx| composer.read(cx).state.clone());
+        state.update(cx, |state, cx| {
+            state.transcript = vec![
+                SessionMessageEntry {
+                    id: "prompt".into(),
+                    role: MessageRole::User,
+                    parts: Vec::new(),
+                    ..asking("unused").remove(0)
+                },
+                SessionMessageEntry {
+                    id: "spawned".into(),
+                    parts: vec![MessagePart::Tool {
+                        id: "p1".into(),
+                        call: zeron_proto::ToolCall::Unknown {
+                            name: format!("Agent: {title}"),
+                            input: Some(serde_json::json!({ "description": title })),
+                        },
+                        is_error: false,
+                        resolved: true,
+                        output: None,
+                        diff: None,
+                        output_ref: None,
+                        output_bytes: None,
+                        diff_ref: None,
+                        diff_stats: None,
+                        subagent_ref: Some("a--sub--p1".into()),
+                        subagent_status: Some(zeron_doc::SubagentStatus::Running),
+                        subagent_tail: None,
+                        html_render: None,
+                    }],
+                    ..asking("unused").remove(0)
+                },
+            ];
+            cx.notify();
+        });
+        land(cx, &composer, "b", "req-b");
+        cx.simulate_resize(gpui::size(px(520.0), px(600.0)));
+        cx.run_until_parked();
+        let agents = cx
+            .debug_bounds("background-agents-pill")
+            .expect("agents pill");
+        let ask = cx.debug_bounds("ask-pill").expect("ask pill");
+        let tab = cx
+            .debug_bounds("composer-sidechat-tab")
+            .expect("sidechat tab");
+        assert!(
+            agents.right() <= ask.left() && ask.right() <= tab.left(),
+            "pills overflow the row: agents {agents:?}, question {ask:?}, tab {tab:?}"
+        );
     }
 
     #[gpui::test]

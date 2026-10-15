@@ -2002,7 +2002,7 @@ impl Composer {
             state.stage_review_findings(&key, None);
             cx.notify();
         });
-        self.close_roster();
+        self.close_roster(cx);
         cx.notify();
     }
 

@@ -73,7 +73,7 @@ impl Composer {
                         }),
                 )
             });
-        Some(frosted_pill(pill).into_any_element())
+        Some(frosted_pill(pill, 1.0).into_any_element())
     }
 }
 

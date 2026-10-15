@@ -12620,6 +12620,12 @@ impl Shell {
             })
             .map(|tab| (tab.state.clone(), tab.composer.clone()))
             .unwrap_or_else(|| (self.state.clone(), self.composer.clone()));
+        if event.keystroke.key == "escape"
+            && composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx))
+        {
+            cx.stop_propagation();
+            return;
+        }
         let selected_chat = state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
