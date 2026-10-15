@@ -1156,6 +1156,7 @@ pub enum SidebarOrganization {
     ByDevice,
     #[default]
     InOneList,
+    Inbox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

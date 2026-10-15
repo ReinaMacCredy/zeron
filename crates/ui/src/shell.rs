@@ -2264,6 +2264,7 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    sidebar_inbox_marks: std::collections::HashMap<String, spaces::InboxMark>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -2980,7 +2981,10 @@ impl Shell {
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
-            sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_collapsed_groups: std::collections::HashSet::from(
+                ["inbox:working".to_string()],
+            ),
+            sidebar_inbox_marks: std::collections::HashMap::new(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -9749,7 +9753,7 @@ impl Shell {
         // (`pickers::chat_harness_marks`); empty hides the mark.
         harnesses: Vec<zeron_proto::HarnessId>,
         // Title of the chat whose agent opened this one (thread tools); the
-        // row wears it as a small badge after its own title.
+        // row names it on its metadata line.
         created_by: Option<SharedString>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
@@ -9855,7 +9859,7 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
-        let shows_metadata = branch.is_some() || change_request.is_some();
+        let shows_metadata = branch.is_some() || change_request.is_some() || created_by.is_some();
         let unsent = crate::draft_store::has_content(&id, cx);
         let queued = queued && !undelivered;
         let working =
@@ -10207,7 +10211,7 @@ impl Shell {
             .h(px(sidebar_row_height(
                 compact,
                 show_label,
-                branch.is_some(),
+                branch.is_some() || created_by.is_some(),
                 change_request.is_some(),
             )))
             .flex()
@@ -10425,32 +10429,6 @@ impl Shell {
                         )
                         .into_any_element(),
                     })
-                    // Same cloth as the jump chip and the PR badge, in the
-                    // accent tone; the creator's title is cut short so the
-                    // badge never crowds this row's own title off the line.
-                    .when_some(created_by, |el, creator| {
-                        let tone = theme.accent;
-                        let mut label: String = creator.chars().take(14).collect();
-                        if creator.chars().count() > 14 {
-                            label.push('…');
-                        }
-                        el.child(
-                            div()
-                                .h(px(16.0))
-                                .flex_none()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .px(px(4.0))
-                                .rounded(px(4.0))
-                                .bg(tone.opacity(0.08))
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(tone.opacity(0.85))
-                                .font_family(theme.font_mono.clone())
-                                .child(SharedString::from(format!("by {label}"))),
-                        )
-                    })
                     .when(!compact && !show_label && remote, |el| {
                         el.child(
                             icon(icons::REMOTE_SERVER)
@@ -10589,6 +10567,24 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(4.0))
+                        .when_some(created_by, |el, creator| {
+                            el.child(sidebar_faded_label(
+                                format!("chat-by-{content_id}").into(),
+                                false,
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(3.0))
+                                    .mr(px(4.0))
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(subline)
+                                    .child("by")
+                                    .child(
+                                        div().text_color(theme.accent.opacity(0.85)).child(creator),
+                                    ),
+                            ))
+                        })
                         .when_some(branch, |el, branch| {
                             el.child(
                                 icon(icons::GIT_BRANCH)

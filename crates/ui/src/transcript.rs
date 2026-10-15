@@ -1225,6 +1225,7 @@ pub enum RowKind {
     ForkMarker {
         source_chat_id: SharedString,
         source_title: SharedString,
+        sidechat: bool,
     },
 }
 
@@ -2135,6 +2136,7 @@ pub fn rows_for_entry(
                             kind: RowKind::ForkMarker {
                                 source_chat_id: source_chat_id.clone().into(),
                                 source_title: single_line(source_title).into(),
+                                sidechat: false,
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -5895,6 +5897,38 @@ impl Transcript {
                     new_rows.extend(self.rows_for(echo, true));
                 }
             }
+            if self.doc_override.is_none()
+                && !entries.is_empty()
+                && let Some(source) = self
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                    .and_then(|chat| chat.sidechat_source_chat_id.as_deref())
+            {
+                let title = state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == source)
+                    .and_then(|chat| chat.title.as_deref())
+                    .unwrap_or("New session");
+                new_rows.insert(
+                    0,
+                    Row {
+                        id: "sidechat-source".into(),
+                        version: fnv1a(title.as_bytes()),
+                        turn_start: false,
+                        kind: RowKind::ForkMarker {
+                            source_chat_id: source.to_string().into(),
+                            source_title: single_line(title).into(),
+                            sidechat: true,
+                        },
+                        entry_id: "sidechat-source".into(),
+                        timestamp: None,
+                        copy_text: None,
+                        compact_fold: None,
+                    },
+                );
+            }
             (
                 entries.is_empty(),
                 entries
@@ -9417,7 +9451,28 @@ impl Transcript {
             RowKind::Handoff { harness, text } => {
                 self.render_handoff(&row.id, *harness, text.clone(), &theme, cx)
             }
-            RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::ForkMarker {
+                source_chat_id,
+                source_title,
+                sidechat,
+            } => {
+                let chat_id = source_chat_id.to_string();
+                fork_marker(
+                    row.id.clone(),
+                    if *sidechat {
+                        "Sidechat of"
+                    } else {
+                        "Forked from"
+                    },
+                    source_title.clone(),
+                    cx.listener(move |_, _, _, cx| {
+                        cx.emit(TranscriptEvent::OpenChat {
+                            chat_id: chat_id.clone(),
+                        });
+                    }),
+                    &theme,
+                )
+            }
         };
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
@@ -11648,7 +11703,13 @@ impl gpui::Render for DividerHintTooltip {
 
 /// A quiet fork seam. The source gets its own constrained line so long
 /// titles cannot widen a narrow side-chat pane. No message metadata lane.
-fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
+fn fork_marker(
+    id: SharedString,
+    label: &'static str,
+    source_title: SharedString,
+    open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    theme: &Theme,
+) -> AnyElement {
     let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
     div()
         .py(px(14.0))
@@ -11671,12 +11732,13 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                         .flex_none()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.7))
-                        .child("Forked from"),
+                        .child(label),
                 )
                 .child(rule()),
         )
         .child(
             div()
+                .id(id)
                 .w_full()
                 .min_w_0()
                 .truncate()
@@ -11684,6 +11746,9 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                 .text_size(crate::typography::ui_rems(13.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.text))
+                .on_click(open)
                 .child(source_title),
         )
         .into_any_element()
