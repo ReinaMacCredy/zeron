@@ -750,6 +750,85 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_inbox_chat_menu_settles_and_unsettles_a_chat(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        let recent = Utc::now() - chrono::Duration::hours(1);
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell.debug_gate = Some(super::GatePhase::Ready);
+                shell.settings.sidebar_organization = SidebarOrganization::Inbox;
+                shell.state.update(cx, |state, _| {
+                    for chat in &mut state.chats {
+                        chat.last_message_at = Some(recent);
+                        chat.last_seen_at = Some(recent);
+                    }
+                });
+                for (id, at) in [
+                    ("elsewhere", recent),
+                    ("other", recent - chrono::Duration::hours(1)),
+                ] {
+                    shell
+                        .settings
+                        .sidebar_settle_overrides
+                        .insert(id.into(), SidebarSettle { settled: true, at });
+                }
+            })
+            .unwrap();
+        let shell = window.root(cx).unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let toggle = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.chat_menu.open(super::ChatMenuState {
+                        chat_id: "regular".into(),
+                        tab: None,
+                        position: gpui::point(px(40.0), px(120.0)),
+                        page: super::ChatMenuPage::Root,
+                    });
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let row = cx
+                .debug_bounds("chat-menu-settle")
+                .expect("Inbox offers Settle on an idle chat");
+            cx.simulate_click(row.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                shell.update(cx, |shell, cx| {
+                    let now = Utc::now();
+                    let state = shell.state.read(cx);
+                    let chat = state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == "regular")
+                        .unwrap();
+                    let status = state.display_status_for(chat, now);
+                    let settled = shell.sidebar_settled_at(status, chat, now).is_some();
+                    let mut kept: Vec<String> = shell
+                        .settings
+                        .sidebar_settle_overrides
+                        .keys()
+                        .cloned()
+                        .collect();
+                    kept.sort();
+                    (settled, kept)
+                })
+            })
+        };
+        assert_eq!(
+            toggle(&mut cx),
+            (true, vec!["elsewhere".into(), "regular".into()])
+        );
+        assert_eq!(
+            toggle(&mut cx),
+            (false, vec!["elsewhere".into(), "regular".into()])
+        );
+    }
+
+    #[gpui::test]
     fn sections_keep_placed_order_and_drags_reorder_them(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let window = test_shell(cx, dir.path());

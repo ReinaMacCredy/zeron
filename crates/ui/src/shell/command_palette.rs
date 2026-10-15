@@ -1283,6 +1283,7 @@ impl Shell {
                     }),
                     None,
                     false,
+                    false,
                     Some(query),
                     theme,
                     cx,

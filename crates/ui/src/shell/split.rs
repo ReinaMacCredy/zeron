@@ -1015,6 +1015,7 @@ mod drag_regressions {
                     }),
                     None,
                     true,
+                    false,
                     None,
                     &theme,
                     cx,

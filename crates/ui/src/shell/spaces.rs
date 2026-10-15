@@ -2251,13 +2251,63 @@ pub(super) struct InboxMark {
     since: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum InboxShelf {
+    Inbox,
+    Working,
+    Settled,
+}
+
+impl InboxShelf {
+    fn of(status: ChatIndicator, settled_at: Option<DateTime<Utc>>) -> Self {
+        if settled_at.is_some() {
+            Self::Settled
+        } else if status == ChatIndicator::Working {
+            Self::Working
+        } else {
+            Self::Inbox
+        }
+    }
+
+    fn group(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Inbox => None,
+            Self::Working => Some(("working", "Working")),
+            Self::Settled => Some(("settled", "Settled")),
+        }
+    }
+}
+
+/// A chat with no messages never settles, as in T3.
+pub(super) fn inbox_settled_at(
+    status: ChatIndicator,
+    chat: &zeron_proto::Chat,
+    settle: Option<SidebarSettle>,
+    after_days: u32,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if status != ChatIndicator::Idle {
+        return None;
+    }
+    let activity = chat.last_message_at;
+    match settle.filter(|settle| activity.is_none_or(|at| at <= settle.at)) {
+        Some(settle) => settle.settled.then_some(settle.at),
+        None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
+    }
+}
+
 pub(super) fn inbox_rank(
     status: ChatIndicator,
     chat: &zeron_proto::Chat,
     started_at: Option<DateTime<Utc>>,
     mark: Option<InboxMark>,
-) -> (bool, std::cmp::Reverse<DateTime<Utc>>) {
-    let working = status == ChatIndicator::Working;
+    settled_at: Option<DateTime<Utc>>,
+) -> (InboxShelf, std::cmp::Reverse<DateTime<Utc>>) {
+    let shelf = InboxShelf::of(status, settled_at);
+    if let Some(at) = settled_at {
+        return (shelf, std::cmp::Reverse(at));
+    }
+    let working = shelf == InboxShelf::Working;
     let since = mark
         .filter(|mark| mark.working == working)
         .and_then(|mark| mark.since);
@@ -2269,7 +2319,7 @@ pub(super) fn inbox_rank(
     } else {
         since.map_or(base, |at| at.max(base))
     };
-    (working, std::cmp::Reverse(key))
+    (shelf, std::cmp::Reverse(key))
 }
 
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
@@ -2387,10 +2437,37 @@ pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
-/// The Archived shelf shows this many rows, then "Show more" pages by
-/// [`ARCHIVED_PAGE_ROWS`].
-const ARCHIVED_INITIAL_ROWS: usize = 10;
-const ARCHIVED_PAGE_ROWS: usize = 25;
+/// The Archived and Settled shelves show this many rows, then "Show more"
+/// pages by [`SHELF_PAGE_ROWS`].
+const SHELF_INITIAL_ROWS: usize = 10;
+const SHELF_PAGE_ROWS: usize = 25;
+
+fn sidebar_show_more_row(
+    id: &'static str,
+    remaining: usize,
+    height: f32,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(height))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(Theme::SPACE_SM))
+        .rounded(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text_muted.opacity(0.55))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+        .child(
+            crate::icons::icon(crate::icons::PLUS)
+                .size(px(14.0))
+                .text_color(theme.text_muted.opacity(0.55)),
+        )
+        .child(SharedString::from(format!("Show {remaining} more")))
+}
 
 /// Put this machine's device group first without disturbing the recency-based
 /// order of any remote groups. A targeted promotion is more truthful than a
@@ -5346,11 +5423,41 @@ impl Shell {
             SidebarOrganization::ByProject if self.settings.space_filter.is_none() => {
                 Some(sidebar_project_group(state, chat).0)
             }
-            SidebarOrganization::Inbox => (state.display_status_for(chat, Utc::now())
-                == ChatIndicator::Working)
-                .then(|| "working".to_string()),
+            SidebarOrganization::Inbox => {
+                let now = Utc::now();
+                self.inbox_shelf(state.display_status_for(chat, now), chat, now)
+                    .group()
+                    .map(|(key, _)| key.to_string())
+            }
             SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
         }
+    }
+
+    pub(super) fn sidebar_settled_at(
+        &self,
+        status: ChatIndicator,
+        chat: &zeron_proto::Chat,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        inbox_settled_at(
+            status,
+            chat,
+            self.settings
+                .sidebar_settle_overrides
+                .get(&chat.id)
+                .copied(),
+            self.settings.sidebar_settle_after_days,
+            now,
+        )
+    }
+
+    fn inbox_shelf(
+        &self,
+        status: ChatIndicator,
+        chat: &zeron_proto::Chat,
+        now: DateTime<Utc>,
+    ) -> InboxShelf {
+        InboxShelf::of(status, self.sidebar_settled_at(status, chat, now))
     }
 
     fn sorted_sidebar_chats<'a>(
@@ -5369,6 +5476,7 @@ impl Shell {
                         .session_for(&chat.id)
                         .and_then(|session| session.started_at),
                     self.sidebar_inbox_marks.get(&chat.id).copied(),
+                    self.sidebar_settled_at(*status, chat, now),
                 )
             });
         } else {
@@ -5493,16 +5601,15 @@ impl Shell {
             }
             if !self.archived_open {
                 self.archived_open = true;
-                self.archived_shown = ARCHIVED_INITIAL_ROWS;
+                self.archived_shown = SHELF_INITIAL_ROWS;
                 self.queue_sidebar_reveal("archived");
             }
             // Page the shelf just far enough to include the row, in the
             // same steps "Show more" takes.
-            let shown = self.archived_shown.max(ARCHIVED_INITIAL_ROWS);
+            let shown = self.archived_shown.max(SHELF_INITIAL_ROWS);
             if index >= shown {
-                self.archived_shown = ARCHIVED_INITIAL_ROWS
-                    + (index + 1 - ARCHIVED_INITIAL_ROWS).div_ceil(ARCHIVED_PAGE_ROWS)
-                        * ARCHIVED_PAGE_ROWS;
+                self.archived_shown = SHELF_INITIAL_ROWS
+                    + (index + 1 - SHELF_INITIAL_ROWS).div_ceil(SHELF_PAGE_ROWS) * SHELF_PAGE_ROWS;
             }
         }
         if self.settings.sidebar_collapsed {
@@ -5536,6 +5643,7 @@ impl Shell {
         status: ChatIndicator,
         chat: zeron_proto::Chat,
         state: &AppState,
+        now: DateTime<Utc>,
     ) -> ActiveChatRow {
         // Line 1 is "project @ device" (t3code's project row); project-less
         // sessions name only their device — no project, no folder.
@@ -5572,8 +5680,10 @@ impl Shell {
             SidebarOrganization::ByProject if self.settings.space_filter.is_none() => {
                 Some(sidebar_project_group(state, &chat))
             }
-            SidebarOrganization::Inbox => (status == ChatIndicator::Working)
-                .then(|| ("working".to_string(), "Working".to_string())),
+            SidebarOrganization::Inbox => self
+                .inbox_shelf(status, &chat, now)
+                .group()
+                .map(|(key, label)| (key.to_string(), label.to_string())),
             SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
         };
         let created_by = chat.created_by_chat_id.as_deref().and_then(|creator| {
@@ -5617,7 +5727,7 @@ impl Shell {
             let state = self.state.read(cx);
             self.sorted_sidebar_chats(state, now, filter.as_deref())
                 .into_iter()
-                .map(|(status, chat)| self.sidebar_chat_data(status, chat.clone(), state))
+                .map(|(status, chat)| self.sidebar_chat_data(status, chat.clone(), state, now))
                 .collect()
         };
         let pinned_order = frozen_pinned
@@ -5849,10 +5959,18 @@ impl Shell {
             let header_icon_chat = (project_group && self.settings.sidebar_show_project_icon)
                 .then(|| rows.first().map(|row| row.chat.id.clone()))
                 .flatten();
+            let shelf = [InboxShelf::Working, InboxShelf::Settled]
+                .into_iter()
+                .find(|shelf| {
+                    self.settings.sidebar_organization == SidebarOrganization::Inbox
+                        && group.as_ref().map(|(key, _)| key.as_str())
+                            == shelf.group().map(|(key, _)| key)
+                });
+            let slim = shelf == Some(InboxShelf::Settled);
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 let height = row.height(
-                    self.settings.sidebar_compact,
+                    self.settings.sidebar_compact || slim,
                     self.settings.sidebar_show_project_label,
                 );
                 let ActiveChatRow {
@@ -5933,6 +6051,7 @@ impl Shell {
                     if is_moving { None } else { drag },
                     jump_label,
                     self.settings.sidebar_show_project_icon && !project_group,
+                    slim,
                     None,
                     theme,
                     cx,
@@ -6039,6 +6158,26 @@ impl Shell {
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
+            let more_height = sidebar_row_height(true, true, false, false);
+            let hidden = if slim {
+                let shown = self.sidebar_settled_shown.max(SHELF_INITIAL_ROWS);
+                let mut tail = rendered_rows.split_off(shown.min(row_count));
+                let pulled = [
+                    selected.as_deref(),
+                    self.chat_rename
+                        .as_ref()
+                        .map(|rename| rename.chat_id.as_str()),
+                ];
+                for id in pulled.into_iter().flatten() {
+                    let key = format!("c:{id}");
+                    if let Some(index) = tail.iter().position(|(row, _, _)| *row == key) {
+                        rendered_rows.push(tail.remove(index));
+                    }
+                }
+                tail.len()
+            } else {
+                0
+            };
             let extra_gap = self.sidebar_transfer_extra_gap(&drag_group);
             let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
                 + extra_gap
@@ -6046,9 +6185,14 @@ impl Shell {
                     .iter()
                     .map(|(_, height, _)| *height)
                     .sum::<f32>()
-                + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
+                + SIDEBAR_LIST_GAP * rendered_rows.len().saturating_sub(1) as f32
+                + if hidden > 0 {
+                    more_height + SIDEBAR_LIST_GAP
+                } else {
+                    0.0
+                };
             self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
-            let kept_row = (collapsed && collapse_key == "inbox:working")
+            let kept_row = (collapsed && shelf.is_some())
                 .then(|| {
                     let selected = format!("c:{}", selected.as_deref()?);
                     let index = rendered_rows
@@ -6064,6 +6208,22 @@ impl Shell {
                 .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
                 .gap(px(SIDEBAR_LIST_GAP))
                 .children(rendered_rows.into_iter().map(|(_, _, row)| row))
+                .when(hidden > 0, |el| {
+                    el.child(
+                        sidebar_show_more_row(
+                            "settled-more",
+                            hidden.min(SHELF_PAGE_ROWS),
+                            more_height,
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar_settled_shown =
+                                this.sidebar_settled_shown.max(SHELF_INITIAL_ROWS)
+                                    + SHELF_PAGE_ROWS;
+                            cx.notify();
+                        })),
+                    )
+                })
                 .when(extra_gap > 0.0, |el| {
                     el.child(
                         div()
@@ -6365,8 +6525,8 @@ impl Shell {
         if !self.settings.sidebar_show_archived {
             return None;
         }
-        const INITIAL: usize = ARCHIVED_INITIAL_ROWS;
-        const PAGE: usize = ARCHIVED_PAGE_ROWS;
+        const INITIAL: usize = SHELF_INITIAL_ROWS;
+        const PAGE: usize = SHELF_PAGE_ROWS;
         let now = Utc::now();
         let rows = self.archived_sidebar_chats(cx);
         if rows.is_empty() {
@@ -6376,7 +6536,7 @@ impl Shell {
             let state = self.state.read(cx);
             rows.into_iter()
                 .map(|chat| {
-                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state, now)
                 })
                 .collect()
         };
@@ -6479,6 +6639,7 @@ impl Shell {
                         None,
                         None,
                         self.settings.sidebar_show_project_icon,
+                        false,
                         None,
                         theme,
                         cx,
@@ -6489,32 +6650,14 @@ impl Shell {
             if has_more {
                 let remaining = (total - shown).min(PAGE);
                 body = body.child(
-                    div()
-                        .id("archived-more")
+                    sidebar_show_more_row("archived-more", remaining, more_height, theme)
                         // Sits outside the rows' gapped column — match the
                         // list's 2px row gap or it fuses with the last row.
                         .mt(px(2.0))
-                        .h(px(more_height))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .px(px(Theme::SPACE_SM))
-                        .rounded(px(6.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted.opacity(0.55))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.archived_shown = this.archived_shown.max(INITIAL) + PAGE;
                             cx.notify();
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::PLUS)
-                                .size(px(14.0))
-                                .flex_none(),
-                        )
-                        .child(SharedString::from(format!("Show {remaining} more"))),
+                        })),
                 );
             }
             body.into_any_element()
@@ -8203,9 +8346,9 @@ mod tests {
 
     use super::{
         ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
-        grouped_visible_order, inbox_rank, promote_local_device_group,
+        grouped_visible_order, inbox_rank, inbox_settled_at, promote_local_device_group,
     };
-    use crate::settings::{SidebarOrganization, SidebarSort};
+    use crate::settings::{SidebarOrganization, SidebarSettle, SidebarSort};
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
         (Some((device.into(), device.into())), vec![value])
@@ -8377,57 +8520,75 @@ mod tests {
     }
 
     #[test]
-    fn inbox_orders_returns_first_and_working_by_start() {
+    fn inbox_orders_returns_then_working_then_settled() {
         type Row = (
             ChatIndicator,
             zeron_proto::Chat,
             Option<chrono::DateTime<Utc>>,
             Option<InboxMark>,
+            Option<SidebarSettle>,
         );
-        fn ids(rows: &mut [Row]) -> Vec<String> {
-            rows.sort_by_key(|(status, chat, started, mark)| {
-                inbox_rank(*status, chat, *started, *mark)
+        const DAY: i64 = 86_400;
+        let at = |secs: i64| Utc.timestamp_opt(10 * DAY + secs, 0).unwrap();
+        let now = at(1_000);
+        let ids = |rows: &mut [Row]| -> Vec<String> {
+            rows.sort_by_key(|(status, chat, started, mark, settle)| {
+                let settled = inbox_settled_at(*status, chat, *settle, 3, now);
+                inbox_rank(*status, chat, *started, *mark, settled)
             });
-            rows.iter().map(|(_, chat, _, _)| chat.id.clone()).collect()
-        }
-        let at = |secs| Utc.timestamp_opt(secs, 0).unwrap();
+            rows.iter().map(|row| row.1.id.clone()).collect()
+        };
         let replied = |id: &str, secs| {
             let mut chat = chat(id);
             chat.last_message_at = Some(at(secs));
             chat
         };
+        let settle = |settled, secs| {
+            Some(SidebarSettle {
+                settled,
+                at: at(secs),
+            })
+        };
+        let mut silent = chat("f");
+        silent.last_message_at = None;
         let returned = InboxMark {
             working: false,
             since: Some(at(450)),
         };
-        let mut rows = vec![
+        use ChatIndicator::{Completed, Errored, Idle, Working};
+        let mut rows: Vec<Row> = vec![
+            (Working, replied("a", 500), Some(at(100)), None, None),
+            (Working, replied("b", 300), Some(at(200)), None, None),
+            (Idle, replied("c", 400), None, None, None),
+            (Errored, replied("d", 50), None, Some(returned), None),
+            (Idle, replied("e", -4 * DAY), None, None, None),
+            (Idle, silent, None, None, None),
+            (Idle, replied("g", 600), None, None, settle(true, 700)),
+            (Idle, replied("h", -5 * DAY), None, None, settle(false, 800)),
+            (Completed, replied("i", -6 * DAY), None, None, None),
             (
-                ChatIndicator::Working,
-                replied("a", 500),
-                Some(at(100)),
+                Working,
+                replied("j", -6 * DAY),
+                Some(at(150)),
                 None,
-            ),
-            (
-                ChatIndicator::Working,
-                replied("b", 300),
-                Some(at(200)),
-                None,
-            ),
-            (ChatIndicator::Idle, replied("c", 400), None, None),
-            (
-                ChatIndicator::Errored,
-                replied("d", 50),
-                None,
-                Some(returned),
+                settle(true, 900),
             ),
         ];
-        assert_eq!(ids(&mut rows), ["d", "c", "b", "a"]);
-        rows.iter_mut()
-            .find(|row| row.1.id == "a")
-            .unwrap()
-            .1
-            .last_message_at = Some(at(900));
-        assert_eq!(ids(&mut rows), ["d", "c", "b", "a"]);
+        assert_eq!(
+            ids(&mut rows),
+            ["d", "c", "h", "i", "f", "b", "j", "a", "g", "e"]
+        );
+        for (id, secs) in [("a", 900), ("g", 950), ("h", 960)] {
+            rows.iter_mut()
+                .find(|row| row.1.id == id)
+                .unwrap()
+                .1
+                .last_message_at = Some(at(secs));
+        }
+        assert_eq!(
+            ids(&mut rows),
+            ["h", "g", "d", "c", "i", "f", "b", "j", "a", "e"]
+        );
     }
 
     #[gpui::test]

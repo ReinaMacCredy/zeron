@@ -60,9 +60,9 @@ use crate::settings::tools::{ToolsPage, ToolsPageEvent};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SPLIT_PANE_MIN, SPLIT_RATIO_DEFAULT,
-    SavePolicy, ShortcutId, SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT,
-    TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible,
-    modifier_send_hint_visible, platform_combo, sidebar_pin_profile_key,
+    SavePolicy, ShortcutId, SidebarOrganization, SidebarSettle, SidebarSort,
+    TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT, UiSettings, badge_combo,
+    jump_hints_visible, modifier_send_hint_visible, platform_combo, sidebar_pin_profile_key,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -235,6 +235,7 @@ const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_SETTLE: u8 = 9;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -2271,6 +2272,7 @@ pub struct Shell {
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     sidebar_inbox_marks: std::collections::HashMap<String, spaces::InboxMark>,
+    sidebar_settled_shown: usize,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -2988,10 +2990,12 @@ impl Shell {
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
-            sidebar_collapsed_groups: std::collections::HashSet::from(
-                ["inbox:working".to_string()],
-            ),
+            sidebar_collapsed_groups: std::collections::HashSet::from([
+                "inbox:working".to_string(),
+                "inbox:settled".to_string(),
+            ]),
             sidebar_inbox_marks: std::collections::HashMap::new(),
+            sidebar_settled_shown: 0,
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -7806,6 +7810,28 @@ impl Shell {
         true
     }
 
+    fn set_chat_settled(&mut self, chat_id: String, settled: bool, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        let now = Utc::now();
+        let state = self.state.read(cx);
+        let last_message: std::collections::HashMap<&str, DateTime<Utc>> = state
+            .chats
+            .iter()
+            .filter_map(|chat| Some((chat.id.as_str(), chat.last_message_at?)))
+            .collect();
+        // Another workspace's chats are absent from this list; keep theirs.
+        self.settings.sidebar_settle_overrides.retain(|id, settle| {
+            last_message
+                .get(id.as_str())
+                .is_none_or(|at| *at <= settle.at)
+        });
+        self.settings
+            .sidebar_settle_overrides
+            .insert(chat_id, SidebarSettle { settled, at: now });
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         self.cancel_pinned_session_drag(cx);
@@ -9780,6 +9806,7 @@ impl Shell {
         // Whether the row wears its project icon. Rows inside a project
         // group leave it to the group header.
         project_icon: bool,
+        slim: bool,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -9804,7 +9831,7 @@ impl Shell {
             .iter()
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
-        let compact = search_query.is_none() && self.settings.sidebar_compact;
+        let compact = search_query.is_none() && (slim || self.settings.sidebar_compact);
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let remote = self
             .state
@@ -10948,7 +10975,15 @@ impl Shell {
                     .is_none_or(|drag| drag.preview.as_ref().is_none_or(|gap| gap.pinned))
             })
             .map(|drag| (drag.from, drag.over, drag.prev_over, drag.epoch));
-        let list_items: Vec<AnyElement> = keyed
+        let inbox = self.settings.sidebar_organization == SidebarOrganization::Inbox;
+        let shelf_anchor = inbox
+            .then(|| {
+                keyed
+                    .iter()
+                    .position(|(key, _, _)| key == "g:inbox:working" || key == "g:inbox:settled")
+            })
+            .flatten();
+        let mut list_items: Vec<AnyElement> = keyed
             .into_iter()
             .enumerate()
             .map(|(ix, (key, _, element))| {
@@ -11011,6 +11046,11 @@ impl Shell {
                 }
             })
             .collect();
+        // t3code's `mt-auto`: a short inbox leaves its shelves at the bottom edge.
+        if let Some(ix) = shelf_anchor {
+            let shelf = std::mem::replace(&mut list_items[ix], div().into_any_element());
+            list_items[ix] = div().mt_auto().child(shelf).into_any_element();
+        }
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
@@ -11030,6 +11070,7 @@ impl Shell {
                 .id("sidebar-active-sessions")
                 .flex()
                 .flex_col()
+                .when(inbox, |el| el.flex_grow(1.0))
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
                 .when_some(pinned_group, |el, group| el.child(group))
@@ -11090,6 +11131,7 @@ impl Shell {
                                     ))
                                     .flex()
                                     .flex_col()
+                                    .when(inbox, |el| el.flex_grow(1.0))
                                     .gap(px(SIDEBAR_LIST_GAP))
                                     .when(regular_items.is_empty(), |el| {
                                         el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
@@ -12752,8 +12794,28 @@ impl Shell {
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.created_by_chat_id.is_some());
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let in_section = self
+                .active_sidebar_sections(cx)
+                .iter()
+                .any(|section| section.session_ids.contains(&chat_id));
+            let is_settled = (self.settings.sidebar_organization == SidebarOrganization::Inbox
+                && !is_pinned
+                && !in_section)
+                .then(|| {
+                    let now = Utc::now();
+                    let state = self.state.read(cx);
+                    let chat = state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == chat_id && !chat.archived)?;
+                    let status = state.display_status_for(chat, now);
+                    (status == zeron_proto::ChatIndicator::Idle)
+                        .then(|| self.sidebar_settled_at(status, chat, now).is_some())
+                })
+                .flatten();
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
+            let settle_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
@@ -12811,8 +12873,33 @@ impl Shell {
                                     .text_color(theme.text_muted),
                             )
                             .child(SharedString::from("Archive"));
+                    let settle = is_settled.map(|settled| {
+                        let row =
+                            popover::menu_row(&theme, false, format!("chat-menu-settle-{chat_id}"))
+                                .id("chat-menu-settle")
+                                .debug_selector(|| "chat-menu-settle".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_chat_settled(settle_id.clone(), !settled, cx)
+                                }))
+                                .child(
+                                    icon(if settled {
+                                        icons::ARCHIVE_UP_MINIMALISTIC
+                                    } else {
+                                        icons::LUCIDE_CIRCLE_CHECK
+                                    })
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(if settled {
+                                    "Unsettle"
+                                } else {
+                                    "Settle"
+                                }));
+                        self.chat_menu_hover_row(CHAT_MENU_ROW_SETTLE, row, cx)
+                    });
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
                     menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
+                        .children(settle)
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                 };

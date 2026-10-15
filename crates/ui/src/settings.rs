@@ -1159,6 +1159,14 @@ pub enum SidebarOrganization {
     Inbox,
 }
 
+/// Holds until the chat's next message after `at`, as T3's `settledOverride` resets on activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarSettle {
+    pub settled: bool,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarSort {
@@ -1407,6 +1415,9 @@ pub struct UiSettings {
     /// Timestamp used to order active sessions (newest first).
     pub sidebar_sort: SidebarSort,
     pub sidebar_active_first: bool,
+    pub sidebar_settle_after_days: u32,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sidebar_settle_overrides: HashMap<String, SidebarSettle>,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
     pub sidebar_show_project_label: bool,
@@ -1629,6 +1640,8 @@ impl Default for UiSettings {
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_active_first: false,
+            sidebar_settle_after_days: 3,
+            sidebar_settle_overrides: HashMap::new(),
             sidebar_show_project_label: true,
             // Upstream boots compact; this fork keeps its detailed rows.
             sidebar_compact: false,
@@ -2320,6 +2333,8 @@ impl UiSettings {
             sidebar_organization,
             sidebar_sort,
             sidebar_active_first,
+            sidebar_settle_after_days,
+            sidebar_settle_overrides,
             sidebar_show_project_label,
             sidebar_compact,
             sidebar_show_project_icon,
@@ -3752,6 +3767,14 @@ mod tests {
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_active_first: true,
+            sidebar_settle_after_days: 7,
+            sidebar_settle_overrides: HashMap::from([(
+                "chat-1".to_string(),
+                SidebarSettle {
+                    settled: true,
+                    at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                },
+            )]),
             sidebar_compact: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
