@@ -307,6 +307,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         compacting: false,
         background_tasks: Vec::new(),
         running_subagents: 0,
+        compact_plan: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,

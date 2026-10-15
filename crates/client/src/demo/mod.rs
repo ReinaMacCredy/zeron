@@ -460,6 +460,7 @@ impl DemoHost {
             doc.upsert_session(&Session {
                 last_completed_turn: completed.map(str::to_owned),
                 running_subagents: 0,
+                compact_plan: None,
                 chat_id: chat_id.to_owned(),
                 device_id: host,
                 status,

@@ -351,6 +351,84 @@ async fn idle_compaction_says_why_it_ran() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agent_compaction_waits_for_its_turn_then_continues() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *harness.gate.lock().unwrap() = Some(gate);
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue second run");
+    wait_for(|| core.sessions.turn_in_flight(CHAT), "second turn starts").await;
+
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "focus": "keep the plan", "continueWith": "go on" }),
+        )
+        .await
+        .expect("request compact");
+    let plan = || core.sessions.session_status(CHAT).and_then(|s| s.compact_plan);
+    assert_eq!(plan(), Some(zeron_proto::CompactPlan::Agent));
+    let prompts = || -> Vec<String> {
+        requests.lock().unwrap().iter().map(|r| r.prompt.clone()).collect()
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!prompts().iter().any(|p| p.starts_with("/compact")), "never under the asking turn");
+
+    let _ = release.send(());
+    wait_for(|| prompts().iter().any(|p| p == "go on"), "the agent's follow-up").await;
+    assert_eq!(
+        prompts()[prompts().len() - 2..],
+        ["/compact keep the plan".to_string(), "go on".to_string()]
+    );
+    let entries = entries(&core);
+    let boundary = entries
+        .iter()
+        .find(|e| e.role == MessageRole::System)
+        .expect("boundary entry");
+    assert_eq!(entry_text(boundary), "Agent compacted · 22.8k → 2.3k tokens");
+    let follow_up = entries
+        .iter()
+        .find(|e| e.role == MessageRole::User && entry_text(e) == "go on")
+        .expect("follow-up entry");
+    assert_eq!(follow_up.from_chat_id.as_deref(), Some(CHAT));
+    assert_eq!(plan(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filling_context_nudges_the_agent_once_per_mark() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, requests) = engine_with_one_turn(tmp.path()).await;
+    core.registry
+        .set_compaction_settings(zeron_engine::registry::CompactionSettings {
+            nudge_percent: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let cwd = tmp.path().to_string_lossy().to_string();
+    for (ix, id) in ["msg-2", "msg-3"].into_iter().enumerate() {
+        core.doc_host
+            .queue_command(CHAT, run_payload(id, &cwd))
+            .expect("queue run");
+        wait_for(|| requests.lock().unwrap().len() == ix + 2, "run starts").await;
+        wait_for(|| !core.sessions.turn_in_flight(CHAT), "run settles").await;
+    }
+    let prompts: Vec<String> = requests.lock().unwrap().iter().map(|r| r.prompt.clone()).collect();
+    assert_eq!(
+        prompts[1],
+        "hello\n\n<system-reminder>\nContext 22.8k of 200.0k (11%). If you are at a stopping point, call the zeron compact tool with a focus that names what to keep.\n</system-reminder>"
+    );
+    assert_eq!(prompts[2], "hello", "one reminder per mark");
+    let typed: Vec<String> = entries(&core)
+        .iter()
+        .filter(|e| e.role == MessageRole::User)
+        .map(entry_text)
+        .collect();
+    assert_eq!(typed, ["hello", "hello", "hello"], "the transcript keeps what was typed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_second_compaction_is_refused_while_one_is_pending() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, _requests) = engine_with_one_turn(tmp.path()).await;

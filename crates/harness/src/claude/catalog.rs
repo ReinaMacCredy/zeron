@@ -232,6 +232,19 @@ pub fn compact_threshold(window_choice: &str, compact_choice: &str) -> Option<u6
     Some(chosen.saturating_sub(AUTO_COMPACT_HEADROOM))
 }
 
+/// The CLI reports the model's whole window, never the smaller one the chat's picks set.
+pub fn chat_budget(config: &zeron_proto::ChatConfig) -> Option<u64> {
+    if config.harness != zeron_proto::HarnessId::ClaudeCode {
+        return None;
+    }
+    let pick = |id: &str| config.model_options.get(id).and_then(|v| v.as_str());
+    let window = pick("contextWindow").and_then(context_window_tokens);
+    let compact = pick("autoCompact")
+        .and_then(auto_compact_tokens)
+        .filter(|_| window != Some(200_000));
+    compact.or(window)
+}
+
 pub fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
     match choice_id {
         "300k" => Some(300_000),

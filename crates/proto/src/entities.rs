@@ -471,6 +471,16 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    /// Host-local, never mirrored into the workspace doc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_plan: Option<CompactPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CompactPlan {
+    Idle { at: i64 },
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

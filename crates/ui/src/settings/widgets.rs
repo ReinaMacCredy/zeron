@@ -640,6 +640,49 @@ const SWITCH_THUMB_WIDTH: f32 = 24.0;
 const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_SIDE_INSET;
 const SWITCH_MARK_SIZE: f32 = 7.2;
 
+pub fn segmented<T: Copy + PartialEq + 'static>(
+    theme: &Theme,
+    id: &'static str,
+    options: &[(T, &'static str)],
+    selected: T,
+    pick: impl Fn(T, &mut Window, &mut gpui::App) + Clone + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .flex_row()
+        .rounded(px(9.0))
+        .p(px(2.0))
+        .bg(crate::theme::ink(0.04))
+        .children(options.iter().enumerate().map(|(ix, &(value, label))| {
+            let chosen = value == selected;
+            let pick = pick.clone();
+            div()
+                .id((id, ix))
+                .min_w(px(72.0))
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(if chosen { theme.text } else { theme.text_muted })
+                .when(chosen, |el| {
+                    el.bg(theme.bg)
+                        .border_1()
+                        .border_color(theme.border.opacity(0.8))
+                })
+                .when(!chosen, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(move |_, window, cx| pick(value, window, cx))
+                })
+                .child(SharedString::from(label))
+        }))
+}
+
 /// A pill switch with the on/off marks nested beneath a sliding thumb.
 /// The caller owns activation and accessibility; only the thumb interpolates.
 pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> gpui::Div {

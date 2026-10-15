@@ -623,16 +623,20 @@ impl Composer {
 
         // A row another thread sent (thread tools) says so, and that it waits
         // for the turn to end (d26 C); the human's own rows carry no line.
-        let from_thread: Option<SharedString> = item.from_chat_id.as_ref().map(|from| {
-            let state = self.state.read(cx);
-            let title = state
-                .chats
-                .iter()
-                .find(|chat| &chat.id == from)
-                .and_then(|chat| chat.title.clone())
-                .unwrap_or_else(|| from.clone());
-            SharedString::from(format!("from {} · held for turn end", one_line(&title)))
-        });
+        let from_thread: Option<SharedString> = item
+            .from_chat_id
+            .as_ref()
+            .filter(|from| from.as_str() != chat_id)
+            .map(|from| {
+                let state = self.state.read(cx);
+                let title = state
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == from)
+                    .and_then(|chat| chat.title.clone())
+                    .unwrap_or_else(|| from.clone());
+                SharedString::from(format!("from {} · held for turn end", one_line(&title)))
+            });
 
         let drag_chat = chat_id.to_string();
         let queue_marker = div()

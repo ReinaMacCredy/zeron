@@ -97,7 +97,8 @@ struct HarnessPrefsFile {
     titles: TitleSettings,
     predictions: PredictionSettings,
     delegation: DelegationSettings,
-    idle_compaction: IdleCompactionSettings,
+    #[serde(alias = "idleCompaction")]
+    compaction: CompactionSettings,
     tools: zeron_proto::tools::ToolSettings,
     review: Option<crate::review::ReviewSettings>,
     system_prompt: String,
@@ -196,13 +197,20 @@ impl Default for DelegationSettings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct IdleCompactionSettings {
+pub struct CompactionSettings {
     pub enabled: bool,
+    pub min_tokens: u64,
+    /// 0 turns the nudge off.
+    pub nudge_percent: u8,
 }
 
-impl Default for IdleCompactionSettings {
+impl Default for CompactionSettings {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            min_tokens: 100_000,
+            nudge_percent: 70,
+        }
     }
 }
 
@@ -631,13 +639,17 @@ impl HarnessRegistry {
         Ok(())
     }
 
-    pub fn idle_compaction_settings(&self) -> IdleCompactionSettings {
-        self.prefs().idle_compaction
+    pub fn compaction_settings(&self) -> CompactionSettings {
+        self.prefs().compaction
     }
 
-    pub fn set_idle_compaction_settings(&self, settings: IdleCompactionSettings) {
-        self.prefs().idle_compaction = settings;
+    pub fn set_compaction_settings(&self, settings: CompactionSettings) -> Result<(), String> {
+        if settings.min_tokens == 0 || settings.nudge_percent > 100 {
+            return Err("Compaction thresholds are out of range".into());
+        }
+        self.prefs().compaction = settings;
         self.persist_prefs();
+        Ok(())
     }
 
     pub fn system_prompt(&self) -> String {

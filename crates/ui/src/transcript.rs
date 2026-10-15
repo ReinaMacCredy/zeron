@@ -9010,8 +9010,13 @@ impl Transcript {
                 // and clock time, then plain prose. Never the user's own
                 // right-aligned bubble, and no accent: the rule is the same
                 // hairline the system dividers use (owner pick C3, 2026-09-18).
-                let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> =
-                    from_chat_id.as_ref().map(|from| {
+                let auto_continue = from_chat_id
+                    .as_deref()
+                    .is_some_and(|from| Some(from) == self.chat_id.as_deref());
+                let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> = from_chat_id
+                    .as_ref()
+                    .filter(|_| !auto_continue)
+                    .map(|from| {
                         let state = self.state.read(cx);
                         let chat = state
                             .chats
@@ -9103,6 +9108,26 @@ impl Transcript {
                                     .ml(px(4.0))
                                     .bg(theme.border.opacity(0.6)),
                             ),
+                    );
+                }
+                if auto_continue {
+                    column = column.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .items_center()
+                            .gap(px(5.0))
+                            .pb(px(4.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                crate::icons::icon(crate::icons::REFRESH)
+                                    .size(px(11.0))
+                                    .text_color(theme.text_faint),
+                            )
+                            .child("Auto-continue"),
                     );
                 }
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
@@ -17914,6 +17939,7 @@ mod tests {
                             held_by_subagents: false,
                             compacting: false,
                             running_subagents: 0,
+                            compact_plan: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,
