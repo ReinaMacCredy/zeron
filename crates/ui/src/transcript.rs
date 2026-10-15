@@ -3097,6 +3097,7 @@ impl TranscriptPreparation {
         &mut self,
         update: &zeron_doc::TranscriptUpdate,
     ) -> Result<Arc<PreparedTranscript>, zeron_doc::TranscriptDesync> {
+        let reset = matches!(update.frame, zeron_doc::TranscriptFrame::Reset { .. });
         match &update.frame {
             zeron_doc::TranscriptFrame::Reset { .. } => {
                 self.cache.clear();
@@ -3125,6 +3126,9 @@ impl TranscriptPreparation {
         zeron_doc::apply_transcript_frame(&mut self.entries, update.frame.clone())?;
         if let Some(baseline) = &update.replay_baseline {
             self.baseline = Some(baseline.clone());
+        }
+        if reset {
+            self.build_settled_in_parallel();
         }
         let mut rows = HashMap::new();
         let mut historical = HashMap::new();
@@ -3184,6 +3188,52 @@ impl TranscriptPreparation {
             bytes,
             navigation_baseline: Arc::new(zeron_doc::TranscriptBaseline::capture(&self.entries)),
         }))
+    }
+
+    /// A reset empties every parser cache, so settled entries share no state.
+    fn build_settled_in_parallel(&mut self) {
+        #[cfg(test)]
+        FORBID_ROW_PREPARATION
+            .with(|forbidden| assert!(!forbidden.get(), "row preparation ran on the UI thread"));
+        let settled: Vec<&SessionMessageEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.status != Some(MessageStatus::Streaming))
+            .collect();
+        // Spawning threads made the ~3 ms tail build slower, so only full histories fan out.
+        if settled.len() <= zeron_doc::TAIL_MESSAGE_COUNT {
+            return;
+        }
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let built: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut rows = Vec::new();
+                        let mut parsers = HashMap::new();
+                        let mut trees = HashMap::new();
+                        while let Some(entry) =
+                            settled.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                        {
+                            let built = rows_for_entry(entry, false, true, &mut |key, text| {
+                                parse_for_row(false, key, text, &mut parsers, &mut trees).0
+                            });
+                            rows.push((entry.id.clone(), Arc::new(built)));
+                        }
+                        (rows, trees)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect()
+        });
+        for (rows, trees) in built {
+            self.cache.extend(rows);
+            self.tree_cache.extend(trees);
+        }
     }
 }
 
