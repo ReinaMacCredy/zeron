@@ -2815,6 +2815,9 @@ impl FilesSurface {
                 .flex()
                 .overflow_x_scroll()
                 .track_scroll(&self.preview.horizontal_scroll)
+                .on_scroll_wheel(crate::swipe::claim_scrollable(
+                    &self.preview.horizontal_scroll,
+                ))
                 .child(
                     div().flex_none().min_w_full().h_full().child(
                         list(

@@ -100,7 +100,10 @@ pub struct RenderOptions {
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
+    pub tables: Option<TableScrolls>,
 }
+
+pub type TableScrolls = Rc<RefCell<HashMap<(SharedString, usize), gpui::ScrollHandle>>>;
 
 #[derive(Clone)]
 pub struct TaskUi {
@@ -410,6 +413,7 @@ impl RenderOptions {
             link: None,
             workspace_root: None,
             code: None,
+            tables: None,
         }
     }
 }
@@ -962,12 +966,22 @@ fn render_table(
     // The horizontal scroller — when the floors exceed the viewport the inner
     // block keeps `min_table_width` and this viewport scrolls it.
     let scroll_id: SharedString = format!("{}-table{ix}", opts.row_key).into();
-    div()
-        .id(scroll_id)
-        .w_full()
-        .overflow_x_scroll()
-        .child(inner)
-        .into_any_element()
+    let scroller = div().id(scroll_id).w_full().overflow_x_scroll();
+    match &opts.tables {
+        Some(tables) => {
+            let handle = tables
+                .borrow_mut()
+                .entry((opts.row_key.clone(), ix))
+                .or_default()
+                .clone();
+            scroller
+                .track_scroll(&handle)
+                .on_scroll_wheel(crate::swipe::claim_scrollable(&handle))
+        }
+        None => scroller.on_scroll_wheel(crate::swipe::claim_any),
+    }
+    .child(inner)
+    .into_any_element()
 }
 
 /// Flattened inline runs: one string + gpui `TextRun`s + clickable link ranges
@@ -2465,6 +2479,7 @@ fn render_code_block_source_with_actions(
                 .flex()
                 .overflow_x_scroll()
                 .track_scroll(&ui.scroll)
+                .on_scroll_wheel(crate::swipe::claim_scrollable(&ui.scroll))
                 .child(lines);
             // A vertical wheel over code must keep bubbling to the transcript;
             // only a true horizontal gesture moves this local viewport.
@@ -2477,6 +2492,7 @@ fn render_code_block_source_with_actions(
             .id(scroll_id)
             .w_full()
             .overflow_x_scroll()
+            .on_scroll_wheel(crate::swipe::claim_any)
             .child(lines)
             .into_any_element()
     };

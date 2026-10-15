@@ -1461,6 +1461,7 @@ impl Shell {
                     .min_w_0()
                     .overflow_x_scroll()
                     .track_scroll(&self.tabs_scroll)
+                    .on_scroll_wheel(crate::swipe::claim_scrollable(&self.tabs_scroll))
                     // Windows caption hit-testing includes the scroll-only
                     // hitboxes behind each tab. Stop at the scroller so the
                     // titlebar cannot claim tab clicks, while wheel events
