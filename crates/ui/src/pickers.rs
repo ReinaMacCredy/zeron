@@ -1425,7 +1425,7 @@ impl Pickers {
                 }
             },
         );
-        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch|profiles|profile-edit`
+        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch|profiles|profile-chip|profile-edit`
         // boots with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
         let boot_knob = std::env::var("ZERON_OPEN_PICKER").ok();
@@ -1433,11 +1433,11 @@ impl Pickers {
             title.is_none()
                 && matches!(
                     boot_knob.as_deref(),
-                    Some("profiles" | "profile-edit" | "profile-settings")
+                    Some("profiles" | "profile-chip" | "profile-edit" | "profile-settings")
                 );
         let boot_open = match boot_knob.as_deref() {
             _ if title.is_some() => None,
-            Some("model" | "profiles" | "profile-edit" | "profile-settings") => {
+            Some("model" | "profiles" | "profile-chip" | "profile-edit" | "profile-settings") => {
                 Some(PickerKind::HarnessModel)
             }
             Some("traits") => Some(PickerKind::HarnessModel),
@@ -1557,7 +1557,7 @@ impl Pickers {
             profiles: Loadable::Idle,
             profiles_task: None,
             profile_edit: None,
-            profiles_only: false,
+            profiles_only: boot_profiles && boot_knob.as_deref() == Some("profile-chip"),
             profile_focus_pending: false,
             boot_profile_edit: boot_profiles
                 && matches!(boot_knob.as_deref(), Some("profile-edit" | "profile-settings")),
@@ -4589,6 +4589,7 @@ impl Pickers {
         label_loading: bool,
         suffix: Option<(SharedString, Option<gpui::Hsla>)>,
         profile: Option<(SharedString, bool)>,
+        trailing: Option<AnyElement>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -4609,7 +4610,89 @@ impl Pickers {
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
-        div()
+        let icon = if icon_loading {
+            Some(
+                div()
+                    .flex_none()
+                    .child(crate::loaders::mini_glyph_spinner(
+                        "picker-chip-loader",
+                        2.0,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .into_any_element(),
+            )
+        } else {
+            chip_icon.map(|(path, tint)| {
+                crate::icons::icon(path)
+                    .size(px(16.0))
+                    .text_color(tint.unwrap_or(theme.text_muted))
+                    .into_any_element()
+            })
+        };
+        let label = if label_loading {
+            // Nothing is named on screen: the label rolls in from empty.
+            rolling(format!("{id}-label"), SharedString::default(), true);
+            popover::skeleton_bar(56.0, cx.entity_id(), cx).into_any_element()
+        } else {
+            // A changing label rolls (Scritto-style); at rest it is the
+            // plain truncating label, or the clip-don't-ellipsize variant
+            // while the model chip's width glides.
+            match rolling(format!("{id}-label"), label.clone(), cx.reduce_motion()) {
+                Some(rolling) => rolling,
+                None if resizing => {
+                    resizing_chip_text(format!("{id}-label").into(), 1.0, None, label)
+                }
+                None => div().min_w_0().truncate().child(label).into_any_element(),
+            }
+        };
+        // The effort half of the combined model+effort chip (and the space
+        // chip's "@ device" tag): muted, no icon — one button, two tones.
+        // `tint` overrides the muted tone (the offline warning). Under row
+        // pressure the suffix yields FIRST (large shrink factor) so the
+        // model name — the run's identity — truncates last.
+        let suffix = suffix.map(|(suffix, tint)| {
+            let color = tint.unwrap_or(theme.text_muted.opacity(0.7));
+            let rolling = rolling(format!("{id}-suffix"), suffix.clone(), cx.reduce_motion());
+            if let Some(rolling) = rolling {
+                div()
+                    .flex()
+                    .flex_shrink(1000.0)
+                    .min_w_0()
+                    .text_color(color)
+                    .child(rolling)
+                    .into_any_element()
+            } else if resizing {
+                resizing_chip_text(format!("{id}-suffix").into(), 1000.0, Some(color), suffix)
+            } else {
+                div()
+                    .flex_shrink(1000.0)
+                    .min_w_0()
+                    .text_color(color)
+                    .truncate()
+                    .child(suffix)
+                    .into_any_element()
+            }
+        });
+        let rest = if set {
+            theme.text.opacity(0.9)
+        } else {
+            theme.text_muted
+        };
+        // zeron composer/styles.tsx `pill`: `transition-colors` — the wash
+        // and text brighten fade over 150ms.
+        let wash = |key: &SharedString, open: bool| {
+            if open {
+                theme.element_hover
+            } else {
+                motion::hover_blend(key, gpui::transparent_black(), theme.element_hover)
+            }
+        };
+        // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
+        // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
+        // hover/open wash — no border, no caret; the actions row stays quiet.
+        let chip = div()
             .relative()
             .child(self.measure_trigger(kind, cx))
             .id(id.clone())
@@ -4622,35 +4705,9 @@ impl Pickers {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
-            // The model trigger sits beside the right-hand composer actions.
-            // Its own padding participates in that visible gap; footer and
-            // destination triggers keep their wider independent hit areas.
-            .px(px(if kind == PickerKind::HarnessModel {
-                6.0
-            } else {
-                10.0
-            }))
             .rounded(px(8.0))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            // zeron composer/styles.tsx `pill`: `transition-colors` — the wash
-            // and text brighten fade over 150ms.
-            .text_color(motion::hover_blend(
-                &id,
-                if set {
-                    theme.text.opacity(0.9)
-                } else {
-                    theme.text_muted
-                },
-                theme.text,
-            ))
-            .bg(if open {
-                theme.element_hover
-            } else {
-                motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
-            })
-            .on_hover(motion::hover_listener(id.clone()))
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -4658,114 +4715,88 @@ impl Pickers {
                     this.open.note_trigger_press_matching(|open| *open == kind)
                 }),
             )
-            .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
-            .when(icon_loading, |el| {
-                el.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
-                    "picker-chip-loader",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )))
-            })
-            .when_some(
-                (!icon_loading).then_some(chip_icon).flatten(),
-                |el, (path, tint)| {
-                    el.child(
-                        crate::icons::icon(path)
-                            .size(px(16.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    )
-                },
-            )
-            .when_some(profile, |el, (name, edited)| {
-                el.child(
-                    div()
-                        .id("picker-model-profile")
-                        .debug_selector(|| "picker-model-profile".into())
-                        .role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("{name} · Change profile")))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .flex_none()
-                                .max_w(px(PROFILE_NAME_MAX))
-                                .truncate()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(name),
-                        )
-                        .when(edited, |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .size(px(6.0))
-                                    .rounded_full()
-                                    .bg(theme.warning),
-                            )
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_profiles(window, cx);
-                            cx.stop_propagation();
-                        })),
-                )
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)));
+        let Some((name, edited)) = profile else {
+            return chip
+                .gap(px(6.0))
+                // The model trigger sits beside the right-hand composer actions.
+                // Its own padding participates in that visible gap; footer and
+                // destination triggers keep their wider independent hit areas.
+                .px(px(if kind == PickerKind::HarnessModel {
+                    6.0
+                } else {
+                    10.0
+                }))
+                .text_color(motion::hover_blend(&id, rest, theme.text))
+                .bg(wash(&id, open))
+                .on_hover(motion::hover_listener(id.clone()))
+                .children(icon)
+                .child(label)
+                .children(suffix)
+                .children(trailing);
+        };
+        // A profiled chip is two click targets, and each half washes on its
+        // own hover so the press target is the one that lights up.
+        let part = |key: SharedString, open: bool| {
+            div()
+                .id(key.clone())
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(6.0))
+                .rounded(px(8.0))
+                .text_color(motion::hover_blend(&key, rest, theme.text))
+                .bg(wash(&key, open))
+                .on_hover(motion::hover_listener(key))
+        };
+        let profile_key: SharedString = format!("{id}-profile").into();
+        let model_key: SharedString = format!("{id}-model").into();
+        chip.child(
+            part(profile_key, open && self.profiles_only)
+                .debug_selector(|| "picker-model-profile".into())
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!("{name} · Change profile")))
+                .flex_none()
+                .children(icon)
                 .child(
                     div()
                         .flex_none()
-                        .w(px(1.0))
-                        .h(px(12.0))
-                        .bg(crate::theme::hairline(0.18)),
-                )
-            })
-            .when(label_loading, |el| {
-                // Nothing is named on screen: the label rolls in from empty.
-                rolling(format!("{id}-label"), SharedString::default(), true);
-                el.child(popover::skeleton_bar(56.0, cx.entity_id(), cx))
-            })
-            .when(!label_loading, |el| {
-                // A changing label rolls (Scritto-style); at rest it is the
-                // plain truncating label, or the clip-don't-ellipsize variant
-                // while the model chip's width glides.
-                let rolling = rolling(format!("{id}-label"), label.clone(), cx.reduce_motion());
-                el.child(match rolling {
-                    Some(rolling) => rolling,
-                    None if resizing => {
-                        resizing_chip_text(format!("{id}-label").into(), 1.0, None, label)
-                    }
-                    None => div().min_w_0().truncate().child(label).into_any_element(),
-                })
-            })
-            // The effort half of the combined model+effort chip (and the space
-            // chip's "@ device" tag): muted, no icon — one button, two tones.
-            // `tint` overrides the muted tone (the offline warning). Under row
-            // pressure the suffix yields FIRST (large shrink factor) so the
-            // model name — the run's identity — truncates last.
-            .when_some(suffix, |el, (suffix, tint)| {
-                let color = tint.unwrap_or(theme.text_muted.opacity(0.7));
-                let rolling = rolling(format!("{id}-suffix"), suffix.clone(), cx.reduce_motion());
-                el.child(if let Some(rolling) = rolling {
-                    div()
-                        .flex()
-                        .flex_shrink(1000.0)
-                        .min_w_0()
-                        .text_color(color)
-                        .child(rolling)
-                        .into_any_element()
-                } else if resizing {
-                    resizing_chip_text(format!("{id}-suffix").into(), 1000.0, Some(color), suffix)
-                } else {
-                    div()
-                        .flex_shrink(1000.0)
-                        .min_w_0()
-                        .text_color(color)
+                        .max_w(px(PROFILE_NAME_MAX))
                         .truncate()
-                        .child(suffix)
-                        .into_any_element()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(name),
+                )
+                .when(edited, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(theme.warning),
+                    )
                 })
-            })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_profiles(window, cx);
+                    cx.stop_propagation();
+                })),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(1.0))
+                .h(px(12.0))
+                .bg(crate::theme::hairline(0.18)),
+        )
+        .child(
+            part(model_key, open && !self.profiles_only)
+                .flex_1()
+                .min_w_0()
+                .child(label)
+                .children(suffix)
+                .children(trailing),
+        )
     }
 
     /// A footer-row trigger (t3code ghost `Button size="xs"`): leading icon,
@@ -8866,29 +8897,29 @@ impl Render for Pickers {
             chip_profile.as_ref(),
             cx,
         );
-        let model_chip = self
-            .trigger_chip(
-                PickerKind::HarnessModel,
-                model_label,
-                true,
-                Some(harness_icon),
-                chip_icon_loading,
-                chip_label_loading,
-                chip_suffix,
-                chip_profile,
-                &theme,
-                cx,
-            )
-            .when(fast, |chip| {
-                chip.child(motion::fast_tier(
+        let model_chip = self.trigger_chip(
+            PickerKind::HarnessModel,
+            model_label,
+            true,
+            Some(harness_icon),
+            chip_icon_loading,
+            chip_label_loading,
+            chip_suffix,
+            chip_profile,
+            fast.then(|| {
+                motion::fast_tier(
                     "composer-fast-tier",
                     div().flex_none().child(
                         crate::icons::icon(crate::icons::FAST_TIER_BOLD)
                             .size(px(13.0))
                             .text_color(theme.accent),
                     ),
-                ))
-            });
+                )
+                .into_any_element()
+            }),
+            &theme,
+            cx,
+        );
         let model_chip = model_chip.w(px(chip_width));
         // Both presentations align to the chip's trailing edge beside Send.
         let model_chip = attach_overlay_end(
@@ -13470,6 +13501,23 @@ mod tests {
                 .unwrap();
             cx.update(|window, cx| window.draw(cx).clear());
         };
+
+        let chip_key = format!(
+            "picker-model-{}",
+            handle.update(cx, |_, _, cx| cx.entity_id()).unwrap()
+        );
+        let lit = |cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>| {
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            (
+                motion::hover_t(&format!("{chip_key}-profile")) > 0.99,
+                motion::hover_t(&format!("{chip_key}-model")) > 0.99,
+            )
+        };
+        let at = profile_part(cx);
+        assert_eq!(lit(cx, at), (true, false), "only the profile half washes");
+        let at = model_part(cx);
+        assert_eq!(lit(cx, at), (false, true), "only the model half washes");
 
         let at = profile_part(cx);
         click(cx, at);
