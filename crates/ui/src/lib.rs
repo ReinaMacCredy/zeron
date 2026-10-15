@@ -176,6 +176,11 @@ pub fn run_app(config: UiConfig) {
     let app = gpui_platform::application()
         .with_assets(icons::Assets)
         .with_http_client(asset_http::AssetHttpClient::new(runtime_handle.clone()));
+    let text_system = app.text_system();
+    // Reading every installed font file takes ~150 ms; overlap it with launch.
+    let installed_fonts = app
+        .background_executor()
+        .spawn(async move { typography::scan_installed_fonts(&text_system) });
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let callback_tx = url_tx.clone();
     app.on_open_urls(move |urls| {
@@ -219,11 +224,12 @@ pub fn run_app(config: UiConfig) {
             .spawn(async move { draft_store::load(&draft_dir) });
         cx.spawn(async move |cx| {
             let drafts = drafts.await;
+            let installed_fonts = installed_fonts.await;
             cx.update(move |cx| {
                 let ui_settings = settings::UiSettings::load(&data_dir);
                 settings::init(ui_settings.clone(), data_dir.clone(), cx);
                 draft_store::init_loaded(data_dir.clone(), drafts, cx);
-                let font_availability = typography::register_fonts(cx);
+                let font_availability = typography::register_scanned_fonts(installed_fonts, cx);
                 // Typography first: theme installation reads the effective family, so
                 // the first frame has the final font and palette without a flash.
                 typography::init(
