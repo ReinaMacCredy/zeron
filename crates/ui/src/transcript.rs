@@ -3903,6 +3903,7 @@ pub struct Transcript {
     /// rerenders keep their local scroll position without leaking state for
     /// blocks no longer present in the selected chat.
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
+    table_scrolls: render::TableScrolls,
     /// Entry whose hover action is showing transient copied-check feedback.
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
@@ -4395,6 +4396,7 @@ impl Transcript {
             copied_code: None,
             copied_clear: None,
             code_fences: HashMap::new(),
+            table_scrolls: Default::default(),
             copied_message: None,
             copied_message_clear: None,
             consent_sent: HashMap::new(),
@@ -6178,6 +6180,10 @@ impl Transcript {
             .collect();
         self.code_fences
             .retain(|key, _| active_code_fences.contains(key));
+        let row_ids: HashSet<&SharedString> = new_rows.iter().map(|row| &row.id).collect();
+        self.table_scrolls
+            .borrow_mut()
+            .retain(|(row, _), _| row_ids.contains(row));
         // Diagram source toggles follow the same stable row identity.
         if self.diagrams.borrow().has_source_toggles() {
             let row_ids: HashSet<&str> = new_rows.iter().map(|row| row.id.as_ref()).collect();
@@ -7216,6 +7222,7 @@ impl Transcript {
                     .flex_row()
                     .gap(px(TOOL_IMAGE_PAD))
                     .overflow_x_scroll()
+                    .on_scroll_wheel(crate::swipe::claim_any)
                     .children(frames),
             )
             .into_any_element()
@@ -9249,6 +9256,7 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
+                    tables: Some(self.table_scrolls.clone()),
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -9319,6 +9327,7 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
+                    tables: Some(self.table_scrolls.clone()),
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];

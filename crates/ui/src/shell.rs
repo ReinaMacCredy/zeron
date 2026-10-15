@@ -68,6 +68,7 @@ use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
 };
+use crate::swipe::SwipeDir;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
 use crate::transcript::{self, BranchKind, Transcript, TranscriptEvent};
@@ -105,6 +106,7 @@ mod search_warm;
 pub(crate) mod spaces;
 mod split;
 mod summary;
+mod swipe_nav;
 mod switcher;
 mod thread_search;
 use side_chats::SideChatTab;
@@ -1130,6 +1132,10 @@ impl NavHistory {
     /// The entry Back would land on.
     pub fn previous(&self) -> Option<&NavEntry> {
         self.index.checked_sub(1).map(|index| &self.entries[index])
+    }
+
+    pub fn next(&self) -> Option<&NavEntry> {
+        self.entries.get(self.index + 1)
     }
 
     /// Memory history keeps every entry, so "behind the last entry" is exactly
@@ -2410,6 +2416,7 @@ pub struct Shell {
     settings_return_route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
+    swipe: swipe_nav::SwipeNav,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
@@ -3069,6 +3076,7 @@ impl Shell {
             settings_restore_pending: false,
             settings_return_route: Route::Chat,
             nav,
+            swipe: swipe_nav::SwipeNav::default(),
             pull_requests_page: None,
             usage_page: None,
             pull_request_detail: None,
@@ -8989,7 +8997,7 @@ impl Shell {
                         "Back",
                         can_back,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_back(cx)),
+                        cx.listener(|this, _, _, cx| this.step_history(SwipeDir::Back, cx)),
                     ))
                     .child(nav_history_button(
                         "nav-forward",
@@ -8997,7 +9005,7 @@ impl Shell {
                         "Forward",
                         can_forward,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
+                        cx.listener(|this, _, _, cx| this.step_history(SwipeDir::Forward, cx)),
                     )),
             )
             .children(show_plus.then(|| {
@@ -14629,6 +14637,7 @@ impl Shell {
             .min_w_0()
             .overflow_x_scroll()
             .track_scroll(&self.right_tab_scroll)
+            .on_scroll_wheel(crate::swipe::claim_scrollable(&self.right_tab_scroll))
             // Windows caption hit-testing includes the scroll-only hitboxes
             // behind each chip. Stop at the scroller so the titlebar cannot
             // claim tab clicks, while wheel events still reach this scroller.
@@ -16250,11 +16259,11 @@ impl Render for Shell {
             // back/forward arrows (the browser surface keeps them to itself).
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
-                cx.listener(|this, _, _, cx| this.navigate_back(cx)),
+                cx.listener(|this, _, _, cx| this.step_history(SwipeDir::Back, cx)),
             )
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Forward),
-                cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
+                cx.listener(|this, _, _, cx| this.step_history(SwipeDir::Forward, cx)),
             )
             .capture_key_down(cx.listener(Self::on_key_down_capture))
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.note_appshot_interaction(cx)))
@@ -16608,6 +16617,12 @@ impl Render for Shell {
                     })
                     .detach();
                 }
+                if self.debug_dialog.as_deref() == Some("swipe")
+                    && self.state.read(cx).focused_id().is_some()
+                {
+                    self.debug_dialog = None;
+                    self.run_swipe_demo(window, cx);
+                }
                 // `=split` (capture knob; the drag gesture has no input-free
                 // path): once a session or the canvas draft is focused, open
                 // the next sidebar session as the split view's secondary
@@ -16663,6 +16678,20 @@ impl Render for Shell {
                     pr_route || matches!(self.route, Route::Terminal | Route::Usage);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
+                    let swipe = self.swipe_layers(0.0, cx);
+                    let settings_page = div()
+                        .size_full()
+                        .relative()
+                        .overflow_hidden()
+                        .opacity(swipe.alpha)
+                        .child(
+                            div()
+                                .size_full()
+                                .relative()
+                                .left(px(swipe.shift))
+                                .child(settings_page),
+                        )
+                        .children(swipe.pill);
                     // A call started from Settings opens its stage here too.
                     let voice_stage = self.render_voice_stage(window, cx);
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
@@ -16687,6 +16716,7 @@ impl Render for Shell {
                         .child(drag)
                         .children(overlays);
                     break 'ready root
+                        .child(self.swipe_layer(cx))
                         .child(sidebar_tone)
                         .child(motion::fade_in("phase-app", page));
                 }
@@ -16890,6 +16920,7 @@ impl Render for Shell {
                     _ => columns.push(main),
                 }
                 let sidecar = (sidecar_width > 0.0).then(|| self.render_sidecar(sidecar_width, cx));
+                let swipe = self.swipe_layers(sidecar_width, cx);
                 let card: AnyElement = div()
                     .id("conversation-column")
                     .debug_selector(|| "conversation-column".into())
@@ -16899,10 +16930,19 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    .opacity(under_stage)
-                    .children(columns)
-                    .children(sidecar)
-                    .children(drop_zones)
+                    .opacity(under_stage * swipe.alpha)
+                    .child(
+                        div()
+                            .size_full()
+                            .relative()
+                            .left(px(swipe.shift))
+                            .flex()
+                            .flex_row()
+                            .children(columns)
+                            .children(sidecar)
+                            .children(drop_zones),
+                    )
+                    .children(swipe.pill)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
@@ -17024,7 +17064,8 @@ impl Render for Shell {
                     )
                     .children(self.render_sidebar_options_titlebar(cx))
                     .children(overlays);
-                root.child(sidebar_tone)
+                root.child(self.swipe_layer(cx))
+                    .child(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
             }
             GatePhase::Loading => root, // splash overlay covers boot

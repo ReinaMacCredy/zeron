@@ -4627,7 +4627,8 @@ fn code_text_viewport(
             let mut viewport = viewport
                 .id(scroll.id)
                 .overflow_x_scroll()
-                .track_scroll(&scroll.handle);
+                .track_scroll(&scroll.handle)
+                .on_scroll_wheel(crate::swipe::claim_scrollable(&scroll.handle));
             // Without this GPUI maps a vertical-only wheel delta onto x for
             // an x-only scroller, starving the virtualized list underneath.
             viewport.style().restrict_scroll_to_axis = Some(true);

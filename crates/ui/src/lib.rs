@@ -83,6 +83,7 @@ pub mod shell;
 pub mod sound;
 pub mod state;
 pub(crate) mod surface_chrome;
+mod swipe;
 pub mod syntax_cache;
 pub mod terminal;
 mod todo_panel;

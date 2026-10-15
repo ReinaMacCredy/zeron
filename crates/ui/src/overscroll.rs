@@ -46,7 +46,7 @@ const SPRING_OMEGA: f32 = 13.0;
 const BOUNCE_MAX_FRACTION: f32 = 0.12;
 const BOUNCE_MAX_PX: f32 = 80.0;
 /// A phase-less stream after this much silence is a new fling.
-const FLING_GAP: Duration = Duration::from_millis(120);
+pub(crate) const FLING_GAP: Duration = Duration::from_millis(120);
 
 const ENABLED: bool = cfg!(any(target_os = "macos", test));
 

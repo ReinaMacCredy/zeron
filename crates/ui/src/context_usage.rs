@@ -60,7 +60,24 @@ pub(crate) fn ring_chip(
 /// The footer's 16px progress ring: a faint full track under a `fraction` arc
 /// starting at twelve o'clock. Shared with the account usage indicator.
 pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl IntoElement {
-    let track = theme.text_faint.opacity(0.25);
+    progress_ring(
+        16.0,
+        6.0,
+        1.8,
+        fraction,
+        color,
+        theme.text_faint.opacity(0.25),
+    )
+}
+
+pub(crate) fn progress_ring(
+    size: f32,
+    radius: f32,
+    stroke: f32,
+    fraction: f32,
+    color: gpui::Hsla,
+    track: gpui::Hsla,
+) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -70,13 +87,13 @@ pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl Into
                     return;
                 }
                 let steps = (64.0 * fraction).ceil().max(2.0) as usize;
-                let mut path = PathBuilder::stroke(px(1.8));
+                let mut path = PathBuilder::stroke(px(stroke));
                 for i in 0..=steps {
                     let angle = -std::f32::consts::FRAC_PI_2
                         + std::f32::consts::TAU * fraction * i as f32 / steps as f32;
                     let p = point(
-                        center.x + px(6.0 * angle.cos()),
-                        center.y + px(6.0 * angle.sin()),
+                        center.x + px(radius * angle.cos()),
+                        center.y + px(radius * angle.sin()),
                     );
                     if i == 0 {
                         path.move_to(p);
@@ -92,7 +109,7 @@ pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl Into
             arc(fraction.clamp(0.0, 1.0), color);
         },
     )
-    .size(px(16.0))
+    .size(px(size))
 }
 
 /// Claude reports the model's whole window, and only from its next turn; the

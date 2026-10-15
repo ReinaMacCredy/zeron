@@ -27,8 +27,10 @@ impl Render for NavigationHost {
                 .size_full()
                 .flex()
                 .flex_col()
+                .relative()
                 .track_focus(&shell.shortcut_focus)
                 .child(div().track_focus(&shell.unfocused))
+                .child(shell.swipe_layer(cx))
                 .on_action(cx.listener(|shell, _: &NextSession, window, cx| {
                     shell.cycle_navigation(true, window, cx);
                 }))
@@ -588,4 +590,45 @@ fn the_footer_terminal_button_toggles_the_drawer(cx: &mut TestAppContext) {
             open
         );
     }
+}
+
+fn swipe(cx: &mut VisualTestContext, at: Point<Pixels>, travel: f32) {
+    for (phase, dx) in [
+        (gpui::TouchPhase::Started, 0.),
+        (gpui::TouchPhase::Moved, travel / 2.),
+        (gpui::TouchPhase::Moved, travel / 2.),
+        (gpui::TouchPhase::Ended, 0.),
+    ] {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(dx), px(0.))),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: phase,
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+    }
+}
+
+#[gpui::test]
+fn a_trackpad_swipe_walks_route_history_and_holds_at_its_start(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| {
+        shell.nav = NavHistory::new(NavEntry::Chat("parent".into()));
+        shell.nav.push(NavEntry::Chat("other".into()));
+        shell.apply_nav(NavEntry::Chat("other".into()), cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    let main = cx.debug_bounds("navigation-main").unwrap().center();
+    let selected = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+    };
+    assert_eq!(selected(&shell, cx).as_deref(), Some("other"));
+
+    swipe(cx, main, 150.);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("parent"));
+    swipe(cx, main, 150.);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("parent"));
+    assert!(shell.read_with(cx, |shell, _| shell.nav.can_forward()));
+    swipe(cx, main, -150.);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("other"));
 }

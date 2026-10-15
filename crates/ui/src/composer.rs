@@ -8633,7 +8633,8 @@ impl Composer {
             .gap(px(STRIP_GAP))
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP))
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .on_scroll_wheel(crate::swipe::claim_any);
         for (ix, appshot) in appshots.iter().enumerate() {
             let Some(screenshot) = appshot.screenshot.image().cloned() else {
                 continue;
