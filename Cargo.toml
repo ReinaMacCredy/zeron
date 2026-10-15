@@ -99,7 +99,6 @@ gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb
     "wayland",
     "x11",
     "font-kit",
-    "runtime_shaders",
 ] }
 gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
 gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "701ca97af7983bf85343d2d1d404ab528b18ec96" }
