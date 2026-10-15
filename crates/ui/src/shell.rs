@@ -2192,6 +2192,22 @@ struct SidebarPane {
     _observation: Subscription,
 }
 
+// A reused cached frame drops its accessibility nodes, so an AT client's
+// element refs into the view die on every unrelated repaint.
+fn cached_unless_a11y<V: Render>(
+    view: Entity<V>,
+    style: gpui::StyleRefinement,
+    window: &Window,
+) -> AnyElement {
+    if window.is_a11y_active() {
+        let mut wrapper = div();
+        wrapper.style().refine(&style);
+        wrapper.child(view).into_any_element()
+    } else {
+        view.cached(style).into_any_element()
+    }
+}
+
 impl Render for SidebarPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::transcript::record_view_frame("sidebar");
@@ -13685,7 +13701,11 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        .child(cached_unless_a11y(
+                            self.transcript.clone(),
+                            gpui::StyleRefinement::default().size_full(),
+                            window,
+                        )),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
