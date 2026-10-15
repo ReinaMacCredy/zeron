@@ -953,6 +953,9 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     if call.is_advisor() {
         return None;
     }
+    if matches!(call, ToolCall::Unknown { name, .. } if name == "Skill") {
+        return None;
+    }
     let text: String = match call {
         ToolCall::Exec { command } => command.clone(),
         ToolCall::ReadFile { path } => path.clone(),
