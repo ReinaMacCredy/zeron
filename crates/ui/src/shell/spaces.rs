@@ -2204,6 +2204,18 @@ struct ActiveChatRow {
     branch: Option<String>,
     change_request: Option<zeron_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
+    created_by: Option<String>,
+}
+
+impl ActiveChatRow {
+    fn height(&self, compact: bool, show_label: bool) -> f32 {
+        sidebar_row_height(
+            compact,
+            show_label,
+            self.branch.is_some() || self.created_by.is_some(),
+            self.change_request.is_some(),
+        )
+    }
 }
 
 pub(super) fn compare_sidebar_chats(
@@ -2231,6 +2243,33 @@ pub(super) fn compare_sidebar_rows(
     active(right.0)
         .cmp(&active(left.0))
         .then_with(|| compare_sidebar_chats(sort, left.1, right.1))
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct InboxMark {
+    working: bool,
+    since: Option<DateTime<Utc>>,
+}
+
+pub(super) fn inbox_rank(
+    status: ChatIndicator,
+    chat: &zeron_proto::Chat,
+    started_at: Option<DateTime<Utc>>,
+    mark: Option<InboxMark>,
+) -> (bool, std::cmp::Reverse<DateTime<Utc>>) {
+    let working = status == ChatIndicator::Working;
+    let since = mark
+        .filter(|mark| mark.working == working)
+        .and_then(|mark| mark.since);
+    let base = chat
+        .last_message_at
+        .map_or(chat.created_at, |at| at.max(chat.created_at));
+    let key = if working {
+        started_at.or(since).unwrap_or(base)
+    } else {
+        since.map_or(base, |at| at.max(base))
+    };
+    (working, std::cmp::Reverse(key))
 }
 
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
@@ -2289,6 +2328,7 @@ enum SidebarViewRow {
     ShowProjectLabel,
     ByDevice,
     InOneList,
+    Inbox,
     LastUpdated,
     Created,
     ActiveFirst,
@@ -2305,18 +2345,28 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByProject
+                | Self::ByDevice
+                | Self::InOneList
+                | Self::Inbox
+                | Self::LastUpdated
+                | Self::Created
         )
+    }
+
+    fn sorts(self) -> bool {
+        matches!(self, Self::LastUpdated | Self::Created | Self::ActiveFirst)
     }
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..6), ("Show", 6..13)];
+    [("Organize", 0..4), ("Sort", 4..7), ("Show", 7..14)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 13] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 14] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
+    SidebarViewRow::Inbox,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
     SidebarViewRow::ActiveFirst,
@@ -2369,79 +2419,6 @@ fn promote_local_device_group<T>(
 /// regrouped exactly as `render_active_rows` groups it (project or device
 /// sections in first-seen order, local device promoted), or unchanged when the
 /// organization draws one flat list.
-/// Linked chats (a sidechat under its source, an agent-created chat under
-/// its creator) sit under their owner, in the order they already had. A link
-/// whose owner is missing from the list renders flat rather than hidden; it
-/// is otherwise unreachable from the sidebar. Depth is two at most: a
-/// sidechat of an agent-created chat follows that chat; any deeper link
-/// renders flat. A sidechat leaves its source where it was; an agent-created
-/// chat lifts its creator's whole group to the earliest position any member
-/// holds (d26), so an active created chat never sinks under a quiet creator.
-/// `true` marks a row that renders nested.
-fn nest_linked_chats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -> Vec<(T, bool)> {
-    let ids: Vec<&str> = rows.iter().map(|row| chat(row).id.as_str()).collect();
-    let position = |id: &str| ids.iter().position(|other| *other == id);
-    // (owner index, lifts the owner's group)
-    let raw: Vec<Option<(usize, bool)>> = rows
-        .iter()
-        .map(|row| {
-            let chat = chat(row);
-            if let Some(at) = chat.sidechat_source_chat_id.as_deref().and_then(position) {
-                Some((at, false))
-            } else if let Some(at) = chat.created_by_chat_id.as_deref().and_then(position) {
-                Some((at, true))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let links: Vec<Option<(usize, bool)>> = raw
-        .iter()
-        .map(|link| {
-            link.filter(|(owner, lifts)| match raw[*owner] {
-                None => true,
-                Some((_, owner_lifts)) => owner_lifts && !lifts,
-            })
-        })
-        .collect();
-    let mut owners: Vec<(usize, usize)> = (0..links.len())
-        .filter(|index| links[*index].is_none())
-        .map(|owner| {
-            let anchor = links
-                .iter()
-                .enumerate()
-                .filter(|(_, link)| matches!(link, Some((at, true)) if *at == owner))
-                .map(|(index, _)| index)
-                .fold(owner, usize::min);
-            (anchor, owner)
-        })
-        .collect();
-    owners.sort_unstable();
-    let mut slots: Vec<Option<T>> = rows.into_iter().map(Some).collect();
-    let mut nested = Vec::with_capacity(slots.len());
-    for (_, owner) in owners {
-        if let Some(row) = slots[owner].take() {
-            nested.push((row, false));
-        }
-        for child in 0..slots.len() {
-            if matches!(links[child], Some((at, _)) if at == owner)
-                && let Some(row) = slots[child].take()
-            {
-                nested.push((row, true));
-                for grandchild in 0..slots.len() {
-                    if matches!(links[grandchild], Some((at, false)) if at == child)
-                        && let Some(row) = slots[grandchild].take()
-                    {
-                        nested.push((row, true));
-                    }
-                }
-            }
-        }
-    }
-    nested.extend(slots.into_iter().flatten().map(|row| (row, false)));
-    nested
-}
-
 fn grouped_visible_order(
     chats: Vec<zeron_proto::Chat>,
     organization: SidebarOrganization,
@@ -2453,7 +2430,9 @@ fn grouped_visible_order(
         match organization {
             SidebarOrganization::ByProject if !filtered => Some(project_group(chat)),
             SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
-            SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
+            SidebarOrganization::ByProject
+            | SidebarOrganization::InOneList
+            | SidebarOrganization::Inbox => None,
         }
     };
     let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
@@ -2470,8 +2449,8 @@ fn grouped_visible_order(
     }
     groups
         .into_iter()
-        .flat_map(|(_, rows)| nest_linked_chats(rows, |chat| chat))
-        .map(|(chat, _)| chat.id)
+        .flat_map(|(_, rows)| rows)
+        .map(|chat| chat.id)
         .collect()
 }
 
@@ -4124,6 +4103,9 @@ impl Shell {
         if let Some(menu) = self.sidebar_view_menu.open_mut() {
             menu.hover_intent.cancel();
         }
+        if row.sorts() && self.settings.sidebar_organization == SidebarOrganization::Inbox {
+            return;
+        }
         self.cancel_sidebar_session_transfer(cx);
         self.cancel_pinned_session_drag(cx);
         match row {
@@ -4144,6 +4126,9 @@ impl Shell {
             }
             SidebarViewRow::InOneList => {
                 self.settings.sidebar_organization = SidebarOrganization::InOneList
+            }
+            SidebarViewRow::Inbox => {
+                self.settings.sidebar_organization = SidebarOrganization::Inbox
             }
             SidebarViewRow::LastUpdated => self.settings.sidebar_sort = SidebarSort::LastUpdated,
             SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
@@ -4336,6 +4321,7 @@ impl Shell {
             "By device",
             "By project",
             "None",
+            "Inbox",
             "Last updated",
             "Created",
             "Active first",
@@ -4351,6 +4337,7 @@ impl Shell {
             icons::LAPTOP,
             icons::FOLDER,
             icons::LIST,
+            icons::BELL,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
             icons::BOLT,
@@ -4367,6 +4354,7 @@ impl Shell {
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
+            organization == SidebarOrganization::Inbox,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
             self.settings.sidebar_active_first,
@@ -4378,9 +4366,14 @@ impl Shell {
             self.settings.sidebar_show_project_filter,
             self.settings.sidebar_show_archived,
         ];
+        let inbox = organization == SidebarOrganization::Inbox;
         let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[selected[..4].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            if inbox {
+                labels[3].to_string()
+            } else {
+                labels[4 + selected[4..6].iter().position(|v| *v).unwrap_or(0)].to_string()
+            },
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
@@ -4486,6 +4479,7 @@ impl Shell {
                             format!("sidebar-view-row-{ix}"),
                         )
                         .id(("sidebar-view-row", ix))
+                        .when(inbox && row.sorts(), |el| el.opacity(0.45))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.activate_sidebar_view_row(row, cx);
                             cx.stop_propagation();
@@ -5121,15 +5115,7 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
-        let mut chats: Vec<_> = state.sidebar_chats(Utc::now(), filter.as_deref());
-        chats.sort_by(|left, right| {
-            compare_sidebar_rows(
-                self.settings.sidebar_sort,
-                self.settings.sidebar_active_first,
-                *left,
-                *right,
-            )
-        });
+        let chats = self.sorted_sidebar_chats(state, Utc::now(), filter.as_deref());
         let chats: Vec<zeron_proto::Chat> =
             chats.into_iter().map(|(_, chat)| chat.clone()).collect();
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
@@ -5360,7 +5346,75 @@ impl Shell {
             SidebarOrganization::ByProject if self.settings.space_filter.is_none() => {
                 Some(sidebar_project_group(state, chat).0)
             }
+            SidebarOrganization::Inbox => (state.display_status_for(chat, Utc::now())
+                == ChatIndicator::Working)
+                .then(|| "working".to_string()),
             SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
+        }
+    }
+
+    fn sorted_sidebar_chats<'a>(
+        &self,
+        state: &'a AppState,
+        now: DateTime<Utc>,
+        filter: Option<&str>,
+    ) -> Vec<(ChatIndicator, &'a zeron_proto::Chat)> {
+        let mut chats = state.sidebar_chats(now, filter);
+        if self.settings.sidebar_organization == SidebarOrganization::Inbox {
+            chats.sort_by_cached_key(|(status, chat)| {
+                inbox_rank(
+                    *status,
+                    chat,
+                    state
+                        .session_for(&chat.id)
+                        .and_then(|session| session.started_at),
+                    self.sidebar_inbox_marks.get(&chat.id).copied(),
+                )
+            });
+        } else {
+            chats.sort_by(|left, right| {
+                compare_sidebar_rows(
+                    self.settings.sidebar_sort,
+                    self.settings.sidebar_active_first,
+                    *left,
+                    *right,
+                )
+            });
+        }
+        chats
+    }
+
+    fn note_inbox_marks(&mut self, now: DateTime<Utc>, cx: &gpui::App) {
+        if self.settings.sidebar_organization != SidebarOrganization::Inbox {
+            return;
+        }
+        let state = self.state.read(cx);
+        for (status, chat) in state.overview_chats(now) {
+            let working = status == ChatIndicator::Working;
+            match self.sidebar_inbox_marks.entry(chat.id.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(InboxMark {
+                        working,
+                        since: None,
+                    });
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry)
+                    if entry.get().working != working =>
+                {
+                    let since = if working {
+                        now
+                    } else {
+                        state
+                            .session_for(&chat.id)
+                            .map_or(now, |session| session.updated_at.min(now))
+                    };
+                    entry.insert(InboxMark {
+                        working,
+                        since: Some(since),
+                    });
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
         }
     }
 
@@ -5370,6 +5424,7 @@ impl Shell {
             SidebarOrganization::ByDevice => "device",
             SidebarOrganization::ByProject => "project",
             SidebarOrganization::InOneList => "list",
+            SidebarOrganization::Inbox => "inbox",
         };
         format!("{organization}:{group}")
     }
@@ -5517,8 +5572,16 @@ impl Shell {
             SidebarOrganization::ByProject if self.settings.space_filter.is_none() => {
                 Some(sidebar_project_group(state, &chat))
             }
+            SidebarOrganization::Inbox => (status == ChatIndicator::Working)
+                .then(|| ("working".to_string(), "Working".to_string())),
             SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
         };
+        let created_by = chat.created_by_chat_id.as_deref().and_then(|creator| {
+            let creator = state.chats.iter().find(|row| row.id == creator)?;
+            Some(transcript::single_line(
+                creator.title.as_deref().unwrap_or("New session"),
+            ))
+        });
         ActiveChatRow {
             status,
             chat: chat.clone(),
@@ -5526,6 +5589,7 @@ impl Shell {
             branch,
             change_request,
             group,
+            created_by,
         }
     }
 
@@ -5538,6 +5602,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
         let now = Utc::now();
+        self.note_inbox_marks(now, cx);
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -5550,22 +5615,9 @@ impl Shell {
             .map(|drag| drag.visible_ids.clone());
         let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
-            let mut chats: Vec<_> = state
-                .sidebar_chats(now, filter.as_deref())
+            self.sorted_sidebar_chats(state, now, filter.as_deref())
                 .into_iter()
-                .map(|(status, chat)| (status, chat.clone()))
-                .collect();
-            chats.sort_by(|left, right| {
-                compare_sidebar_rows(
-                    self.settings.sidebar_sort,
-                    self.settings.sidebar_active_first,
-                    (left.0, &left.1),
-                    (right.0, &right.1),
-                )
-            });
-            chats
-                .into_iter()
-                .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
+                .map(|(status, chat)| self.sidebar_chat_data(status, chat.clone(), state))
                 .collect()
         };
         let pinned_order = frozen_pinned
@@ -5594,11 +5646,9 @@ impl Shell {
         self.sidebar_pinned_heights = pinned_rows
             .iter()
             .map(|row| {
-                sidebar_row_height(
+                row.height(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
-                    row.branch.is_some(),
-                    row.change_request.is_some(),
                 )
             })
             .collect();
@@ -5688,11 +5738,9 @@ impl Shell {
                         .map_or_else(|| "regular".into(), |(key, _)| format!("regular:{key}"))
                 };
                 drag.source_index = index;
-                drag.row_height = sidebar_row_height(
+                drag.row_height = rows[index].height(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
-                    rows[index].branch.is_some(),
-                    rows[index].change_request.is_some(),
                 );
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
@@ -5801,14 +5849,12 @@ impl Shell {
             let header_icon_chat = (project_group && self.settings.sidebar_show_project_icon)
                 .then(|| rows.first().map(|row| row.chat.id.clone()))
                 .flatten();
-            // Pins keep the user's explicit order; only regular groups nest.
-            let rows = if pinned_group {
-                rows.into_iter().map(|row| (row, false)).collect()
-            } else {
-                nest_linked_chats(rows, |row| &row.chat)
-            };
             let mut rendered_rows = Vec::with_capacity(rows.len());
-            for (group_index, (row, nested)) in rows.into_iter().enumerate() {
+            for (group_index, row) in rows.into_iter().enumerate() {
+                let height = row.height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
+                );
                 let ActiveChatRow {
                     status,
                     chat,
@@ -5816,6 +5862,7 @@ impl Shell {
                     branch,
                     change_request,
                     group: _,
+                    created_by,
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
@@ -5826,12 +5873,6 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| crate::pickers::chat_harness_marks(&chat))
                     .unwrap_or_default();
-                let height = sidebar_row_height(
-                    self.settings.sidebar_compact,
-                    self.settings.sidebar_show_project_label,
-                    branch.is_some(),
-                    change_request.is_some(),
-                );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -5849,17 +5890,6 @@ impl Shell {
                     profile_key: profile_key.clone().unwrap_or_default(),
                 });
                 slot += 1;
-                let created_by: Option<SharedString> = chat
-                    .created_by_chat_id
-                    .as_deref()
-                    .and_then(|creator| {
-                        let state = self.state.read(cx);
-                        let creator = state.chats.iter().find(|row| row.id == creator)?;
-                        Some(transcript::single_line(
-                            creator.title.as_deref().unwrap_or("New session"),
-                        ))
-                    })
-                    .map(SharedString::from);
                 let origin = self
                     .sidebar_session_transfer
                     .as_ref()
@@ -5894,7 +5924,7 @@ impl Shell {
                     branch.map(SharedString::from),
                     change_request,
                     harness,
-                    created_by,
+                    created_by.map(SharedString::from),
                     status,
                     is_selected,
                     split_side,
@@ -5907,28 +5937,6 @@ impl Shell {
                     theme,
                     cx,
                 );
-                // Nesting is a left inset plus the ↳ mark — the row itself is
-                // an ordinary chat row and opens like one.
-                let element = if nested {
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(12.0))
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from("↳")),
-                        )
-                        .child(div().flex_1().min_w_0().child(element))
-                        .into_any_element()
-                } else {
-                    element
-                };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
                 let element = if let Some(origin) = origin {
@@ -6040,6 +6048,15 @@ impl Shell {
                     .sum::<f32>()
                 + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
             self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
+            let kept_row = (collapsed && collapse_key == "inbox:working")
+                .then(|| {
+                    let selected = format!("c:{}", selected.as_deref()?);
+                    let index = rendered_rows
+                        .iter()
+                        .position(|(key, _, _)| *key == selected)?;
+                    Some(rendered_rows.remove(index))
+                })
+                .flatten();
             let body = div()
                 .w_full()
                 .flex()
@@ -6141,14 +6158,20 @@ impl Shell {
                 body_height,
                 body.into_any_element(),
             );
-            let height =
-                SIDEBAR_DISCLOSURE_SECTION_HEIGHT + if collapsed { 0.0 } else { body_height };
+            let height = SIDEBAR_DISCLOSURE_SECTION_HEIGHT
+                + kept_row
+                    .as_ref()
+                    .map_or(0.0, |(_, height, _)| SIDEBAR_DISCLOSURE_BODY_INSET + height)
+                + if collapsed { 0.0 } else { body_height };
             let element = div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .pt(px(SIDEBAR_SECTION_GAP))
                 .child(header)
+                .when_some(kept_row, |el, (_, _, row)| {
+                    el.child(div().pt(px(SIDEBAR_DISCLOSURE_BODY_INSET)).child(row))
+                })
                 .child(body)
                 .into_any_element();
             rendered.push((format!("g:{collapse_key}"), height, element));
@@ -8179,8 +8202,8 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
 
     use super::{
-        ChatIndicator, compare_sidebar_chats, compare_sidebar_rows, grouped_visible_order,
-        nest_linked_chats, promote_local_device_group,
+        ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
+        grouped_visible_order, inbox_rank, promote_local_device_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -8324,40 +8347,23 @@ mod tests {
     }
 
     #[test]
-    fn sidechats_render_under_their_source_and_orphans_stay_flat() {
+    fn linked_chats_keep_their_own_sort_position() {
+        let created_by = |id: &str, creator: &str| {
+            let mut chat = chat(id);
+            chat.created_by_chat_id = Some(creator.into());
+            chat
+        };
         let sidechat_of = |id: &str, source: &str| {
             let mut chat = chat(id);
             chat.sidechat_source_chat_id = Some(source.into());
             chat
         };
-        let rows = vec![
-            sidechat_of("s2", "src"),
-            chat("other"),
-            sidechat_of("s1", "src"),
-            chat("src"),
-            sidechat_of("orphan", "gone"),
+        let chats = vec![
+            created_by("child", "parent"),
+            chat("x"),
+            sidechat_of("side", "x"),
+            chat("parent"),
         ];
-
-        let nested = nest_linked_chats(rows, |chat| chat);
-        let order: Vec<(&str, bool)> = nested
-            .iter()
-            .map(|(chat, nested)| (chat.id.as_str(), *nested))
-            .collect();
-        // Both sidechats follow their source, in their own list order; the
-        // one whose source is absent keeps its place, unindented.
-        assert_eq!(
-            order,
-            [
-                ("other", false),
-                ("src", false),
-                ("s2", true),
-                ("s1", true),
-                ("orphan", false),
-            ]
-        );
-
-        // The jump order the sidebar hands the shortcuts matches the screen.
-        let chats = vec![chat("src"), sidechat_of("s1", "src"), chat("other")];
         assert_eq!(
             grouped_visible_order(
                 chats,
@@ -8366,82 +8372,62 @@ mod tests {
                 None,
                 space_key
             ),
-            ["src", "s1", "other"]
+            ["child", "x", "side", "parent"]
         );
     }
 
     #[test]
-    fn agent_created_chats_lift_their_creator_and_orphans_stay_flat() {
-        let created_by = |id: &str, creator: &str| {
+    fn inbox_orders_returns_first_and_working_by_start() {
+        type Row = (
+            ChatIndicator,
+            zeron_proto::Chat,
+            Option<chrono::DateTime<Utc>>,
+            Option<InboxMark>,
+        );
+        fn ids(rows: &mut [Row]) -> Vec<String> {
+            rows.sort_by_key(|(status, chat, started, mark)| {
+                inbox_rank(*status, chat, *started, *mark)
+            });
+            rows.iter().map(|(_, chat, _, _)| chat.id.clone()).collect()
+        }
+        let at = |secs| Utc.timestamp_opt(secs, 0).unwrap();
+        let replied = |id: &str, secs| {
             let mut chat = chat(id);
-            chat.created_by_chat_id = Some(creator.into());
+            chat.last_message_at = Some(at(secs));
             chat
         };
-        // Attention order: an active created chat outranks everything, its
-        // quiet creator sits third.
-        let rows = vec![
-            created_by("c1", "p"),
-            chat("x"),
-            chat("p"),
-            created_by("c2", "p"),
-            created_by("orphan", "gone"),
-            chat("y"),
-        ];
-
-        let nested = nest_linked_chats(rows, |chat| chat);
-        let order: Vec<(&str, bool)> = nested
-            .iter()
-            .map(|(chat, nested)| (chat.id.as_str(), *nested))
-            .collect();
-        // The creator's group takes c1's slot; the created rows follow it in
-        // their own order; the orphan keeps its place, unindented.
-        assert_eq!(
-            order,
-            [
-                ("p", false),
-                ("c1", true),
-                ("c2", true),
-                ("x", false),
-                ("orphan", false),
-                ("y", false),
-            ]
-        );
-
-        // A sidechat never lifts its source: the source stays where the sort
-        // put it and the sidechat follows.
-        let sidechat_of = |id: &str, source: &str| {
-            let mut chat = chat(id);
-            chat.sidechat_source_chat_id = Some(source.into());
-            chat
+        let returned = InboxMark {
+            working: false,
+            since: Some(at(450)),
         };
-        let rows = vec![sidechat_of("s1", "p"), chat("x"), chat("p")];
-        let order: Vec<String> = nest_linked_chats(rows, |chat| chat)
-            .into_iter()
-            .map(|(chat, _)| chat.id)
-            .collect();
-        assert_eq!(order, ["x", "p", "s1"]);
-
-        // /sidechat inside a created chat still nests under that chat (the
-        // w10 behavior), and a link any deeper renders flat.
-        let rows = vec![
-            sidechat_of("s", "c"),
-            created_by("c", "p"),
-            chat("p"),
-            created_by("deep", "c"),
+        let mut rows = vec![
+            (
+                ChatIndicator::Working,
+                replied("a", 500),
+                Some(at(100)),
+                None,
+            ),
+            (
+                ChatIndicator::Working,
+                replied("b", 300),
+                Some(at(200)),
+                None,
+            ),
+            (ChatIndicator::Idle, replied("c", 400), None, None),
+            (
+                ChatIndicator::Errored,
+                replied("d", 50),
+                None,
+                Some(returned),
+            ),
         ];
-        let order: Vec<(String, bool)> = nest_linked_chats(rows, |chat| chat)
-            .into_iter()
-            .map(|(chat, nested)| (chat.id, nested))
-            .collect();
-        assert_eq!(
-            order,
-            [
-                ("p".to_string(), false),
-                ("c".to_string(), true),
-                ("s".to_string(), true),
-                ("deep".to_string(), false),
-            ]
-        );
+        assert_eq!(ids(&mut rows), ["d", "c", "b", "a"]);
+        rows.iter_mut()
+            .find(|row| row.1.id == "a")
+            .unwrap()
+            .1
+            .last_message_at = Some(at(900));
+        assert_eq!(ids(&mut rows), ["d", "c", "b", "a"]);
     }
 
     #[gpui::test]
