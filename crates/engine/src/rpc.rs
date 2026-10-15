@@ -142,6 +142,8 @@ struct CreateThreadParams {
     model: Option<String>,
     #[serde(default)]
     reasoning: Option<zeron_proto::ReasoningLevel>,
+    #[serde(flatten)]
+    profile: crate::doc_host::ProfileParams,
     #[serde(default)]
     space_id: Option<String>,
     #[serde(default)]
@@ -1293,15 +1295,17 @@ impl EngineRpc {
                     harness: reviewer.harness,
                     model: reviewer.model.clone(),
                     reasoning: reviewer.reasoning,
-                    permission_mode,
-                    model_options: profile
-                        .filter(|profile| !profile.model_options.is_empty())
-                        .map(|profile| profile.model_options.clone()),
-                    instructions: profile.map(|profile| profile.instructions.clone()),
-                    profile_id: profile.map(|profile| profile.id.clone()),
-                    disabled_tools: profile
-                        .map(|profile| profile.disabled_tools.clone())
-                        .unwrap_or_default(),
+                    profile: crate::doc_host::ProfileParams {
+                        permission_mode,
+                        model_options: profile
+                            .filter(|profile| !profile.model_options.is_empty())
+                            .map(|profile| profile.model_options.clone()),
+                        instructions: profile.map(|profile| profile.instructions.clone()),
+                        profile_id: profile.map(|profile| profile.id.clone()),
+                        disabled_tools: profile
+                            .map(|profile| profile.disabled_tools.clone())
+                            .unwrap_or_default(),
+                    },
                     wait: false,
                     wake: Some(p.wake.unwrap_or(zeron_proto::DelegationWake::Never)),
                     client_request_id: Some(request),
@@ -2975,6 +2979,7 @@ impl RpcService for EngineRpc {
                         p.harness,
                         p.model.as_deref(),
                         p.reasoning,
+                        &p.profile,
                         p.space_id.as_deref(),
                         p.cwd.as_deref(),
                     )

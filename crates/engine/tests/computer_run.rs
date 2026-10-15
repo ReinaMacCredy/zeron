@@ -517,7 +517,17 @@ async fn an_agent_delivered_slash_never_activates_while_settings_on_covers_every
     let peer = rig
         .core
         .doc_host
-        .create_thread(LEAD, "check the app", None, None, None, None, None, None)
+        .create_thread(
+            LEAD,
+            "check the app",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let created = rig.saw(2).await;

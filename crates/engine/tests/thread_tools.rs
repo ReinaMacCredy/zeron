@@ -273,6 +273,7 @@ async fn create_thread_opens_a_peer_whose_first_turn_is_a_message_from_its_creat
             None,
             None,
             None,
+            &Default::default(),
             None,
             None,
         )
@@ -356,6 +357,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             Some(HarnessId::Mock),
             Some(" rec-2 "),
             Some(ReasoningLevel::Low),
+            &Default::default(),
             None,
             None,
         )
@@ -374,7 +376,17 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let copied = rig
         .core
         .doc_host
-        .create_thread("picky", "task", None, None, None, None, None, None)
+        .create_thread(
+            "picky",
+            "task",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(config_of(&copied), Some(creators.clone()));
@@ -391,6 +403,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             Some(HarnessId::Codex),
             None,
             None,
+            &Default::default(),
             None,
             None,
         )
@@ -414,6 +427,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             Some(HarnessId::Codex),
             Some("gpt-5.6-luna"),
             None,
+            &Default::default(),
             None,
             None,
         )
@@ -429,13 +443,120 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let from_bare = rig
         .core
         .doc_host
-        .create_thread("lead", "task", None, None, Some("rec-3"), None, None, None)
+        .create_thread(
+            "lead",
+            "task",
+            None,
+            None,
+            Some("rec-3"),
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let config = config_of(&from_bare).expect("a config row");
     assert_eq!(config.harness, HarnessId::Mock);
     assert_eq!(config.model.as_deref(), Some("rec-3"));
     assert_eq!(config.reasoning, None);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_asked_for() {
+    let rig = rig(Duration::from_millis(1));
+    let options = |speed: &str| {
+        serde_json::json!({ "speed": speed })
+            .as_object()
+            .cloned()
+            .unwrap()
+    };
+    let creators = zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: Some("rec-1".into()),
+        reasoning: Some(ReasoningLevel::High),
+        model_options: options("fast"),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Auto,
+        instructions: "Coordinate only.".into(),
+        profile_id: Some("orchestrator".into()),
+        disabled_tools: vec!["mcp__xcode".into()],
+    };
+    rig.core
+        .workspace
+        .create_chat(
+            "orchestrating",
+            Some("space-tt"),
+            None,
+            Some(creators.clone()),
+            None,
+        )
+        .unwrap();
+    let config_of = |chat_id: &str| rig.core.workspace.chat(chat_id).unwrap().unwrap().config;
+    let create = |profile: zeron_engine::doc_host::ProfileParams| {
+        let core = &rig.core;
+        async move {
+            core.doc_host
+                .create_thread(
+                    "orchestrating",
+                    "task",
+                    None,
+                    None,
+                    None,
+                    None,
+                    &profile,
+                    None,
+                    None,
+                )
+                .await
+        }
+    };
+
+    let plain = create(Default::default()).await.unwrap();
+    assert_eq!(
+        config_of(&plain),
+        Some(zeron_proto::ChatConfig {
+            instructions: String::new(),
+            profile_id: None,
+            ..creators.clone()
+        }),
+        "run settings, mode, options and tool set carry over; the profile does not"
+    );
+
+    let reviewer = create(zeron_engine::doc_host::ProfileParams {
+        permission_mode: Some(zeron_proto::PermissionMode::Ask),
+        model_options: Some(options("slow")),
+        instructions: Some("Review only.".into()),
+        profile_id: Some("reviewer".into()),
+        disabled_tools: vec!["WebFetch".into()],
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        config_of(&reviewer),
+        Some(zeron_proto::ChatConfig {
+            model_options: options("slow"),
+            sandbox: zeron_proto::PermissionMode::Ask.sandbox(),
+            permission_mode: zeron_proto::PermissionMode::Ask,
+            instructions: "Review only.".into(),
+            profile_id: Some("reviewer".into()),
+            disabled_tools: vec!["mcp__xcode".into(), "WebFetch".into()],
+            ..creators.clone()
+        })
+    );
+
+    let wider = create(zeron_engine::doc_host::ProfileParams {
+        permission_mode: Some(zeron_proto::PermissionMode::Full),
+        profile_id: Some("builder".into()),
+        ..Default::default()
+    })
+    .await
+    .expect_err("a profile may not widen the creator's mode");
+    assert!(
+        wider.to_string().contains("permission_escalation_denied"),
+        "{wider}"
+    );
     rig.core.shutdown().await;
 }
 
@@ -464,6 +585,7 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
             None,
             None,
             None,
+            &Default::default(),
             Some("space-other"),
             None,
         )
@@ -486,6 +608,7 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
             None,
             None,
             None,
+            &Default::default(),
             None,
             nested.to_str(),
         )
@@ -504,7 +627,17 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
         let err = rig
             .core
             .doc_host
-            .create_thread("lead", "task", None, None, None, None, space, cwd)
+            .create_thread(
+                "lead",
+                "task",
+                None,
+                None,
+                None,
+                None,
+                &Default::default(),
+                space,
+                cwd,
+            )
             .await
             .expect_err(expected);
         assert!(err.to_string().contains(expected), "{err}");
@@ -578,7 +711,17 @@ async fn a_message_to_a_working_peer_steers_its_turn_when_the_agent_takes_mid_tu
     let peer = rig
         .core
         .doc_host
-        .create_thread("lead", "first task", None, None, None, None, None, None)
+        .create_thread(
+            "lead",
+            "first task",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     wait_for(
@@ -633,7 +776,17 @@ async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript
     let peer = rig
         .core
         .doc_host
-        .create_thread("lead", "first task", None, None, None, None, None, None)
+        .create_thread(
+            "lead",
+            "first task",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     wait_for(
@@ -793,6 +946,7 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
                 None,
                 None,
                 None,
+                &Default::default(),
                 None,
                 None,
             )
@@ -802,7 +956,17 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
     let err = rig
         .core
         .doc_host
-        .create_thread("lead", "one too many", None, None, None, None, None, None)
+        .create_thread(
+            "lead",
+            "one too many",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .expect_err("ninth");
     assert!(err.to_string().contains("8 open threads"), "{err}");
@@ -921,13 +1085,13 @@ async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
 async fn a_delegated_child_takes_the_model_options_it_was_given() {
     let rig = rig(Duration::from_millis(5));
     let mut params = delegate("try the fast tier");
-    params.model_options = Some(
+    params.profile.model_options = Some(
         serde_json::json!({ "speed": "fast" })
             .as_object()
             .cloned()
             .unwrap(),
     );
-    params.instructions = Some("Review only.".into());
+    params.profile.instructions = Some("Review only.".into());
     let view = rig
         .core
         .doc_host
@@ -963,8 +1127,8 @@ async fn a_delegated_child_names_its_own_profile_never_the_owners() {
         .unwrap();
     let child_profile = |task: &str, profile: Option<&str>| {
         let mut params = delegate(task);
-        params.profile_id = profile.map(str::to_string);
-        params.instructions = profile.map(|_| "Review only.".to_string());
+        params.profile.profile_id = profile.map(str::to_string);
+        params.profile.instructions = profile.map(|_| "Review only.".to_string());
         let core = &rig.core;
         async move {
             let view = core

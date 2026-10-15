@@ -126,7 +126,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model or reasoning level is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). Counts against this turn's send budget.",
+            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level, permission mode, model options and tool set, but never this chat's agent profile or its instructions. `profile` starts it on an agent profile from orchestrator_capabilities instead: that profile's harness, model, reasoning, model options, instructions and tool set (added to this chat's), and its permission mode when that is no higher than this chat's. `harness`, `model` or `reasoning` override this chat's or the profile's; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model, reasoning level or profile is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -134,6 +134,7 @@ fn thread_tool_list() -> Value {
                     "title": { "type": "string" },
                     "project": { "type": "string", "description": "Project id, path or name from list_projects; default: this chat's." },
                     "cwd": { "type": "string", "description": "Existing directory to run in; default: the project's folder." },
+                    "profile": { "type": "string", "description": "Agent profile id from orchestrator_capabilities; default: none." },
                     "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." },
                     "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
@@ -998,23 +999,14 @@ impl ThreadTools {
             Some(key) => Some(project_of(&self.projects(&caller).await?, key)?.id.clone()),
             None => None,
         };
-        self.check_model(&caller, args, "").await?;
+        let mut run = self.run_settings(&caller, args, args, "").await?;
         self.spend_send()?;
-        let created = self
-            .call_engine(
-                methods::CREATE_THREAD,
-                json!({
-                    "fromChatId": self.chat_id,
-                    "prompt": prompt,
-                    "title": args["title"].as_str(),
-                    "harness": args["harness"].as_str(),
-                    "model": args["model"].as_str(),
-                    "reasoning": args["reasoning"].as_str(),
-                    "spaceId": space_id,
-                    "cwd": args["cwd"].as_str(),
-                }),
-            )
-            .await?;
+        run["fromChatId"] = json!(self.chat_id);
+        run["prompt"] = json!(prompt);
+        run["title"] = json!(args["title"].as_str());
+        run["spaceId"] = json!(space_id);
+        run["cwd"] = json!(args["cwd"].as_str());
+        let created = self.call_engine(methods::CREATE_THREAD, run).await?;
         let thread_id = created["chatId"]
             .as_str()
             .ok_or("engine returned no chatId")?;
@@ -1247,56 +1239,22 @@ impl ThreadTools {
             Some(_) => return Err("mode must be async or wait".into()),
         };
         let (caller, _) = self.peers().await?;
-        let profile = match args["profile"].as_str().filter(|id| !id.trim().is_empty()) {
-            Some(id) => Some(self.agent_profile(id).await?),
-            None => None,
-        };
-        let target = &profile_target(profile.as_ref(), &args["target"]);
-        self.check_model(&caller, target, "model_unavailable: ")
+        let mut run = self
+            .run_settings(&caller, args, &args["target"], "model_unavailable: ")
             .await?;
-        let permission_mode = match args["permissionMode"]
+        if let Some(mode) = args["permissionMode"]
             .as_str()
             .filter(|mode| *mode != "inherit")
         {
-            Some(mode) => Some(json!(mode)),
-            None => profile
-                .as_ref()
-                .and_then(|profile| profile.permission_mode)
-                .filter(|mode| {
-                    let owner = caller
-                        .config
-                        .as_ref()
-                        .map_or(PermissionMode::Ask, |c| c.permission_mode);
-                    mode.rank() <= owner.rank()
-                })
-                .map(|mode| json!(mode)),
-        };
-        let model_options = profile
-            .as_ref()
-            .filter(|profile| target["harness"] == json!(profile.harness))
-            .filter(|profile| !profile.model_options.is_empty())
-            .map(|profile| profile.model_options.clone());
-        let mut view = self
-            .call_engine(
-                methods::DELEGATE_TASK,
-                json!({
-                    "ownerChatId": self.chat_id,
-                    "task": task,
-                    "title": args["title"].as_str(),
-                    "role": args["role"].as_str(),
-                    "harness": target["harness"].as_str(),
-                    "model": target["model"].as_str(),
-                    "reasoning": target["reasoning"].as_str(),
-                    "permissionMode": permission_mode,
-                    "modelOptions": model_options,
-                    "instructions": profile.as_ref().map(|profile| profile.instructions.clone()),
-                    "profileId": profile.as_ref().map(|profile| profile.id.clone()),
-                    "disabledTools": profile.as_ref().map(|profile| profile.disabled_tools.clone()).unwrap_or_default(),
-                    "wait": wait,
-                    "clientRequestId": args["clientRequestId"].as_str(),
-                }),
-            )
-            .await?;
+            run["permissionMode"] = json!(mode);
+        }
+        run["ownerChatId"] = json!(self.chat_id);
+        run["task"] = json!(task);
+        run["title"] = json!(args["title"].as_str());
+        run["role"] = json!(args["role"].as_str());
+        run["wait"] = json!(wait);
+        run["clientRequestId"] = json!(args["clientRequestId"].as_str());
+        let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
         if !wait {
             view["waitTimedOut"] = json!(false);
             return Ok(view);
@@ -1312,6 +1270,41 @@ impl ThreadTools {
                 .clamp(1, MAX_WAIT_SECS * 1000),
         );
         self.await_task(&task_id, timeout).await
+    }
+
+    async fn run_settings(
+        &self,
+        caller: &Chat,
+        args: &Value,
+        target: &Value,
+        prefix: &str,
+    ) -> Result<Value, String> {
+        let profile = match args["profile"].as_str().filter(|id| !id.trim().is_empty()) {
+            Some(id) => Some(self.agent_profile(id).await?),
+            None => None,
+        };
+        let target = profile_target(profile.as_ref(), target);
+        self.check_model(caller, &target, prefix).await?;
+        let caller_mode = caller
+            .config
+            .as_ref()
+            .map_or(PermissionMode::Ask, |c| c.permission_mode);
+        let profile = profile.as_ref();
+        Ok(json!({
+            "harness": target["harness"].as_str(),
+            "model": target["model"].as_str(),
+            "reasoning": target["reasoning"].as_str(),
+            "permissionMode": profile
+                .and_then(|profile| profile.permission_mode)
+                .filter(|mode| mode.rank() <= caller_mode.rank()),
+            "modelOptions": profile
+                .filter(|profile| target["harness"] == json!(profile.harness))
+                .filter(|profile| !profile.model_options.is_empty())
+                .map(|profile| profile.model_options.clone()),
+            "instructions": profile.map(|profile| profile.instructions.clone()),
+            "profileId": profile.map(|profile| profile.id.clone()),
+            "disabledTools": profile.map(|profile| profile.disabled_tools.clone()).unwrap_or_default(),
+        }))
     }
 
     async fn await_task(&self, task_id: &str, timeout: Duration) -> Result<Value, String> {
@@ -5401,6 +5394,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn create_thread_starts_on_no_profile_unless_one_is_named() {
+        let rig = rig(fixture());
+        for args in [
+            json!({ "prompt": "go" }),
+            json!({ "prompt": "go", "profile": "reviewer" }),
+            json!({ "prompt": "go", "profile": "reviewer", "model": "gpt-5" }),
+            json!({ "prompt": "go", "profile": "builder" }),
+        ] {
+            rig.tools.create_thread(&args).await.unwrap();
+        }
+        let sent = logged(&rig.calls, methods::CREATE_THREAD);
+        assert_eq!(sent[0]["profileId"], Value::Null);
+        assert_eq!(sent[0]["instructions"], Value::Null);
+        assert_eq!(sent[0]["harness"], Value::Null);
+        assert_eq!(sent[0]["disabledTools"], json!([]));
+        assert_eq!(sent[1]["profileId"], "reviewer");
+        assert_eq!(sent[1]["instructions"], "Never edit files.");
+        assert_eq!(sent[1]["harness"], "codex");
+        assert_eq!(sent[1]["model"], "gpt-5.6-luna");
+        assert_eq!(sent[1]["reasoning"], "high");
+        assert_eq!(sent[1]["permissionMode"], "ask");
+        assert_eq!(sent[1]["modelOptions"], json!({ "speed": "fast" }));
+        assert_eq!(sent[1]["prompt"], "go");
+        assert_eq!(sent[2]["model"], "gpt-5");
+        assert_eq!(
+            sent[3]["permissionMode"],
+            Value::Null,
+            "a profile never widens the caller's mode"
+        );
+
+        let err = rig
+            .tools
+            .create_thread(&json!({ "prompt": "go", "profile": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("profile_unavailable"), "{err}");
+        assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 4);
     }
 
     #[tokio::test]

@@ -47,7 +47,7 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 #[path = "doc_host_delegation.rs"]
 mod delegation;
-pub use delegation::{DELEGATION_GUIDANCE, DelegateTaskParams, TaskView};
+pub use delegation::{DELEGATION_GUIDANCE, DelegateTaskParams, ProfileParams, TaskView};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
@@ -3798,8 +3798,9 @@ impl DocHost {
     }
 
     /// Thread tools: open a peer chat in the creator's project (its cwd and
-    /// run configuration, with any of harness/model/reasoning overridden if
-    /// asked) or in another project on the creator's device
+    /// run configuration without its profile, with any of
+    /// harness/model/reasoning overridden and `profile` applied if asked) or
+    /// in another project on the creator's device
     /// (that project's folder), stamped `createdByChatId`, and hand it
     /// `prompt` as a message from the creator. `cwd` overrides the folder
     /// with an existing directory.
@@ -3812,6 +3813,7 @@ impl DocHost {
         harness: Option<zeron_proto::HarnessId>,
         model: Option<&str>,
         reasoning: Option<zeron_proto::ReasoningLevel>,
+        profile: &ProfileParams,
         space_id: Option<&str>,
         cwd: Option<&str>,
     ) -> Result<String, EngineError> {
@@ -3849,7 +3851,7 @@ impl DocHost {
                 "this thread already has {live} open threads it created; archive one first"
             )));
         }
-        let config = self.derived_config(&from, harness, model, reasoning);
+        let config = self.derived_config(&from, harness, model, reasoning, profile)?;
         let chat_id = new_id();
         let (space_id, cwd) = match (space_id, cwd) {
             (_, Some(cwd)) => (space_id.or(from.space_id.as_deref()), Some(cwd.to_string())),

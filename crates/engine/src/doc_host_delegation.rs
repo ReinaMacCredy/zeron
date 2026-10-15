@@ -45,6 +45,19 @@ pub struct DelegateTaskParams {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning: Option<ReasoningLevel>,
+    #[serde(flatten)]
+    pub profile: ProfileParams,
+    #[serde(default)]
+    pub wait: bool,
+    #[serde(default)]
+    pub wake: Option<DelegationWake>,
+    #[serde(default)]
+    pub client_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileParams {
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
     #[serde(default)]
@@ -55,12 +68,6 @@ pub struct DelegateTaskParams {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub disabled_tools: Vec<String>,
-    #[serde(default)]
-    pub wait: bool,
-    #[serde(default)]
-    pub wake: Option<DelegationWake>,
-    #[serde(default)]
-    pub client_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -268,7 +275,8 @@ impl DocHost {
         harness: Option<HarnessId>,
         model: Option<&str>,
         reasoning: Option<ReasoningLevel>,
-    ) -> Option<ChatConfig> {
+        profile: &ProfileParams,
+    ) -> Result<Option<ChatConfig>, EngineError> {
         let mut config = from.config.clone();
         let model = model.map(str::trim).filter(|model| !model.is_empty());
         if harness.is_some() || model.is_some() || reasoning.is_some() {
@@ -289,7 +297,51 @@ impl DocHost {
                 config.reasoning = Some(reasoning);
             }
         }
-        config
+        match profile
+            .instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => {
+                config
+                    .get_or_insert_with(|| self.default_chat_config())
+                    .instructions = text.to_string();
+            }
+            None => {
+                if let Some(config) = config.as_mut() {
+                    config.instructions.clear();
+                }
+            }
+        }
+        if let Some(config) = config.as_mut() {
+            config.profile_id = profile.profile_id.clone();
+        }
+        if !profile.disabled_tools.is_empty() {
+            let config = config.get_or_insert_with(|| self.default_chat_config());
+            for name in &profile.disabled_tools {
+                if !config.disabled_tools.contains(name) {
+                    config.disabled_tools.push(name.clone());
+                }
+            }
+        }
+        if let Some(options) = &profile.model_options {
+            config
+                .get_or_insert_with(|| self.default_chat_config())
+                .model_options = options.clone();
+        }
+        if let Some(mode) = profile.permission_mode {
+            let config = config.get_or_insert_with(|| self.default_chat_config());
+            if mode.rank() > config.permission_mode.rank() {
+                return Err(failure(
+                    "permission_escalation_denied",
+                    "a new chat may only narrow this chat's permission mode",
+                ));
+            }
+            config.permission_mode = mode;
+            config.sandbox = mode.sandbox();
+        }
+        Ok(config)
     }
 
     fn workspace_or_fail(&self) -> Result<&WorkspaceHost, EngineError> {
@@ -380,56 +432,13 @@ impl DocHost {
                 ),
             ));
         }
-        let mut config = self.derived_config(
+        let config = self.derived_config(
             &owner,
             params.harness,
             params.model.as_deref(),
             params.reasoning,
-        );
-        match params
-            .instructions
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-        {
-            Some(text) => {
-                config
-                    .get_or_insert_with(|| self.default_chat_config())
-                    .instructions = text.to_string();
-            }
-            None => {
-                if let Some(config) = config.as_mut() {
-                    config.instructions.clear();
-                }
-            }
-        }
-        if let Some(config) = config.as_mut() {
-            config.profile_id = params.profile_id.clone();
-        }
-        if !params.disabled_tools.is_empty() {
-            let config = config.get_or_insert_with(|| self.default_chat_config());
-            for name in &params.disabled_tools {
-                if !config.disabled_tools.contains(name) {
-                    config.disabled_tools.push(name.clone());
-                }
-            }
-        }
-        if let Some(options) = &params.model_options {
-            config
-                .get_or_insert_with(|| self.default_chat_config())
-                .model_options = options.clone();
-        }
-        if let Some(mode) = params.permission_mode {
-            let config = config.get_or_insert_with(|| self.default_chat_config());
-            if mode.rank() > config.permission_mode.rank() {
-                return Err(failure(
-                    "permission_escalation_denied",
-                    "a delegated task may only narrow this chat's permission mode",
-                ));
-            }
-            config.permission_mode = mode;
-            config.sandbox = mode.sandbox();
-        }
+            &params.profile,
+        )?;
         let chat_id = new_id();
         let anchor = new_id();
         let delegation = Delegation {
