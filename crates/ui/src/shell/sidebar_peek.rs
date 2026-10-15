@@ -261,15 +261,7 @@ impl Shell {
             .w(px(self.sidebar_content_width()))
             .h_full()
             .flex_none();
-        // A reused cached frame drops its accessibility nodes, so an AT client's
-        // element refs into the sidebar die on every unrelated repaint.
-        let inner = if window.is_a11y_active() {
-            let mut wrapper = div();
-            wrapper.style().refine(&style);
-            wrapper.child(self.sidebar_pane.clone()).into_any_element()
-        } else {
-            self.sidebar_pane.clone().cached(style).into_any_element()
-        };
+        let inner = super::cached_unless_a11y(self.sidebar_pane.clone(), style, window);
         div()
             .id("sidebar-content")
             .track_focus(&self.sidebar_peek_focus)

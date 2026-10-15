@@ -2192,13 +2192,30 @@ struct SidebarPane {
     _observation: Subscription,
 }
 
+// A reused cached frame drops its accessibility nodes, so an AT client's
+// element refs into the view die on every unrelated repaint.
+fn cached_unless_a11y<V: Render>(
+    view: Entity<V>,
+    style: gpui::StyleRefinement,
+    window: &Window,
+) -> AnyElement {
+    if window.is_a11y_active() {
+        let mut wrapper = div();
+        wrapper.style().refine(&style);
+        wrapper.child(view).into_any_element()
+    } else {
+        view.cached(style).into_any_element()
+    }
+}
+
 impl Render for SidebarPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::transcript::record_view_frame("sidebar");
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
         let inner = shell.update(cx, |shell, cx| {
+            shell.sidebar_windowing = !window.is_a11y_active();
             let theme = Theme::of(cx).clone();
             shell.render_chat_sidebar(&theme, cx)
         });
@@ -2526,6 +2543,10 @@ pub struct Shell {
     chat_hover_resync: bool,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
+    sidebar_row_tops:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, (usize, f32)>>>,
+    /// AT clients hold element refs into rows, so rows stay built while one reads.
+    sidebar_windowing: bool,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -3152,6 +3173,8 @@ impl Shell {
             chat_status_hover: None,
             chat_hover_resync: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_row_tops: Default::default(),
+            sidebar_windowing: false,
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -13678,7 +13701,11 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        .child(cached_unless_a11y(
+                            self.transcript.clone(),
+                            gpui::StyleRefinement::default().size_full(),
+                            window,
+                        )),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.

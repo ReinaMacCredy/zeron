@@ -465,6 +465,112 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn sidebar_builds_only_rows_near_the_viewport(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    shell.sidebar_windowing = true;
+                    div()
+                        .w(px(280.0))
+                        .h(px(300.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                let now = Utc::now();
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = (0..60)
+                        .map(|ix| {
+                            let mut chat = pin_test_chat(&format!("c{ix:02}"));
+                            chat.last_message_at = Some(now - chrono::Duration::minutes(ix));
+                            chat
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..2 {
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear();
+                });
+            }
+        };
+        draw(cx);
+        assert!(cx.debug_bounds("chat-c00").is_some());
+        assert!(cx.debug_bounds("chat-c59").is_none());
+        assert!(cx.debug_bounds("session-slot-c59").is_some());
+
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-c59").is_some());
+        assert!(cx.debug_bounds("chat-c00").is_none());
+
+        // A far row resorted to the top builds on its first frame, not after its stale top heals.
+        shell.update(cx, |shell, cx| {
+            shell
+                .sidebar_scroll
+                .set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-c58").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let chat = state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "c58")
+                    .unwrap();
+                chat.last_message_at = Some(Utc::now() + chrono::Duration::minutes(1));
+            });
+            cx.notify();
+        });
+        assert!(cx.debug_bounds("chat-c58").is_some());
+    }
+
+    #[gpui::test]
     fn active_first_glides_finished_threads_above_idle_ones(cx: &mut gpui::TestAppContext) {
         use super::*;
 
@@ -5703,6 +5809,19 @@ impl Shell {
         }
     }
 
+    fn sidebar_row_band(&self) -> Option<std::ops::Range<f32>> {
+        if !self.sidebar_windowing
+            || self.pinned_session_drag.is_some()
+            || self.sidebar_session_transfer.is_some()
+            || self.sidebar_session_return.is_some()
+        {
+            return None;
+        }
+        let height = f32::from(self.sidebar_scroll.bounds().size.height);
+        let top = -f32::from(self.sidebar_scroll.offset().y);
+        (height > 0.0).then(|| top - height..top + 2.0 * height)
+    }
+
     /// The sidebar's Sessions list: every session (idle included) of the
     /// filter space — or all spaces under "All" — attention-sorted. Rows are
     /// keyed for the FLIP resort glide.
@@ -5940,6 +6059,15 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         let mut moving_row = None;
+        let band = self.sidebar_row_band();
+        let row_tops = self.sidebar_row_tops.clone();
+        row_tops
+            .borrow_mut()
+            .retain(|id, _| active.contains(id.as_str()));
+        let renaming = self
+            .chat_rename
+            .as_ref()
+            .map(|rename| rename.chat_id.clone());
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -6031,46 +6159,87 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    change_request,
-                    harness,
-                    created_by.map(SharedString::from),
-                    status,
-                    is_selected,
-                    split_side,
-                    false,
-                    is_moving,
-                    if is_moving { None } else { drag },
-                    jump_label,
-                    self.settings.sidebar_show_project_icon && !project_group,
-                    slim,
-                    None,
-                    theme,
-                    cx,
-                );
-                // The source slot shrinks when its vacancy moves across sections.
-                // Its zero-height anchor still tracks the live activity position.
-                let element = if let Some(origin) = origin {
-                    moving_row = Some((element, height));
-                    div()
-                        .child(div().h(px(slot_height.max(0.0))))
-                        .on_children_prepainted(move |bounds, _, _| {
-                            if let Some(bounds) = bounds.first() {
-                                origin.set(bounds.origin);
-                            }
+                let windowed = band.as_ref().is_some_and(|band| {
+                    !is_selected
+                        && split_side.is_none()
+                        && renaming.as_deref() != Some(chat.id.as_str())
+                        && row_tops.borrow().get(&chat.id).is_some_and(|(at, top)| {
+                            *at == slot && (top + slot_height < band.start || *top > band.end)
                         })
-                        .into_any_element()
+                });
+                let element = if windowed {
+                    div().into_any_element()
                 } else {
-                    self.render_sidebar_gap_row(element, &chat.id, &drag_group, group_index)
+                    let element = self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(
+                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        )
+                        .into(),
+                        time_ago,
+                        folder.into(),
+                        branch.map(SharedString::from),
+                        change_request,
+                        harness,
+                        created_by.map(SharedString::from),
+                        status,
+                        is_selected,
+                        split_side,
+                        false,
+                        is_moving,
+                        if is_moving { None } else { drag },
+                        jump_label,
+                        self.settings.sidebar_show_project_icon && !project_group,
+                        slim,
+                        None,
+                        theme,
+                        cx,
+                    );
+                    // The source slot shrinks when its vacancy moves across sections.
+                    // Its zero-height anchor still tracks the live activity position.
+                    if let Some(origin) = origin {
+                        moving_row = Some((element, height));
+                        div()
+                            .child(div().h(px(slot_height.max(0.0))))
+                            .on_children_prepainted(move |bounds, _, _| {
+                                if let Some(bounds) = bounds.first() {
+                                    origin.set(bounds.origin);
+                                }
+                            })
+                            .into_any_element()
+                    } else {
+                        self.render_sidebar_gap_row(element, &chat.id, &drag_group, group_index)
+                    }
                 };
+                let row_top = self.sidebar_windowing.then(|| {
+                    let tops = row_tops.clone();
+                    let scroll = self.sidebar_scroll.clone();
+                    let id = chat.id.clone();
+                    let at = slot;
+                    gpui::canvas(
+                        move |bounds, window, _| {
+                            let viewport = scroll.bounds();
+                            tops.borrow_mut().insert(
+                                id,
+                                (
+                                    at,
+                                    f32::from(bounds.top() - viewport.top() - scroll.offset().y),
+                                ),
+                            );
+                            let margin = viewport.size.height / 2.0;
+                            // An emptied slot that drifted near the viewport builds next frame.
+                            if windowed
+                                && bounds.bottom() > viewport.top() - margin
+                                && bounds.top() < viewport.bottom() + margin
+                            {
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0()
+                });
                 // The hit region stays at the natural slot while its content slides;
                 // preview movement must not move its own insertion thresholds.
                 let target_group = drag_group.clone();
@@ -6084,6 +6253,7 @@ impl Shell {
                     .mb(px(slot_height.min(0.0)))
                     .flex_none()
                     .child(element)
+                    .children(row_top)
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if !event.bounds.contains(&event.event.position)

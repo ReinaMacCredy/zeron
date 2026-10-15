@@ -8,6 +8,7 @@
 //! extension since the rail shares the transcript's rows and `ListState`.
 
 use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
@@ -412,19 +413,19 @@ impl Transcript {
         if !self.rail_enabled() {
             return gpui::Empty.into_any_element();
         }
-        let (entries, echoes) = {
+        let ticks = {
             let state = self.state_entity().read(cx);
-            (state.transcript.clone(), state.pending_echoes().to_vec())
+            rail_ticks(&state.transcript, state.pending_echoes())
         };
-        let ticks = rail_ticks(&entries, &echoes);
         // Map each tick to its transcript row (user rows share the entry id).
+        let mut first_row: HashMap<&str, usize> = HashMap::new();
+        for (ix, row) in self.rows().iter().enumerate() {
+            first_row.entry(row.id.as_ref()).or_insert(ix);
+        }
         let pairs: Vec<(RailTick, usize)> = ticks
             .into_iter()
             .filter_map(|tick| {
-                let row = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.id.as_ref() == tick.message_id.as_str())?;
+                let row = *first_row.get(tick.message_id.as_str())?;
                 Some((tick, row))
             })
             .collect();

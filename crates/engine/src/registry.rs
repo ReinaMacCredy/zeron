@@ -495,6 +495,10 @@ impl HarnessRegistry {
         self.persist_prefs();
     }
 
+    pub fn ids(&self) -> Vec<HarnessId> {
+        self.order().clone()
+    }
+
     /// What this device offers: every harness whose CLI is FOUND, minus the
     /// user's explicit opt-outs. Enablement follows detection, so installing
     /// an agent is all it takes for it to appear in the composer.

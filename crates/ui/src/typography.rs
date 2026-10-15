@@ -1,10 +1,7 @@
 //! Device-local interface typography: bundled font registration, the persisted
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
 
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::{borrow::Cow, collections::BTreeMap};
 
 use gpui::{App, Global, Rems, SharedString, Window, px, rems};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -350,20 +347,36 @@ fn installed_families_with_latin_metrics() -> BTreeMap<String, bool> {
     families
 }
 
-/// Register each family independently so one bad optional asset cannot hide
-/// the rest of the catalog.
-pub fn register_fonts(cx: &App) -> FontAvailability {
+pub struct InstalledFonts(BTreeMap<String, bool>);
+
+pub fn scan_installed_fonts(text_system: &gpui::TextSystem) -> InstalledFonts {
     // Capture device fonts before adding ours so the Installed section only
     // contains families supplied by the OS/user, not our embedded assets.
-    let families_with_latin_metrics = installed_families_with_latin_metrics();
-    let system_names: BTreeSet<_> = cx
-        .text_system()
-        .all_font_names()
-        .into_iter()
-        .filter(|name| !name.starts_with('.'))
-        .filter(|name| name != "Geist" && name != "Geist Mono")
-        .filter(|name| families_with_latin_metrics.contains_key(name))
-        .collect();
+    let (families_with_latin_metrics, names) = std::thread::scope(|scope| {
+        let families = scope.spawn(installed_families_with_latin_metrics);
+        let names = text_system.all_font_names();
+        (families.join().unwrap(), names)
+    });
+    InstalledFonts(
+        names
+            .into_iter()
+            .filter(|name| !name.starts_with('.'))
+            .filter(|name| name != "Geist" && name != "Geist Mono")
+            .filter_map(|name| {
+                let fixed_width = *families_with_latin_metrics.get(&name)?;
+                Some((name, fixed_width))
+            })
+            .collect(),
+    )
+}
+
+pub fn register_fonts(cx: &App) -> FontAvailability {
+    register_scanned_fonts(scan_installed_fonts(cx.text_system()), cx)
+}
+
+/// Register each family independently so one bad optional asset cannot hide
+/// the rest of the catalog.
+pub fn register_scanned_fonts(installed: InstalledFonts, cx: &App) -> FontAvailability {
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
     let mut choices = vec![
@@ -372,8 +385,8 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
         UiFontFamily::System,
     ];
     let mut fixed_width = vec![UiFontFamily::GeistMono];
-    for name in system_names {
-        if families_with_latin_metrics.get(&name) == Some(&true) {
+    for (name, is_fixed_width) in installed.0 {
+        if is_fixed_width {
             fixed_width.push(UiFontFamily::Installed(name.clone()));
         }
         choices.push(UiFontFamily::Installed(name));

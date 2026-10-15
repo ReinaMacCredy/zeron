@@ -1182,33 +1182,36 @@ pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    for spec in [grok_spec()] {
-        let Some(pkg) = spec.npm_package else {
-            continue;
-        };
-        let pin = crate::adapter_install::NpmPin::parse(pkg);
-        if find_on_paths(spec.executable, (spec.extra_paths)()).is_some()
-            || crate::adapter_install::installed_entry(&pin, spec.executable).is_some()
-            || find_on_paths(spec.cli_executable, (spec.cli_extra_paths)()).is_none()
-            || crate::adapter_install::find_npm().is_none()
-        {
-            continue;
-        }
-        let (bin_name, display_name) = (spec.executable, spec.display_name);
-        handle.spawn(async move {
-            match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
-                Ok(entry) => tracing::info!(
-                    target: "zeron_harness::adapter_install",
-                    adapter = %entry.display(),
-                    "prewarmed {display_name} ACP adapter"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "zeron_harness::adapter_install",
-                    "prewarm of the {display_name} ACP adapter failed: {e}"
-                ),
+    // The PATH probes wait on the login-shell snapshot; engine boot must not.
+    handle.clone().spawn_blocking(move || {
+        for spec in [grok_spec()] {
+            let Some(pkg) = spec.npm_package else {
+                continue;
+            };
+            let pin = crate::adapter_install::NpmPin::parse(pkg);
+            if find_on_paths(spec.executable, (spec.extra_paths)()).is_some()
+                || crate::adapter_install::installed_entry(&pin, spec.executable).is_some()
+                || find_on_paths(spec.cli_executable, (spec.cli_extra_paths)()).is_none()
+                || crate::adapter_install::find_npm().is_none()
+            {
+                continue;
             }
-        });
-    }
+            let (bin_name, display_name) = (spec.executable, spec.display_name);
+            handle.spawn(async move {
+                match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
+                    Ok(entry) => tracing::info!(
+                        target: "zeron_harness::adapter_install",
+                        adapter = %entry.display(),
+                        "prewarmed {display_name} ACP adapter"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "zeron_harness::adapter_install",
+                        "prewarm of the {display_name} ACP adapter failed: {e}"
+                    ),
+                }
+            });
+        }
+    });
 }
 
 /// A resolved launch: a concrete program, or a managed npm adapter that may
