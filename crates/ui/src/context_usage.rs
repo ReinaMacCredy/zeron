@@ -101,17 +101,10 @@ pub(crate) fn with_chat_budget(
     usage: ContextUsage,
     config: Option<&zeron_proto::ChatConfig>,
 ) -> ContextUsage {
-    use zeron_harness::claude::catalog;
-    let Some(config) = config.filter(|c| c.harness == zeron_proto::HarnessId::ClaudeCode) else {
-        return usage;
-    };
-    let pick = |id: &str| config.model_options.get(id).and_then(|v| v.as_str());
-    let window = pick("contextWindow").and_then(catalog::context_window_tokens);
-    let compact = pick("autoCompact")
-        .and_then(catalog::auto_compact_tokens)
-        .filter(|_| window != Some(200_000));
     ContextUsage {
-        window: compact.or(window).or(usage.window),
+        window: config
+            .and_then(zeron_harness::claude::catalog::chat_budget)
+            .or(usage.window),
         ..usage
     }
 }

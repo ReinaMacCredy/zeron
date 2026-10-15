@@ -1280,6 +1280,7 @@ mod drag_regressions {
                     started_at: None,
                     updated_at: chrono::Utc::now(),
                     running_subagents: 0,
+                    compact_plan: None,
                 });
             });
             std::mem::forget(dir);

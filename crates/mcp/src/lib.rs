@@ -79,12 +79,33 @@ const REASONING_LEVELS: [&str; 9] = [
 /// The tool catalog as `tools/list` reports it.
 pub fn tool_list() -> Value {
     let mut tools = thread_tool_list();
-    if let Some(list) = tools.as_array_mut()
-        && let Some(at) = list.iter().position(|tool| tool["name"] == "html_render")
-    {
-        list.insert(at + 1, visual::tool());
+    if let Some(list) = tools.as_array_mut() {
+        for (after, tool) in [
+            ("html_render", visual::tool()),
+            ("context_settings", compact_tool()),
+        ] {
+            if let Some(at) = list.iter().position(|tool| tool["name"] == after) {
+                list.insert(at + 1, tool);
+            }
+        }
     }
     tools
+}
+
+fn compact_tool() -> Value {
+    json!({
+        "name": "compact",
+        "description": "Compact this chat's own context: the conversation so far is replaced by a summary, so later turns are cheaper and the context window has room again. Use it at a natural boundary (a slice done and verified, before the next phase), not in the middle of an edit. It cannot run under the turn that asks for it: it is queued and runs once this turn ends and no sub-agents or background shells are running, so finish your reply after calling it. `focus` tells the summary what to keep: the plan, files being changed, open failures, decisions. `continueWith` is sent to you as your next message once the compaction is done, so the work goes on without the person; leave it out to stop and wait for them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "focus": { "type": "string", "maxLength": 4000, "description": "What the summary must keep." },
+                "continueWith": { "type": "string", "maxLength": 4000, "description": "Your next message after the compaction, such as \"Continue with slice 3\"." }
+            },
+            "additionalProperties": false
+        },
+        "annotations": { "title": "Compact context", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+    })
 }
 
 fn thread_tool_list() -> Value {
@@ -646,6 +667,7 @@ impl ThreadTools {
             "project_actions" => self.project_actions(args).await,
             "agent_profiles" => self.manage_agent_profiles(args).await,
             "context_settings" => self.context_settings(args).await,
+            "compact" => self.compact(args).await,
             "html_render" => self.html_render(args).await,
             visual::TOOL => self.show_visual(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
@@ -1917,6 +1939,23 @@ impl ThreadTools {
         }
     }
 
+    pub async fn compact(&self, args: &Value) -> Result<Value, String> {
+        self.call_engine(
+            methods::REQUEST_COMPACT,
+            json!({
+                "chatId": self.chat_id,
+                "focus": args["focus"].as_str(),
+                "continueWith": args["continueWith"].as_str(),
+            }),
+        )
+        .await?;
+        Ok(json!({
+            "queued": true,
+            "runs": "when this turn ends",
+            "continueWith": args["continueWith"].as_str().is_some_and(|text| !text.trim().is_empty()),
+        }))
+    }
+
     async fn check_options(&self, draft: &AgentProfileDraft, sent: &Value) -> Result<(), String> {
         let sent: Vec<&String> = sent
             .as_object()
@@ -2760,7 +2799,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 30] = [
+    const THREAD_TOOLS: [&str; 31] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2776,6 +2815,7 @@ mod tests {
         "project_actions",
         "agent_profiles",
         "context_settings",
+        "compact",
         "html_preview",
         "html_render",
         "show_visual",

@@ -61,9 +61,9 @@ pub mod methods {
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
-    /// `IdleCompactionSettings` → `IdleCompactionSettings`.
-    pub const GET_IDLE_COMPACTION_SETTINGS: &str = "GetIdleCompactionSettings";
-    pub const SET_IDLE_COMPACTION_SETTINGS: &str = "SetIdleCompactionSettings";
+    /// `CompactionSettings` → `CompactionSettings`.
+    pub const GET_COMPACTION_SETTINGS: &str = "GetCompactionSettings";
+    pub const SET_COMPACTION_SETTINGS: &str = "SetCompactionSettings";
     pub const GET_REVIEW_SETTINGS: &str = "GetReviewSettings";
     pub const SET_REVIEW_SETTINGS: &str = "SetReviewSettings";
     pub const START_REVIEW: &str = "StartReview";
@@ -80,6 +80,7 @@ pub mod methods {
     /// Compact a chat's context in place. Returns once the harness is done —
     /// there is no live transcript to watch it through.
     pub const COMPACT_CHAT: &str = "CompactChat";
+    pub const REQUEST_COMPACT: &str = "RequestCompact";
     /// Stop one live background task (a shell, or a subagent by its spawn
     /// tool id) of `chatId`'s running harness: `{chatId, taskId}`.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";

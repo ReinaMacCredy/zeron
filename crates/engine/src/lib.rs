@@ -18,6 +18,7 @@ use zeron_sync::DocsStore;
 pub mod agent_accounts;
 pub mod agent_profiles;
 pub mod auth;
+mod auto_compact;
 mod background_output;
 mod change_request_store;
 pub mod change_requests;
@@ -34,7 +35,6 @@ mod home_widgets;
 mod html_render;
 pub(crate) mod home_index;
 mod http_error;
-mod idle_compact;
 pub mod instance_lock;
 pub mod local_import;
 mod model_catalogs;
@@ -305,7 +305,7 @@ impl EngineCore {
                 send_continuation(&host, &continuation).await;
             }
         });
-        idle_compact::spawn(sessions.clone(), registry.clone());
+        auto_compact::spawn(sessions.clone(), registry.clone(), doc_host.clone());
         doc_host.settle_delegations_after_boot();
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);

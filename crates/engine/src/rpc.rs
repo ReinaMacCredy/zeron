@@ -122,6 +122,16 @@ struct CompactChatParams {
     focus: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestCompactParams {
+    chat_id: String,
+    #[serde(default)]
+    focus: Option<String>,
+    #[serde(default)]
+    continue_with: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateSidechatParams {
@@ -2256,8 +2266,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PREDICTION_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
-            | methods::GET_IDLE_COMPACTION_SETTINGS
-            | methods::SET_IDLE_COMPACTION_SETTINGS
+            | methods::GET_COMPACTION_SETTINGS
+            | methods::SET_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
             | methods::SET_REVIEW_SETTINGS
             | methods::START_REVIEW
@@ -2270,6 +2280,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_HARNESS_TOOLS
             | methods::HARNESS_COMPACTION
             | methods::COMPACT_CHAT
+            | methods::REQUEST_COMPACT
             | methods::STOP_BACKGROUND_TASK
             | methods::WATCH_BACKGROUND_OUTPUT
             | methods::WATCH_TOKEN_RATE
@@ -2759,13 +2770,15 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.delegation_settings())
             }
-            methods::GET_IDLE_COMPACTION_SETTINGS => {
-                RpcReply::value(&self.registry.idle_compaction_settings())
+            methods::GET_COMPACTION_SETTINGS => {
+                RpcReply::value(&self.registry.compaction_settings())
             }
-            methods::SET_IDLE_COMPACTION_SETTINGS => {
-                let p: crate::registry::IdleCompactionSettings = parse_params(params)?;
-                self.registry.set_idle_compaction_settings(p);
-                RpcReply::value(&self.registry.idle_compaction_settings())
+            methods::SET_COMPACTION_SETTINGS => {
+                let p: crate::registry::CompactionSettings = parse_params(params)?;
+                self.registry
+                    .set_compaction_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.compaction_settings())
             }
             methods::GET_TOOL_SETTINGS => {
                 let p: GetToolSettingsParams = if params.is_null() {
@@ -2942,6 +2955,13 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&outcome)
+            }
+            methods::REQUEST_COMPACT => {
+                let p: RequestCompactParams = parse_params(params)?;
+                self.sessions
+                    .request_compact(&p.chat_id, p.focus, p.continue_with)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::FORK_CHAT => {
                 let p: ForkChatParams = parse_params(params)?;

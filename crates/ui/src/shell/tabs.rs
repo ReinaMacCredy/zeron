@@ -1981,6 +1981,7 @@ mod strip_regressions {
             started_at: None,
             updated_at: Utc::now(),
             running_subagents: 0,
+            compact_plan: None,
         }
     }
 

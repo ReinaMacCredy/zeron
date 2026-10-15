@@ -1,16 +1,21 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
-use zeron_proto::{Session, SessionStats, SessionStatus};
+use zeron_proto::{CompactPlan, Session, SessionStats, SessionStatus};
 
-use crate::{now_ms, registry::HarnessRegistry, sessions::SessionsEngine};
+use crate::{doc_host::DocHost, now_ms, registry::HarnessRegistry, sessions::SessionsEngine};
 
-// Claude Code's own defaults (CLI 2.1.299, `tengu_sunny_locket`): only a 1h
-// cache, fire at 90% of its life, at most a minute late, from 200K tokens.
+// Claude Code's own idle defaults (CLI 2.1.299, `tengu_sunny_locket`): only a
+// 1h cache, fire at 90% of its life, at most a minute late.
 const CACHE_TTL_SECS: u32 = 3600;
 const FIRE_AT_FRACTION: f64 = 0.9;
 const LATE_MS: i64 = 60_000;
-const MIN_TOKENS: u64 = 200_000;
+/// A finished background shell makes the CLI open its own turn seconds after the chat settles.
+const AGENT_SETTLE_MS: i64 = 10_000;
 /// Monotonic sleeps stop while the Mac sleeps; re-read the wall clock often.
 const MAX_NAP: Duration = Duration::from_secs(60);
 
@@ -40,17 +45,70 @@ fn settled(session: &Session) -> bool {
         && session.background_tasks.is_empty()
 }
 
-pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>) {
-    let min_tokens = std::env::var("ZERON_IDLE_COMPACT_MIN_TOKENS")
+fn clear_idle_plan(sessions: &SessionsEngine, chat_id: &str) {
+    if !sessions.agent_compact_waiting(chat_id) {
+        sessions.set_compact_plan(chat_id, None);
+    }
+}
+
+fn run_agent_compaction(
+    sessions: &SessionsEngine,
+    host: &DocHost,
+    running: &Arc<Mutex<HashSet<String>>>,
+    chat_id: &str,
+) {
+    if !running
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(chat_id.to_string())
+    {
+        return;
+    }
+    let (sessions, host, running, chat_id) = (
+        sessions.clone(),
+        host.clone(),
+        running.clone(),
+        chat_id.to_string(),
+    );
+    tokio::spawn(async move {
+        match sessions.compact_for_agent(&chat_id).await {
+            Ok(Some((outcome, continue_with))) => {
+                tracing::info!(chat = %chat_id, compacted = outcome.compacted, "agent compaction ran");
+                if let Some(text) = continue_with
+                    && let Err(err) = host.queue_auto_continue(&chat_id, &text).await
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "agent auto-continue not sent");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => tracing::info!(chat = %chat_id, error = %err, "agent compaction dropped"),
+        }
+        running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&chat_id);
+    });
+}
+
+pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, host: DocHost) {
+    let min_tokens_override: Option<u64> = std::env::var("ZERON_IDLE_COMPACT_MIN_TOKENS")
         .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(MIN_TOKENS);
+        .and_then(|value| value.parse().ok());
     tokio::spawn(async move {
         let mut statuses = sessions.watch_sessions();
         let mut seen: HashMap<String, DateTime<Utc>> = HashMap::new();
         let mut armed: HashMap<String, Armed> = HashMap::new();
         let mut fired: HashMap<String, i64> = HashMap::new();
+        let mut agent_due: HashMap<String, i64> = HashMap::new();
+        let running = Arc::new(Mutex::new(HashSet::new()));
+        let mut last_settings = registry.compaction_settings();
         loop {
+            let settings = registry.compaction_settings();
+            if settings != last_settings {
+                seen.clear();
+                last_settings = settings;
+            }
+            let min_tokens = min_tokens_override.unwrap_or(settings.min_tokens);
             let idle: Vec<Session> = statuses
                 .borrow_and_update()
                 .iter()
@@ -58,23 +116,56 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>) {
                 .cloned()
                 .collect();
             seen.retain(|chat, _| idle.iter().any(|s| &s.chat_id == chat));
-            armed.retain(|chat, _| seen.contains_key(chat));
+            agent_due.retain(|chat, _| seen.contains_key(chat));
+            let gone: Vec<String> = armed
+                .keys()
+                .filter(|chat| !seen.contains_key(*chat))
+                .cloned()
+                .collect();
+            for chat_id in gone {
+                armed.remove(&chat_id);
+                clear_idle_plan(&sessions, &chat_id);
+            }
             for session in &idle {
                 if seen.get(&session.chat_id) == Some(&session.updated_at) {
                     continue;
                 }
                 seen.insert(session.chat_id.clone(), session.updated_at);
+                if sessions.agent_compact_waiting(&session.chat_id) {
+                    armed.remove(&session.chat_id);
+                    agent_due.insert(session.chat_id.clone(), now_ms() + AGENT_SETTLE_MS);
+                    continue;
+                }
                 let next = sessions
                     .cache_state(&session.chat_id)
                     .and_then(|(stats, tokens)| arm(&stats, tokens, min_tokens))
+                    .filter(|_| settings.enabled)
                     .filter(|next| fired.get(&session.chat_id) != Some(&next.touched_at));
                 match next {
-                    Some(next) => armed.insert(session.chat_id.clone(), next),
-                    None => armed.remove(&session.chat_id),
-                };
+                    Some(next) => {
+                        armed.insert(session.chat_id.clone(), next);
+                        sessions.set_compact_plan(
+                            &session.chat_id,
+                            Some(CompactPlan::Idle { at: next.fire_at }),
+                        );
+                    }
+                    None => {
+                        armed.remove(&session.chat_id);
+                        clear_idle_plan(&sessions, &session.chat_id);
+                    }
+                }
             }
 
             let now = now_ms();
+            let agents: Vec<String> = agent_due
+                .iter()
+                .filter(|(_, at)| **at <= now)
+                .map(|(chat, _)| chat.clone())
+                .collect();
+            for chat_id in agents {
+                agent_due.remove(&chat_id);
+                run_agent_compaction(&sessions, &host, &running, &chat_id);
+            }
             let due: Vec<(String, Armed)> = armed
                 .iter()
                 .filter(|(_, at)| at.fire_at <= now)
@@ -83,13 +174,14 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>) {
             for (chat_id, at) in due {
                 armed.remove(&chat_id);
                 fired.insert(chat_id.clone(), at.touched_at);
-                if !registry.idle_compaction_settings().enabled || now - at.fire_at > LATE_MS {
-                    continue;
-                }
                 let still = sessions
                     .cache_state(&chat_id)
                     .and_then(|(stats, tokens)| arm(&stats, tokens, min_tokens));
-                if still != Some(at) {
+                if !registry.compaction_settings().enabled
+                    || now - at.fire_at > LATE_MS
+                    || still != Some(at)
+                {
+                    clear_idle_plan(&sessions, &chat_id);
                     continue;
                 }
                 let sessions = sessions.clone();
@@ -101,6 +193,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>) {
                             "idle compaction ran before the prompt cache expired"
                         ),
                         Err(err) => {
+                            clear_idle_plan(&sessions, &chat_id);
                             tracing::info!(chat = %chat_id, error = %err, "idle compaction skipped")
                         }
                     }
@@ -109,7 +202,9 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>) {
 
             let nap = armed
                 .values()
-                .map(|at| Duration::from_millis((at.fire_at - now).max(0) as u64))
+                .map(|at| at.fire_at)
+                .chain(agent_due.values().copied())
+                .map(|at| Duration::from_millis((at - now).max(0) as u64))
                 .min()
                 .unwrap_or(MAX_NAP)
                 .min(MAX_NAP);
@@ -124,6 +219,8 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MIN_TOKENS: u64 = 200_000;
 
     fn stats(ttl: Option<u32>, touched_at: Option<i64>) -> SessionStats {
         SessionStats {

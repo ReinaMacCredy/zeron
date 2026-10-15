@@ -52,6 +52,12 @@ pub struct JournaledEvent {
     pub event: AgentEvent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentCompact {
+    pub focus: Option<String>,
+    pub continue_with: Option<String>,
+}
+
 /// Result of a manual context compaction — also the RPC result shape.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -550,6 +556,8 @@ struct Inner {
     /// chat completes a real turn (t3code `timedOutNativeCompactions`): the
     /// harness may still be compacting behind the timeout.
     compaction_timed_out: Mutex<std::collections::HashSet<String>>,
+    agent_compacts: Mutex<HashMap<String, AgentCompact>>,
+    context_nudges: Mutex<HashMap<String, (u8, String)>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -754,6 +762,8 @@ impl SessionsEngine {
                 sidechat_contexts: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
+                agent_compacts: Mutex::new(HashMap::new()),
+                context_nudges: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
@@ -1887,6 +1897,87 @@ impl SessionsEngine {
         self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
     }
 
+    pub fn request_compact(
+        &self,
+        chat_id: &str,
+        focus: Option<String>,
+        continue_with: Option<String>,
+    ) -> Result<(), EngineError> {
+        let (harness_id, _) = self.compaction_request(chat_id)?;
+        let harness = self.inner.registry.resolve(harness_id)?;
+        if harness.compaction() == Compaction::None {
+            return Err(EngineError::Other(format!(
+                "{} does not support compaction",
+                harness.display_name()
+            )));
+        }
+        let trimmed = |text: Option<String>| {
+            text.map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+        };
+        lock(&self.inner.agent_compacts).insert(
+            chat_id.to_string(),
+            AgentCompact {
+                focus: trimmed(focus),
+                continue_with: trimmed(continue_with),
+            },
+        );
+        self.inner
+            .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
+        Ok(())
+    }
+
+    pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {
+        lock(&self.inner.agent_compacts).contains_key(chat_id)
+    }
+
+    pub(crate) async fn compact_for_agent(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<(CompactOutcome, Option<String>)>, EngineError> {
+        let Some(request) = lock(&self.inner.agent_compacts).get(chat_id).cloned() else {
+            return Ok(None);
+        };
+        let busy = |sessions: &Self| {
+            sessions.turn_in_flight(chat_id) || lock(&sessions.inner.compacting).contains(chat_id)
+        };
+        if busy(self) {
+            return Ok(None);
+        }
+        match self
+            .compact_noting(chat_id, request.focus.clone(), COMPACTED_AGENT_NOTE)
+            .await
+        {
+            Ok(outcome) => {
+                if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
+                    self.inner.set_compact_plan(chat_id, None);
+                }
+                Ok(Some((outcome, request.continue_with)))
+            }
+            Err(_) if busy(self) => Ok(None),
+            Err(err) => {
+                lock(&self.inner.agent_compacts).remove(chat_id);
+                self.inner.set_compact_plan(chat_id, None);
+                let note = self.doc_handle(chat_id).and_then(|handle| {
+                    Ok(handle.write_system_note(
+                        &new_id(),
+                        "The agent's compaction did not run",
+                        Some(&err.to_string()),
+                        now_ms(),
+                    )?)
+                });
+                if let Err(note_err) = note {
+                    tracing::warn!(chat = %chat_id, error = %note_err, "compaction note write failed");
+                }
+                Err(err)
+            }
+        }
+    }
+
+    pub(crate) fn set_compact_plan(&self, chat_id: &str, plan: Option<zeron_proto::CompactPlan>) {
+        self.inner.set_compact_plan(chat_id, plan);
+    }
+
     pub(crate) fn cache_state(&self, chat_id: &str) -> Option<(zeron_proto::SessionStats, u64)> {
         let handle = self.doc_handle(chat_id).ok()?;
         let doc = handle.doc();
@@ -1971,6 +2062,7 @@ impl SessionsEngine {
             runs.insert(chat_id.to_string(), run);
         }
         self.set_status(chat_id, SessionStatus::Working, true);
+        self.inner.set_compacting(chat_id, true);
 
         let started = match &compaction {
             Compaction::Native => harness.compact(request, controls).await,
@@ -2028,6 +2120,12 @@ impl SessionsEngine {
             pre_tokens,
             post_tokens,
         )?;
+        if lock(&self.inner.agent_compacts)
+            .remove(handle.chat_id())
+            .is_some()
+        {
+            self.inner.set_compact_plan(handle.chat_id(), None);
+        }
         Ok(CompactOutcome {
             compacted: true,
             pre_tokens,
@@ -2902,6 +3000,74 @@ impl Inner {
         user_entry_id: &str,
         computer: bool,
     ) -> Option<HarnessPrompt> {
+        let wrapped = self.wrapped_prompt(chat_id, typed, user_entry_id, computer);
+        let Some(nudge) = self.context_nudge(chat_id, typed, user_entry_id) else {
+            return wrapped;
+        };
+        let mut wrapped = wrapped.unwrap_or_else(|| HarnessPrompt {
+            prompt: typed.to_owned(),
+            handoff: None,
+        });
+        wrapped.prompt = format!("{}\n\n{nudge}", wrapped.prompt);
+        Some(wrapped)
+    }
+
+    /// Slash commands go out untouched: the note would become their arguments.
+    fn context_nudge(&self, chat_id: &str, typed: &str, user_entry_id: &str) -> Option<String> {
+        let first = self.registry.compaction_settings().nudge_percent;
+        if first == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
+            return None;
+        }
+        let config = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let chat_disabled = config.as_ref().map_or(&[][..], |c| &c.disabled_tools);
+        if self
+            .registry
+            .tool_settings()
+            .for_chat(chat_disabled)
+            .disabled(&[])
+            .contains("compact")
+        {
+            return None;
+        }
+        let usage = self.doc_host()?.open(chat_id).ok()?.doc().context_usage()?;
+        let tokens = usage.tokens?;
+        let window = config
+            .as_ref()
+            .and_then(zeron_harness::claude::catalog::chat_budget)
+            .or(usage.window)
+            .filter(|window| *window > 0)?;
+        let percent = (tokens.saturating_mul(100) / window).min(100) as u8;
+        let mut nudges = lock(&self.context_nudges);
+        let Some(mark) = [first.max(NUDGE_LAST_MARK), first]
+            .into_iter()
+            .find(|mark| percent >= *mark)
+        else {
+            nudges.remove(chat_id);
+            return None;
+        };
+        if let Some((sent, entry)) = nudges.get(chat_id)
+            && *sent >= mark
+            && entry != user_entry_id
+        {
+            return None;
+        }
+        nudges.insert(chat_id.to_string(), (mark, user_entry_id.to_string()));
+        Some(format!(
+            "<system-reminder>\nContext {} of {} ({percent}%). If you are at a stopping point, call the zeron compact tool with a focus that names what to keep.\n</system-reminder>",
+            format_tokens(tokens),
+            format_tokens(window),
+        ))
+    }
+
+    fn wrapped_prompt(
+        &self,
+        chat_id: &str,
+        typed: &str,
+        user_entry_id: &str,
+        computer: bool,
+    ) -> Option<HarnessPrompt> {
         let invoked = computer
             .then(|| crate::computer::activation::parse_computer_invocation(typed))
             .flatten()
@@ -3248,6 +3414,7 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                     running_subagents: 0,
+                    compact_plan: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3312,6 +3479,21 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn set_compact_plan(&self, chat_id: &str, plan: Option<zeron_proto::CompactPlan>) {
+        let mut statuses = lock(&self.statuses);
+        let Some(entry) = statuses.get_mut(chat_id) else {
+            return;
+        };
+        if entry.compact_plan == plan {
+            return;
+        }
+        entry.compact_plan = plan;
+        entry.updated_at = Utc::now();
+        let mut list: Vec<Session> = statuses.values().cloned().collect();
+        list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        self.sessions_tx.send_replace(list);
     }
 
     fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
@@ -3793,6 +3975,8 @@ fn record_compaction(
 /// when it reported both.
 const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
+const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
+const NUDGE_LAST_MARK: u8 = 85;
 
 fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
     match (pre_tokens, post_tokens) {

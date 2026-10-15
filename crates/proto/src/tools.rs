@@ -109,6 +109,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "context_settings",
                 "Read this chat's context settings and set its auto-compact window.",
             ),
+            tool(
+                "compact",
+                "Compact this chat's own context once its turn ends, then optionally continue.",
+            ),
         ],
     },
     ToolGroupInfo {

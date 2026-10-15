@@ -17525,6 +17525,7 @@ mod tests {
             started_at: Some(updated_at),
             updated_at,
             running_subagents: 0,
+            compact_plan: None,
         }
     }
 

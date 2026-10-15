@@ -265,6 +265,7 @@ mod gate_tests {
             started_at: None,
             updated_at,
             running_subagents: running,
+            compact_plan: None,
             held_by_subagents: false,
             compacting: false,
             background_tasks: Vec::new(),

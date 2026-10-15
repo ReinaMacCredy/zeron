@@ -3761,6 +3761,27 @@ impl DocHost {
         Ok(true)
     }
 
+    pub async fn queue_auto_continue(&self, chat_id: &str, text: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        handle.doc.push_queued(&QueuedMessage {
+            id: new_id(),
+            text: text.to_string(),
+            attachments: Vec::new(),
+            hold_for_turn_end: false,
+            issued_by: self.inner.config.device_id.clone(),
+            issued_at: now_ms(),
+            edited_at: None,
+            delivery_gate: None,
+            from_chat_id: Some(chat_id.to_string()),
+            computer_generation: Some(handle.doc.computer_generation()),
+            delegated_tasks: Vec::new(),
+            input_request: None,
+        })?;
+        handle.publish_queue();
+        self.drain_queue(&handle).await;
+        Ok(())
+    }
+
     /// Thread tools: the inter-thread rows waiting on `chat_id`, moved into
     /// its transcript as read user entries. A waiting agent asked for them
     /// mid-turn; a person's own queued rows stay where they are.
@@ -3770,7 +3791,12 @@ impl DocHost {
             .doc
             .read_queue()?
             .into_iter()
-            .filter(|row| row.from_chat_id.is_some() && row.delivery_gate.is_none())
+            .filter(|row| {
+                row.from_chat_id
+                    .as_deref()
+                    .is_some_and(|from| from != chat_id)
+                    && row.delivery_gate.is_none()
+            })
             .collect();
         let mut taken = Vec::new();
         for row in waiting {
@@ -4692,7 +4718,7 @@ impl DocHost {
                 item.issued_at.min(now_ms()),
                 Some(from),
             )?;
-            if item.input_request.is_none() {
+            if item.input_request.is_none() && from != chat_id {
                 let title = self
                     .workspace()
                     .and_then(|ws| ws.chat(from).ok().flatten())

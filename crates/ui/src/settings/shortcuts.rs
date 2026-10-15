@@ -104,7 +104,7 @@ pub struct ShortcutsPage {
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
     predictions: Entity<crate::settings::predictions::PredictionsCard>,
     delegation: Entity<crate::settings::delegation::DelegationCard>,
-    idle_compaction: Entity<crate::settings::idle_compaction::IdleCompactionCard>,
+    compaction: Entity<crate::settings::compaction::CompactionCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
@@ -166,9 +166,9 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::delegation::DelegationCard::new(state, cx))
             },
-            idle_compaction: {
+            compaction: {
                 let state = state.clone();
-                cx.new(|cx| crate::settings::idle_compaction::IdleCompactionCard::new(state, cx))
+                cx.new(|cx| crate::settings::compaction::CompactionCard::new(state, cx))
             },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
             _state: state,
@@ -1251,61 +1251,23 @@ impl Render for ShortcutsPage {
                         ],
                     )),
             )
-            .child(
-                div()
-                    .id("compact-effort-slider-style")
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .rounded(px(9.0))
-                    .p(px(2.0))
-                    .bg(crate::theme::ink(0.04))
-                    .children(
-                        [
-                            (crate::settings::EffortSliderStyle::Glass, "Glass"),
-                            (crate::settings::EffortSliderStyle::Stepped, "Stepped"),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, (style, label))| {
-                            let selected = effort_slider == style;
-                            div()
-                                .id(("effort-slider-option", ix))
-                                .min_w(px(72.0))
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(7.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(12.0))
-                                .text_color(if selected {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })
-                                .when(selected, |el| {
-                                    el.bg(theme.bg)
-                                        .border_1()
-                                        .border_color(theme.border.opacity(0.8))
-                                })
-                                .when(!selected, |el| {
-                                    el.cursor_pointer()
-                                        .hover(|s| s.text_color(theme.text))
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            crate::settings::update(
-                                                crate::settings::SavePolicy::Debounced,
-                                                cx,
-                                                |settings| settings.compact_effort_slider = style,
-                                            );
-                                            cx.refresh_windows();
-                                            cx.notify();
-                                        }))
-                                })
-                                .child(SharedString::from(label))
-                        }),
-                    ),
-            );
+            .child(widgets::segmented(
+                &theme,
+                "compact-effort-slider-style",
+                &[
+                    (crate::settings::EffortSliderStyle::Glass, "Glass"),
+                    (crate::settings::EffortSliderStyle::Stepped, "Stepped"),
+                ],
+                effort_slider,
+                |style, _, cx| {
+                    crate::settings::update(
+                        crate::settings::SavePolicy::Debounced,
+                        cx,
+                        |settings| settings.compact_effort_slider = style,
+                    );
+                    cx.refresh_windows();
+                },
+            ));
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -1431,7 +1393,7 @@ impl Render for ShortcutsPage {
                                     .child(self.thread_naming.clone())
                                     .child(self.predictions.clone())
                                     .child(self.delegation.clone())
-                                    .child(self.idle_compaction.clone())
+                                    .child(self.compaction.clone())
                                     .child(self.worktrees.clone()),
                             ),
                     )
