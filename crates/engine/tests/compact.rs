@@ -339,6 +339,18 @@ async fn compaction_appends_one_system_entry_and_resets_the_meter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn idle_compaction_says_why_it_ran() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+
+    assert!(core.sessions.compact_idle(CHAT).await.unwrap().compacted);
+    assert_eq!(
+        entry_text(entries(&core).last().expect("boundary entry")),
+        "Compacted while idle, before the prompt cache expired · 22.8k → 2.3k tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_second_compaction_is_refused_while_one_is_pending() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, _requests) = engine_with_one_turn(tmp.path()).await;

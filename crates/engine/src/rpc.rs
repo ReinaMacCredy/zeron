@@ -2187,6 +2187,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PREDICTION_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
+            | methods::GET_IDLE_COMPACTION_SETTINGS
+            | methods::SET_IDLE_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
             | methods::SET_REVIEW_SETTINGS
             | methods::START_REVIEW
@@ -2685,6 +2687,14 @@ impl RpcService for EngineRpc {
                     .set_delegation_settings(p)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.delegation_settings())
+            }
+            methods::GET_IDLE_COMPACTION_SETTINGS => {
+                RpcReply::value(&self.registry.idle_compaction_settings())
+            }
+            methods::SET_IDLE_COMPACTION_SETTINGS => {
+                let p: crate::registry::IdleCompactionSettings = parse_params(params)?;
+                self.registry.set_idle_compaction_settings(p);
+                RpcReply::value(&self.registry.idle_compaction_settings())
             }
             methods::GET_TOOL_SETTINGS => {
                 let p: GetToolSettingsParams = if params.is_null() {

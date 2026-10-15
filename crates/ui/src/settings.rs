@@ -29,6 +29,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod home;
+pub mod idle_compaction;
 pub mod notifications;
 pub mod permission_guide;
 pub mod predictions;

@@ -97,6 +97,7 @@ struct HarnessPrefsFile {
     titles: TitleSettings,
     predictions: PredictionSettings,
     delegation: DelegationSettings,
+    idle_compaction: IdleCompactionSettings,
     tools: zeron_proto::tools::ToolSettings,
     review: Option<crate::review::ReviewSettings>,
     system_prompt: String,
@@ -190,6 +191,18 @@ impl Default for DelegationSettings {
             max_depth: 2,
             max_running_children: 8,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct IdleCompactionSettings {
+    pub enabled: bool,
+}
+
+impl Default for IdleCompactionSettings {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -616,6 +629,15 @@ impl HarnessRegistry {
         self.prefs().delegation = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    pub fn idle_compaction_settings(&self) -> IdleCompactionSettings {
+        self.prefs().idle_compaction
+    }
+
+    pub fn set_idle_compaction_settings(&self, settings: IdleCompactionSettings) {
+        self.prefs().idle_compaction = settings;
+        self.persist_prefs();
     }
 
     pub fn system_prompt(&self) -> String {

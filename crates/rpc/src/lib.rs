@@ -60,6 +60,10 @@ pub mod methods {
     /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
+    /// Compact a long idle chat before its 1h prompt cache expires. No params /
+    /// `IdleCompactionSettings` → `IdleCompactionSettings`.
+    pub const GET_IDLE_COMPACTION_SETTINGS: &str = "GetIdleCompactionSettings";
+    pub const SET_IDLE_COMPACTION_SETTINGS: &str = "SetIdleCompactionSettings";
     pub const GET_REVIEW_SETTINGS: &str = "GetReviewSettings";
     pub const SET_REVIEW_SETTINGS: &str = "SetReviewSettings";
     pub const START_REVIEW: &str = "StartReview";

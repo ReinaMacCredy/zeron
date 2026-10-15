@@ -1880,6 +1880,25 @@ impl SessionsEngine {
         chat_id: &str,
         focus: Option<String>,
     ) -> Result<CompactOutcome, EngineError> {
+        self.compact_noting(chat_id, focus, COMPACTED_NOTE).await
+    }
+
+    pub async fn compact_idle(&self, chat_id: &str) -> Result<CompactOutcome, EngineError> {
+        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
+    }
+
+    pub(crate) fn cache_state(&self, chat_id: &str) -> Option<(zeron_proto::SessionStats, u64)> {
+        let handle = self.doc_handle(chat_id).ok()?;
+        let doc = handle.doc();
+        Some((doc.session_stats()?, doc.context_usage()?.tokens?))
+    }
+
+    async fn compact_noting(
+        &self,
+        chat_id: &str,
+        focus: Option<String>,
+        note: &str,
+    ) -> Result<CompactOutcome, EngineError> {
         {
             let mut pending = lock(&self.inner.compacting);
             if pending.contains(chat_id) {
@@ -1971,7 +1990,7 @@ impl SessionsEngine {
                         lock(&self.inner.compaction_timed_out).insert(chat_id.to_string());
                         Err(EngineError::Other("Context compaction timed out.".into()))
                     }
-                    Ok(drain) => self.settle_compaction(&handle, drain),
+                    Ok(drain) => self.settle_compaction(&handle, drain, note),
                 }
             }
         }
@@ -1983,6 +2002,7 @@ impl SessionsEngine {
         &self,
         handle: &ChatDocHandle,
         drain: CompactionDrain,
+        note: &str,
     ) -> Result<CompactOutcome, EngineError> {
         let Some((pre_tokens, post_tokens)) = drain.compacted else {
             if let Some(failure) = drain.failure {
@@ -2001,7 +2021,13 @@ impl SessionsEngine {
                 ),
             });
         };
-        record_compaction(handle.doc(), &self.inner.device_id, pre_tokens, post_tokens)?;
+        record_compaction(
+            handle.doc(),
+            &self.inner.device_id,
+            note,
+            pre_tokens,
+            post_tokens,
+        )?;
         Ok(CompactOutcome {
             compacted: true,
             pre_tokens,
@@ -3719,6 +3745,7 @@ async fn drain_compaction(
 fn record_compaction(
     doc: &SessionDoc,
     device_id: &str,
+    note: &str,
     pre_tokens: Option<u64>,
     post_tokens: Option<u64>,
 ) -> Result<(), DocError> {
@@ -3730,7 +3757,7 @@ fn record_compaction(
         role: MessageRole::System,
         parts: vec![MessagePart::Text {
             id: "t0".into(),
-            text: compaction_note(pre_tokens, post_tokens),
+            text: compaction_note(note, pre_tokens, post_tokens),
         }],
         created_at: now_ms(),
         device_id: device_id.to_string(),
@@ -3750,14 +3777,17 @@ fn record_compaction(
 
 /// The system entry's text: the boundary, plus the harness's own before/after
 /// when it reported both.
-fn compaction_note(pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
+const COMPACTED_NOTE: &str = "Context compacted";
+const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
+
+fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
     match (pre_tokens, post_tokens) {
         (Some(pre), Some(post)) => format!(
-            "Context compacted · {} → {} tokens",
+            "{note} · {} → {} tokens",
             format_tokens(pre),
             format_tokens(post)
         ),
-        _ => "Context compacted".into(),
+        _ => note.into(),
     }
 }
 
@@ -5177,7 +5207,13 @@ async fn drive_run(
                     clock.start(false, now);
                 }
             }
-            if let Err(err) = record_compaction(doc_ref, &device_id, *pre_tokens, *post_tokens) {
+            if let Err(err) = record_compaction(
+                doc_ref,
+                &device_id,
+                COMPACTED_NOTE,
+                *pre_tokens,
+                *post_tokens,
+            ) {
                 tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
             }
             continue;
