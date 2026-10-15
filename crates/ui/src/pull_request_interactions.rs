@@ -221,7 +221,6 @@ impl PullRequestDetailPage {
                 Err(error) => page.comment_error = Some(error),
             }
             page.save_draft(cx);
-            page.refresh_from_board(cx);
             cx.notify();
         }));
     }
@@ -238,7 +237,6 @@ impl PullRequestDetailPage {
 
     pub(super) fn comment_composer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let sending = self.submission.is_some();
-        let narrow = self.page_width.is_some_and(|width| width < NARROW_PAGE);
         let can_send = !sending
             && self.detail.is_some()
             && !self.comment_input.read(cx).text().trim().is_empty();
@@ -452,14 +450,7 @@ impl PullRequestDetailPage {
             .flex_none()
             .w_full()
             .pb(px(NAV_CLEARANCE))
-            // The content column's gutter, so the dock lines up with the thread.
-            .child(
-                widgets::page_column()
-                    .pt_0()
-                    .pb_0()
-                    .when(narrow, |el| el.px(px(NARROW_PAD_X)))
-                    .child(stack),
-            )
+            .child(widgets::page_column().pt_0().pb_0().child(stack))
             .into_any_element()
     }
 
