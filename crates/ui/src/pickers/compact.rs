@@ -313,7 +313,7 @@ impl Pickers {
     }
 
     pub(super) fn compact_model_picker(&self, cx: &App) -> bool {
-        self.title.is_none() && crate::settings::compact_model_picker(cx)
+        self.title.is_none() && !self.profiles_only && crate::settings::compact_model_picker(cx)
     }
 
     pub(super) fn toggle_compact_layout(&mut self, cx: &mut Context<Self>) {

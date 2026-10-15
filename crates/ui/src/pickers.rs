@@ -1246,6 +1246,7 @@ pub struct Pickers {
     profiles: Loadable<Vec<zeron_proto::AgentProfile>>,
     profiles_task: Option<Task<()>>,
     profile_edit: Option<profiles::ProfileEdit>,
+    profiles_only: bool,
     profile_focus_pending: bool,
     boot_profile_edit: bool,
     boot_profile_settings: bool,
@@ -1556,6 +1557,7 @@ impl Pickers {
             profiles: Loadable::Idle,
             profiles_task: None,
             profile_edit: None,
+            profiles_only: false,
             profile_focus_pending: false,
             boot_profile_edit: boot_profiles
                 && matches!(boot_knob.as_deref(), Some("profile-edit" | "profile-settings")),
@@ -2102,6 +2104,7 @@ impl Pickers {
             return;
         }
         if kind == PickerKind::HarnessModel {
+            self.profiles_only = false;
             let groups = self.setting_groups(cx);
             self.open_model_height = model_menu_height(groups.len(), tray_card_extra(&groups));
             self.compact_model_list = false;
@@ -2223,6 +2226,24 @@ impl Pickers {
             // Projects and devices are already synced state — nothing to load.
             PickerKind::Space | PickerKind::Device | PickerKind::Permission => {}
         }
+        cx.notify();
+    }
+
+    fn toggle_profiles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle(PickerKind::HarnessModel, window, cx);
+        if self.open_kind() == Some(PickerKind::HarnessModel) {
+            self.profiles_only = true;
+            self.show_profiles(cx);
+        }
+    }
+
+    fn show_profiles(&mut self, cx: &mut Context<Self>) {
+        self.setting_menu = None;
+        self.model_rail = ModelRail::Profiles;
+        self.active = 0;
+        self.search.update(cx, |input, cx| {
+            input.set_placeholder("Search profiles…", cx)
+        });
         cx.notify();
     }
 
@@ -4660,22 +4681,37 @@ impl Pickers {
             .when_some(profile, |el, (name, edited)| {
                 el.child(
                     div()
+                        .id("picker-model-profile")
+                        .debug_selector(|| "picker-model-profile".into())
+                        .role(gpui::Role::Button)
+                        .aria_label(SharedString::from(format!("{name} · Change profile")))
                         .flex_none()
-                        .max_w(px(PROFILE_NAME_MAX))
-                        .truncate()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(name),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(PROFILE_NAME_MAX))
+                                .truncate()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(name),
+                        )
+                        .when(edited, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .size(px(6.0))
+                                    .rounded_full()
+                                    .bg(theme.warning),
+                            )
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_profiles(window, cx);
+                            cx.stop_propagation();
+                        })),
                 )
-                .when(edited, |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.warning),
-                    )
-                })
                 .child(
                     div()
                         .flex_none()
@@ -5859,15 +5895,7 @@ impl Pickers {
                     .when(!profiles_view, |el| {
                         el.hover(|s| s.bg(crate::theme::ink(0.06)))
                     })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.setting_menu = None;
-                        this.model_rail = ModelRail::Profiles;
-                        this.active = 0;
-                        this.search.update(cx, |input, cx| {
-                            input.set_placeholder("Search profiles…", cx)
-                        });
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_profiles(cx)))
                     .child(
                         crate::icons::icon(crate::icons::LUCIDE_USER_ROUND)
                             .size(px(15.0))
@@ -6107,7 +6135,7 @@ impl Pickers {
         div()
             .flex()
             .flex_col()
-            .child(tabs)
+            .when(!self.profiles_only, |el| el.child(tabs))
             .child(search_row)
             .children(refresh_error)
             .child(list_host)
@@ -13377,6 +13405,107 @@ mod tests {
                 assert_eq!(config.permission_mode, PermissionMode::Full);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_chip_profile_part_opens_profiles_and_the_model_part_opens_models(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.profiles = Loadable::Ready(vec![zeron_proto::AgentProfile {
+                    id: "orch".into(),
+                    name: "Orchestrator".into(),
+                    harness: HarnessId::ClaudeCode,
+                    model: Some("fable".into()),
+                    reasoning: None,
+                    permission_mode: None,
+                    model_options: Default::default(),
+                    notes: String::new(),
+                    instructions: String::new(),
+                    by_agent: false,
+                    disabled_tools: Vec::new(),
+                }]);
+                pickers.state.update(cx, |state, _| {
+                    state.chats[0].config.as_mut().unwrap().profile_id = Some("orch".into());
+                });
+                // The chip glides on the wall clock; start it at the profiled width.
+                pickers.chip_width = None;
+            })
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(handle.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear());
+        let state = |cx: &mut gpui::VisualTestContext| {
+            handle
+                .read_with(cx, |pickers, _| {
+                    (
+                        pickers.open_kind(),
+                        pickers.model_rail == ModelRail::Profiles,
+                        pickers.profiles_only,
+                    )
+                })
+                .unwrap()
+        };
+        let click = |cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>| {
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear());
+        };
+        let profile_part = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("picker-model-profile")
+                .expect("the profile part is painted")
+                .center()
+        };
+        let model_part = |cx: &mut gpui::VisualTestContext| {
+            let chip = cx.debug_bounds("picker-model").expect("chip painted");
+            let profile = cx.debug_bounds("picker-model-profile").unwrap();
+            let at = gpui::point(chip.right() - px(8.0), chip.center().y);
+            assert!(profile.right() < at.x);
+            at
+        };
+        // An open card eats the outside press that closes it; let it finish.
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            handle
+                .update(cx, |pickers, _, _| pickers.open = Default::default())
+                .unwrap();
+            cx.update(|window, cx| window.draw(cx).clear());
+        };
+
+        let at = profile_part(cx);
+        click(cx, at);
+        assert_eq!(state(cx), (Some(PickerKind::HarnessModel), true, true));
+        assert!(
+            cx.debug_bounds("picker-layout-toggle").is_none(),
+            "the profiles card drops the tab row"
+        );
+        let at = profile_part(cx);
+        click(cx, at);
+        assert_eq!(state(cx).0, None, "a press while open closes the card");
+        settle(cx);
+
+        let at = model_part(cx);
+        click(cx, at);
+        assert_eq!(state(cx), (Some(PickerKind::HarnessModel), false, false));
+        assert!(cx.debug_bounds("picker-layout-toggle").is_some());
+        settle(cx);
+
+        let at = profile_part(cx);
+        click(cx, at);
+        assert_eq!(state(cx), (Some(PickerKind::HarnessModel), true, true));
+        settle(cx);
+
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.state.update(cx, |state, _| {
+                    state.chats[0].config.as_mut().unwrap().profile_id = None;
+                });
+            })
+            .unwrap();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("picker-model-profile").is_none(),
+            "no profile, no profile part"
+        );
     }
 
     #[gpui::test]
