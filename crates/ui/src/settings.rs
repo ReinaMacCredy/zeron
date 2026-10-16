@@ -1159,14 +1159,6 @@ pub enum SidebarOrganization {
     Inbox,
 }
 
-/// Holds until the chat's next message after `at`, as T3's `settledOverride` resets on activity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SidebarSettle {
-    pub settled: bool,
-    pub at: chrono::DateTime<chrono::Utc>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarSort {
@@ -1417,8 +1409,6 @@ pub struct UiSettings {
     pub sidebar_active_first: bool,
     pub sidebar_settle_after_days: u32,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sidebar_settle_overrides: HashMap<String, SidebarSettle>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_unsettled_at: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub sidebar_working_shelf: bool,
     /// Optional harness branding and repository metadata shown below each
@@ -1644,7 +1634,6 @@ impl Default for UiSettings {
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_active_first: false,
             sidebar_settle_after_days: 3,
-            sidebar_settle_overrides: HashMap::new(),
             sidebar_unsettled_at: HashMap::new(),
             sidebar_working_shelf: false,
             sidebar_show_project_label: true,
@@ -2339,7 +2328,6 @@ impl UiSettings {
             sidebar_sort,
             sidebar_active_first,
             sidebar_settle_after_days,
-            sidebar_settle_overrides,
             sidebar_unsettled_at,
             sidebar_working_shelf,
             sidebar_show_project_label,
@@ -3775,13 +3763,6 @@ mod tests {
             sidebar_sort: SidebarSort::Created,
             sidebar_active_first: true,
             sidebar_settle_after_days: 7,
-            sidebar_settle_overrides: HashMap::from([(
-                "chat-1".to_string(),
-                SidebarSettle {
-                    settled: true,
-                    at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
-                },
-            )]),
             sidebar_unsettled_at: HashMap::from([(
                 "chat-2".to_string(),
                 chrono::DateTime::from_timestamp(1_700_000_100, 0).unwrap(),

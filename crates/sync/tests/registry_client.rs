@@ -52,6 +52,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         created_by_chat_id: None,
         previous_harnesses: Vec::new(),
         delegation: None,
+        settle: None,
     }
 }
 

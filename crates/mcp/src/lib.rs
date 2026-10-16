@@ -108,6 +108,23 @@ fn compact_tool() -> Value {
     })
 }
 
+fn thread_flag_tool(name: &str, description: &str, flag: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "threadId": { "type": "string" },
+                "threadIds": { "type": "array", "items": { "type": "string" } },
+                flag: { "type": "boolean" }
+            },
+            "required": [flag],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn thread_tool_list() -> Value {
     let thread_id = json!({ "type": "string" });
     let wait = json!({ "type": "boolean", "description": "Block until the thread's turn ends and add its outcome as `turn`." });
@@ -216,20 +233,16 @@ fn thread_tool_list() -> Value {
                 "additionalProperties": false
             }
         },
-        {
-            "name": "set_thread_archived",
-            "description": "Archive or unarchive one thread (`threadId`) or several (`threadIds`) on this device, in any project. A working thread (this chat included, while its turn runs) cannot be archived; archiving never cascades to other threads.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "threadId": thread_id,
-                    "threadIds": { "type": "array", "items": { "type": "string" } },
-                    "archived": { "type": "boolean" }
-                },
-                "required": ["archived"],
-                "additionalProperties": false
-            }
-        },
+        thread_flag_tool(
+            "set_thread_archived",
+            "Archive or unarchive one thread (`threadId`) or several (`threadIds`) on this device, in any project. A working thread (this chat included, while its turn runs) cannot be archived; archiving never cascades to other threads.",
+            "archived",
+        ),
+        thread_flag_tool(
+            "set_thread_settled",
+            "Settle or unsettle one thread (`threadId`) or several (`threadIds`) on this device, in any project, as the sidebar's Settle button does: a settled thread moves to the Inbox's Settled shelf. It holds until the thread's next message, which brings it back. A working thread, or one waiting on a question, cannot be settled.",
+            "settled",
+        ),
         {
             "name": "interrupt_thread",
             "description": "Stop another thread's running turn on this device, as its stop button does. Never this chat itself. Counts against this turn's send budget.",
@@ -660,6 +673,7 @@ impl ThreadTools {
             "watch_threads" => self.watch_threads(args).await,
             "set_thread_title" => self.set_thread_title(args).await,
             "set_thread_archived" => self.set_thread_archived(args).await,
+            "set_thread_settled" => self.set_thread_settled(args).await,
             "interrupt_thread" => self.interrupt_thread(args).await,
             "respond_to_input" => self.respond_to_input(args).await,
             "ask_user" => self.ask_user(args).await,
@@ -2093,8 +2107,7 @@ impl ThreadTools {
         Ok(json!({ "threadId": thread_id, "title": title }))
     }
 
-    pub async fn set_thread_archived(&self, args: &Value) -> Result<Value, String> {
-        let archived = args["archived"].as_bool().ok_or("archived is required")?;
+    async fn peer_ids<'a>(&self, args: &'a Value) -> Result<Vec<&'a str>, String> {
         let ids: Vec<&str> = match args["threadIds"].as_array() {
             Some(ids) => ids.iter().filter_map(Value::as_str).collect(),
             None => vec![Self::thread_id(args)?],
@@ -2105,6 +2118,12 @@ impl ThreadTools {
         for id in &ids {
             self.peer(id).await?;
         }
+        Ok(ids)
+    }
+
+    pub async fn set_thread_archived(&self, args: &Value) -> Result<Value, String> {
+        let archived = args["archived"].as_bool().ok_or("archived is required")?;
+        let ids = self.peer_ids(args).await?;
         if archived {
             let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
             let now = Utc::now();
@@ -2125,6 +2144,32 @@ impl ThreadTools {
             .await?;
         }
         Ok(json!({ "threadIds": ids, "archived": archived }))
+    }
+
+    pub async fn set_thread_settled(&self, args: &Value) -> Result<Value, String> {
+        let settled = args["settled"].as_bool().ok_or("settled is required")?;
+        let ids = self.peer_ids(args).await?;
+        if settled {
+            let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
+            let now = Utc::now();
+            if let Some((id, status)) = ids
+                .iter()
+                .map(|id| (id, status_of(&sessions, id, now)))
+                .find(|(_, status)| matches!(*status, "working" | "awaiting_input"))
+            {
+                return Err(format!(
+                    "thread {id} is {status}; the sidebar keeps it out of Settled until it is idle"
+                ));
+            }
+        }
+        for id in &ids {
+            self.call_engine(
+                methods::MUTATE,
+                json!({ "op": "setChatSettled", "chatId": id, "settled": settled }),
+            )
+            .await?;
+        }
+        Ok(json!({ "threadIds": ids, "settled": settled }))
     }
 
     /// The inter-thread rows waiting on this chat, moved into its transcript.
@@ -2799,7 +2844,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 31] = [
+    const THREAD_TOOLS: [&str; 32] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2808,6 +2853,7 @@ mod tests {
         "watch_threads",
         "set_thread_title",
         "set_thread_archived",
+        "set_thread_settled",
         "interrupt_thread",
         "respond_to_input",
         "ask_user",
@@ -3880,6 +3926,49 @@ mod tests {
                 .await
                 .unwrap_err(),
             "threadId or threadIds is required"
+        );
+    }
+
+    #[tokio::test]
+    async fn settle_is_a_registry_mutation_refused_for_busy_threads() {
+        let mut fake = fixture();
+        fake.session_snapshots[0].push(session("c", "awaitingInput", 0));
+        let rig = rig(fake);
+        let out = rig
+            .tools
+            .set_thread_settled(&json!({ "threadIds": ["a", "e"], "settled": true }))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "threadIds": ["a", "e"], "settled": true }));
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[0].1,
+            json!({ "op": "setChatSettled", "chatId": "a", "settled": true })
+        );
+        assert_eq!(calls[1].1["chatId"], "e");
+        for (id, status) in [("b", "working"), ("c", "awaiting_input")] {
+            let err = rig
+                .tools
+                .set_thread_settled(&json!({ "threadIds": ["a", id], "settled": true }))
+                .await
+                .unwrap_err();
+            assert!(
+                err.starts_with(&format!("thread {id} is {status}")),
+                "{err}"
+            );
+        }
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), 2);
+        rig.tools
+            .set_thread_settled(&json!({ "threadId": "b", "settled": false }))
+            .await
+            .unwrap();
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            rig.tools
+                .set_thread_settled(&json!({ "threadId": "far", "settled": true }))
+                .await
+                .unwrap_err(),
+            "no thread far on this device"
         );
     }
 

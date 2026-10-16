@@ -1067,6 +1067,7 @@ impl WorkspaceHost {
                 created_by_chat_id: created_by_chat_id.map(str::to_string),
                 previous_harnesses: Vec::new(),
                 delegation,
+                settle: None,
             })
         })?;
         Ok(())
@@ -1121,6 +1122,7 @@ impl WorkspaceHost {
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
+            settle: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1176,6 +1178,7 @@ impl WorkspaceHost {
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
+            settle: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1342,6 +1345,14 @@ impl WorkspaceHost {
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    pub fn set_chat_settled(&self, chat_id: &str, settled: bool) -> Result<bool, EngineError> {
+        let settle = zeron_proto::SidebarSettle {
+            settled,
+            at: Utc::now(),
+        };
+        Ok(self.mutate(|doc| doc.set_chat_settle(chat_id, settle))?)
     }
 
     pub fn update_chat_delegation(

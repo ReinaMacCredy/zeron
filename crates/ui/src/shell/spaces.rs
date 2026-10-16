@@ -2463,7 +2463,6 @@ impl InboxShelf {
 pub(super) fn inbox_settled_at(
     status: ChatIndicator,
     chat: &zeron_proto::Chat,
-    settle: Option<SidebarSettle>,
     after_days: u32,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
@@ -2474,7 +2473,10 @@ pub(super) fn inbox_settled_at(
         return None;
     }
     let activity = chat.last_message_at;
-    match settle.filter(|settle| activity.is_none_or(|at| at <= settle.at)) {
+    match chat
+        .settle
+        .filter(|settle| activity.is_none_or(|at| at <= settle.at))
+    {
         Some(settle) => settle.settled.then_some(settle.at),
         None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
     }
@@ -5645,16 +5647,7 @@ impl Shell {
         chat: &zeron_proto::Chat,
         now: DateTime<Utc>,
     ) -> Option<DateTime<Utc>> {
-        inbox_settled_at(
-            status,
-            chat,
-            self.settings
-                .sidebar_settle_overrides
-                .get(&chat.id)
-                .copied(),
-            self.settings.sidebar_settle_after_days,
-            now,
-        )
+        inbox_settled_at(status, chat, self.settings.sidebar_settle_after_days, now)
     }
 
     fn inbox_shelf(
@@ -8654,7 +8647,7 @@ mod tests {
         ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
         grouped_visible_order, inbox_rank, inbox_settled_at, promote_local_device_group,
     };
-    use crate::settings::{SidebarOrganization, SidebarSettle, SidebarSort};
+    use crate::settings::{SidebarOrganization, SidebarSort};
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
         (Some((device.into(), device.into())), vec![value])
@@ -8689,6 +8682,7 @@ mod tests {
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
+            settle: None,
         }
     }
 
@@ -8830,7 +8824,6 @@ mod tests {
         zeron_proto::Chat,
         Option<chrono::DateTime<Utc>>,
         Option<InboxMark>,
-        Option<SidebarSettle>,
         Option<chrono::DateTime<Utc>>,
     );
 
@@ -8842,8 +8835,8 @@ mod tests {
 
     fn inbox_ids(rows: &mut [InboxRow], working_shelf: bool) -> Vec<String> {
         let now = inbox_at(1_000);
-        rows.sort_by_key(|(status, chat, started, mark, settle, unsettled)| {
-            let settled = inbox_settled_at(*status, chat, *settle, 3, now);
+        rows.sort_by_key(|(status, chat, started, mark, unsettled)| {
+            let settled = inbox_settled_at(*status, chat, 3, now);
             inbox_rank(
                 *status,
                 chat,
@@ -8866,11 +8859,12 @@ mod tests {
             chat.last_message_at = Some(at(secs));
             chat
         };
-        let settle = |settled, secs| {
-            Some(SidebarSettle {
+        let settle = |mut chat: zeron_proto::Chat, settled, secs| {
+            chat.settle = Some(zeron_proto::SidebarSettle {
                 settled,
                 at: at(secs),
-            })
+            });
+            chat
         };
         let mut silent = chat("f");
         silent.last_message_at = None;
@@ -8881,28 +8875,26 @@ mod tests {
         };
         use ChatIndicator::{Completed, Errored, Idle, Working};
         let mut rows: Vec<InboxRow> = vec![
-            (Working, replied("a", 500), Some(at(100)), None, None, None),
-            (Working, replied("b", 300), Some(at(200)), None, None, None),
-            (Idle, replied("c", 400), None, None, None, None),
-            (Errored, replied("d", 50), None, Some(returned), None, None),
-            (Idle, replied("e", -4 * DAY), None, None, None, None),
-            (Idle, silent, None, None, None, None),
-            (Idle, replied("g", 600), None, None, settle(true, 700), None),
+            (Working, replied("a", 500), Some(at(100)), None, None),
+            (Working, replied("b", 300), Some(at(200)), None, None),
+            (Idle, replied("c", 400), None, None, None),
+            (Errored, replied("d", 50), None, Some(returned), None),
+            (Idle, replied("e", -4 * DAY), None, None, None),
+            (Idle, silent, None, None, None),
+            (Idle, settle(replied("g", 600), true, 700), None, None, None),
             (
                 Idle,
-                replied("h", -5 * DAY),
+                settle(replied("h", -5 * DAY), false, 800),
                 None,
                 None,
-                settle(false, 800),
                 Some(at(800)),
             ),
-            (Completed, replied("i", -6 * DAY), None, None, None, None),
+            (Completed, replied("i", -6 * DAY), None, None, None),
             (
                 Working,
-                replied("j", -6 * DAY),
+                settle(replied("j", -6 * DAY), true, 900),
                 Some(at(150)),
                 None,
-                settle(true, 900),
                 None,
             ),
         ];
@@ -8930,7 +8922,7 @@ mod tests {
             let mut chat = chat(id);
             chat.created_at = at(created);
             chat.last_message_at = Some(at(last));
-            (status, chat, None, None, None, unsettled.map(at))
+            (status, chat, None, None, unsettled.map(at))
         };
         use ChatIndicator::{Completed, Idle, Working};
         let mut rows = vec![
