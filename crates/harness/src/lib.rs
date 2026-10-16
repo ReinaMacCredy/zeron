@@ -153,6 +153,7 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    compact: std::sync::Arc<(std::sync::Mutex<Option<String>>, tokio::sync::Notify)>,
 }
 
 impl TurnControl {
@@ -164,6 +165,26 @@ impl TurnControl {
     /// Driver: resolves once per [`Self::stop_turn`].
     pub async fn stop_requested(&self) {
         self.stop.notified().await;
+    }
+
+    pub fn compact(&self, command: String) {
+        *self.compact.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(command);
+        self.compact.1.notify_one();
+    }
+
+    pub async fn compact_requested(&self) -> String {
+        loop {
+            if let Some(command) = self
+                .compact
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                return command;
+            }
+            self.compact.1.notified().await;
+        }
     }
 
     /// Driver: how many background tasks the runtime currently holds.
@@ -279,6 +300,9 @@ pub trait Harness: Send + Sync {
     /// with its background work. Otherwise stopping a turn tears the runtime
     /// down through the `interrupt` token.
     fn stops_turn_in_place(&self) -> bool {
+        false
+    }
+    fn compacts_in_place(&self) -> bool {
         false
     }
     /// Whether a live runtime started for `live` can take `next` as its

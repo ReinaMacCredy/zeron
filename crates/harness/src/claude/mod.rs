@@ -603,6 +603,9 @@ impl Harness for ClaudeHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    fn compacts_in_place(&self) -> bool {
+        true
+    }
     /// Same launch arguments and cwd. The CLI ignores the sandbox level, and
     /// option spellings that launch the same flags are the same runtime.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
@@ -1316,6 +1319,16 @@ async fn run_session(session: Session) {
                     steering_open = false;
                     let _ = stdin_tx.send(StdinMsg::Close);
                 }
+            },
+
+            command = turn.compact_requested(), if steering_open && !interrupted => {
+                active_since_stop = true;
+                let id = uuid::Uuid::new_v4().to_string();
+                // `now` would abort a wake turn the CLI already opened (CLI 2.1.300).
+                let line = wire::steer_message_line_with_images(&command, &id, false, &[]);
+                pending_steers.push_back(id.clone());
+                commands.written(id);
+                if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
             },
 
             // End the in-flight turn, not the session: the CLI stays up, so
