@@ -96,6 +96,21 @@ pub(crate) fn is_computer_tool_name(name: &str) -> bool {
 impl ToolServer {
     /// The `{"mcpServers": {name: {command, args}}}` document Claude's
     /// `--mcp-config` takes inline.
+    /// The same bridge as a shell command for a Claude Code hook:
+    /// `<command> hook …` with the arguments that follow `mcp`.
+    pub fn hook_command(&self) -> Option<String> {
+        let (subcommand, rest) = self.args.split_first()?;
+        let quote = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
+        (subcommand == "mcp").then(|| {
+            [self.command.as_str(), "hook"]
+                .into_iter()
+                .chain(rest.iter().map(String::as_str))
+                .map(quote)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
     pub fn mcp_config_json(&self, name: &str) -> String {
         serde_json::json!({
             "mcpServers": { name: {
@@ -859,6 +874,26 @@ mod tool_server_tests {
         assert!(!server.mcp_config_json("zeron").contains("computer use"));
         let debug = format!("{server:?}");
         assert!(debug.contains("ZERON_RUN_SECRET") && !debug.contains("s3cret"));
+    }
+
+    #[test]
+    fn the_hook_command_survives_spaces_and_quotes_in_the_path() {
+        let server = ToolServer {
+            command: "/Apps/Zeron Dev 2.app/zeron's".into(),
+            args: vec!["mcp".into(), "--chat".into(), "c1".into()],
+            env: vec![],
+            guidance: None,
+        };
+        let command = server.hook_command().expect("an mcp bridge has a hook");
+        assert_eq!(command, r#"'/Apps/Zeron Dev 2.app/zeron'\''s' 'hook' '--chat' 'c1'"#);
+        let words = std::process::Command::new("sh")
+            .args(["-c", &format!("for w in {command}; do echo \"$w\"; done")])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(words.stdout).unwrap(),
+            "/Apps/Zeron Dev 2.app/zeron's\nhook\n--chat\nc1\n"
+        );
     }
 
     #[test]

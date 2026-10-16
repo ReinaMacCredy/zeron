@@ -273,7 +273,7 @@ impl ClaudeHarness {
     /// The configuration arguments a run launches with — everything the
     /// process bakes in at spawn except the session to resume. Two requests
     /// with equal arguments (and cwd) are the same runtime.
-    fn launch_args(request: &RunRequest) -> Vec<String> {
+    fn launch_args(request: &RunRequest, hook: Option<&str>) -> Vec<String> {
         let mut args: Vec<String> = [
             "--print",
             "--input-format",
@@ -333,6 +333,15 @@ impl ClaudeHarness {
         if let Some(window) = auto_compact_window(request) {
             settings.insert("autoCompactWindow".into(), Value::from(window));
         }
+        if let Some(command) = hook {
+            settings.insert(
+                "hooks".into(),
+                serde_json::json!({ "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{ "type": "command", "command": command }],
+                }] }),
+            );
+        }
         if !settings.is_empty() {
             args.push("--settings".into());
             args.push(Value::Object(settings).to_string());
@@ -344,10 +353,10 @@ impl ClaudeHarness {
         args
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
+    fn build_command(&self, exe: &PathBuf, request: &RunRequest, hook: Option<&str>) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
-        cmd.args(Self::launch_args(request));
+        cmd.args(Self::launch_args(request, hook));
         // File checkpoints are only recorded for sessions that ran with this
         // set; a chat that never had it can never restore code later.
         cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
@@ -597,7 +606,8 @@ impl Harness for ClaudeHarness {
     /// Same launch arguments and cwd. The CLI ignores the sandbox level, and
     /// option spellings that launch the same flags are the same runtime.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        self.reconfigures_in_place(live, next) && Self::launch_args(live) == Self::launch_args(next)
+        self.reconfigures_in_place(live, next)
+            && Self::launch_args(live, None) == Self::launch_args(next, None)
     }
     /// Model, context window, effort, fast mode, thinking and ultracode all
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
@@ -745,7 +755,12 @@ impl ClaudeHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let title_only = one_shot.is_some();
         let exe = self.resolve_executable()?;
-        let mut cmd = self.build_command(&exe, &request);
+        let hook = controls
+            .tool_server
+            .as_ref()
+            .filter(|_| one_shot.is_none())
+            .and_then(|server| server.hook_command());
+        let mut cmd = self.build_command(&exe, &request, hook.as_deref());
         if let Some(instructions) = one_shot {
             cmd.args([
                 "--system-prompt",
@@ -1765,7 +1780,7 @@ mod tests {
                     .model_options
                     .insert("contextWindow".into(), json!(choice));
             }
-            let cmd = harness.build_command(&exe, &request);
+            let cmd = harness.build_command(&exe, &request, None);
             let std = cmd.as_std();
             let args: Vec<String> = std
                 .get_args()
@@ -1815,7 +1830,7 @@ mod tests {
             }
         };
         let settings = |request: &RunRequest| {
-            let args = ClaudeHarness::launch_args(request);
+            let args = ClaudeHarness::launch_args(request, None);
             args.iter()
                 .position(|a| a == "--settings")
                 .map(|i| serde_json::from_str::<Value>(&args[i + 1]).unwrap())
@@ -1881,7 +1896,7 @@ mod tests {
             disabled_tools: tools.iter().map(|t| t.to_string()).collect(),
         };
         let disallowed = |request: &RunRequest| {
-            let args = ClaudeHarness::launch_args(request);
+            let args = ClaudeHarness::launch_args(request, None);
             args.iter()
                 .position(|a| a == "--disallowedTools")
                 .map(|i| args[i + 1].clone())
@@ -1923,7 +1938,7 @@ mod tests {
                 disabled_tools: Vec::new(),
             };
             harness
-                .build_command(&exe, &request)
+                .build_command(&exe, &request, None)
                 .as_std()
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -2066,7 +2081,7 @@ mod tests {
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect()
         };
-        let cmd = harness.build_command(&exe, &request);
+        let cmd = harness.build_command(&exe, &request, None);
         let argv = args(&cmd);
         for flag in [
             "--resume=sess-a",
@@ -2106,7 +2121,7 @@ mod tests {
 
         // No branch: a plain resume, never a fork.
         request.branch = None;
-        let argv = args(&harness.build_command(&exe, &request));
+        let argv = args(&harness.build_command(&exe, &request, None));
         assert!(argv.iter().any(|a| a == "--resume=sess-a"));
         assert!(
             !argv
@@ -2144,7 +2159,7 @@ mod tests {
             disabled_tools: Vec::new(),
         };
         let run = |request: &RunRequest| {
-            let cmd = harness.build_command(&exe, request);
+            let cmd = harness.build_command(&exe, request, None);
             let argv: Vec<String> = cmd
                 .as_std()
                 .get_args()

@@ -83,6 +83,9 @@ pub mod methods {
     /// there is no live transcript to watch it through.
     pub const COMPACT_CHAT: &str = "CompactChat";
     pub const REQUEST_COMPACT: &str = "RequestCompact";
+    /// `{chatId}` -> `{text}`: the compaction reminder for a turn still
+    /// running, asked by `zeron hook` after each Claude Code tool call.
+    pub const MID_TURN_NUDGE: &str = "MidTurnNudge";
     /// Stop one live background task (a shell, or a subagent by its spawn
     /// tool id) of `chatId`'s running harness: `{chatId, taskId}`.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";

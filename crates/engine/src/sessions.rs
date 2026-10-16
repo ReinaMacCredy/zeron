@@ -559,6 +559,8 @@ struct Inner {
     agent_compacts: Mutex<HashMap<String, AgentCompact>>,
     /// Skips one reminder so a summary still over the floor cannot re-compact on its own continuation.
     agent_compacted: Mutex<std::collections::HashSet<String>>,
+    /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
+    nudged_at: Mutex<HashMap<String, u64>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -765,6 +767,7 @@ impl SessionsEngine {
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 agent_compacts: Mutex::new(HashMap::new()),
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
+                nudged_at: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
@@ -1898,6 +1901,11 @@ impl SessionsEngine {
         self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
     }
 
+    /// The reminder a Claude Code PostToolUse hook hands the running turn, if one is due.
+    pub fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
+        self.inner.mid_turn_nudge(chat_id)
+    }
+
     pub fn request_compact(
         &self,
         chat_id: &str,
@@ -3015,16 +3023,10 @@ impl Inner {
         Some(wrapped)
     }
 
-    /// Slash commands go out untouched: the note would become their arguments.
-    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+    /// Context tokens once past the reminder floor, when the agent can act on a reminder.
+    fn nudge_tokens(&self, chat_id: &str, harness_id: HarnessId) -> Option<u64> {
         let floor = self.registry.compaction_settings().nudge_tokens;
-        if floor == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
-            return None;
-        }
-        if self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
-            return None;
-        }
-        if lock(&self.agent_compacted).remove(chat_id) {
+        if floor == 0 || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
             return None;
         }
         let config = self
@@ -3049,11 +3051,42 @@ impl Inner {
             .or(usage.window)
             .filter(|window| *window > 0)
             .map_or(floor, |window| floor.min(window * 7 / 10));
-        if tokens < floor {
+        (tokens >= floor).then_some(tokens)
+    }
+
+    /// Slash commands go out untouched: the note would become their arguments.
+    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+        if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
+        if lock(&self.agent_compacted).remove(chat_id) {
+            return None;
+        }
+        let tokens = self.nudge_tokens(chat_id, harness_id)?;
+        lock(&self.nudged_at).insert(chat_id.to_string(), tokens);
         Some(format!(
             "<system-reminder>\nContext {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>",
+            format_tokens(tokens),
+        ))
+    }
+
+    /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
+    fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
+        let harness_id = self.doc_host()?.harness_for(chat_id);
+        let tokens = self.nudge_tokens(chat_id, harness_id)?;
+        let mut nudged = lock(&self.nudged_at);
+        let last = nudged.entry(chat_id.to_string()).or_insert(0);
+        // Smaller than at the last reminder: the chat compacted since.
+        if tokens < *last {
+            *last = tokens;
+            return None;
+        }
+        if *last > 0 && tokens < *last + MID_TURN_NUDGE_STEP {
+            return None;
+        }
+        *last = tokens;
+        Some(format!(
+            "<system-reminder>\nContext {}, and this turn is still running. Keep going unless the step you just finished closes a piece of work and the rest needs only its conclusions. Then call compact with continueWith naming the remaining steps and end your turn: the chat compacts and resumes from continueWith.\n</system-reminder>",
             format_tokens(tokens),
         ))
     }
@@ -3984,6 +4017,8 @@ fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>
         _ => note.into(),
     }
 }
+
+const MID_TURN_NUDGE_STEP: u64 = 50_000;
 
 fn format_tokens(tokens: u64) -> String {
     if tokens >= 1000 {

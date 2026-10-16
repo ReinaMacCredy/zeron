@@ -442,6 +442,21 @@ async fn a_stopped_auto_continue_keeps_its_caption() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_running_turn_is_reminded_once_per_step_of_growth() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    core.registry
+        .set_compaction_settings(zeron_engine::registry::CompactionSettings {
+            nudge_tokens: 20_000,
+            ..Default::default()
+        })
+        .unwrap();
+    let first = core.sessions.mid_turn_nudge(CHAT).expect("past the floor");
+    assert!(first.starts_with("<system-reminder>\nContext 22.8k, and this turn is still running."));
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "no growth since the last reminder");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_filling_context_nudges_the_agent_on_every_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;

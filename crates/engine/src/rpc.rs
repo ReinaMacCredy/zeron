@@ -2965,6 +2965,10 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&outcome)
             }
+            methods::MID_TURN_NUDGE => {
+                let p: ChatParams = parse_params(params)?;
+                RpcReply::value(&serde_json::json!({ "text": self.sessions.mid_turn_nudge(&p.chat_id) }))
+            }
             methods::REQUEST_COMPACT => {
                 let p: RequestCompactParams = parse_params(params)?;
                 self.sessions
