@@ -9051,14 +9051,23 @@ impl Shell {
         (self.sidebar_edge() + Theme::SPACE_SM - natural).max(0.0)
     }
 
+    /// The review chip renders only with the chat actions, so its menu must not outlive them.
+    pub(super) fn drop_hidden_review_menu(&mut self, cx: &mut Context<Self>) {
+        if self.composer.read(cx).review_menu_open() {
+            self.composer
+                .update(cx, |composer, _| composer.drop_review_menu());
+        }
+    }
+
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
     fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !matches!(self.route, Route::Tasks | Route::PullRequests) {
+            return self.render_session_title_bar(window, cx);
+        }
+        self.drop_hidden_review_menu(cx);
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_title_bar(cx);
-        }
-        if !matches!(self.route, Route::PullRequests) {
-            return self.render_session_title_bar(window, cx);
         }
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()

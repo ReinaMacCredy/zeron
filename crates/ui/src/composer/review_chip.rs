@@ -1804,7 +1804,7 @@ impl Composer {
             .into_any_element()
     }
 
-    pub(super) fn drop_review_menu(&mut self) {
+    pub(crate) fn drop_review_menu(&mut self) {
         self.review.menu = Default::default();
         self.review.submenu_intent.reset();
         self.review.submenu = None;

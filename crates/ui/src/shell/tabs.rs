@@ -1640,6 +1640,9 @@ impl Shell {
         } = self.titlebar_trailing_layout(cx);
 
         let show_chat_actions = matches!(self.route, Route::Chat) && !on_canvas && !takeover;
+        if !show_chat_actions {
+            self.drop_hidden_review_menu(cx);
+        }
         let chat_actions = show_chat_actions.then(|| {
             let review_chip = self.composer.update(cx, |composer, cx| {
                 composer.render_review_chip(&theme, window, cx)
