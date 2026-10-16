@@ -15,6 +15,7 @@
 mod account_usage;
 pub mod agent_profiles;
 pub mod app_menus;
+mod app_rail;
 pub mod app_update;
 pub mod appearance;
 pub mod appshots;

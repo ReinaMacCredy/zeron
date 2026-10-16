@@ -405,12 +405,13 @@ impl Shell {
         let viewport = window.viewport_size();
         // The sidebar stays usable beside the stage; collapsed, the stage
         // spans the whole window. Settings always shows its own sidebar.
-        let left = if matches!(self.route, Route::Settings(_)) {
-            self.settings.sidebar_width
-        } else {
-            self.sidebar_now()
-        };
-        let width = (f32::from(viewport.width) - left).max(0.0);
+        let left = self.content_left()
+            + if matches!(self.route, Route::Settings(_)) {
+                self.settings.sidebar_width
+            } else {
+                self.sidebar_now()
+            };
+        let width = (f32::from(viewport.width) - left - self.content_inset()).max(0.0);
         let ui_settings = settings::current(cx);
         let artwork = ui_settings
             .new_thread_composer_background

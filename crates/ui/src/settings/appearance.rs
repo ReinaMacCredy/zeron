@@ -4232,6 +4232,41 @@ impl Render for AppearancePage {
         {
             settings_rows.extend(self.render_frost_rows(&theme, ui_settings.frost, cx));
         }
+        let inset_shell = ui_settings.inset_shell;
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Inset card"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                                .child("Hold the sidebar and content in one rounded card above the window background.")
+                                .into_any_element()],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, inset_shell, "inset-shell")
+                        .id("inset-shell-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Inset card")
+                        .aria_toggled(if inset_shell {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_inset_shell(!inset_shell, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::WIDGET))
