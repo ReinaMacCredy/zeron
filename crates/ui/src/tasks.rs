@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui::{
@@ -25,6 +26,7 @@ const CARD_WIDTH: f32 = 340.0;
 const ROW_HEIGHT: f32 = 44.0;
 const CHECK_SIZE: f32 = 18.0;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const START_PENDING: Duration = Duration::from_secs(15);
 
 pub enum TasksEvent {
     Create {
@@ -106,6 +108,7 @@ pub struct TasksPage {
     project_select: widgets::SelectState,
     done_open: bool,
     open_first_card: bool,
+    starting: HashMap<String, Instant>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -143,6 +146,7 @@ impl TasksPage {
             project_select: widgets::SelectState::default(),
             done_open: true,
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
+            starting: HashMap::new(),
             focus: cx.focus_handle(),
             _subscriptions: vec![add_events, state_changes, settings_changes],
         };
@@ -268,6 +272,22 @@ impl TasksPage {
                 self.open_card(id, None, false, None, cx);
             }
         }
+        let linked: Vec<String> = self
+            .starting
+            .keys()
+            .filter(|id| {
+                self.state
+                    .read(cx)
+                    .tasks
+                    .iter()
+                    .any(|task| &task.id == *id && task.chat_id.is_some())
+            })
+            .cloned()
+            .collect();
+        for id in linked {
+            self.starting.remove(&id);
+        }
+        self.starting.retain(|_, at| at.elapsed() < START_PENDING);
         let Some(card) = self.card.as_mut() else {
             return;
         };
@@ -325,11 +345,25 @@ impl TasksPage {
         let startable = self.state.read(cx).tasks.iter().any(|task| {
             task.id == task_id && task.chat_id.is_none() && task.completed_at.is_none()
         });
-        if !startable {
+        if !startable || self.is_starting(&task_id) {
             return;
         }
+        self.starting.insert(task_id.clone(), Instant::now());
+        cx.spawn(async move |page, cx| {
+            cx.background_executor().timer(START_PENDING).await;
+            page.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
         let patch = self.take_card_patch(cx).map(|(_, patch)| patch);
         cx.emit(TasksEvent::Start { task_id, patch });
+        cx.notify();
+    }
+
+    /// Covers the gap until the link lands; a failed start frees it on expiry.
+    fn is_starting(&self, task_id: &str) -> bool {
+        self.starting
+            .get(task_id)
+            .is_some_and(|at| at.elapsed() < START_PENDING)
     }
 
     fn update(&mut self, task_id: &str, patch: TaskPatch, cx: &mut Context<Self>) {
@@ -1134,6 +1168,7 @@ impl TasksPage {
             )
         });
 
+        let starting = self.is_starting(&task_id);
         let chat_id = row.and_then(|row| row.task.chat_id.clone());
         let done = status == TaskStatus::Done;
         let primary = match chat_id.clone() {
@@ -1147,8 +1182,8 @@ impl TasksPage {
             None if !done => widgets::action_button(theme, widgets::ActionTone::Solid)
                 .id("task-card-start")
                 .debug_selector(|| "task-card-start".into())
-                .when(row.is_none(), |el| el.opacity(0.5))
-                .child("Start")
+                .when(row.is_none() || starting, |el| el.opacity(0.5))
+                .child(if starting { "Starting…" } else { "Start" })
                 .child(
                     div()
                         .text_size(ui_rems(11.0))

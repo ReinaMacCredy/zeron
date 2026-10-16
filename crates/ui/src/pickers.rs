@@ -1713,6 +1713,10 @@ impl Pickers {
         if let Some(config) = self.chat_row(cx).and_then(|c| c.config.as_ref()) {
             return Some(config.harness);
         }
+        self.canvas_default_harness()
+    }
+
+    fn canvas_default_harness(&self) -> Option<HarnessId> {
         // New-chat canvas: the remembered last-used harness (sticky defaults),
         // when the loaded catalog still offers it (the device may have
         // disabled it in Settings → Providers since).
@@ -1735,6 +1739,31 @@ impl Pickers {
         // new-chat canvas onto "Mock" instead of Claude Code + its default
         // model (it stays available under `ZERON_HARNESS=mock`).
         fresh.and_then(|list| self.offered(list).first().map(|d| d.id))
+    }
+
+    /// What a new chat on the canvas would run, whichever chat is selected.
+    pub(crate) fn canvas_harness_model(&self) -> (Option<HarnessId>, Option<String>) {
+        let Some(harness) = self
+            .config
+            .harness
+            .or_else(|| self.canvas_default_harness())
+        else {
+            return (None, None);
+        };
+        let picked = self
+            .config
+            .model
+            .as_deref()
+            .or_else(|| self.defaults.model_for(harness).map(|m| m.id.as_str()));
+        let model = self
+            .models
+            .get(&harness)
+            .and_then(|models| models.ready())
+            .filter(|_| !self.stale_models.contains(&harness))
+            .and_then(|models| selected_catalog_model(models, picked))
+            .map(|m| m.id.clone())
+            .or_else(|| picked.map(str::to_string));
+        (Some(harness), model)
     }
 
     /// Effective model id: the draft pick, the selected chat's config, or (on
@@ -12772,6 +12801,66 @@ mod tests {
             let state = pickers.state.read(cx);
             let config = state.chats[0].config.as_ref().unwrap();
             assert_eq!(config.model_options.get(AUTO_COMPACT), None);
+        });
+    }
+
+    #[gpui::test]
+    fn the_canvas_pick_ignores_the_selected_chat(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let pickers = context_card_picker(cx, false, dir.path());
+        pickers.update(cx, |pickers, cx| {
+            pickers.config = DraftConfig::default();
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::ClaudeCode, "Claude Code"),
+                descriptor(HarnessId::Codex, "Codex"),
+            ]);
+            assert_eq!(
+                pickers.canvas_harness_model(),
+                (Some(HarnessId::ClaudeCode), Some("fable".into()))
+            );
+            pickers.state.update(cx, |state, _| {
+                state.chats = vec![zeron_proto::Chat {
+                    id: "c1".into(),
+                    device_id: "dev".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: Some(ChatConfig {
+                        harness: HarnessId::Codex,
+                        model: Some("gpt-5".into()),
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        permission_mode: Default::default(),
+                        instructions: String::new(),
+                        profile_id: None,
+                        disabled_tools: Vec::new(),
+                    }),
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: chrono::Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                    sidechat_source_chat_id: None,
+                    created_by_chat_id: None,
+                    previous_harnesses: Vec::new(),
+                    delegation: None,
+                    settle: None,
+                    unsettled_at: None,
+                }];
+                state.selected_chat = Some("c1".into());
+            });
+            assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
+            assert_eq!(
+                pickers.canvas_harness_model(),
+                (Some(HarnessId::ClaudeCode), Some("fable".into()))
+            );
         });
     }
 

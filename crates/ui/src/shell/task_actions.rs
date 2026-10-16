@@ -50,6 +50,8 @@ impl Shell {
         task_id: &str,
         space_id: Option<String>,
         patch: Option<TaskPatch>,
+        harness: Option<HarnessId>,
+        model: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -63,6 +65,7 @@ impl Shell {
         );
         let start = serde_json::json!({
             "op": "startTask", "taskId": task_id, "chatId": chat_id, "spaceId": space_id,
+            "harness": harness, "model": model,
         });
         cx.spawn(async move |this, cx| {
             for params in update.into_iter().chain([start]) {
@@ -143,7 +146,13 @@ impl Shell {
             TasksEvent::Update { task_id, patch } => self.update_task(task_id, patch.clone(), cx),
             TasksEvent::Delete(task_id) => self.delete_task(task_id, cx),
             TasksEvent::Start { task_id, patch } => {
-                self.start_task(task_id, None, patch.clone(), cx)
+                let (harness, model) = self
+                    .composer
+                    .read(cx)
+                    .pickers()
+                    .read(cx)
+                    .canvas_harness_model();
+                self.start_task(task_id, None, patch.clone(), harness, model, cx)
             }
             TasksEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
         }
