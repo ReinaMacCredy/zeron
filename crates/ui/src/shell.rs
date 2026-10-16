@@ -9059,11 +9059,14 @@ impl Shell {
         (self.sidebar_edge() + Theme::SPACE_SM - natural).max(0.0)
     }
 
-    /// The review chip renders only with the chat actions, so its menu must not outlive them.
-    pub(super) fn drop_hidden_review_menu(&mut self, cx: &mut Context<Self>) {
+    /// The review chip and handoff button menus must not outlive the chat actions they render with.
+    pub(super) fn drop_hidden_chat_action_menus(&mut self, cx: &mut Context<Self>) {
         if self.composer.read(cx).review_menu_open() {
             self.composer
                 .update(cx, |composer, _| composer.drop_review_menu());
+        }
+        if self.handoff_menu.get().is_some() {
+            self.handoff_menu = popover::Popup::default();
         }
     }
 
@@ -9073,7 +9076,7 @@ impl Shell {
         if !matches!(self.route, Route::Tasks | Route::PullRequests) {
             return self.render_session_title_bar(window, cx);
         }
-        self.drop_hidden_review_menu(cx);
+        self.drop_hidden_chat_action_menus(cx);
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_title_bar(cx);
         }

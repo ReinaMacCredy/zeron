@@ -1641,7 +1641,7 @@ impl Shell {
 
         let show_chat_actions = matches!(self.route, Route::Chat) && !on_canvas && !takeover;
         if !show_chat_actions {
-            self.drop_hidden_review_menu(cx);
+            self.drop_hidden_chat_action_menus(cx);
         }
         let chat_actions = show_chat_actions.then(|| {
             let review_chip = self.composer.update(cx, |composer, cx| {
