@@ -4696,7 +4696,13 @@ impl DocHost {
                 continue;
             };
             changed = true;
-            if let Err(err) = handle.write_user_message(&row.id, &row.text, row.issued_at) {
+            let from = row
+                .from_chat_id
+                .as_deref()
+                .or(row.delegated_tasks.first().map(String::as_str));
+            if let Err(err) =
+                handle.write_user_message_from(&row.id, &row.text, row.issued_at, from)
+            {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "cancelled held send write failed");
             }
         }

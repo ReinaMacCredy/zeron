@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use zeron_proto::AgentEvent;
 
+const AGENT_COMPACTS_FILE: &str = "agent-compacts.json";
+
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
     #[error("io: {0}")]
@@ -88,6 +90,34 @@ impl RunJournal {
             tracing::warn!(chat = %chat_id, error = %err, "resume-attempt ledger write failed");
         }
         next
+    }
+
+    /// Compactions agents asked for that have not run yet, so an engine
+    /// restart in between does not drop them.
+    pub fn agent_compacts<T: serde::de::DeserializeOwned>(&self) -> HashMap<String, T> {
+        std::fs::read(self.dir.join(AGENT_COMPACTS_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_agent_compacts<T: Serialize>(&self, compacts: &HashMap<String, T>) {
+        let path = self.dir.join(AGENT_COMPACTS_FILE);
+        let written = if compacts.is_empty() {
+            std::fs::remove_file(&path).or_else(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(err),
+            })
+        } else {
+            let tmp = path.with_extension("json.tmp");
+            serde_json::to_vec(compacts)
+                .map_err(std::io::Error::other)
+                .and_then(|json| std::fs::write(&tmp, json))
+                .and_then(|()| std::fs::rename(&tmp, &path))
+        };
+        if let Err(err) = written {
+            tracing::warn!(error = %err, "agent compaction ledger write failed");
+        }
     }
 
     /// A cleanly completed turn resets the budget — only consecutive
