@@ -230,7 +230,7 @@ impl Render for CompactionCard {
                 .child(row_text(
                     &theme,
                     "Remind at",
-                    "Context used, as the footer ring shows it. A second reminder follows at 85%.",
+                    "Context used, as the footer ring shows it. Every message past it carries the reminder until the chat compacts.",
                 ))
                 .child(widgets::segmented(
                     &theme,

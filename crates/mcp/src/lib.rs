@@ -104,7 +104,8 @@ fn compact_tool() -> Value {
             },
             "additionalProperties": false
         },
-        "annotations": { "title": "Compact context", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+        "annotations": { "title": "Compact context", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+        "_meta": { "anthropic/alwaysLoad": true }
     })
 }
 

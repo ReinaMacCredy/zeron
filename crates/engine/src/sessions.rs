@@ -557,7 +557,8 @@ struct Inner {
     /// harness may still be compacting behind the timeout.
     compaction_timed_out: Mutex<std::collections::HashSet<String>>,
     agent_compacts: Mutex<HashMap<String, AgentCompact>>,
-    context_nudges: Mutex<HashMap<String, (u8, String)>>,
+    /// Skips one reminder so a summary still over the floor cannot re-compact on its own continuation.
+    agent_compacted: Mutex<std::collections::HashSet<String>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -763,7 +764,7 @@ impl SessionsEngine {
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 agent_compacts: Mutex::new(HashMap::new()),
-                context_nudges: Mutex::new(HashMap::new()),
+                agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
@@ -1952,6 +1953,7 @@ impl SessionsEngine {
                 if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
                     self.inner.set_compact_plan(chat_id, None);
                 }
+                lock(&self.inner.agent_compacted).insert(chat_id.to_string());
                 Ok(Some((outcome, request.continue_with)))
             }
             Err(_) if busy(self) => Ok(None),
@@ -3001,7 +3003,7 @@ impl Inner {
         computer: bool,
     ) -> Option<HarnessPrompt> {
         let wrapped = self.wrapped_prompt(chat_id, typed, user_entry_id, computer);
-        let Some(nudge) = self.context_nudge(chat_id, typed, user_entry_id) else {
+        let Some(nudge) = self.context_nudge(chat_id, typed) else {
             return wrapped;
         };
         let mut wrapped = wrapped.unwrap_or_else(|| HarnessPrompt {
@@ -3013,9 +3015,12 @@ impl Inner {
     }
 
     /// Slash commands go out untouched: the note would become their arguments.
-    fn context_nudge(&self, chat_id: &str, typed: &str, user_entry_id: &str) -> Option<String> {
+    fn context_nudge(&self, chat_id: &str, typed: &str) -> Option<String> {
         let first = self.registry.compaction_settings().nudge_percent;
         if first == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
+            return None;
+        }
+        if lock(&self.agent_compacted).remove(chat_id) {
             return None;
         }
         let config = self
@@ -3038,26 +3043,12 @@ impl Inner {
             .and_then(zeron_harness::claude::catalog::chat_budget)
             .or(usage.window)
             .filter(|window| *window > 0)?;
-        let percent = (tokens.saturating_mul(100) / window).min(100) as u8;
-        let mut nudges = lock(&self.context_nudges);
-        let Some(mark) = [first.max(NUDGE_LAST_MARK), first]
-            .into_iter()
-            .find(|mark| percent >= *mark)
-        else {
-            nudges.remove(chat_id);
-            return None;
-        };
-        if let Some((sent, entry)) = nudges.get(chat_id)
-            && *sent >= mark
-            && entry != user_entry_id
-        {
+        if tokens.saturating_mul(100) < u64::from(first) * window {
             return None;
         }
-        nudges.insert(chat_id.to_string(), (mark, user_entry_id.to_string()));
         Some(format!(
-            "<system-reminder>\nContext {} of {} ({percent}%). If you are at a stopping point, call the zeron compact tool with a focus that names what to keep.\n</system-reminder>",
+            "<system-reminder>\nContext {}. Compact at a boundary, not mid-task: if this message starts a new phase, call compact first with the request as continueWith; if this turn finishes a piece of work and what comes next needs only its conclusions, call compact last. A follow-up question about the current work is not a boundary. It runs after the turn ends; name what to keep.\n</system-reminder>",
             format_tokens(tokens),
-            format_tokens(window),
         ))
     }
 
@@ -3976,7 +3967,6 @@ fn record_compaction(
 const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
 const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
-const NUDGE_LAST_MARK: u8 = 85;
 
 fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
     match (pre_tokens, post_tokens) {
