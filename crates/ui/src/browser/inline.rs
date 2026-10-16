@@ -617,8 +617,7 @@ fn input_monitor(
         let Some(window) = parent.window() else {
             return event.as_ptr();
         };
-        // Mouse-moved events often carry no window; the screen location is
-        // the one to trust.
+        // Mouse-moved events often carry no window; trust the screen location.
         let in_window = window.convertPointFromScreen(NSEvent::mouseLocation());
         let point = parent.convertPoint_fromView(in_window, None);
         let inside = contains(state.region.get(), point);
@@ -681,8 +680,7 @@ fn on_screen(window: &NSWindow) -> bool {
         && !window.isMiniaturized()
 }
 
-/// Wakes a page whose snapshots stopped while its window was hidden: the
-/// window may show again without presenting, so no sync would re-stamp it.
+// A window can show again without presenting, so no sync would re-stamp its pages.
 fn shown_observers(
     window: Option<Retained<NSWindow>>,
     missed: &Arc<AtomicBool>,
