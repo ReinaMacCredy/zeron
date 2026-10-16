@@ -263,6 +263,16 @@ pub struct Chat {
     /// Unlike `created_by_chat_id`, the delegating chat owns this one (d67).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Delegation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<SidebarSettle>,
+}
+
+/// Holds until the chat's next message after `at`, as T3's `settledOverride` resets on activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarSettle {
+    pub settled: bool,
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

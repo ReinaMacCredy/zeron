@@ -1279,6 +1279,13 @@ impl RegistryDoc {
                     .transpose()?
                     .unwrap_or(Value::Null),
             ),
+            (
+                "settle",
+                chat.settle
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1386,6 +1393,23 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("archived", json!(archived))]),
+        );
+        Ok(true)
+    }
+
+    pub fn set_chat_settle(
+        &mut self,
+        chat_id: &str,
+        settle: zeron_proto::SidebarSettle,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("settle", serde_json::to_value(settle)?)]),
         );
         Ok(true)
     }

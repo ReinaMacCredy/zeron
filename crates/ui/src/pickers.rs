@@ -11565,6 +11565,7 @@ mod tests {
             created_by_chat_id: None,
             previous_harnesses: vec![HarnessId::ClaudeCode, HarnessId::Codex],
             delegation: None,
+            settle: None,
         };
         assert_eq!(
             chat_harness_marks(&chat),
@@ -12474,6 +12475,7 @@ mod tests {
                     created_by_chat_id: None,
                     previous_harnesses: Vec::new(),
                     delegation: None,
+                    settle: None,
                 }];
                 state.selected_chat = Some("c1".into());
                 state.transcript_replayed = false;
@@ -12670,6 +12672,7 @@ mod tests {
                     created_by_chat_id: None,
                     previous_harnesses: Vec::new(),
                     delegation: None,
+                    settle: None,
                 }];
                 state.selected_chat = Some("c1".into());
             });

@@ -734,13 +734,16 @@ pub(crate) struct RawChat {
     /// dropped from the list, never the row.
     #[serde(default, deserialize_with = "lenient_harness_list")]
     previous_harnesses: Vec<HarnessId>,
-    #[serde(default, deserialize_with = "lenient_delegation")]
+    #[serde(default, deserialize_with = "lenient")]
     delegation: Option<zeron_proto::Delegation>,
+    #[serde(default, deserialize_with = "lenient")]
+    settle: Option<zeron_proto::SidebarSettle>,
 }
 
-fn lenient_delegation<'de, D>(deserializer: D) -> Result<Option<zeron_proto::Delegation>, D::Error>
+fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(value.and_then(|value| serde_json::from_value(value).ok()))
@@ -800,6 +803,7 @@ impl From<RawChat> for Chat {
             created_by_chat_id: raw.created_by_chat_id,
             previous_harnesses: raw.previous_harnesses,
             delegation: raw.delegation,
+            settle: raw.settle,
         }
     }
 }
@@ -927,6 +931,7 @@ mod tests {
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
+            settle: None,
         }
     }
 

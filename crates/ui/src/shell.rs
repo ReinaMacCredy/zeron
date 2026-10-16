@@ -60,7 +60,7 @@ use crate::settings::tools::{ToolsPage, ToolsPageEvent};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SPLIT_PANE_MIN, SPLIT_RATIO_DEFAULT,
-    SavePolicy, ShortcutId, SidebarOrganization, SidebarSettle, SidebarSort,
+    SavePolicy, ShortcutId, SidebarOrganization, SidebarSort,
     TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT, UiSettings, badge_combo,
     jump_hints_visible, modifier_send_hint_visible, platform_combo, sidebar_pin_profile_key,
 };
@@ -7881,23 +7881,10 @@ impl Shell {
 
     fn set_chat_settled(&mut self, chat_id: String, settled: bool, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
-        let now = Utc::now();
-        let state = self.state.read(cx);
-        let last_message: std::collections::HashMap<&str, DateTime<Utc>> = state
-            .chats
-            .iter()
-            .filter_map(|chat| Some((chat.id.as_str(), chat.last_message_at?)))
-            .collect();
-        // Another workspace's chats are absent from this list; keep theirs.
-        self.settings.sidebar_settle_overrides.retain(|id, settle| {
-            last_message
-                .get(id.as_str())
-                .is_none_or(|at| *at <= settle.at)
-        });
-        self.settings
-            .sidebar_settle_overrides
-            .insert(chat_id, SidebarSettle { settled, at: now });
-        self.schedule_save(cx);
+        self.mutate(
+            serde_json::json!({ "op": "setChatSettled", "chatId": chat_id, "settled": settled }),
+            cx,
+        );
         cx.notify();
     }
 
@@ -18242,6 +18229,7 @@ mod tests {
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
+            settle: None,
         }
     }
 
@@ -21227,6 +21215,7 @@ mod exit_regressions {
                         sidechat_source_chat_id: None,
                         previous_harnesses: Vec::new(),
                         delegation: None,
+                        settle: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
@@ -22288,6 +22277,7 @@ mod right_tab_mouse_regressions {
                     created_by_chat_id: None,
                     previous_harnesses: Vec::new(),
                     delegation: None,
+                    settle: None,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

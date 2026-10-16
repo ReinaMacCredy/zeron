@@ -604,6 +604,7 @@ mod tests {
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
+            settle: None,
         }
     }
 

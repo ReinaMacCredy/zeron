@@ -751,6 +751,15 @@ mod tests {
 
     #[gpui::test]
     fn the_inbox_chat_menu_settles_and_unsettles_a_chat(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
         let dir = tempfile::tempdir().unwrap();
         let window = test_shell(cx, dir.path());
         let recent = Utc::now() - chrono::Duration::hours(1);
@@ -760,25 +769,17 @@ mod tests {
                 shell.debug_gate = Some(super::GatePhase::Ready);
                 shell.settings.sidebar_organization = SidebarOrganization::Inbox;
                 shell.state.update(cx, |state, _| {
+                    state.set_test_engine(engine);
                     for chat in &mut state.chats {
                         chat.last_message_at = Some(recent);
                         chat.last_seen_at = Some(recent);
                     }
                 });
-                for (id, at) in [
-                    ("elsewhere", recent),
-                    ("other", recent - chrono::Duration::hours(1)),
-                ] {
-                    shell
-                        .settings
-                        .sidebar_settle_overrides
-                        .insert(id.into(), SidebarSettle { settled: true, at });
-                }
             })
             .unwrap();
         let shell = window.root(cx).unwrap();
         let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let toggle = |cx: &mut gpui::VisualTestContext| {
+        let mut toggle = |cx: &mut gpui::VisualTestContext| {
             cx.update(|_, cx| {
                 shell.update(cx, |shell, cx| {
                     shell.chat_menu.open(super::ChatMenuState {
@@ -796,8 +797,21 @@ mod tests {
                 .expect("Inbox offers Settle on an idle chat");
             cx.simulate_click(row.center(), gpui::Modifiers::none());
             cx.run_until_parked();
+            let request = std::iter::from_fn(|| requests.try_recv().ok())
+                .map(|raw| serde_json::from_str::<serde_json::Value>(&raw).unwrap())
+                .find(|request| request["params"]["op"] == "setChatSettled")
+                .expect("Settle writes the engine");
+            assert_eq!(request["params"]["chatId"], "regular");
+            let settled = request["params"]["settled"].as_bool().unwrap();
             cx.update(|_, cx| {
                 shell.update(cx, |shell, cx| {
+                    shell.state.update(cx, |state, _| {
+                        let chat = state.chats.iter_mut().find(|chat| chat.id == "regular");
+                        chat.unwrap().settle = Some(zeron_proto::SidebarSettle {
+                            settled,
+                            at: Utc::now(),
+                        });
+                    });
                     let now = Utc::now();
                     let state = shell.state.read(cx);
                     let chat = state
@@ -806,15 +820,11 @@ mod tests {
                         .find(|chat| chat.id == "regular")
                         .unwrap();
                     let status = state.display_status_for(chat, now);
-                    let settled = shell.sidebar_settled_at(status, chat, now).is_some();
-                    let mut kept: Vec<String> = shell
-                        .settings
-                        .sidebar_settle_overrides
-                        .keys()
-                        .cloned()
-                        .collect();
-                    kept.sort();
-                    (settled, kept)
+                    assert_eq!(
+                        shell.sidebar_settled_at(status, chat, now).is_some(),
+                        settled
+                    );
+                    settled
                 })
             })
         };
@@ -831,15 +841,9 @@ mod tests {
                     .contains_key("regular")
             })
         };
-        assert_eq!(
-            toggle(&mut cx),
-            (true, vec!["elsewhere".into(), "regular".into()])
-        );
+        assert!(toggle(&mut cx));
         assert!(!unsettled(&mut cx));
-        assert_eq!(
-            toggle(&mut cx),
-            (false, vec!["elsewhere".into(), "regular".into()])
-        );
+        assert!(!toggle(&mut cx));
         assert!(unsettled(&mut cx));
     }
 

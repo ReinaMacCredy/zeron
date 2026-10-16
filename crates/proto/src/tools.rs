@@ -79,6 +79,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "Archive or unarchive one or several threads.",
             ),
             tool(
+                "set_thread_settled",
+                "Settle or unsettle threads in the sidebar's Inbox.",
+            ),
+            tool(
                 "interrupt_thread",
                 "Stop another thread's running turn, as its stop button does.",
             ),
@@ -375,7 +379,7 @@ mod tests {
         let mut settings = ToolSettings::default();
         settings.set_tool("interrupt_thread", false);
         settings.set_group(ToolGroup::Threads, false);
-        assert_eq!(settings.disabled(&[]).len(), 10);
+        assert_eq!(settings.disabled(&[]).len(), 11);
         settings.set_group(ToolGroup::Threads, true);
         assert_eq!(settings.disabled(&[]), BTreeSet::from(["interrupt_thread"]));
     }
