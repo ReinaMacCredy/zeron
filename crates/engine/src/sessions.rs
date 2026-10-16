@@ -52,7 +52,8 @@ pub struct JournaledEvent {
     pub event: AgentEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AgentCompact {
     pub focus: Option<String>,
     pub continue_with: Option<String>,
@@ -762,6 +763,7 @@ impl SessionsEngine {
         registry: Arc<HarnessRegistry>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
+        let agent_compacts = journal.agent_compacts();
         Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
@@ -784,7 +786,7 @@ impl SessionsEngine {
                 sidechat_contexts: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
-                agent_compacts: Mutex::new(HashMap::new()),
+                agent_compacts: Mutex::new(agent_compacts),
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 nudged_at: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
@@ -1943,16 +1945,31 @@ impl SessionsEngine {
             text.map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
         };
-        lock(&self.inner.agent_compacts).insert(
-            chat_id.to_string(),
-            AgentCompact {
-                focus: trimmed(focus),
-                continue_with: trimmed(continue_with),
-            },
-        );
+        self.inner.edit_agent_compacts(|compacts| {
+            compacts.insert(
+                chat_id.to_string(),
+                AgentCompact {
+                    focus: trimmed(focus),
+                    continue_with: trimmed(continue_with),
+                },
+            )
+        });
         self.inner
             .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
         Ok(())
+    }
+
+    /// After a restart: a chat whose agent asked for a compaction that never
+    /// ran has no status row yet, and auto_compact only sees settled rows.
+    pub(crate) fn surface_waiting_agent_compacts(&self) {
+        let waiting: Vec<String> = lock(&self.inner.agent_compacts).keys().cloned().collect();
+        for chat_id in waiting {
+            if !lock(&self.inner.statuses).contains_key(&chat_id) {
+                self.inner.set_status(&chat_id, SessionStatus::Idle, false);
+            }
+            self.inner
+                .set_compact_plan(&chat_id, Some(zeron_proto::CompactPlan::Agent));
+        }
     }
 
     pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {
@@ -1977,7 +1994,11 @@ impl SessionsEngine {
             .await
         {
             Ok(outcome) => {
-                if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
+                if self
+                    .inner
+                    .edit_agent_compacts(|compacts| compacts.remove(chat_id))
+                    .is_some()
+                {
                     self.inner.set_compact_plan(chat_id, None);
                 }
                 lock(&self.inner.agent_compacted).insert(chat_id.to_string());
@@ -1985,7 +2006,8 @@ impl SessionsEngine {
             }
             Err(_) if busy(self) => Ok(None),
             Err(err) => {
-                lock(&self.inner.agent_compacts).remove(chat_id);
+                self.inner
+                    .edit_agent_compacts(|compacts| compacts.remove(chat_id));
                 self.inner.set_compact_plan(chat_id, None);
                 let note = self.doc_handle(chat_id).and_then(|handle| {
                     Ok(handle.write_system_note(
@@ -2191,7 +2213,11 @@ impl SessionsEngine {
                 ),
             });
         };
-        if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
+        if self
+            .inner
+            .edit_agent_compacts(|compacts| compacts.remove(chat_id))
+            .is_some()
+        {
             self.inner.set_compact_plan(chat_id, None);
         }
         Ok(CompactOutcome {
@@ -3079,6 +3105,16 @@ impl Inner {
         });
         wrapped.prompt = format!("{}\n\n{nudge}", wrapped.prompt);
         Some(wrapped)
+    }
+
+    fn edit_agent_compacts<R>(
+        &self,
+        edit: impl FnOnce(&mut HashMap<String, AgentCompact>) -> R,
+    ) -> R {
+        let mut compacts = lock(&self.agent_compacts);
+        let result = edit(&mut compacts);
+        self.journal.save_agent_compacts(&compacts);
+        result
     }
 
     /// Context tokens once past the reminder floor, when the agent can act on a reminder.
@@ -6387,6 +6423,43 @@ mod tests {
     }
 
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[test]
+    fn an_agent_compaction_request_survives_a_restart() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = || {
+            SessionsEngine::new(
+                "host".into(),
+                Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+                Arc::new(HarnessRegistry::new()),
+            )
+        };
+        let request = AgentCompact {
+            focus: Some("keep the plan".into()),
+            continue_with: Some("go on".into()),
+        };
+        engine()
+            .inner
+            .edit_agent_compacts(|compacts| compacts.insert("chat".into(), request.clone()));
+
+        let restarted = engine();
+        assert_eq!(
+            lock(&restarted.inner.agent_compacts).get("chat"),
+            Some(&request)
+        );
+        restarted.surface_waiting_agent_compacts();
+        let row = restarted
+            .session_status("chat")
+            .expect("a settled row to schedule from");
+        assert_eq!(row.status, SessionStatus::Idle);
+        assert_eq!(row.compact_plan, Some(zeron_proto::CompactPlan::Agent));
+
+        restarted
+            .inner
+            .edit_agent_compacts(|compacts| compacts.remove("chat"));
+        assert!(!engine().agent_compact_waiting("chat"));
+    }
 
     #[test]
     fn pending_branch_caches_misses_and_tracks_lifecycle_updates() {
