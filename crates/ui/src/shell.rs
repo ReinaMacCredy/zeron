@@ -108,6 +108,7 @@ mod split;
 mod summary;
 mod swipe_nav;
 mod switcher;
+mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
