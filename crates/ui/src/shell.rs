@@ -6981,7 +6981,7 @@ impl Shell {
         self.set_route(Route::Inbox, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
-        self.load_account_usage(cx);
+        self.refresh_device_accounts(cx);
         cx.notify();
     }
 
@@ -12660,6 +12660,7 @@ impl Shell {
     fn rail_item_active(&self, item: RailItem) -> bool {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
+            RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
@@ -12669,6 +12670,10 @@ impl Shell {
     fn activate_rail_item(&mut self, item: RailItem, cx: &mut Context<Self>) {
         match item {
             RailItem::Home => self.open_home(cx),
+            RailItem::Inbox => {
+                self.settings_focus_pending = false;
+                self.open_inbox(cx);
+            }
             RailItem::PullRequests => {
                 // Leaving Settings through the rail is a plain route change;
                 // nothing there should grab focus on the way out.
@@ -12718,7 +12723,12 @@ impl Shell {
     ) -> AnyElement {
         let item = entry.item;
         let active = self.rail_item_active(item);
+        let awaiting = (item == RailItem::Inbox)
+            .then(|| crate::inbox::awaiting_chats(self.state.read(cx), Utc::now()).len())
+            .filter(|count| *count > 0);
         let button = app_rail::button(entry, active, theme)
+            .relative()
+            .when_some(awaiting, |el, count| el.child(app_rail::badge(count, theme)))
             .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {
             return button
@@ -14639,7 +14649,7 @@ impl Shell {
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
         if matches!(self.route, Route::Inbox) {
-            let accounts = self.account_usage.clone();
+            let accounts = crate::account_usage::local_snapshot(cx).cloned();
             let page = self.inbox_page(cx);
             page.update(cx, |page, cx| page.set_accounts(accounts, cx));
             return div()
