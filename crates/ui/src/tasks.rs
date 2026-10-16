@@ -378,10 +378,7 @@ impl TasksPage {
         let state = self.state.read(cx);
         let now = Utc::now();
         let row = |task: &zeron_proto::Task| {
-            let chat = task
-                .chat_id
-                .as_deref()
-                .and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+            let chat = linked_chat(state, task);
             let linked = chat.map(|chat| {
                 let harness = chat.config.as_ref().map(|config| config.harness);
                 let model = chat
@@ -1288,6 +1285,24 @@ impl TasksPage {
                 .into_any_element(),
         )
     }
+}
+
+fn linked_chat<'a>(state: &'a AppState, task: &zeron_proto::Task) -> Option<&'a zeron_proto::Chat> {
+    let id = task.chat_id.as_deref()?;
+    state.chats.iter().find(|chat| chat.id == id)
+}
+
+pub(crate) fn needs_you_count(state: &AppState) -> usize {
+    let now = Utc::now();
+    state
+        .tasks
+        .iter()
+        .filter(|task| !task.deleted)
+        .filter(|task| {
+            let linked = linked_chat(state, task).map(|chat| state.display_status_for(chat, now));
+            task_status(task, linked) == TaskStatus::NeedsYou
+        })
+        .count()
 }
 
 fn column_tone(status: TaskStatus, theme: &Theme) -> (Option<SharedString>, &'static str, Hsla) {

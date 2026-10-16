@@ -23,6 +23,7 @@ const CARD_WIDTH: f32 = 400.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RailItem {
     Home,
+    Tasks,
     PullRequests,
     Usage,
     Settings,
@@ -35,12 +36,18 @@ pub(crate) struct RailEntry {
     pub icon: &'static str,
 }
 
-pub(crate) const TOP: [RailEntry; 3] = [
+pub(crate) const TOP: [RailEntry; 4] = [
     RailEntry {
         item: RailItem::Home,
         id: "rail-home",
         label: "Home",
         icon: icons::HOME,
+    },
+    RailEntry {
+        item: RailItem::Tasks,
+        id: "open-tasks",
+        label: "Tasks",
+        icon: icons::LUCIDE_LIST_CHECKS,
     },
     RailEntry {
         item: RailItem::PullRequests,
@@ -90,6 +97,26 @@ pub(crate) fn button(entry: &RailEntry, active: bool, theme: &Theme) -> Stateful
         } else {
             motion::hover_blend(id, theme.text_muted, theme.text)
         }))
+}
+
+pub(crate) fn count_badge(count: usize, theme: &Theme) -> Div {
+    let label = if count > 99 { "99+".to_string() } else { count.to_string() };
+    div()
+        .absolute()
+        .top(px(-2.0))
+        .right(px(-3.0))
+        .min_w(px(16.0))
+        .h(px(16.0))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme.accent)
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(gpui::white())
+        .child(SharedString::from(label))
 }
 
 pub(crate) fn ring_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {

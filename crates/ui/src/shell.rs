@@ -12625,6 +12625,7 @@ impl Shell {
     fn rail_item_active(&self, item: RailItem) -> bool {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
+            RailItem::Tasks => matches!(self.route, Route::Tasks),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
@@ -12644,6 +12645,10 @@ impl Shell {
                 cx.notify();
             }
             RailItem::Usage => self.open_usage(cx),
+            RailItem::Tasks => {
+                self.settings_focus_pending = false;
+                self.open_tasks(cx);
+            }
             RailItem::Settings => self.toggle_settings(cx),
         }
     }
@@ -12683,7 +12688,13 @@ impl Shell {
     ) -> AnyElement {
         let item = entry.item;
         let active = self.rail_item_active(item);
+        let badge = (item == RailItem::Tasks)
+            .then(|| crate::tasks::needs_you_count(self.state.read(cx)))
+            .filter(|count| *count > 0)
+            .map(|count| app_rail::count_badge(count, theme));
         let button = app_rail::button(entry, active, theme)
+            .relative()
+            .children(badge)
             .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {
             return button
