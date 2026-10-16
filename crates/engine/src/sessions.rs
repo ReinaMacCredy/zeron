@@ -244,6 +244,24 @@ struct RunHandle {
     /// is unambiguously before the stop (cancelled with it) or after it
     /// (re-dispatched to a fresh runtime — never lost).
     retiring: Arc<std::sync::atomic::AtomicBool>,
+    compaction: Arc<Mutex<Option<QueuedCompaction>>>,
+}
+
+struct QueuedCompaction {
+    note: &'static str,
+    started: bool,
+    compacted: Option<(Option<u64>, Option<u64>)>,
+    done: oneshot::Sender<CompactionDrain>,
+}
+
+impl QueuedCompaction {
+    fn finish(self, result: Option<String>, failure: Option<String>) {
+        let _ = self.done.send(CompactionDrain {
+            compacted: self.compacted,
+            result,
+            failure,
+        });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +498,7 @@ impl RunSetup {
                 delegate_binds: Arc::new(Mutex::new(Vec::new())),
                 html_binds: Arc::new(Mutex::new(Vec::new())),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                compaction: Arc::new(Mutex::new(None)),
             },
             controls,
             engine_rx,
@@ -1990,7 +2009,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         focus: Option<String>,
-        note: &str,
+        note: &'static str,
     ) -> Result<CompactOutcome, EngineError> {
         {
             let mut pending = lock(&self.inner.compacting);
@@ -2035,6 +2054,38 @@ impl SessionsEngine {
                     None => command.clone(),
                 };
             }
+        }
+        let warm = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| {
+                h.steerable
+                    && h.runtime_config.harness_id == harness_id
+                    && h.started.load(std::sync::atomic::Ordering::Acquire)
+                    && !h.retiring.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .map(|h| (h.turn.clone(), h.compaction.clone()));
+        if matches!(compaction, Compaction::SlashText(_))
+            && harness.compacts_in_place()
+            && let Some((turn, queued)) = warm
+        {
+            let (done, finished) = oneshot::channel();
+            *lock(&queued) = Some(QueuedCompaction {
+                note,
+                started: false,
+                compacted: None,
+                done,
+            });
+            turn.compact(request.prompt);
+            return match tokio::time::timeout(COMPACT_TIMEOUT, finished).await {
+                Ok(Ok(drain)) => self.compaction_outcome(chat_id, drain),
+                Ok(Err(_)) => Err(EngineError::Other(
+                    "Context compaction was interrupted.".into(),
+                )),
+                Err(_elapsed) => {
+                    lock(&queued).take();
+                    Err(EngineError::Other("Context compaction timed out.".into()))
+                }
+            };
         }
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
@@ -2098,6 +2149,23 @@ impl SessionsEngine {
         drain: CompactionDrain,
         note: &str,
     ) -> Result<CompactOutcome, EngineError> {
+        if let Some((pre_tokens, post_tokens)) = drain.compacted {
+            record_compaction(
+                handle.doc(),
+                &self.inner.device_id,
+                note,
+                pre_tokens,
+                post_tokens,
+            )?;
+        }
+        self.compaction_outcome(handle.chat_id(), drain)
+    }
+
+    fn compaction_outcome(
+        &self,
+        chat_id: &str,
+        drain: CompactionDrain,
+    ) -> Result<CompactOutcome, EngineError> {
         let Some((pre_tokens, post_tokens)) = drain.compacted else {
             if let Some(failure) = drain.failure {
                 return Err(EngineError::Other(failure));
@@ -2115,18 +2183,8 @@ impl SessionsEngine {
                 ),
             });
         };
-        record_compaction(
-            handle.doc(),
-            &self.inner.device_id,
-            note,
-            pre_tokens,
-            post_tokens,
-        )?;
-        if lock(&self.inner.agent_compacts)
-            .remove(handle.chat_id())
-            .is_some()
-        {
-            self.inner.set_compact_plan(handle.chat_id(), None);
+        if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
+            self.inner.set_compact_plan(chat_id, None);
         }
         Ok(CompactOutcome {
             compacted: true,
@@ -3935,6 +3993,17 @@ async fn drain_compaction(
     drain
 }
 
+fn queued_compaction(
+    inner: &Inner,
+    chat_id: &str,
+    run_id: &str,
+) -> Option<Arc<Mutex<Option<QueuedCompaction>>>> {
+    lock(&inner.runs)
+        .get(chat_id)
+        .filter(|h| h.run_id == run_id)
+        .map(|h| h.compaction.clone())
+}
+
 fn record_compaction(
     doc: &SessionDoc,
     device_id: &str,
@@ -5402,13 +5471,17 @@ async fn drive_run(
                     clock.start(false, now);
                 }
             }
-            if let Err(err) = record_compaction(
-                doc_ref,
-                &device_id,
-                COMPACTED_NOTE,
-                *pre_tokens,
-                *post_tokens,
-            ) {
+            let note = queued_compaction(&inner, &chat_id, &run_id)
+                .and_then(|queued| {
+                    let mut queued = lock(&queued);
+                    let queued = queued.as_mut().filter(|queued| queued.started)?;
+                    queued.compacted = Some((*pre_tokens, *post_tokens));
+                    Some(queued.note)
+                })
+                .unwrap_or(COMPACTED_NOTE);
+            if let Err(err) =
+                record_compaction(doc_ref, &device_id, note, *pre_tokens, *post_tokens)
+            {
                 tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
             }
             continue;
@@ -5679,11 +5752,27 @@ async fn drive_run(
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
             inner.set_status(&chat_id, SessionStatus::Working, true);
+            let compaction_started =
+                queued_compaction(&inner, &chat_id, &run_id).is_some_and(|queued| {
+                    let mut queued = lock(&queued);
+                    match queued.take() {
+                        Some(mut compaction) if !compaction.started => {
+                            compaction.started = true;
+                            *queued = Some(compaction);
+                            true
+                        }
+                        Some(compaction) => {
+                            compaction.finish(None, None);
+                            false
+                        }
+                        None => false,
+                    }
+                });
             // The boundary confirms delivery of the oldest accepted steer —
             // retire its at-least-once ledger entry.
             let steer = lock(&inner.runs)
                 .get(&chat_id)
-                .filter(|h| h.run_id == run_id)
+                .filter(|h| h.run_id == run_id && !compaction_started)
                 .and_then(|h| lock(&h.routed_steers).pop_front());
             if let Some(steer) = steer {
                 // Consumed: a steer carrying the fork history delivered it to
@@ -5798,7 +5887,30 @@ async fn drive_run(
         if let AgentEvent::UsageLimit { resets_at } = &event {
             turn_limit = Some(resets_at.or(turn_limit.flatten()));
         }
-        if let AgentEvent::Done { status, .. } = &event {
+        if let AgentEvent::Done {
+            status,
+            result,
+            error,
+            ..
+        } = &event
+        {
+            let ends_compaction = queued_compaction(&inner, &chat_id, &run_id)
+                .and_then(|queued| {
+                    let mut queued = lock(&queued);
+                    queued
+                        .as_ref()
+                        .is_some_and(|q| q.started || *status == DoneStatus::Interrupted)
+                        .then(|| queued.take())
+                        .flatten()
+                })
+                .map(|queued| {
+                    let failure = error.clone().or_else(|| {
+                        (*status == DoneStatus::Interrupted)
+                            .then(|| "Context compaction was interrupted.".to_string())
+                    });
+                    queued.finish(result.clone(), failure);
+                })
+                .is_some();
             if let Some(resets_at) = turn_limit.take()
                 && !interrupted
                 && let Some(schedule) = inner.resume_schedule.get()
@@ -5900,6 +6012,7 @@ async fn drive_run(
             let completed_turn = (*status == DoneStatus::Completed
                 && !interrupted
                 && turn_was_active
+                && !ends_compaction
                 && !pending_steer
                 && !inner.continues_with_sent_message(&chat_id))
             .then(|| entry_id.clone());

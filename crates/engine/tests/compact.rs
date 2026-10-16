@@ -34,6 +34,8 @@ struct TestHarness {
     steerable: AtomicBool,
     /// False reports `Compaction::None`, like Pi or an ACP agent without `/compact`.
     can_compact: AtomicBool,
+    in_place: AtomicBool,
+    mailbox: Arc<Mutex<Vec<String>>>,
     /// Held by the next run until the test releases it.
     gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
@@ -45,6 +47,8 @@ impl TestHarness {
             compacts: AtomicBool::new(true),
             steerable: AtomicBool::new(steerable),
             can_compact: AtomicBool::new(true),
+            in_place: AtomicBool::new(false),
+            mailbox: Arc::new(Mutex::new(Vec::new())),
             gate: Mutex::new(None),
         }
     }
@@ -73,6 +77,9 @@ impl Harness for TestHarness {
         } else {
             Compaction::None
         }
+    }
+    fn compacts_in_place(&self) -> bool {
+        self.in_place.load(Ordering::SeqCst)
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
@@ -130,6 +137,9 @@ impl Harness for TestHarness {
                 session_id: Some("sess-compact".into()),
             }));
         }
+        if self.in_place.load(Ordering::SeqCst) && !compacting {
+            return Ok(live_run(events, controls, self.mailbox.clone()));
+        }
         // The child stays warm after `Done` and ends only on its interrupt
         // token — the persistent-session shape a parked run depends on.
         Ok(futures::stream::once(async move {
@@ -150,6 +160,74 @@ impl Harness for TestHarness {
         }))
         .boxed())
     }
+}
+
+fn live_run(
+    events: Vec<Result<AgentEvent, HarnessError>>,
+    controls: RunControls,
+    mailbox: Arc<Mutex<Vec<String>>>,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let RunControls {
+        mut steering,
+        interrupt,
+        turn,
+        ..
+    } = controls;
+    tokio::spawn(async move {
+        let send = |events: Vec<AgentEvent>| {
+            for event in events {
+                let _ = tx.unbounded_send(Ok(event));
+            }
+        };
+        for event in events {
+            let _ = tx.unbounded_send(event);
+        }
+        let steered = || AgentEvent::Steered {
+            assistant_message_id: None,
+            next_assistant_message_id: None,
+        };
+        let done = |result: Option<String>| AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result,
+            error: None,
+            session_id: Some("sess-compact".into()),
+        };
+        loop {
+            tokio::select! {
+                _ = interrupt.cancelled() => {
+                    send(vec![AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }]);
+                    return;
+                }
+                command = turn.compact_requested() => {
+                    mailbox.lock().unwrap().push(command);
+                    send(vec![
+                        steered(),
+                        AgentEvent::Compacting { active: true },
+                        AgentEvent::Compacted {
+                            pre_tokens: Some(22_762),
+                            post_tokens: Some(2_326),
+                        },
+                        done(Some(String::new())),
+                    ]);
+                }
+                Some(steer) = steering.recv() => {
+                    mailbox.lock().unwrap().push(steer.prompt.clone());
+                    send(vec![
+                        steered(),
+                        AgentEvent::TextDelta { text: format!("ack: {}", steer.prompt) },
+                        done(None),
+                    ]);
+                }
+            }
+        }
+    });
+    rx.boxed()
 }
 
 async fn wait_for<F: FnMut() -> bool>(mut predicate: F, what: &str) {
@@ -221,6 +299,11 @@ async fn engine_with_one_turn_on(
 ) -> (EngineCore, Arc<TestHarness>, Arc<Mutex<Vec<RunRequest>>>) {
     let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let harness = Arc::new(TestHarness::new(requests.clone(), steerable));
+    let core = engine_with_one_turn_by(dir, harness.clone()).await;
+    (core, harness, requests)
+}
+
+async fn engine_with_one_turn_by(dir: &std::path::Path, harness: Arc<TestHarness>) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(harness.clone());
     let core = EngineCore::assemble(&dir.join("data"), Arc::new(registry), HarnessId::Mock, None)
@@ -246,7 +329,7 @@ async fn engine_with_one_turn_on(
         .expect("queue run");
     wait_for(|| entries(&core).len() == 2, "first turn").await;
     wait_for(|| !core.sessions.turn_in_flight(CHAT), "first turn settles").await;
-    (core, harness, requests)
+    core
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -413,6 +496,61 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
         .expect("follow-up entry");
     assert_eq!(follow_up.from_chat_id.as_deref(), Some(CHAT));
     assert_eq!(plan(), None);
+}
+
+/// A parked run can open its own turn (a finished background shell); interrupting it loses that turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_compaction_queues_into_the_parked_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.in_place.store(true, Ordering::SeqCst);
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "focus": "keep the plan", "continueWith": "go on" }),
+        )
+        .await
+        .expect("request compact");
+    let mailbox = || harness.mailbox.lock().unwrap().clone();
+    wait_for(
+        || mailbox().len() == 2,
+        "the compaction and the agent's follow-up",
+    )
+    .await;
+    assert_eq!(mailbox(), ["/compact keep the plan", "go on"]);
+    assert_eq!(requests.lock().unwrap().len(), 1, "no second process");
+
+    wait_for(
+        || {
+            entries(&core)
+                .iter()
+                .any(|e| e.role == MessageRole::User && entry_text(e) == "go on")
+        },
+        "the follow-up entry",
+    )
+    .await;
+    let entries = entries(&core);
+    let boundaries: Vec<String> = entries
+        .iter()
+        .filter(|e| e.role == MessageRole::System)
+        .map(entry_text)
+        .collect();
+    assert_eq!(boundaries, ["Agent compacted · 22.8k → 2.3k tokens"]);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.status != Some(MessageStatus::Aborted)),
+        "{entries:#?}"
+    );
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .and_then(|s| s.compact_plan),
+        None
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
