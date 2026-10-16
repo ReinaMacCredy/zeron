@@ -2246,6 +2246,7 @@ pub struct ComposerInput {
     text_size: f32,
     configured_line_height: f32,
     single_line: bool,
+    max_chars: Option<usize>,
     scroll_left: f32,
     // -- measured state (written during layout/paint) --
     last_lines: Vec<WrappedLine>,
@@ -2368,6 +2369,7 @@ impl ComposerInput {
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
             single_line: false,
+            max_chars: None,
             scroll_left: 0.0,
             last_lines: Vec::new(),
             line_starts: vec![0],
@@ -2431,6 +2433,11 @@ impl ComposerInput {
 
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    pub(crate) fn with_max_chars(mut self, max: usize) -> Self {
+        self.max_chars = Some(max);
         self
     }
 
@@ -2825,6 +2832,9 @@ impl ComposerInput {
         self.content = text.into();
         if self.single_line {
             self.content = self.content.replace(['\r', '\n'], " ");
+        }
+        if let Some(max) = self.max_chars {
+            self.content = self.content.chars().take(max).collect();
         }
         let end = self.content.len();
         self.selected_range = end..end;
@@ -5042,6 +5052,16 @@ impl EntityInputHandler for ComposerInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.projection.normalize_range(range);
+        let clamped: String;
+        let new_text = match self.max_chars {
+            Some(max) => {
+                let kept =
+                    self.content.chars().count() - self.content[range.clone()].chars().count();
+                clamped = new_text.chars().take(max.saturating_sub(kept)).collect();
+                clamped.as_str()
+            }
+            None => new_text,
+        };
         self.invalidate_mention_tooltip();
         // An IME commit is the tail of a composition whose pre-composition
         // snapshot was already taken (`replace_and_mark_text_in_range`);

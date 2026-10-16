@@ -7012,16 +7012,12 @@ impl Shell {
             crate::inbox::InboxEvent::OpenPullRequests => self.open_pull_requests(cx),
             crate::inbox::InboxEvent::OpenTasks => self.open_tasks(cx),
             crate::inbox::InboxEvent::CreateTask { title, due_on } => {
-                let Some(engine) = self.state.read(cx).engine().cloned() else {
-                    self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
-                    cx.notify();
-                    return;
-                };
-                let params = serde_json::json!({
-                    "op": "createTask", "taskId": uuid::Uuid::new_v4().to_string(),
-                    "title": title, "dueOn": due_on,
-                });
-                Self::spawn_mutate(engine, params, cx).detach();
+                let space_id = self
+                    .state
+                    .read(cx)
+                    .selected_space_row()
+                    .map(|space| space.id.clone());
+                self.create_task(title, space_id, Some(due_on.clone()), cx);
             }
             crate::inbox::InboxEvent::SetTaskCompleted { task_id, completed } => {
                 let patch = zeron_proto::TaskPatch {

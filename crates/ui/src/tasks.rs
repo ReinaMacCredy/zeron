@@ -44,6 +44,7 @@ pub enum TasksEvent {
         patch: Option<TaskPatch>,
     },
     OpenChat(String),
+    Refused(String),
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ struct Card {
     notes: Entity<ComposerInput>,
     saved_title: String,
     saved_notes: String,
+    refused: bool,
     seen: bool,
     save: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
@@ -123,7 +125,11 @@ impl Focusable for TasksPage {
 
 impl TasksPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let add = cx.new(|cx| ComposerInput::new(ADD_PLACEHOLDER, cx).with_single_line());
+        let add = cx.new(|cx| {
+            ComposerInput::new(ADD_PLACEHOLDER, cx)
+                .with_single_line()
+                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
+        });
         let add_events = cx.subscribe(&add, |page, _, event: &ComposerInputEvent, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 page.submit_add(false, cx);
@@ -210,12 +216,15 @@ impl TasksPage {
             .map(|task| task.notes.clone())
             .unwrap_or_default();
         let title_input = cx.new(|cx| {
-            let mut input = ComposerInput::new("Task title", cx).with_single_line();
+            let mut input = ComposerInput::new("Task title", cx)
+                .with_single_line()
+                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
             input.set_text(saved_title.clone(), cx);
             input
         });
         let notes_input = cx.new(|cx| {
-            let mut input = ComposerInput::new("Add notes", cx);
+            let mut input =
+                ComposerInput::new("Add notes", cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
             input.set_text(saved_notes.clone(), cx);
             input
         });
@@ -245,6 +254,7 @@ impl TasksPage {
             notes: notes_input,
             saved_title,
             saved_notes,
+            refused: false,
             seen: row.is_some(),
             save: None,
             _subscriptions: subscriptions,
@@ -272,18 +282,19 @@ impl TasksPage {
                 self.open_card(id, None, false, None, cx);
             }
         }
-        let linked: Vec<String> = self
-            .starting
-            .keys()
-            .filter(|id| {
-                self.state
-                    .read(cx)
-                    .tasks
-                    .iter()
-                    .any(|task| &task.id == *id && task.chat_id.is_some())
-            })
-            .cloned()
-            .collect();
+        let linked: Vec<String> = {
+            let state = self.state.read(cx);
+            self.starting
+                .keys()
+                .filter(|id| {
+                    state
+                        .tasks
+                        .iter()
+                        .any(|task| &task.id == *id && linked_chat(&state.chats, task).is_some())
+                })
+                .cloned()
+                .collect()
+        };
         for id in linked {
             self.starting.remove(&id);
         }
@@ -314,6 +325,7 @@ impl TasksPage {
         }));
     }
 
+    /// Notes too large to sync stay unsaved, so a later flush retries them once shortened.
     fn take_card_patch(&mut self, cx: &mut Context<Self>) -> Option<(String, TaskPatch)> {
         let card = self.card.as_mut()?;
         card.save = None;
@@ -321,14 +333,60 @@ impl TasksPage {
         let notes = card.notes.read(cx).text().to_string();
         let mut patch = TaskPatch::default();
         if !title.is_empty() && title != card.saved_title {
-            card.saved_title = title.clone();
             patch.title = Some(title);
         }
-        if notes != card.saved_notes {
-            card.saved_notes = notes.clone();
+        let notes_dirty = notes != card.saved_notes;
+        if notes_dirty {
             patch.notes = Some(notes);
         }
+        if patch == TaskPatch::default() {
+            return None;
+        }
+        let refusal = self
+            .state
+            .read(cx)
+            .tasks
+            .iter()
+            .find(|task| task.id == card.task_id)
+            .and_then(|row| zeron_doc::check_task_syncs(&patched(row, &patch)).err());
+        if refusal.is_some() {
+            patch.notes = None;
+        }
+        if let Some(error) = refusal.filter(|_| !card.refused) {
+            cx.emit(TasksEvent::Refused(error.to_string()));
+        }
+        card.refused = notes_dirty && patch.notes.is_none();
+        if let Some(title) = &patch.title {
+            card.saved_title = title.clone();
+        }
+        if let Some(notes) = &patch.notes {
+            card.saved_notes = notes.clone();
+        }
         (patch != TaskPatch::default()).then(|| (card.task_id.clone(), patch))
+    }
+
+    pub fn save_failed(&mut self, task_id: &str, patch: &TaskPatch, cx: &mut Context<Self>) {
+        let row = self
+            .state
+            .read(cx)
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .cloned();
+        let Some(card) = self.card.as_mut().filter(|card| card.task_id == task_id) else {
+            return;
+        };
+        if patch.title.as_ref() == Some(&card.saved_title) {
+            card.saved_title = row.as_ref().map(|t| t.title.clone()).unwrap_or_default();
+        }
+        if patch.notes.as_ref() == Some(&card.saved_notes) {
+            card.saved_notes = row.map(|t| t.notes).unwrap_or_default();
+        }
+    }
+
+    pub fn start_failed(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        self.starting.remove(task_id);
+        cx.notify();
     }
 
     fn flush_card(&mut self, cx: &mut Context<Self>) {
@@ -342,8 +400,11 @@ impl TasksPage {
             return;
         };
         let task_id = card.task_id.clone();
-        let startable = self.state.read(cx).tasks.iter().any(|task| {
-            task.id == task_id && task.chat_id.is_none() && task.completed_at.is_none()
+        let state = self.state.read(cx);
+        let startable = state.tasks.iter().any(|task| {
+            task.id == task_id
+                && linked_chat(&state.chats, task).is_none()
+                && task.completed_at.is_none()
         });
         if !startable || self.is_starting(&task_id) {
             return;
@@ -412,7 +473,7 @@ impl TasksPage {
         let state = self.state.read(cx);
         let now = Utc::now();
         let row = |task: &zeron_proto::Task| {
-            let chat = linked_chat(state, task);
+            let chat = linked_chat(&state.chats, task);
             let linked = chat.map(|chat| {
                 let harness = chat.config.as_ref().map(|config| config.harness);
                 let model = chat
@@ -1169,7 +1230,9 @@ impl TasksPage {
         });
 
         let starting = self.is_starting(&task_id);
-        let chat_id = row.and_then(|row| row.task.chat_id.clone());
+        let chat_id = row
+            .filter(|row| row.linked.is_some())
+            .and_then(|row| row.task.chat_id.clone());
         let done = status == TaskStatus::Done;
         let primary = match chat_id.clone() {
             Some(chat) => widgets::text_action(theme, widgets::ActionTone::Solid, "Open thread")
@@ -1322,9 +1385,24 @@ impl TasksPage {
     }
 }
 
-fn linked_chat<'a>(state: &'a AppState, task: &zeron_proto::Task) -> Option<&'a zeron_proto::Chat> {
+/// A link whose chat is gone (deleted) reads as no link: the task can start again.
+pub(crate) fn linked_chat<'a>(
+    chats: &'a [zeron_proto::Chat],
+    task: &zeron_proto::Task,
+) -> Option<&'a zeron_proto::Chat> {
     let id = task.chat_id.as_deref()?;
-    state.chats.iter().find(|chat| chat.id == id)
+    chats.iter().find(|chat| chat.id == id)
+}
+
+fn patched(row: &zeron_proto::Task, patch: &TaskPatch) -> zeron_proto::Task {
+    let mut task = row.clone();
+    if let Some(title) = &patch.title {
+        task.title = title.clone();
+    }
+    if let Some(notes) = &patch.notes {
+        task.notes = notes.clone();
+    }
+    task
 }
 
 pub(crate) fn needs_you_count(state: &AppState) -> usize {
@@ -1334,7 +1412,8 @@ pub(crate) fn needs_you_count(state: &AppState) -> usize {
         .iter()
         .filter(|task| !task.deleted)
         .filter(|task| {
-            let linked = linked_chat(state, task).map(|chat| state.display_status_for(chat, now));
+            let linked =
+                linked_chat(&state.chats, task).map(|chat| state.display_status_for(chat, now));
             task_status(task, linked) == TaskStatus::NeedsYou
         })
         .count()

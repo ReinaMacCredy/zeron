@@ -68,6 +68,7 @@ impl InboxPage {
         let add_input = cx.new(|cx| {
             ComposerInput::new("Add a task for today…", cx)
                 .with_single_line()
+                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
                 .with_text_metrics(13.0, 18.0)
                 .with_accessibility_role(gpui::Role::TextInput)
         });
@@ -309,17 +310,18 @@ fn attention_breakdown(prs: &[(&ChangeRequestListItem, Vec<AttentionReason>)]) -
     .join(" · ")
 }
 
-pub(crate) fn today_tasks(
-    tasks: &[zeron_proto::Task],
+pub(crate) fn today_tasks<'a>(
+    tasks: &'a [zeron_proto::Task],
+    chats: &[zeron_proto::Chat],
     today: NaiveDate,
     day_start: DateTime<Utc>,
-) -> Vec<&zeron_proto::Task> {
+) -> Vec<&'a zeron_proto::Task> {
     let today = today.format("%Y-%m-%d").to_string();
     let mut open: Vec<&zeron_proto::Task> = tasks
         .iter()
         .filter(|task| !task.deleted && task.completed_at.is_none())
         .filter(|task| {
-            task.chat_id.is_some()
+            crate::tasks::linked_chat(chats, task).is_some()
                 || task
                     .due_on
                     .as_deref()
@@ -566,7 +568,7 @@ impl InboxPage {
         let today = now.date_naive();
         let today_key = today.format("%Y-%m-%d").to_string();
         let state = self.state.read(cx);
-        let tasks = today_tasks(&state.tasks, today, day_start);
+        let tasks = today_tasks(&state.tasks, &state.chats, today, day_start);
         let open = tasks
             .iter()
             .filter(|task| task.completed_at.is_none())
@@ -577,11 +579,7 @@ impl InboxPage {
                 let done = task.completed_at.is_some();
                 let meta = if done {
                     None
-                } else if let Some(chat) = task
-                    .chat_id
-                    .as_deref()
-                    .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
-                {
+                } else if let Some(chat) = crate::tasks::linked_chat(&state.chats, task) {
                     Some(format!("In {}", chat_title(chat)))
                 } else {
                     match task.due_on.as_deref() {
@@ -977,6 +975,7 @@ mod tests {
             task("c-tomorrow", Some("2026-10-18"), None, None),
             task("d-backlog", None, None, None),
             task("e-linked", None, Some("chat"), None),
+            task("e-linked-dead", None, Some("deleted-chat"), None),
             task(
                 "f-done-yesterday",
                 Some("2026-10-16"),
@@ -987,7 +986,13 @@ mod tests {
             task("h-done-late", Some("2026-10-20"), None, Some(start + 600)),
             deleted,
         ];
-        let ids: Vec<&str> = today_tasks(&tasks, today, day_start)
+        let chats: Vec<zeron_proto::Chat> = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "chat", "deviceId": "local", "archived": false, "createdAt": day_start,
+            }))
+            .unwrap(),
+        ];
+        let ids: Vec<&str> = today_tasks(&tasks, &chats, today, day_start)
             .into_iter()
             .map(|task| task.id.as_str())
             .collect();
