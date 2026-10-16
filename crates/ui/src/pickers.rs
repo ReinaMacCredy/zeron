@@ -2898,10 +2898,13 @@ impl Pickers {
         let state = self.state.read(cx);
         !state.transcript_replayed
             || !state.pending_echoes().is_empty()
-            || state
-                .transcript
-                .iter()
-                .any(|entry| entry.role != MessageRole::System)
+            || state.transcript.iter().any(|entry| {
+                entry.role != MessageRole::System
+                    || entry
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, zeron_doc::MessagePart::Handoff { .. }))
+            })
     }
 
     /// The dialog's "Yes": land the parked pick and mark it in the transcript.
