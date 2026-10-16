@@ -88,6 +88,7 @@ pub mod syntax_cache;
 pub mod terminal;
 mod todo_panel;
 pub(crate) mod tool_images;
+mod tasks;
 pub mod theme;
 pub mod theme_library;
 pub mod toast;
