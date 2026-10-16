@@ -1979,6 +1979,85 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn sidebar_hover_card_opens_after_the_delay_beside_the_row(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (_host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.reduced_motion = true;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = ["a", "b"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, id)| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "title": id, "deviceId": "local", "archived": false,
+                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let row = cx.debug_bounds("chat-a").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let card = cx.debug_bounds("sidebar-hover-card").unwrap();
+        assert!(card.left() >= row.right());
+        assert!((card.top() - row.top()).abs() < px(8.0));
+
+        let below = cx.debug_bounds("chat-b").unwrap();
+        cx.simulate_mouse_move(
+            gpui::point(row.center().x, below.bottom() + px(200.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("sidebar-hover-card").is_none());
+    }
+
+    #[gpui::test]
     fn archive_pill_follows_a_still_pointer_down_the_list(cx: &mut gpui::TestAppContext) {
         use super::*;
 

@@ -2530,6 +2530,8 @@ pub struct Shell {
     project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
+    sidebar_hover_card: Option<String>,
+    sidebar_hover_card_closed: Option<std::time::Instant>,
     /// Set by an archive-pill click until the pointer next moves. gpui only
     /// re-evaluates `on_hover` on mouse movement, so the row that slides up
     /// under a still pointer would otherwise never show its archive pill;
@@ -3165,6 +3167,8 @@ impl Shell {
             sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
+            sidebar_hover_card: None,
+            sidebar_hover_card_closed: None,
             chat_hover_resync: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_row_tops: Default::default(),
@@ -10888,6 +10892,24 @@ impl Shell {
                 .into_any_element()
         };
         let settle_action = (!archived && (slim || inbox)).then(|| settle_action(slim));
+        let hover_card = (hovered
+            && self.sidebar_hover_card.as_deref() == Some(row_id.as_str())
+            && rename_input.is_none()
+            && !cx.has_active_drag())
+        .then(|| {
+            self.render_sidebar_hover_card(
+                &id,
+                &title,
+                &space_name,
+                branch.as_ref(),
+                created_by.as_ref(),
+                change_request.as_ref(),
+                subagents,
+                failed,
+                theme,
+                cx,
+            )
+        });
         let frame = self.chat_row_frame(
             &row_id,
             &id,
@@ -10900,7 +10922,8 @@ impl Shell {
             hovered,
             &fade_key,
             cx,
-        );
+        )
+        .when_some(hover_card, |el, card| el.child(card));
 
         if slim {
             let lifted = hovered || selected;
@@ -11218,6 +11241,210 @@ impl Shell {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn render_sidebar_hover_card(
+        &self,
+        id: &str,
+        title: &SharedString,
+        project: &SharedString,
+        branch: Option<&SharedString>,
+        created_by: Option<&SharedString>,
+        change_request: Option<&zeron_proto::ChangeRequestSummary>,
+        subagents: u32,
+        failed: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (device, config) = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == id);
+            (
+                chat.and_then(|chat| state.device_name(&chat.device_id))
+                    .map(str::to_string),
+                chat.and_then(|chat| chat.config.clone()),
+            )
+        };
+        let model = config.map(|config| {
+            let pickers = self.composer.read(cx).pickers().read(cx);
+            let label = config.model.as_deref().map(|model| {
+                pickers
+                    .model_label(config.harness, model)
+                    .or_else(|| crate::pickers::curated_model_label(config.harness, model))
+                    .unwrap_or_else(|| model.to_string())
+            });
+            let text = match label {
+                Some(label) => format!("{} · {label}", config.harness.display_name()),
+                None => config.harness.display_name().to_string(),
+            };
+            (config.harness, text)
+        });
+        let muted = theme.text_muted;
+        let body = theme.text.opacity(0.75);
+        let line = |glyph: AnyElement, text: SharedString, color: gpui::Hsla| {
+            div()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(12.0))
+                        .flex()
+                        .items_center()
+                        .child(glyph),
+                )
+                .child(div().min_w_0().truncate().text_color(color).child(text))
+        };
+        let glyph = |path: &'static str, color: gpui::Hsla| {
+            icon(path)
+                .size(px(12.0))
+                .text_color(color)
+                .into_any_element()
+        };
+        let project_glyph = self.render_project_icon(id, 12.0, false, cx);
+        let details = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .pl(px(2.0))
+            .text_color(muted)
+            .when(!project.is_empty(), |el| {
+                el.child(line(project_glyph, project.clone(), body))
+            })
+            .when_some(device, |el, device| {
+                el.child(line(
+                    glyph(icons::LUCIDE_MONITOR, muted),
+                    device.into(),
+                    body,
+                ))
+            })
+            .when_some(branch, |el, branch| {
+                el.child(line(
+                    glyph(icons::LUCIDE_GIT_BRANCH, muted),
+                    branch.clone(),
+                    body,
+                ))
+            })
+            .when_some(model, |el, (harness, text)| {
+                el.child(line(
+                    crate::pickers::harness_mark_stack(&[harness], 12.0, muted, 1.0)
+                        .into_any_element(),
+                    text.into(),
+                    body,
+                ))
+            })
+            .when_some(created_by, |el, parent| {
+                el.child(line(
+                    glyph(icons::LUCIDE_CORNER_DOWN_RIGHT, muted),
+                    format!("Opened by {parent}").into(),
+                    body,
+                ))
+            })
+            .when(subagents > 0, |el| {
+                el.child(line(
+                    glyph(icons::LUCIDE_BOT, muted),
+                    format!(
+                        "{subagents} subagent{} running",
+                        if subagents == 1 { "" } else { "s" }
+                    )
+                    .into(),
+                    body,
+                ))
+            })
+            .when(failed, |el| {
+                el.child(line(
+                    glyph(icons::LUCIDE_CIRCLE_ALERT, theme.danger),
+                    "Error occurred".into(),
+                    theme.danger,
+                ))
+            });
+        let card = div()
+            .debug_selector(|| "sidebar-hover-card".into())
+            .w(px(280.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.text.opacity(0.1))
+            .bg(popover::surface_bg(theme))
+            .px(px(8.0))
+            .py(px(4.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(16.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .px(px(4.0))
+                    .py(px(8.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title.clone()),
+                    )
+                    .child(details)
+                    .when_some(change_request, |el, summary| {
+                        el.child(
+                            div()
+                                .pt(px(8.0))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .child(line(
+                                    glyph(icons::LUCIDE_GIT_PULL_REQUEST, muted),
+                                    format!("#{} {}", summary.number, summary.title).into(),
+                                    body,
+                                )),
+                        )
+                    }),
+            );
+        div()
+            .absolute()
+            .top(px(SIDEBAR_CARD_INSET))
+            .right(px(-4.0))
+            .size_0()
+            .child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::TopLeft)
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(motion::fade_quick(
+                            SharedString::from(format!("hover-card-{id}")),
+                            div().child(crate::frost::frosted(8.0, crate::frost::MENU_BLUR, card)),
+                        )),
+                )
+                .priority(1),
+            )
+            .into_any_element()
+    }
+
+    fn schedule_sidebar_hover_card(&mut self, row_id: String, cx: &mut Context<Self>) {
+        let warm = self
+            .sidebar_hover_card_closed
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+        if warm || self.sidebar_hover_card.is_some() {
+            self.sidebar_hover_card = Some(row_id);
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.chat_status_hover.as_deref() == Some(row_id.as_str()) {
+                    this.sidebar_hover_card = Some(row_id);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn chat_row_frame(
         &self,
         row_id: &str,
@@ -11253,9 +11480,19 @@ impl Shell {
                                 this.chat_status_hover = Some(hover_id.clone());
                                 cx.notify();
                             }
-                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.chat_status_hover = None;
-                            cx.notify();
+                            if search_query_none {
+                                this.schedule_sidebar_hover_card(hover_id.clone(), cx);
+                            }
+                        } else {
+                            if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                                this.chat_status_hover = None;
+                                cx.notify();
+                            }
+                            if this.sidebar_hover_card.as_deref() == Some(hover_id.as_str()) {
+                                this.sidebar_hover_card = None;
+                                this.sidebar_hover_card_closed = Some(std::time::Instant::now());
+                                cx.notify();
+                            }
                         }
                     })
                 })
