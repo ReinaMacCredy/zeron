@@ -1412,7 +1412,7 @@ mod pinned_session_tests {
             let bounds = cx.debug_bounds("sidebar-pinned-section").unwrap();
             assert_eq!(
                 f32::from(bounds.size.height),
-                if open { 156.0 } else { 28.0 }
+                if open { 160.0 } else { 32.0 }
             );
             assert!(cx.debug_bounds("sidebar-pinned-divider").is_none());
         }
@@ -1613,7 +1613,7 @@ mod pinned_session_tests {
         assert_eq!(dragged_card.origin.x, source_bounds.origin.x);
         assert_eq!(
             f32::from(dragged_card.size.height),
-            super::super::sidebar_row_height(compact, show_label, true, false)
+            super::super::sidebar_row_height(compact, false, show_label)
         );
         // Even a sub-row move follows the pointer immediately, before a drop slot changes.
         let pointer = from + gpui::point(px(8.0), px(7.0));
@@ -2180,10 +2180,10 @@ mod pinned_session_tests {
 
     #[test]
     fn pinned_drag_accounts_for_disclosure_header_and_scroll() {
-        // The first row starts 36px below the scroll viewport: 4px list
-        // padding, 28px header, and 4px body inset.
+        // The first row starts 40px below the scroll viewport: 4px list
+        // padding, 32px header, and 4px body inset.
         let viewport_top = 100.0;
-        let row_top = 136.0;
+        let row_top = 140.0;
         assert_eq!(
             super::pinned_session_pointer_y(row_top, viewport_top, 0.0),
             0.0
@@ -2194,7 +2194,7 @@ mod pinned_session_tests {
         );
         assert_eq!(
             pinned_session_drop_index(
-                super::pinned_session_pointer_y(row_top, viewport_top, 63.0),
+                super::pinned_session_pointer_y(row_top, viewport_top, 83.0),
                 3
             ),
             Some(1),
@@ -2314,13 +2314,8 @@ struct ActiveChatRow {
 }
 
 impl ActiveChatRow {
-    fn height(&self, compact: bool, show_label: bool) -> f32 {
-        sidebar_row_height(
-            compact,
-            show_label,
-            self.branch.is_some() || self.created_by.is_some(),
-            self.change_request.is_some(),
-        )
+    fn height(&self, compact: bool, slim: bool, show_label: bool) -> f32 {
+        sidebar_row_height(compact, slim, show_label)
     }
 }
 
@@ -2553,7 +2548,7 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 15] = [
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
 pub(super) const SIDEBAR_SECTION_GAP: f32 = 12.0;
-pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
+pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 32.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
@@ -2685,51 +2680,49 @@ pub(super) fn sidebar_disclosure_header(
     action: Option<AnyElement>,
     chevron: AnyElement,
 ) -> gpui::Div {
+    let label: SharedString = match count {
+        Some(count) => format!("{label} ({count})").into(),
+        None => label,
+    };
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
         .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
-        .px(px(Theme::SPACE_SM))
+        .mx(px(2.0))
+        .px(px(8.0))
+        .rounded(px(8.0))
         .cursor_pointer()
         .children(icon)
-        .child(super::sidebar_faded_label(
-            "sidebar-disclosure-label".into(),
-            false,
+        .child(
             div()
-                .text_size(crate::typography::ui_rems(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted.opacity(0.5))
-                .child(label),
-        ))
-        .children(count.map(|count| sidebar_count_badge(theme, count)))
-        .child(div().flex_1())
+                .flex_none()
+                .max_w(px(180.0))
+                .child(super::sidebar_faded_label(
+                    "sidebar-disclosure-label".into(),
+                    false,
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .line_height(px(16.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(sidebar_header_glyph(theme))
+                        .child(label),
+                )),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(8.0))
+                .h(px(1.0))
+                .bg(theme.border.opacity(0.6)),
+        )
         .children(action)
         .child(chevron)
 }
 
-/// Section header glyphs (chevron, `+`, `…`) share the label's muted tone.
 pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
-    theme.text_muted.opacity(0.5)
-}
-
-/// A collapsed section's session count, cut like the sidebar's pull-request
-/// badge (16pt tall, 4pt radius, monospace digits) in a muted tone.
-fn sidebar_count_badge(theme: &Theme, count: usize) -> gpui::Div {
-    div()
-        .flex_none()
-        .h(px(16.0))
-        .px(px(4.0))
-        .flex()
-        .items_center()
-        .rounded(px(4.0))
-        .bg(crate::theme::ink(0.06))
-        .text_size(px(10.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .font_family(theme.font_mono.clone())
-        .text_color(theme.text_muted.opacity(0.7))
-        .child(SharedString::from(count.to_string()))
+    theme.text_muted.opacity(0.6)
 }
 
 /// One activatable row of the open dropdown, in nav order. `AddSpace` names
@@ -3178,7 +3171,7 @@ impl Shell {
         theme: &Theme,
     ) -> AnyElement {
         let resting_reveal = if open { 1.0 } else { 0.0 };
-        let chevron = icon(icons::ALT_ARROW_RIGHT)
+        let chevron = icon(icons::LUCIDE_CHEVRON_DOWN)
             .size(px(12.0))
             .text_color(sidebar_header_glyph(theme));
         if let Some(tween) = self
@@ -3199,7 +3192,7 @@ impl Shell {
                     move |el, t| {
                         let reveal = motion::lerp(from, to, t);
                         el.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            reveal * 0.25,
+                            (1.0 - reveal) * 0.5,
                         )))
                     },
                 ))
@@ -3210,7 +3203,7 @@ impl Shell {
                 .size(px(12.0))
                 .child(
                     chevron.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                        resting_reveal * 0.25,
+                        (1.0 - resting_reveal) * 0.5,
                     ))),
                 )
                 .into_any_element()
@@ -4876,134 +4869,144 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Hidden from View → Show: keep the row's top breathing room only.
-        if !self.settings.sidebar_show_project_filter {
-            return div().flex_none().h(px(4.0)).into_any_element();
-        }
         let filter = self.settings.space_filter.clone();
-        // The filtered project's artwork and name, as its dropdown row
-        // draws them, plus the offline glyph when no host is reachable.
-        let (label, space, offline): (SharedString, Option<zeron_proto::Space>, bool) = {
+        let (label, space): (SharedString, Option<zeron_proto::Space>) = {
             let state = self.state.read(cx);
             match filter.as_deref().and_then(|id| state.space_row(id)) {
-                Some(space) => {
-                    let members = state.project_members(space);
-                    let (_, offline) = state.project_device_tag(&members, Utc::now());
-                    (
-                        state
-                            .representative_space(space)
-                            .display_name()
-                            .to_string()
-                            .into(),
-                        Some(space.clone()),
-                        offline,
-                    )
-                }
-                None => (SharedString::from("All projects"), None, false),
+                Some(space) => (
+                    state
+                        .representative_space(space)
+                        .display_name()
+                        .to_string()
+                        .into(),
+                    Some(space.clone()),
+                ),
+                None => (SharedString::from("All projects"), None),
             }
-        };
-        let art = match &space {
-            Some(space) => {
-                let profile = self.active_sidebar_pin_profile_key(cx);
-                self.project_icons
-                    .render(&self.state, Some(space), profile, false, cx)
-            }
-            None => icon(icons::FOLDER)
-                .size(px(16.0))
-                .text_color(theme.text_muted)
-                .into_any_element(),
         };
         let open = self.spaces_menu.is_open();
-
-        let trigger = div()
-            .id("spaces-filter")
+        let filtered = space.is_some();
+        let header_button = |id: &'static str, glyph: &'static str, active: bool| {
+            let group = SharedString::from(format!("{id}-group"));
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .group(group.clone())
+                .size(px(28.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .when(active, |el| el.bg(theme.glass_hover()))
+                .hover(|s| s.bg(theme.glass_hover()))
+                .child(
+                    icon(glyph)
+                        .size(px(16.0))
+                        .text_color(if filtered && id == "spaces-filter" {
+                            theme.accent
+                        } else {
+                            theme.text_muted.opacity(0.6)
+                        })
+                        .group_hover(group, |s| s.text_color(theme.text)),
+                )
+        };
+        let search = div()
+            .id("sidebar-search")
+            .debug_selector(|| "sidebar-search".into())
+            .group("sidebar-search")
             .flex_1()
             .min_w_0()
-            .h(px(29.0))
+            .h(px(32.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(Theme::SPACE_SM))
+            .gap(px(8.0))
+            .px(px(8.0))
             .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                "spaces-filter",
-                theme.text.opacity(0.8),
-                theme.text,
-            ))
-            .bg(if open {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "spaces-filter",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("spaces-filter"))
             .cursor_pointer()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
+            .hover(|s| s.bg(theme.glass_hover()))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx)))
+            .child(
+                icon(icons::LUCIDE_SEARCH)
+                    .size(px(16.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.6)),
             )
-            .on_click(cx.listener(|this, _, window, cx| {
-                // A press that found the menu open closes it (the card's
-                // mouse-down-out already began the close) — never reopen.
-                if this.spaces_menu.take_press_was_open() {
-                    this.close_spaces_menu(cx);
+            .child(super::sidebar_faded_label(
+                "sidebar-search-label".into(),
+                true,
+                div()
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .group_hover("sidebar-search", |s| s.text_color(theme.text))
+                    .child(if filtered {
+                        SharedString::from(format!("Search {label}"))
+                    } else {
+                        SharedString::from("Search")
+                    }),
+            ));
+        let filter_button = self.settings.sidebar_show_project_filter.then(|| {
+            header_button("spaces-filter", icons::LUCIDE_LIST_FILTER, open)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.spaces_menu.take_press_was_open() {
+                        this.close_spaces_menu(cx);
+                    } else {
+                        this.open_spaces_menu(window, cx);
+                    }
+                }))
+                .tooltip(crate::settings::widgets::text_tooltip(if filtered {
+                    SharedString::from(format!("Filter: {label}"))
                 } else {
-                    this.open_spaces_menu(window, cx);
-                }
-            }))
-            .child(popover::picker_icon_slot(art))
-            // flex_1 gives long space names a bound to fade against.
+                    SharedString::from("Filter by project")
+                }))
+        });
+        let add_project = header_button("sidebar-add-project", icons::LUCIDE_FOLDER_PLUS, false)
+            .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
+            .tooltip(crate::settings::widgets::text_tooltip(
+                ShortcutId::NewProject.label(),
+            ));
+        let new_chat = header_button("sidebar-new-chat", icons::LUCIDE_SQUARE_PEN, false)
+            .on_click(cx.listener(|this, _, _, cx| this.open_new_session(None, cx)))
+            .tooltip(crate::settings::widgets::text_tooltip(
+                ShortcutId::NewSession.label(),
+            ));
+        let row = div()
+            .flex_none()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .p(px(8.0))
+            .child(search)
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .flex_none()
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(super::sidebar_faded_label(
-                        "spaces-filter-label".into(),
-                        false,
-                        label,
-                    ))
-                    // Disconnected glyph, not the word (user request).
-                    .when(offline, |el| {
-                        el.child(
-                            icon(icons::WIFI_OFF)
-                                .size(px(12.0))
-                                .flex_none()
-                                .text_color(theme.warning.opacity(0.8)),
-                        )
-                    }),
+                    .children(filter_button)
+                    .child(add_project)
+                    .child(new_chat),
             );
-        let trigger = if self.spaces_menu.get().is_some() {
+        if self.spaces_menu.get().is_some() {
             let closing = self.spaces_menu.closing_since();
             let menu = self.render_spaces_menu(theme, cx);
-            trigger.relative().child(popover::anchored_menu_below(
+            row.child(popover::anchored_menu_below(
                 "spaces-filter-menu",
                 menu,
                 closing,
             ))
-        } else {
-            trigger
-        };
-
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .px(px(Theme::SPACE_SM))
-            .pt(px(8.0))
-            .pb(px(4.0))
-            .child(trigger)
             .into_any_element()
+        } else {
+            row.into_any_element()
+        }
     }
 
     /// The sidebar's view options ("…"): a titlebar control at the sidebar's
@@ -5416,7 +5419,7 @@ impl Shell {
         rows.into_iter()
             .map(|(id, target, prompt)| {
                 let selected = focused.as_deref() == Some(id.as_str());
-                let height = super::chat_row_height(false, false);
+                let height = super::chat_row_height(true);
                 let element =
                     self.render_draft_row(id.clone(), target, prompt, selected, theme, cx);
                 (format!("d:{id}"), height, element)
@@ -5435,106 +5438,104 @@ impl Shell {
     ) -> AnyElement {
         let row_id = format!("draft-{id}");
         let hovered = self.chat_status_hover.as_deref() == Some(row_id.as_str());
-        let fade_key = format!("{row_id}-hover");
-        let (hover, text) = (theme.glass_hover(), theme.text);
-        let selected_wash = crate::theme::glass_selected_bg();
-        // Unsent work shares one look with the session rows' pen: an amber
-        // wash at rest, the ordinary selected wash when open.
-        let rest_bg = if selected {
-            selected_wash
+        let bg = if selected {
+            crate::theme::glass_selected_bg()
         } else {
-            theme.warning.opacity(0.05)
+            theme.warning.opacity(if hovered { 0.08 } else { 0.04 })
         };
-        let hover_bg = if selected { selected_wash } else { hover };
-        let rest_text = if selected { text } else { text.opacity(0.8) };
-        let subline = theme.text_muted.opacity(0.5);
         let open_id = id.clone();
         let discard_id = id.clone();
         let hover_id = row_id.clone();
-        let trailing: AnyElement = if hovered {
-            div()
-                .id(SharedString::from(format!("draft-discard-{id}")))
-                .size(px(18.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.0))
-                .hover(|s| s.bg(crate::theme::wash(0.14)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.discard_draft(discard_id.clone(), cx);
-                }))
-                .child(
-                    icon(icons::CLOSE)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted),
-                )
-                .into_any_element()
-        } else {
-            icon(icons::PEN)
-                .size(px(11.0))
-                .flex_none()
-                .text_color(theme.warning.opacity(0.85))
-                .into_any_element()
-        };
+        let discard_group = SharedString::from(format!("draft-discard-{id}"));
+        let discard = div()
+            .id(discard_group.clone())
+            .group(discard_group.clone())
+            .ml_auto()
+            .h(px(20.0))
+            .px(px(4.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .opacity(if hovered { 1.0 } else { 0.0 })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.discard_draft(discard_id.clone(), cx);
+            }))
+            .child(
+                icon(icons::LUCIDE_X)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .group_hover(discard_group, |s| s.text_color(theme.text)),
+            );
         div()
             .id(SharedString::from(row_id.clone()))
-            .h(px(super::chat_row_height(false, false)))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .text_color(motion::hover_blend(&fade_key, rest_text, text))
-            .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
-            .on_hover({
-                let fade_hover = motion::hover_listener(fade_key.clone());
-                cx.listener(move |this, hovered: &bool, window, cx| {
-                    fade_hover(hovered, window, cx);
-                    if *hovered {
-                        if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                            this.chat_status_hover = Some(hover_id.clone());
-                            cx.notify();
-                        }
-                    } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                        this.chat_status_hover = None;
+            .h(px(super::chat_row_height(true)))
+            .py(px(super::SIDEBAR_CARD_INSET))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                        this.chat_status_hover = Some(hover_id.clone());
                         cx.notify();
                     }
-                })
-            })
+                } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                    this.chat_status_hover = None;
+                    cx.notify();
+                }
+            }))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_draft(open_id.clone(), true, cx);
             }))
             .child(
                 div()
-                    .w_full()
+                    .size_full()
+                    .rounded(px(8.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(Theme::SPACE_SM))
+                    .flex_col()
+                    .bg(bg)
                     .child(
                         div()
-                            .flex_1()
+                            .h(px(20.0))
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                icon(icons::LUCIDE_SQUARE_PEN)
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(theme.warning),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .line_height(px(16.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(target)),
+                            )
+                            .child(discard),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .w_full()
                             .min_w_0()
                             .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .line_height(px(14.0))
-                            .text_color(subline)
-                            .child(SharedString::from(target)),
-                    )
-                    .child(div().h(px(14.0)).flex().items_center().child(trailing)),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .line_height(px(17.0))
-                    .child(SharedString::from(prompt)),
+                            .text_size(crate::typography::ui_rems(14.0))
+                            .line_height(px(20.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text.opacity(0.9))
+                            .child(SharedString::from(prompt)),
+                    ),
             )
             .into_any_element()
     }
@@ -5804,8 +5805,6 @@ impl Shell {
         state: &AppState,
         now: DateTime<Utc>,
     ) -> ActiveChatRow {
-        // Line 1 is "project @ device" (t3code's project row); project-less
-        // sessions name only their device — no project, no folder.
         let space = state.space_for_chat(&chat);
         let project = match (space, chat.space_id.as_deref()) {
             (Some(space), _) => Some(space.display_name().to_string()),
@@ -5816,10 +5815,8 @@ impl Shell {
             .device_name(&chat.device_id)
             .unwrap_or("Unknown device")
             .to_string();
-        // Unknown device → no fragment, same as the archived list.
         let folder = match (project, state.device_name(&chat.device_id)) {
-            (Some(project), Some(_)) => format!("{project} @ {device}"),
-            (Some(project), None) => project,
+            (Some(project), _) => project,
             (None, Some(_)) => device.clone(),
             (None, None) => String::new(),
         };
@@ -5930,6 +5927,7 @@ impl Shell {
             .map(|row| {
                 row.height(
                     self.settings.sidebar_compact,
+                    false,
                     self.settings.sidebar_show_project_label,
                 )
             })
@@ -6020,9 +6018,15 @@ impl Shell {
                         .map_or_else(|| "regular".into(), |(key, _)| format!("regular:{key}"))
                 };
                 drag.source_index = index;
+                let project_group = self.settings.sidebar_organization
+                    == SidebarOrganization::ByProject
+                    && group
+                        .as_ref()
+                        .is_some_and(|(key, _)| !key.starts_with("section:"));
                 drag.row_height = rows[index].height(
                     self.settings.sidebar_compact,
-                    self.settings.sidebar_show_project_label,
+                    false,
+                    self.settings.sidebar_show_project_label && !project_group,
                 );
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
@@ -6151,8 +6155,9 @@ impl Shell {
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 let height = row.height(
-                    self.settings.sidebar_compact || slim,
-                    self.settings.sidebar_show_project_label,
+                    self.settings.sidebar_compact,
+                    slim,
+                    self.settings.sidebar_show_project_label && !project_group,
                 );
                 let ActiveChatRow {
                     status,
@@ -6243,6 +6248,7 @@ impl Shell {
                         if is_moving { None } else { drag },
                         jump_label,
                         self.settings.sidebar_show_project_icon && !project_group,
+                        project_group,
                         slim,
                         None,
                         theme,
@@ -6381,7 +6387,7 @@ impl Shell {
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
-            let more_height = sidebar_row_height(true, true, false, false);
+            let more_height = sidebar_row_height(self.settings.sidebar_compact, true, true);
             let hidden = if slim {
                 let shown = self.sidebar_settled_shown.max(SHELF_INITIAL_ROWS);
                 let mut tail = rendered_rows.split_off(shown.min(row_count));
@@ -6460,7 +6466,7 @@ impl Shell {
             let toggle_key = collapse_key.clone();
             let toggle_motion_key = motion_key.clone();
             let group_icon = header_icon_chat.map(|chat_id| {
-                self.render_project_group_icon(&chat_id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, cx)
+                self.render_project_group_icon(&chat_id, 16.0, cx)
             });
             // A real project's group gets a hover-revealed `+` that opens a new
             // chat homed on it — on this device's checkout when it has one
@@ -6772,21 +6778,16 @@ impl Shell {
         let has_more = total > shown;
         // "Show more" matches the row slot: compact rows are 29px, so the
         // button shrinks with them instead of towering over the list.
-        let more_height = if self.settings.sidebar_compact {
-            super::sidebar_row_height(true, true, false, false)
-        } else {
-            36.0
-        };
+        let more_height = sidebar_row_height(self.settings.sidebar_compact, true, true);
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
             + rows
                 .iter()
                 .take(shown)
-                .map(|row| {
+                .map(|_| {
                     sidebar_row_height(
                         self.settings.sidebar_compact,
+                        false,
                         self.settings.sidebar_show_project_label,
-                        row.branch.is_some(),
-                        row.change_request.is_some(),
                     )
                 })
                 .sum::<f32>()
@@ -6864,6 +6865,7 @@ impl Shell {
                         None,
                         None,
                         self.settings.sidebar_show_project_icon,
+                        false,
                         false,
                         None,
                         theme,

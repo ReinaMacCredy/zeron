@@ -1284,6 +1284,7 @@ impl Shell {
                     None,
                     false,
                     false,
+                    false,
                     Some(query),
                     theme,
                     cx,
