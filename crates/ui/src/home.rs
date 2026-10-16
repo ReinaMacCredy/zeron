@@ -527,7 +527,7 @@ pub(crate) fn running_agents(state: &AppState, now: DateTime<Utc>) -> Vec<(&Chat
         .collect()
 }
 
-fn local_git_project_paths(state: &AppState) -> Vec<(String, String, String)> {
+pub(crate) fn local_git_project_paths(state: &AppState) -> Vec<(String, String, String)> {
     state
         .spaces
         .iter()
@@ -596,7 +596,7 @@ pub(crate) struct HomePrs {
     pub error: Option<String>,
 }
 
-async fn load_home_prs(
+pub(crate) async fn load_home_prs(
     engine: &crate::state::EngineHandle,
     projects: Vec<(String, String, String)>,
 ) -> HomePrs {

@@ -949,6 +949,7 @@ pub enum Route {
     Chat,
     PullRequests,
     Usage,
+    Inbox,
     Settings(SettingsSection),
     Terminal,
 }
@@ -1116,6 +1117,7 @@ pub enum NavEntry {
     },
     Settings(SettingsSection),
     Usage,
+    Inbox,
 }
 
 /// Browser-style navigation history for the titlebar back/forward buttons
@@ -2466,6 +2468,7 @@ pub struct Shell {
     swipe: swipe_nav::SwipeNav,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
+    inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -2955,6 +2958,7 @@ impl Shell {
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
             Some("usage") => Route::Usage,
+            Some("inbox") => Route::Inbox,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -2998,6 +3002,7 @@ impl Shell {
             Route::Chat | Route::Terminal => NavEntry::Chat(String::new()),
             Route::PullRequests => NavEntry::PullRequests,
             Route::Usage => NavEntry::Usage,
+            Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -3136,6 +3141,7 @@ impl Shell {
             swipe: swipe_nav::SwipeNav::default(),
             pull_requests_page: None,
             usage_page: None,
+            inbox_page: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -6981,6 +6987,61 @@ impl Shell {
         cx.notify();
     }
 
+    fn open_inbox(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Inbox) {
+            return;
+        }
+        self.enter_inbox_route(cx);
+        self.nav.push(NavEntry::Inbox);
+    }
+
+    fn enter_inbox_route(&mut self, cx: &mut Context<Self>) {
+        self.set_route(Route::Inbox, cx);
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        self.load_account_usage(cx);
+        cx.notify();
+    }
+
+    fn inbox_page(&mut self, cx: &mut Context<Self>) -> Entity<crate::inbox::InboxPage> {
+        if let Some((page, _)) = &self.inbox_page {
+            return page.clone();
+        }
+        let (state, composer) = (self.state.clone(), self.composer.clone());
+        let page = cx.new(|cx| crate::inbox::InboxPage::new(state, composer, cx));
+        let events = cx.subscribe(&page, |this, _, event: &crate::inbox::InboxEvent, cx| {
+            this.on_inbox_event(event, cx)
+        });
+        self.inbox_page = Some((page.clone(), events));
+        page
+    }
+
+    fn on_inbox_event(&mut self, event: &crate::inbox::InboxEvent, cx: &mut Context<Self>) {
+        match event {
+            crate::inbox::InboxEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
+            crate::inbox::InboxEvent::OpenPullRequests => self.open_pull_requests(cx),
+            crate::inbox::InboxEvent::CreateTask { title, due_on } => {
+                let Some(engine) = self.state.read(cx).engine().cloned() else {
+                    self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+                    cx.notify();
+                    return;
+                };
+                let params = serde_json::json!({
+                    "op": "createTask", "taskId": uuid::Uuid::new_v4().to_string(),
+                    "title": title, "dueOn": due_on,
+                });
+                Self::spawn_mutate(engine, params, cx).detach();
+            }
+            crate::inbox::InboxEvent::SetTaskCompleted { task_id, completed } => {
+                let patch = zeron_proto::TaskPatch {
+                    completed: Some(*completed),
+                    ..Default::default()
+                };
+                self.update_task(task_id, patch, cx);
+            }
+        }
+    }
+
     /// Show the board's route without recording a navigation.
     fn enter_pull_requests_route(&mut self, cx: &mut Context<Self>) {
         if matches!(self.route, Route::PullRequests) {
@@ -7215,6 +7276,7 @@ impl Shell {
                 self.pending_pull_request = Some((url, device));
             }
             NavEntry::Usage => self.enter_usage_route(cx),
+            NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -14413,6 +14475,18 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
+        if matches!(self.route, Route::Inbox) {
+            let accounts = self.account_usage.clone();
+            let page = self.inbox_page(cx);
+            page.update(cx, |page, cx| page.set_accounts(accounts, cx));
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(page)
+                .into_any_element();
+        }
+
         if matches!(self.route, Route::Usage) {
             let state = self.state.clone();
             let page = self
@@ -17380,7 +17454,7 @@ impl Render for Shell {
                         this.toggle_pr_chat(cx)
                     }
                     Route::PullRequests => {}
-                    Route::Settings(_) | Route::Terminal | Route::Usage => {}
+                    Route::Settings(_) | Route::Terminal | Route::Usage | Route::Inbox => {}
                 }),
             )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
@@ -17790,7 +17864,7 @@ impl Render for Shell {
                 // for the return trip.
                 let pr_route = matches!(self.route, Route::PullRequests);
                 let page_route =
-                    pr_route || matches!(self.route, Route::Terminal | Route::Usage);
+                    pr_route || matches!(self.route, Route::Terminal | Route::Usage | Route::Inbox);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     let swipe = self.swipe_layers(0.0, cx);

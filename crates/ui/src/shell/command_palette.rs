@@ -258,6 +258,7 @@ enum Command {
     NewTerminal(TerminalLaunch),
     NewProject,
     Settings,
+    Inbox,
     Usage,
     Theme(AppearanceMode),
     ArchiveThread,
@@ -270,6 +271,7 @@ impl Command {
             Self::NewTerminal(launch) => launch.menu_label(),
             Self::NewProject => "New project",
             Self::Settings => "Open settings",
+            Self::Inbox => "Open inbox",
             Self::Usage => "Open usage",
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
             Self::Theme(AppearanceMode::Light) => "Switch to light theme",
@@ -284,6 +286,7 @@ impl Command {
             Self::NewTerminal(launch) => launch.brand().0,
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
+            Self::Inbox => icons::BELL,
             Self::Usage => icons::USAGE_CHART,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
@@ -406,6 +409,7 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
         .chain([
             Command::NewProject,
             Command::Settings,
+            Command::Inbox,
             Command::Usage,
             Command::Theme(if is_dark {
                 AppearanceMode::Light
@@ -1017,6 +1021,7 @@ impl Shell {
             RowKind::Command(Command::NewTerminal(launch)) => self.open_terminal_tab(launch, cx),
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
+            RowKind::Command(Command::Inbox) => self.open_inbox(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
@@ -1074,7 +1079,9 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::Theme(_) | Command::NewTerminal(_) | Command::Usage => return None,
+            Command::Theme(_) | Command::NewTerminal(_) | Command::Inbox | Command::Usage => {
+                return None;
+            }
         };
         let combo = self.settings.keymap.get(id);
         let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
@@ -2973,6 +2980,7 @@ mod tests {
                 Command::NewTerminal(TerminalLaunch::Codex),
                 Command::NewProject,
                 Command::Settings,
+                Command::Inbox,
                 Command::Usage,
                 Command::Theme(AppearanceMode::Light)
             ]
