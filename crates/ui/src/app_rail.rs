@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use gpui::{AnyElement, Div, SharedString, Stateful, div, prelude::*, px};
-use zeron_proto::{AgentAccount, AgentAccountsSnapshot};
+use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
 
 use crate::account_usage::used_fraction;
 use crate::icons::{self, icon};
@@ -18,7 +18,7 @@ const RING_RADIUS: f32 = 13.0;
 const RING_STROKE: f32 = 2.5;
 const RING_GLYPH: f32 = 14.0;
 const MAX_RINGS: usize = 2;
-const CARD_WIDTH: f32 = 280.0;
+const CARD_WIDTH: f32 = 400.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RailItem {
@@ -161,80 +161,113 @@ pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
 }
 
 pub(crate) fn ring_card(
-    account: &AgentAccount,
+    harness: HarnessId,
+    rows: Vec<AnyElement>,
+    error: Option<SharedString>,
     footer: AnyElement,
     theme: &Theme,
-    now: DateTime<Utc>,
 ) -> Div {
-    let (mark, tint) = crate::pickers::harness_brand_icon(account.harness);
-    let email = account
-        .email
-        .clone()
-        .or_else(|| account.display_name.clone());
+    let title = format!("{} accounts", accounts::provider_name(harness));
     popover::popover_card(theme)
         .w(px(CARD_WIDTH))
         .flex()
         .flex_col()
-        .gap(px(2.0))
-        .child(
+        .child(popover::menu_heading(theme, &title))
+        .children(rows)
+        .children(error.map(|error| {
             div()
                 .px(px(8.0))
-                .pt(px(6.0))
-                .flex()
-                .flex_col()
-                .gap(px(5.0))
+                .py(px(4.0))
+                .text_size(px(12.0))
+                .text_color(theme.danger)
+                .child(error)
+        }))
+        .child(popover::menu_separator())
+        .child(footer)
+}
+
+pub(crate) fn account_row(
+    account: &AgentAccount,
+    ix: usize,
+    theme: &Theme,
+    now: DateTime<Utc>,
+) -> Stateful<Div> {
+    let email: SharedString = account
+        .email
+        .clone()
+        .or_else(|| account.display_name.clone())
+        .unwrap_or_else(|| "Unknown account".into())
+        .into();
+    let mut meta: Vec<AnyElement> = account
+        .plan_label
+        .iter()
+        .map(|plan| {
+            div()
+                .child(SharedString::from(plan.clone()))
+                .into_any_element()
+        })
+        .collect();
+    if account.active {
+        meta.push(
+            div()
+                .text_color(theme.accent)
+                .child(SharedString::from("In use"))
+                .into_any_element(),
+        );
+    } else if let Some(reason) = account
+        .usage_error
+        .clone()
+        .filter(|_| account.usage_windows.is_empty())
+    {
+        meta.push(div().child(SharedString::from(reason)).into_any_element());
+    }
+    popover::menu_row(theme, account.active, format!("rail-account-row-{ix}"))
+        .id(("rail-account-row", ix))
+        .debug_selector(move || format!("rail-account-row-{ix}"))
+        .when(account.active || !account.switchable, |row| {
+            row.cursor_default()
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(crate::typography::ui_rems(12.0))
+                        .truncate()
+                        .text_size(px(12.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(
-                            icon(mark)
-                                .size(px(12.0))
-                                .text_color(tint.unwrap_or(theme.text_muted)),
-                        )
-                        .child(SharedString::from(accounts::provider_name(account.harness)))
-                        .when_some(account.plan_label.clone(), |row, plan| {
-                            row.child(crate::settings::widgets::badge(theme, plan).ml_auto())
-                        }),
+                        .child(email),
                 )
-                .when_some(email, |col, email| {
-                    col.child(
-                        div()
-                            .mt(px(-2.0))
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.5))
-                            .truncate()
-                            .child(SharedString::from(email)),
-                    )
+                .when(!meta.is_empty(), |el| {
+                    el.child(crate::settings::widgets::meta_line(theme, meta))
+                }),
+        )
+        .child(
+            div()
+                .id(("rail-account-meters", ix))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .when(!account.usage_windows.is_empty(), |meters| {
+                    meters.tooltip(crate::settings::widgets::text_tooltip(
+                        accounts::usage_resets(&account.usage_windows, now),
+                    ))
                 })
                 .children(
                     account
                         .usage_windows
                         .iter()
-                        .map(|window| accounts::compact_usage_meter(window, theme, now)),
-                )
-                .when_some(account.usage_error.clone(), |col, error| {
-                    col.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(error)),
-                    )
-                })
-                .pb(px(4.0)),
+                        .take(2)
+                        .map(|window| accounts::render_usage_meter(window, theme)),
+                ),
         )
-        .child(popover::menu_separator())
-        .child(footer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{AgentUsageWindow, HarnessId};
+    use zeron_proto::AgentUsageWindow;
 
     fn account(harness: HarnessId, active: bool, used: &[f32]) -> AgentAccount {
         serde_json::from_value(serde_json::json!({

@@ -2501,7 +2501,7 @@ pub struct Shell {
     device_accounts: Entity<crate::account_usage::DeviceAccounts>,
     _device_accounts: Subscription,
     _accounts_cache: Subscription,
-    rail_usage_menu: popover::Popup<String>,
+    rail_usage_menu: popover::Popup<HarnessId>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -12720,13 +12720,14 @@ impl Shell {
             .update(cx, |accounts, cx| accounts.load(cx));
     }
 
-    fn toggle_rail_usage(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.rail_usage_menu.take_press_was_open() || self.rail_usage_menu.as_open() == Some(&id)
+    fn toggle_rail_usage(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if self.rail_usage_menu.take_press_was_open()
+            || self.rail_usage_menu.as_open() == Some(&harness)
         {
             self.close_rail_usage(cx);
             return;
         }
-        self.rail_usage_menu.open(id);
+        self.rail_usage_menu.open(harness);
         self.refresh_device_accounts(cx);
         cx.notify();
     }
@@ -12774,9 +12775,9 @@ impl Shell {
             .into_iter()
             .enumerate()
             .map(|(ix, account)| {
-                let open = self.rail_usage_menu.as_open() == Some(&account.id);
+                let harness = account.harness;
+                let open = self.rail_usage_menu.as_open() == Some(&harness);
                 let tooltip = app_rail::ring_tooltip(Some(&account), false);
-                let id = account.id.clone();
                 let hover = hover.clone();
                 let mut trigger = div()
                     .id(("rail-usage", ix))
@@ -12798,12 +12799,12 @@ impl Shell {
                         cx.listener(|this, _, _, _| this.rail_usage_menu.note_trigger_press()),
                     )
                     .on_click(
-                        cx.listener(move |this, _, _, cx| this.toggle_rail_usage(id.clone(), cx)),
+                        cx.listener(move |this, _, _, cx| this.toggle_rail_usage(harness, cx)),
                     );
                 if !open {
                     trigger = trigger.tooltip(crate::settings::widgets::text_tooltip(tooltip));
                 }
-                if self.rail_usage_menu.get() == Some(&account.id) {
+                if self.rail_usage_menu.get() == Some(&harness) {
                     let footer = popover::menu_row(&popup_theme, false, "rail-usage-open-usage")
                         .id("rail-usage-open-usage")
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -12817,7 +12818,34 @@ impl Shell {
                         )
                         .child(SharedString::from("Open Usage"))
                         .into_any_element();
-                    let card = app_rail::ring_card(&account, footer, &popup_theme, Utc::now())
+                    let now = Utc::now();
+                    let harness_accounts: Vec<zeron_proto::AgentAccount> =
+                        crate::account_usage::local_snapshot(cx)
+                            .map(|snapshot| {
+                                accounts::provider_accounts(snapshot, harness)
+                                    .into_iter()
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    let rows = harness_accounts
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, row)| {
+                            let switch_to = row.clone();
+                            app_rail::account_row(row, ix, &popup_theme, now)
+                                .when(!row.active && row.switchable, |el| {
+                                    el.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.device_accounts.update(cx, |accounts, cx| {
+                                            accounts.switch(&switch_to, cx)
+                                        });
+                                    }))
+                                })
+                                .into_any_element()
+                        })
+                        .collect();
+                    let error = self.device_accounts.read(cx).error();
+                    let card = app_rail::ring_card(harness, rows, error, footer, &popup_theme)
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_rail_usage(cx)))
                         .into_any_element();
                     trigger = trigger.child(popover::anchored_menu_right(
@@ -17760,15 +17788,15 @@ impl Render for Shell {
                 // Usage section) once the first usage probe has landed.
                 // `=rail-usage` opens the first ring's popover once accounts load.
                 if self.debug_dialog.as_deref() == Some("rail-usage")
-                    && let Some(id) =
+                    && let Some(harness) =
                         crate::account_usage::local_snapshot(cx).and_then(|snapshot| {
                             app_rail::ring_accounts(snapshot)
                                 .first()
-                                .map(|account| account.id.clone())
+                                .map(|account| account.harness)
                         })
                 {
                     self.debug_dialog = None;
-                    self.rail_usage_menu.open(id);
+                    self.rail_usage_menu.open(harness);
                 }
                 if self.debug_dialog.as_deref() == Some("user-menu")
                     && crate::account_usage::local_snapshot(cx).is_some()

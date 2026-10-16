@@ -2,11 +2,11 @@
 //! through [`AccountsSnapshotCache`].
 use std::time::{Duration, Instant};
 
-use gpui::{App, Context, Entity, Task};
+use gpui::{App, Context, Entity, SharedString, Task};
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
 use zeron_rpc::methods;
 
-use crate::settings::accounts::AccountsSnapshotCache;
+use crate::settings::accounts::{self, AccountsSnapshotCache};
 use crate::state::AppState;
 
 /// Forced probes hit the provider; the engine throttles them too, but the
@@ -43,6 +43,8 @@ pub struct DeviceAccounts {
     state: Entity<AppState>,
     last_forced: Option<Instant>,
     load_task: Option<Task<()>>,
+    action_task: Option<Task<()>>,
+    error: Option<SharedString>,
     _poll: Task<()>,
 }
 
@@ -60,12 +62,71 @@ impl DeviceAccounts {
             state,
             last_forced: None,
             load_task: None,
+            action_task: None,
+            error: None,
             _poll: poll,
         }
     }
 
     pub fn loading(&self) -> bool {
         self.load_task.is_some()
+    }
+
+    /// The last refused switch.
+    pub fn error(&self) -> Option<SharedString> {
+        self.error.clone()
+    }
+
+    /// Switch optimistically, like Settings → Accounts: the rows flip at once
+    /// and the engine's reply replaces them; a refusal restores the list.
+    pub fn switch(&mut self, account: &AgentAccount, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let cache = &mut cx.default_global::<AccountsSnapshotCache>().0;
+        let previous = cache.get(&None).cloned();
+        if let Some(snapshot) = cache.get_mut(&None) {
+            // Per-provider agents keep one live login per provider: only the
+            // switched-to row's group changes.
+            accounts::mark_switched(snapshot, account);
+        }
+        self.error = None;
+        let params = serde_json::json!({
+            "id": account.id,
+            "accountId": account.id,
+            "harness": account.harness,
+        });
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::ACTIVATE_AGENT_ACCOUNT, params)
+                .await;
+            this.update(cx, |accounts, cx| {
+                accounts.action_task = None;
+                match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
+                    Ok(Ok(snapshot)) => {
+                        cx.default_global::<AccountsSnapshotCache>()
+                            .0
+                            .insert(None, snapshot);
+                    }
+                    Ok(Err(_)) => {
+                        accounts.last_forced = None;
+                        accounts.load(cx);
+                    }
+                    Err(err) => {
+                        if let Some(previous) = previous {
+                            cx.default_global::<AccountsSnapshotCache>()
+                                .0
+                                .insert(None, previous);
+                        }
+                        accounts.error = Some(err.to_string().into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// With nothing cached the plain list paints first: the engine serves its
