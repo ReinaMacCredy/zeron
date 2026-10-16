@@ -345,6 +345,7 @@ pub mod methods {
     pub const GET_GIT_ACTIVITY: &str = "GetGitActivity";
     pub const LIST_LISTENING_SERVICES: &str = "ListListeningServices";
     pub const GET_SYSTEM_STATS: &str = "GetSystemStats";
+    pub const GET_TODAY_RUNS: &str = "GetTodayRuns";
     /// One page of a repository's open pull requests (`filter`, `after`
     /// cursor), with the total count.
     pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";

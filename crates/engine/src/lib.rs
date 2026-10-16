@@ -54,6 +54,7 @@ pub mod spaces;
 pub mod terminals;
 pub mod thread_watches;
 pub mod titles;
+mod today_runs;
 mod token_rate;
 mod transcript_history;
 mod turn_clock;
