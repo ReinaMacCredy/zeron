@@ -2150,6 +2150,7 @@ fn multi_op_batches_keep_their_ops_in_place() {
         spaces: vec![space("space-1", "dev-a", "/p")],
         chats: vec![chat("chat-1", "dev-a")],
         sessions: vec![],
+        tasks: vec![],
     };
     doc.seed_from_workspace(&state).unwrap();
     let seed = doc.pending[0].clone();
@@ -2395,4 +2396,125 @@ fn attaching_an_edge_after_local_only_writes_reseeds_them() {
     let mut doc = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
     doc.set_local_only(false);
     assert_eq!(doc.pending_len(), 0);
+}
+
+fn task(id: &str, title: &str) -> zeron_proto::Task {
+    serde_json::from_value(json!({ "id": id, "title": title, "createdAt": ts(2_000) })).unwrap()
+}
+
+#[test]
+fn tasks_round_trip_create_patch_delete_across_devices_and_restart() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut first = task("t1", "  Write the spec  ");
+    first.space_id = Some("space-1".into());
+    first.due_on = Some("2026-10-20".into());
+    assert!(a.create_task(&first).unwrap());
+    assert!(!a.create_task(&task("t1", "Retried")).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let synced = b.task("t1").unwrap();
+    assert_eq!(synced.title, "Write the spec", "titles are stored trimmed");
+    assert_eq!(synced.space_id.as_deref(), Some("space-1"));
+    assert_eq!(synced.due_on.as_deref(), Some("2026-10-20"));
+    assert_eq!(b.read_all().unwrap().tasks, vec![synced.clone()]);
+
+    let done_at = ts(5_000);
+    let patch = zeron_proto::TaskPatch {
+        notes: Some("Cover the edge cases".into()),
+        due_on: Some(None),
+        chat_id: Some(Some("chat-9".into())),
+        completed: Some(true),
+        ..Default::default()
+    };
+    assert!(b.update_task("t1", &patch, done_at).unwrap());
+    let retitle = zeron_proto::TaskPatch {
+        title: Some("Write the SPEC".into()),
+        ..Default::default()
+    };
+    assert!(a.update_task("t1", &retitle, ts(5_001)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    let merged = a.task("t1").unwrap();
+    assert_eq!(merged, b.task("t1").unwrap());
+    assert_eq!(
+        merged.title, "Write the SPEC",
+        "edits to other fields survive"
+    );
+    assert_eq!(merged.notes, "Cover the edge cases");
+    assert_eq!(merged.due_on, None);
+    assert_eq!(merged.chat_id.as_deref(), Some("chat-9"));
+    assert_eq!(merged.completed_at, Some(done_at));
+    let again = zeron_proto::TaskPatch {
+        completed: Some(true),
+        ..Default::default()
+    };
+    a.update_task("t1", &again, ts(9_000)).unwrap();
+    assert_eq!(a.task("t1").unwrap().completed_at, Some(done_at));
+
+    let restarted = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "a").unwrap();
+    assert_eq!(restarted.task("t1"), a.task("t1"));
+
+    assert!(a.delete_task("t1", ts(10_000)).unwrap());
+    assert!(a.task("t1").is_none());
+    assert!(a.read_tasks().unwrap().is_empty());
+    assert!(!a.update_task("t1", &retitle, ts(10_001)).unwrap());
+    assert!(!a.create_task(&task("t1", "Revived")).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.read_tasks().unwrap().is_empty());
+}
+
+#[test]
+fn tasks_append_in_creation_order_and_move_by_order_key() {
+    let mut doc = RegistryDoc::new("a");
+    for (id, title) in [("t1", "One"), ("t2", "Two"), ("t3", "Three")] {
+        doc.create_task(&task(id, title)).unwrap();
+    }
+    let ids = |doc: &RegistryDoc| -> Vec<String> {
+        doc.read_tasks()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect()
+    };
+    assert_eq!(ids(&doc), ["t1", "t2", "t3"]);
+    let keys: Vec<String> = doc
+        .read_tasks()
+        .unwrap()
+        .into_iter()
+        .map(|t| t.order_key)
+        .collect();
+    let between = zeron_proto::pin_order_key_between(None, Some(&keys[0]), "nonce").unwrap();
+    let to_front = zeron_proto::TaskPatch {
+        order_key: Some(between),
+        ..Default::default()
+    };
+    doc.update_task("t3", &to_front, ts(3_000)).unwrap();
+    assert_eq!(ids(&doc), ["t3", "t1", "t2"]);
+    doc.delete_task("t2", ts(3_001)).unwrap();
+    doc.create_task(&task("t4", "Four")).unwrap();
+    assert_eq!(ids(&doc), ["t3", "t1", "t4"]);
+}
+
+#[test]
+fn tasks_refuse_invalid_fields() {
+    let mut doc = RegistryDoc::new("a");
+    assert!(doc.create_task(&task("t1", "   ")).is_err());
+    let mut bad_day = task("t1", "Title");
+    bad_day.due_on = Some("2026-02-30".into());
+    assert!(doc.create_task(&bad_day).is_err());
+    doc.create_task(&task("t1", "Title")).unwrap();
+    let before = doc.task("t1").unwrap();
+    let bad_key = zeron_proto::TaskPatch {
+        title: Some("Renamed".into()),
+        order_key: Some("not-hex".into()),
+        ..Default::default()
+    };
+    assert!(doc.update_task("t1", &bad_key, ts(3_000)).is_err());
+    assert_eq!(
+        doc.task("t1").unwrap(),
+        before,
+        "a refused patch writes nothing"
+    );
 }
