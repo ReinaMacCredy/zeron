@@ -241,7 +241,7 @@ fn split_tab_chip(
     let active = halves.iter().any(|(id, ..)| selected == Some(id.as_str()));
     let mut chip = div()
         .id("session-tab-split")
-        .flex_basis(px(TAB_MAX_WIDTH * 2.0 + TAB_GAP))
+        .w(px(TAB_MAX_WIDTH * 2.0 + TAB_GAP))
         .min_w(px(TAB_MIN_WIDTH * 2.0 + TAB_GAP))
         .h(px(TAB_HEIGHT))
         .flex()
@@ -1338,7 +1338,7 @@ impl Shell {
                     let tab_el = div()
                         .id(SharedString::from(format!("session-tab-{id}")))
                         .debug_selector(|| format!("session-tab-{id}"))
-                        .flex_basis(px(TAB_MAX_WIDTH))
+                        .w(px(TAB_MAX_WIDTH))
                         .min_w(px(TAB_MIN_WIDTH))
                         .h(px(TAB_HEIGHT))
                         .flex()
