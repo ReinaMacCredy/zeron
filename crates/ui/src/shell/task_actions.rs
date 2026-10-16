@@ -44,7 +44,6 @@ impl Shell {
         );
     }
 
-    /// The returned chat id is the thread the engine opens for the task.
     pub fn start_task(
         &mut self,
         task_id: &str,

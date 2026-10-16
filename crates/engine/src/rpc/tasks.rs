@@ -45,8 +45,7 @@ impl EngineRpc {
         }
     }
 
-    /// Opens a chat on this device whose first turn is the task, linked
-    /// before the send so a failed send is visible and recoverable.
+    /// Linked before the send so a failed send stays visible on the task.
     pub(super) async fn start_task(
         &self,
         task_id: &str,

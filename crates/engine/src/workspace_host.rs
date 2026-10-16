@@ -1271,7 +1271,6 @@ impl WorkspaceHost {
         self.read(|doc| doc.task(task_id))
     }
 
-    /// `false` when the id is taken: a retried create changes nothing.
     pub fn create_task(&self, task: &Task) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.create_task(task))?)
     }

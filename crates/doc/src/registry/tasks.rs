@@ -115,9 +115,7 @@ impl RegistryDoc {
         Ok(tasks)
     }
 
-    /// `false` when the id is already taken, deleted rows included: a retried
-    /// create must not overwrite later edits or revive a deleted task. An
-    /// empty `order_key` appends after every other task.
+    /// A taken id, deleted rows included, is never overwritten: retries must not revive.
     pub fn create_task(&mut self, task: &Task) -> Result<bool, DocError> {
         if task.id.is_empty() || task.id.len() > 256 {
             return Err(invalid("Invalid task ID"));
@@ -170,8 +168,6 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// Writes only the patched fields, so concurrent edits to different
-    /// fields both survive. `false` when no live task has this id.
     pub fn update_task(
         &mut self,
         task_id: &str,
@@ -212,8 +208,7 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// Soft delete: the row stays as a flagged tombstone so a retried create
-    /// cannot bring it back. `false` when no live task has this id.
+    /// A flagged row, not a tombstone, so a retried create cannot revive it.
     pub fn delete_task(&mut self, task_id: &str, now: DateTime<Utc>) -> Result<bool, DocError> {
         if self.task(task_id).is_none() {
             return Ok(false);
