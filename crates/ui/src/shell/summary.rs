@@ -37,6 +37,7 @@ enum SidecarValue {
     Tone(SharedString, gpui::Hsla),
     Dot(Option<SharedString>, gpui::Hsla),
     Counts(usize, u32, u32),
+    Meter(f32, gpui::Hsla),
 }
 
 struct SidecarEntry {
@@ -45,6 +46,7 @@ struct SidecarEntry {
     icon: &'static str,
     tint: Option<gpui::Hsla>,
     badge: Option<gpui::Hsla>,
+    ink: Option<gpui::Hsla>,
     label: SharedString,
     suffix: Option<SharedString>,
     value: Option<SidecarValue>,
@@ -66,6 +68,7 @@ impl SidecarEntry {
             icon,
             tint: None,
             badge: None,
+            ink: None,
             label: label.into(),
             suffix: None,
             value: None,
@@ -82,6 +85,11 @@ impl SidecarEntry {
 
     fn badge(mut self, badge: Option<gpui::Hsla>) -> Self {
         self.badge = badge;
+        self
+    }
+
+    fn ink(mut self, ink: gpui::Hsla) -> Self {
+        self.ink = Some(ink);
         self
     }
 
@@ -123,6 +131,9 @@ impl SidecarEntry {
                 | SidecarValue::Tone(v, _)
                 | SidecarValue::Dot(Some(v), _),
             ) => format!("{label}: {v}").into(),
+            Some(SidecarValue::Meter(fraction, _)) => {
+                format!("{label}: {}%", (fraction * 100.0).round() as u32).into()
+            }
             _ => label,
         }
     }
@@ -452,7 +463,7 @@ impl Shell {
             .map(|window| (window.label.clone(), window.used_fraction.clamp(0.0, 1.0)))
     }
 
-    fn sidecar_actions_section(&self) -> Option<SidecarSection> {
+    fn sidecar_actions_section(&self, theme: &Theme, cx: &App) -> Option<SidecarSection> {
         let status = self.project_actions.active_status()?.clone();
         let snapshot = self.project_actions.visible_snapshot()?;
         let key = self.project_actions.active.clone()?;
@@ -486,13 +497,35 @@ impl Shell {
             _ => {}
         }
         let can_run = status.can_run();
+        let chat_id = self.state.read(cx).selected_chat.clone();
+        let exits = self
+            .terminal
+            .as_ref()
+            .map(|panel| panel.read(cx).exit_codes())
+            .unwrap_or_default();
         for (ix, action) in snapshot.actions.into_iter().enumerate() {
+            let run = chat_id
+                .clone()
+                .and_then(|chat| self.project_action_tabs.get(&(chat, action.id.clone())))
+                .and_then(|tab| exits.iter().find(|(key, _)| key == tab))
+                .map(|(_, exited)| match exited {
+                    None => SidecarValue::Tone(
+                        "Running".into(),
+                        chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2,
+                    ),
+                    Some(0) => SidecarValue::Tone(
+                        "Done".into(),
+                        chat_status_tone(zeron_proto::ChatIndicator::Completed, theme).2,
+                    ),
+                    Some(_) => SidecarValue::Tone("Failed".into(), theme.danger),
+                });
             let mut entry = SidecarEntry::new(
                 "action",
                 ix,
                 action_icon(action.icon),
                 action_label(&action),
-            );
+            )
+            .value(run);
             if can_run {
                 let key = key.clone();
                 let run = action.clone();
@@ -628,6 +661,7 @@ impl Shell {
             .map(basename);
         let counts = self.summary_change_counts(cx);
         let usage = chat.as_ref().and_then(|chat| self.summary_usage(chat));
+        let working = chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2;
 
         let mut sections = Vec::new();
 
@@ -643,8 +677,19 @@ impl Shell {
             SidecarEntry::new("browser", 0, icons::ASTRA_GLOBE, "Browser")
                 .action(|this, window, cx| this.focus_browser(window, cx)),
         );
+        let live_terminals = self.right_terminal.as_ref().map_or(0, |panel| {
+            panel
+                .read(cx)
+                .tab_summaries(cx)
+                .iter()
+                .filter(|(_, _, exited)| !exited)
+                .count()
+        });
         on.push(
             SidecarEntry::new("terminal", 0, icons::ASTRA_TERMINAL, "Terminal")
+                .value((live_terminals > 0).then(|| {
+                    SidecarValue::Dot(Some(format!("{live_terminals} running").into()), working)
+                }))
                 .action(|this, _, cx| this.focus_terminal(cx)),
         );
         on.push(
@@ -720,6 +765,14 @@ impl Shell {
                     icons::ASTRA_GIT_BRANCH,
                     branch.unwrap_or_else(|| "No branch".into()),
                 )
+                .ink(
+                    gpui::rgb(if theme.appearance.is_dark() {
+                        0xc4b4ff
+                    } else {
+                        0x7f22fe
+                    })
+                    .into(),
+                )
                 .value(head.map(|sha| SidecarValue::Mono(sha.into()))),
             );
         }
@@ -753,10 +806,19 @@ impl Shell {
                 .take(SECTION_CAP)
                 .enumerate()
                 .map(|(ix, chat)| {
-                    let expired = chat.sidechat_expired(Utc::now());
+                    let now = Utc::now();
+                    let status = if chat.sidechat_expired(now) {
+                        Some(SidecarValue::Text("Expired".into()))
+                    } else {
+                        let (label, _, color) = chat_status_tone(
+                            self.state.read(cx).display_status_for(&chat, now),
+                            theme,
+                        );
+                        label.map(|label| SidecarValue::Tone(label, color))
+                    };
                     let title = chat.title.clone().unwrap_or_else(|| "Sidechat".into());
                     SidecarEntry::new("sidechat", ix, icons::ASTRA_CHAT_BUBBLE, title)
-                        .value(expired.then(|| SidecarValue::Text("Expired".into())))
+                        .value(status)
                         .action(move |this, _, cx| {
                             this.add_sidechat_surface(&chat, cx);
                         })
@@ -782,7 +844,7 @@ impl Shell {
             });
         }
 
-        sections.extend(self.sidecar_actions_section());
+        sections.extend(self.sidecar_actions_section(theme, cx));
 
         if !subagents.is_empty() {
             let (running, previous) = split_subagents(subagents);
@@ -817,17 +879,25 @@ impl Shell {
                     Some(zeron_doc::SubagentStatus::Failed) => Some(theme.danger),
                     _ => None,
                 };
-                let elapsed = agent
-                    .started_at
-                    .filter(|_| running)
-                    .map(|started| short_elapsed((now - started) / 1000));
+                let status = match agent.status {
+                    Some(zeron_doc::SubagentStatus::Running) => Some(SidecarValue::Tone(
+                        agent.started_at.map_or("Working".into(), |started| {
+                            short_elapsed((now - started) / 1000).into()
+                        }),
+                        working,
+                    )),
+                    Some(zeron_doc::SubagentStatus::Failed) => {
+                        Some(SidecarValue::Tone("Failed".into(), theme.danger))
+                    }
+                    _ => None,
+                };
                 let (mark, tint) =
                     crate::pickers::agent_brand_icon(agent.harness, agent.model.as_deref());
                 SidecarEntry::new(key, ix, mark, agent.title.clone())
                     .suffix(suffix)
                     .tint(tint)
                     .badge(badge)
-                    .value(elapsed.map(|text| SidecarValue::Text(text.into())))
+                    .value(status)
                     .action(move |this, _, cx| {
                         if agent.delegated {
                             this.open_child_chat_tab(&agent.doc_id, cx);
@@ -890,17 +960,9 @@ impl Shell {
 
         let usage_entry = match usage {
             Some((window, fraction)) => {
-                let level = accounts::usage_level(fraction);
-                let tone = match level {
-                    accounts::UsageLevel::Normal => theme.text_faint,
-                    _ => accounts::usage_color(level, theme),
-                };
-                SidecarEntry::new("usage", 0, icons::ASTRA_GRAPH, window).value(Some(
-                    SidecarValue::Tone(
-                        format!("{}%", (fraction * 100.0).round() as u32).into(),
-                        tone,
-                    ),
-                ))
+                let tone = accounts::usage_color(accounts::usage_level(fraction), theme);
+                SidecarEntry::new("usage", 0, icons::ASTRA_GRAPH, window)
+                    .value(Some(SidecarValue::Meter(fraction, tone)))
             }
             None => SidecarEntry::new("usage", 0, icons::ASTRA_GRAPH, "Usage unavailable"),
         };
@@ -920,7 +982,7 @@ impl Shell {
             let path = name.clone();
             project_entries.push(
                 SidecarEntry::new("instructions", 0, icons::ASTRA_BOOK, "Project instructions")
-                    .value(Some(SidecarValue::Mono(name.into())))
+                    .value(Some(SidecarValue::Tone(name.into(), theme.warning)))
                     .action(move |this, window, cx| {
                         this.open_right_pane(cx);
                         this.add_file_surface(path.clone(), window, cx);
@@ -1245,7 +1307,13 @@ impl Shell {
                     .min_w_0()
                     .flex()
                     .flex_row()
-                    .child(div().min_w_0().truncate().child(entry.label.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when_some(entry.ink, |el, ink| el.text_color(ink))
+                            .child(entry.label.clone()),
+                    )
                     .children(
                         entry
                             .suffix
@@ -1569,6 +1637,27 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
             .children(text.clone().map(|text| div().truncate().child(text)))
             .child(div().flex_none().size(px(6.0)).rounded_full().bg(*color))
             .into_any_element(),
+        SidecarValue::Meter(fraction, color) => div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .text_color(*color)
+            .child(
+                div()
+                    .w(px(36.0))
+                    .h(px(4.0))
+                    .rounded(px(2.0))
+                    .overflow_hidden()
+                    .bg(crate::theme::hairline(0.1))
+                    .child(div().h_full().w(px(36.0 * fraction)).bg(*color)),
+            )
+            .child(SharedString::from(format!(
+                "{}%",
+                (fraction * 100.0).round() as u32
+            )))
+            .into_any_element(),
         SidecarValue::Counts(files, add, del) => {
             let files = if *files == 1 {
                 "1 file".to_string()
@@ -1789,6 +1878,27 @@ mod sidecar_regressions {
                 assert_eq!(shell.sidechat_tabs[&id].chat_id, expected);
             });
         }
+    }
+
+    #[gpui::test]
+    fn sidechat_rows_carry_the_sidebar_status(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let chat = state.chats.iter_mut().find(|c| c.id == "side-a").unwrap();
+                chat.created_at = Utc::now();
+                chat.last_message_at = Some(Utc::now());
+            });
+            let theme = Theme::of(cx).clone();
+            let sections = shell.sidecar_sections(&theme, cx);
+            let side = sections
+                .iter()
+                .find(|section| section.heading.as_ref() == "Side chats")
+                .unwrap();
+            let tooltips: Vec<_> = side.entries.iter().map(|e| e.tooltip()).collect();
+            assert_eq!(tooltips[0].as_ref(), "Parent: Expired");
+            assert_eq!(tooltips[1].as_ref(), "Parent: Done");
+        });
     }
 
     #[gpui::test]
@@ -2433,7 +2543,21 @@ mod sidecar_regressions {
             assert_eq!(editor.action_id.as_deref(), Some("dev"));
         });
 
+        let action_tooltip = |cx: &mut VisualTestContext| {
+            shell.update(cx, |shell, cx| {
+                let theme = Theme::of(cx).clone();
+                shell
+                    .sidecar_sections(&theme, cx)
+                    .into_iter()
+                    .flat_map(|section| section.entries)
+                    .find(|entry| entry.key == "action")
+                    .unwrap()
+                    .tooltip()
+            })
+        };
+        assert_eq!(action_tooltip(cx).as_ref(), "Dev");
         click(cx, "sidecar-panel-action-0");
+        assert_eq!(action_tooltip(cx).as_ref(), "Dev: Running");
         let runs = called(cx, &calls, zeron_rpc::methods::RUN_PROJECT_ACTION, 1);
         assert_eq!(runs[0]["actionId"], "dev");
         assert_eq!(runs[0]["spaceId"], "s1");
@@ -2447,6 +2571,7 @@ mod sidecar_regressions {
                 )
             })
         });
+        assert_eq!(action_tooltip(cx).as_ref(), "Dev: Failed");
         shell.update(cx, |shell, _| {
             let generation = shell.project_actions.begin_load(&key);
             let snapshot = shell.project_actions.active_snapshot().cloned().unwrap();

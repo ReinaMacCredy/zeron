@@ -447,6 +447,8 @@ impl Shell {
         let tab = panel.update(cx, |panel, cx| {
             panel.reserve_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
         });
+        self.project_action_tabs
+            .insert((context.chat_id.clone(), action.id.clone()), tab);
         self.panels
             .update(&context.chat_id, |panels| panels.terminal_open = true);
         self.terminal_tween = None;

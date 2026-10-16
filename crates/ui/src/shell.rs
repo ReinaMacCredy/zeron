@@ -134,6 +134,37 @@ fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'stat
     }
 }
 
+fn chat_status_tone(
+    status: zeron_proto::ChatIndicator,
+    theme: &Theme,
+) -> (Option<SharedString>, &'static str, gpui::Hsla) {
+    use zeron_proto::ChatIndicator as Status;
+    let dark = theme.appearance == crate::theme::Appearance::Dark;
+    match status {
+        Status::Working => (
+            Some("Working".into()),
+            icons::LUCIDE_CIRCLE_DASHED,
+            gpui::rgb(0x2b7fff).into(),
+        ),
+        Status::AwaitingInput => (
+            Some("Input".into()),
+            icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
+            gpui::rgb(if dark { 0xa3b3ff } else { 0x4f39f6 }).into(),
+        ),
+        Status::Errored => (
+            Some("Failed".into()),
+            icons::LUCIDE_CIRCLE_ALERT,
+            theme.danger,
+        ),
+        Status::Completed => (
+            Some("Done".into()),
+            icons::LUCIDE_CIRCLE_CHECK,
+            gpui::rgb(0x00bc7d).into(),
+        ),
+        Status::Idle => (None, icons::LUCIDE_CIRCLE_DASHED, theme.text_muted),
+    }
+}
+
 actions!(
     shell,
     [
@@ -2298,6 +2329,7 @@ pub struct Shell {
     pub(super) jump_hints: bool,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
+    project_action_tabs: std::collections::HashMap<(String, String), u64>,
     /// Last resolved layout, for drag anchors and matching transcript clearance.
     terminal_geometry: crate::terminal::dock::SharedGeometry,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
@@ -3017,6 +3049,7 @@ impl Shell {
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
+            project_action_tabs: std::collections::HashMap::new(),
             right_terminal: None,
             main_terminal: None,
             _main_terminal_observe: None,
@@ -4085,8 +4118,22 @@ impl Shell {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), cx));
+        Self::observe_terminal_exits(&terminal, cx);
         self.right_terminal = Some(terminal.clone());
         terminal
+    }
+
+    /// Repaint on an exit only; the panel notifies on every output chunk.
+    fn observe_terminal_exits(panel: &Entity<TerminalPanel>, cx: &mut Context<Self>) {
+        let mut seen = Vec::new();
+        cx.observe(panel, move |_, panel, cx| {
+            let codes = panel.read(cx).exit_codes();
+            if codes != seen {
+                seen = codes;
+                cx.notify();
+            }
+        })
+        .detach();
     }
 
     /// The right pane's surface tabs in the STORED (drag-reorderable) order —
@@ -6051,6 +6098,7 @@ impl Shell {
             return terminal.clone();
         }
         let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
+        Self::observe_terminal_exits(&terminal, cx);
         self.terminal = Some(terminal.clone());
         terminal
     }
@@ -10695,7 +10743,6 @@ impl Shell {
             let state = self.state.read(cx);
             crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
-        let dark = theme.appearance == crate::theme::Appearance::Dark;
         let (status_label, status_icon, status_color): (Option<SharedString>, &str, gpui::Hsla) =
             if expired {
                 (
@@ -10716,29 +10763,8 @@ impl Shell {
                     theme.warning,
                 )
             } else {
-                match status {
-                    Status::Working => (
-                        Some(work_label.map_or("Working".into(), SharedString::from)),
-                        icons::LUCIDE_CIRCLE_DASHED,
-                        gpui::rgb(0x2b7fff).into(),
-                    ),
-                    Status::AwaitingInput => (
-                        Some("Input".into()),
-                        icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
-                        gpui::rgb(if dark { 0xa3b3ff } else { 0x4f39f6 }).into(),
-                    ),
-                    Status::Errored => (
-                        Some("Failed".into()),
-                        icons::LUCIDE_CIRCLE_ALERT,
-                        theme.danger,
-                    ),
-                    Status::Completed => (
-                        Some("Done".into()),
-                        icons::LUCIDE_CIRCLE_CHECK,
-                        gpui::rgb(0x00bc7d).into(),
-                    ),
-                    Status::Idle => (None, icons::LUCIDE_CIRCLE_DASHED, theme.text_muted),
-                }
+                let (label, icon, color) = chat_status_tone(status, theme);
+                (work_label.map(SharedString::from).or(label), icon, color)
             };
         let unread = !settled_state && matches!(status, Status::Completed | Status::AwaitingInput);
         let failed = undelivered || (!settled_state && status == Status::Errored);

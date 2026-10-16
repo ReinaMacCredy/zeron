@@ -499,6 +499,13 @@ impl TerminalPanel {
             .unwrap_or_default()
     }
 
+    pub fn exit_codes(&self) -> Vec<(u64, Option<i32>)> {
+        self.chats
+            .values()
+            .flat_map(|tabs| tabs.tabs.iter().map(|t| (t.key, t.exited)))
+            .collect()
+    }
+
     /// Open a fresh tab for the selected chat and return its key.
     pub fn open_tab_for_selected(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         let chat = self.selected_chat(cx);
