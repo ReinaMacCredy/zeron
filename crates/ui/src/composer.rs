@@ -14077,10 +14077,6 @@ impl Render for Composer {
             self.comments_menu = Default::default();
         }
         let comments_chip = self.render_staged_chips(&theme, cx);
-        let review_chip = self.render_review_chip(&theme, window, cx);
-        if review_chip.is_none() {
-            self.drop_review_menu();
-        }
         let pr_chips = self.render_pr_chips(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
@@ -14236,10 +14232,7 @@ impl Render for Composer {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach)
-                                .children(review_chip.map(|chip| {
-                                    div().ml(px(4.0)).opacity(beneath_voice).child(chip)
-                                })),
+                                .child(attach),
                         )
                         .child(model_picker)
                         .child(
@@ -14297,10 +14290,7 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach)
-                                .children(review_chip.map(|chip| {
-                                    div().ml(px(4.0)).opacity(beneath_voice).child(chip)
-                                })),
+                                .child(attach),
                         )
                         .child(
                             div()

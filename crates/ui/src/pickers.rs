@@ -9106,6 +9106,56 @@ impl Pickers {
     }
 }
 
+pub(crate) struct HandoffTarget {
+    pub(crate) harness: HarnessId,
+    pub(crate) name: String,
+    pub(crate) model: String,
+    pub(crate) model_label: String,
+}
+
+impl Pickers {
+    /// Every offered harness with the model a handoff would land on: the
+    /// remembered pick for that harness, else its catalog default.
+    pub(crate) fn handoff_targets(&self) -> Vec<HandoffTarget> {
+        let Some(list) = self.harnesses.ready() else {
+            return Vec::new();
+        };
+        self.offered(list)
+            .into_iter()
+            .filter_map(|descriptor| {
+                let harness = descriptor.id;
+                let (model, model_label) = match self.defaults.model_for(harness) {
+                    Some(remembered) => (
+                        remembered.id.clone(),
+                        self.model_label(harness, &remembered.id)
+                            .unwrap_or_else(|| remembered.label.clone()),
+                    ),
+                    None => {
+                        let models = self.models.get(&harness)?.ready()?;
+                        let model = default_model(models)?;
+                        (model.id.clone(), model.label.clone())
+                    }
+                };
+                Some(HandoffTarget {
+                    harness,
+                    name: descriptor.name,
+                    model,
+                    model_label,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn hand_off_in_place(
+        &mut self,
+        harness: HarnessId,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.pick_foreign_model(harness, model, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

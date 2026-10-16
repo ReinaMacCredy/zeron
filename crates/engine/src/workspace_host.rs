@@ -28,7 +28,9 @@ use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
-use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space};
+use zeron_proto::{
+    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskPatch,
+};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -183,6 +185,7 @@ struct WorkspaceHostInner {
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
+    tasks_tx: watch::Sender<Vec<Task>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
@@ -310,6 +313,7 @@ impl WorkspaceHost {
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
+        let (tasks_tx, _) = watch::channel(state.tasks);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
             revision: 0,
@@ -334,6 +338,7 @@ impl WorkspaceHost {
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
+                tasks_tx,
                 sidebar_preferences_tx,
                 room: Mutex::new(None),
                 changed_tx,
@@ -1301,6 +1306,26 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.delete_space(space_id))?)
     }
 
+    pub fn watch_tasks(&self) -> watch::Receiver<Vec<Task>> {
+        self.inner.tasks_tx.subscribe()
+    }
+
+    pub fn task(&self, task_id: &str) -> Option<Task> {
+        self.read(|doc| doc.task(task_id))
+    }
+
+    pub fn create_task(&self, task: &Task) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.create_task(task))?)
+    }
+
+    pub fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_task(task_id, patch, Utc::now()))?)
+    }
+
+    pub fn delete_task(&self, task_id: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.delete_task(task_id, Utc::now()))?)
+    }
+
     /// Synced seen marker (any device; LWW + monotonic guard in the doc layer).
     pub fn mark_chat_seen(
         &self,
@@ -1541,6 +1566,7 @@ impl WorkspaceHostInner {
                 }
                 publish_if_changed(&self.sessions_tx, state.sessions);
                 publish_if_changed(&self.spaces_tx, state.spaces);
+                publish_if_changed(&self.tasks_tx, state.tasks);
             }
             Err(err) => {
                 tracing::warn!(error = %err, "registry read failed");

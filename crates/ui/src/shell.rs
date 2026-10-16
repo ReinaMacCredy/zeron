@@ -88,6 +88,7 @@ mod command_palette;
 mod device_tabs;
 mod file_mutations;
 mod files_panel;
+mod handoff;
 mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
@@ -108,6 +109,7 @@ mod split;
 mod summary;
 mod swipe_nav;
 mod switcher;
+mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
@@ -400,9 +402,9 @@ pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
 pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
 /// Breathing room between the navigation cluster and transcript identity.
 pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
-/// A 28px action centered in the 38px titlebar with its 2px downward optical
-/// shift lands 6px from the top; use the same inset at the trailing edge.
-pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
+/// A 28px action centred in the titlebar sits this far from the top; use the
+/// same inset at the trailing edge.
+pub const TITLEBAR_ACTION_EDGE_INSET: f32 = Theme::TITLEBAR_HEIGHT / 2.0 - 14.0;
 /// Width of the persistent top-left button cluster itself: a 24px sidebar
 /// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
 pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
@@ -1650,10 +1652,9 @@ impl WidthTween {
 }
 
 fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
-    // Match the padded flex row's center, not the raw titlebar center.
     // Keep the native 24px controls untouched and give them 4px of air.
     let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
-    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    let center = Theme::TITLEBAR_HEIGHT * 0.5;
     (center - height * 0.5, height)
 }
 
@@ -2347,6 +2348,7 @@ pub struct Shell {
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     new_tab_menu: popover::Popup<()>,
+    handoff_menu: popover::Popup<()>,
     sidecar_collapsed_now: Option<bool>,
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
@@ -3061,6 +3063,7 @@ impl Shell {
             canvas_browser_drafts: std::collections::HashMap::new(),
             right_plus: popover::Popup::default(),
             new_tab_menu: popover::Popup::default(),
+            handoff_menu: popover::Popup::default(),
             sidecar_collapsed_now: None,
             sidecar_flip: None,
             sidecar_popover: None,
@@ -8965,16 +8968,15 @@ impl Shell {
 
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
-    fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !matches!(self.route, Route::PullRequests) {
-            return self.render_session_title_bar(cx);
+            return self.render_session_title_bar(window, cx);
         }
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
             .size_full()
             .flex()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .pl(px((self.sidebar_now() + Theme::SPACE_LG)
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
@@ -8985,9 +8987,31 @@ impl Shell {
                     bar.child(detail.update(cx, |page, cx| page.titlebar(closable, cx)))
                 },
             );
-        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+        let bar = div()
+            .relative()
+            .h(px(Theme::TITLEBAR_HEIGHT))
+            .flex_none()
+            .children(self.titlebar_seam_divider(cx))
+            .child(inner);
         self.titlebar_drag_region("pull-requests-titlebar", bar, cx)
             .into_any_element()
+    }
+
+    /// Synara's 1x20 hairline at the sidebar seam; it fades out with the
+    /// sidebar.
+    pub(super) fn titlebar_seam_divider(&self, cx: &App) -> Option<AnyElement> {
+        let reveal = self.sidebar_reveal();
+        (reveal > 0.01).then(|| {
+            div()
+                .absolute()
+                .left(px(self.sidebar_now()))
+                .top(px((Theme::TITLEBAR_HEIGHT - 20.0) / 2.0))
+                .w(px(1.0))
+                .h(px(20.0))
+                .bg(Theme::of(cx).border)
+                .opacity(reveal)
+                .into_any_element()
+        })
     }
 
     /// Make a titlebar strip drag the window — zed's platform-titlebar
@@ -9095,7 +9119,6 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .px(px(TITLEBAR_CLUSTER_PAD))
             .child(
                 div()
@@ -9149,7 +9172,7 @@ impl Shell {
                     div()
                         .absolute()
                         .left(px(brand_left))
-                        .top(px(Theme::TITLEBAR_TOP_PAD))
+                        .top_0()
                         .bottom_0()
                         .flex()
                         .items_center()
@@ -9214,7 +9237,6 @@ impl Shell {
                 .top_0()
                 .left(px(left))
                 .h(px(Theme::TITLEBAR_HEIGHT))
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
                 .flex()
                 .items_center()
                 .opacity(reveal)
@@ -9382,7 +9404,6 @@ impl Shell {
                 .flex()
                 .flex_row()
                 .items_center()
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
                 .gap(px(2.0))
                 .px(px(10.0))
                 .children(buttons.iter().flatten().map(|button| {
@@ -17614,6 +17635,25 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
+                // `=handoff` opens the titlebar handoff menu once the selected
+                // chat can hand off; `=review` opens the Review chip's menu.
+                if self.debug_dialog.as_deref() == Some("handoff") && !self.handoff_disabled(cx) {
+                    self.debug_dialog = None;
+                    self.open_handoff_menu(cx);
+                }
+                // The chip drops a menu opened before its counts land, so the
+                // knob only lets go once the menu survives a frame.
+                if self.debug_dialog.as_deref() == Some("review")
+                    && self.composer.update(cx, |c, cx| {
+                        let open = c.review_menu_open();
+                        if !open {
+                            c.open_review_menu(cx);
+                        }
+                        open
+                    })
+                {
+                    self.debug_dialog = None;
+                }
                 // `=summary` / `=sidecar-popover` / `=sidecar-terminal` (capture
                 // knobs): one browser tab, then the sidecar expanded, railed with
                 // its popover up, or expanded over an open terminal dock.
@@ -18056,7 +18096,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(cx);
+                let title_bar = self.render_title_bar(window, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
@@ -18542,14 +18582,14 @@ mod tests {
 
     #[test]
     fn island_stays_centered_on_controls_while_expanding() {
-        let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+        let center = Theme::TITLEBAR_HEIGHT * 0.5;
         for step in 0..=20 {
             let (top, height) = titlebar_island_vertical_geometry(step as f32 / 20.0);
             assert_eq!(top + height * 0.5, center);
             assert!((28.0..=32.0).contains(&height));
         }
         let (top, height) = titlebar_island_vertical_geometry(1.0);
-        assert_eq!(center, 21.0);
+        assert_eq!(center, 22.0);
         assert_eq!(center - 12.0 - top, 4.0);
         assert_eq!(top + height - (center + 12.0), 4.0);
     }
@@ -19301,7 +19341,7 @@ mod tests {
         assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
         assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
         assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
-        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
+        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 8.0);
     }
 
     #[test]

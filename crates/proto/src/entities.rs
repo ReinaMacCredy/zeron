@@ -448,6 +448,92 @@ pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub order_key: String,
+    #[serde(default)]
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub due_on: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub space_id: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_key: Option<String>,
+}
+
+fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskStatus {
+    ToDo,
+    Working,
+    NeedsYou,
+    Done,
+}
+
+/// A stopped linked thread waits on the person until they tick the task.
+pub fn task_status(task: &Task, linked: Option<ChatIndicator>) -> TaskStatus {
+    if task.completed_at.is_some() {
+        return TaskStatus::Done;
+    }
+    match linked {
+        None => TaskStatus::ToDo,
+        Some(ChatIndicator::Working) => TaskStatus::Working,
+        Some(_) => TaskStatus::NeedsYou,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionStatus {
@@ -1869,6 +1955,42 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn task_status_derives_from_completion_then_the_linked_thread() {
+        let mut task: Task = serde_json::from_value(serde_json::json!({ "id": "t" })).unwrap();
+        assert_eq!(task_status(&task, None), TaskStatus::ToDo);
+        assert_eq!(
+            task_status(&task, Some(ChatIndicator::Working)),
+            TaskStatus::Working
+        );
+        for stopped in [
+            ChatIndicator::AwaitingInput,
+            ChatIndicator::Errored,
+            ChatIndicator::Completed,
+            ChatIndicator::Idle,
+        ] {
+            assert_eq!(task_status(&task, Some(stopped)), TaskStatus::NeedsYou);
+        }
+        task.completed_at = Some(Utc::now());
+        assert_eq!(
+            task_status(&task, Some(ChatIndicator::Working)),
+            TaskStatus::Done
+        );
+    }
+
+    #[test]
+    fn task_patch_tells_a_cleared_field_from_an_absent_one() {
+        let patch: TaskPatch =
+            serde_json::from_value(serde_json::json!({ "dueOn": null, "chatId": "c" })).unwrap();
+        assert_eq!(patch.due_on, Some(None));
+        assert_eq!(patch.chat_id, Some(Some("c".into())));
+        assert_eq!(patch.space_id, None);
+        assert_eq!(
+            serde_json::to_value(&patch).unwrap(),
+            serde_json::json!({ "dueOn": null, "chatId": "c" })
+        );
+    }
 
     #[test]
     fn sidechat_expires_at_24_hours_from_creation_not_last_activity() {

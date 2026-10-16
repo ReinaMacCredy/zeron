@@ -50,6 +50,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod tasks;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -943,6 +944,37 @@ enum MutateParams {
         chat_id: String,
         #[serde(default)]
         at: Option<i64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    CreateTask {
+        task_id: String,
+        title: String,
+        #[serde(default)]
+        notes: String,
+        #[serde(default)]
+        space_id: Option<String>,
+        #[serde(default)]
+        due_on: Option<String>,
+        #[serde(default)]
+        order_key: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    UpdateTask {
+        task_id: String,
+        patch: zeron_proto::TaskPatch,
+    },
+    #[serde(rename_all = "camelCase")]
+    DeleteTask { task_id: String },
+    #[serde(rename_all = "camelCase")]
+    StartTask {
+        task_id: String,
+        chat_id: String,
+        #[serde(default)]
+        space_id: Option<String>,
+        #[serde(default)]
+        harness: Option<HarnessId>,
+        #[serde(default)]
+        model: Option<String>,
     },
 }
 
@@ -2056,6 +2088,30 @@ impl EngineRpc {
                     .mark_chat_seen(&chat_id, at)
                     .map_err(failed)
                     .map(drop)
+            }
+            MutateParams::CreateTask {
+                task_id,
+                title,
+                notes,
+                space_id,
+                due_on,
+                order_key,
+            } => self.create_task(task_id, title, notes, space_id, due_on, order_key),
+            MutateParams::UpdateTask { task_id, patch } => self.update_task(&task_id, &patch),
+            MutateParams::DeleteTask { task_id } => self
+                .workspace
+                .delete_task(&task_id)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::StartTask {
+                task_id,
+                chat_id,
+                space_id,
+                harness,
+                model,
+            } => {
+                self.start_task(&task_id, &chat_id, space_id, harness, model)
+                    .await
             }
         }
     }
@@ -3680,6 +3736,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
+            methods::WATCH_TASKS => {
+                Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
+            }
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self

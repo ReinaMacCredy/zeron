@@ -582,7 +582,7 @@ impl Composer {
         }
     }
 
-    fn open_review_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_review_menu(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.review_target(cx) else {
             return;
         };
@@ -646,7 +646,20 @@ impl Composer {
         Some(look)
     }
 
-    pub(super) fn render_review_chip(
+    pub(crate) fn render_review_chip(
+        &mut self,
+        theme: &Theme,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let chip = self.review_chip(theme, window, cx);
+        if chip.is_none() {
+            self.drop_review_menu();
+        }
+        chip
+    }
+
+    fn review_chip(
         &mut self,
         theme: &Theme,
         window: &mut gpui::Window,
@@ -1223,7 +1236,7 @@ impl Composer {
             .child(popover::menu_separator())
             .child(review_now)
             .into_any_element();
-        popover::anchored_menu_above(
+        popover::anchored_menu_below_end(
             "composer-review-popup",
             menu,
             self.review.menu.closing_since(),
@@ -1798,7 +1811,7 @@ impl Composer {
         self.review.submenu_bounds = None;
     }
 
-    pub(super) fn review_menu_open(&self) -> bool {
+    pub(crate) fn review_menu_open(&self) -> bool {
         self.review.menu.is_open()
     }
 

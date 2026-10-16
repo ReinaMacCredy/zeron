@@ -81,6 +81,7 @@ impl WorkspaceStore {
                 spaces: vec![],
                 chats: vec![],
                 sessions: vec![],
+                tasks: vec![],
             }
         }));
         let prefs = doc.sidebar_preferences();

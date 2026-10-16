@@ -782,6 +782,7 @@ pub struct AppState {
     pub(crate) connectivity_observed: bool,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
+    pub tasks: Vec<zeron_proto::Task>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
@@ -982,6 +983,7 @@ impl AppState {
             connectivity: zeron_proto::Connectivity::default(),
             connectivity_observed: false,
             spaces: Vec::new(),
+            tasks: Vec::new(),
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
@@ -1393,6 +1395,14 @@ impl AppState {
         }
         self.heal_space_selection();
         changed || self.selected_space != previous_selection
+    }
+
+    pub fn apply_tasks(&mut self, tasks: Vec<zeron_proto::Task>) -> bool {
+        if self.tasks == tasks {
+            return false;
+        }
+        self.tasks = tasks;
+        true
     }
 
     fn heal_space_selection(&mut self) {
@@ -2815,6 +2825,7 @@ impl AppState {
         self.device_presentation = None;
         self.session_presence_presentation.clear();
         self.spaces.clear();
+        self.tasks.clear();
         self.chats.clear();
         self.vanished_chats.clear();
         self.pending_side_chat = None;
@@ -3045,6 +3056,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_SPACES,
                 AppState::apply_spaces,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_TASKS,
+                AppState::apply_tasks,
             ),
             spawn_watch(
                 cx,

@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SessionStatus, Space};
+use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SessionStatus, Space, Task};
 
 use crate::schema::DocError;
 
@@ -50,6 +50,8 @@ pub struct WorkspaceState {
     pub spaces: Vec<Space>,
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    #[serde(default)]
+    pub tasks: Vec<Task>,
 }
 
 /// Result of a `delete_space` cascade — the chat ids removed alongside the
@@ -515,6 +517,7 @@ impl WorkspaceDoc {
             spaces: self.read_spaces()?,
             chats: self.read_chats()?,
             sessions: self.read_sessions()?,
+            tasks: Vec::new(),
         })
     }
 
