@@ -514,25 +514,27 @@ async fn an_agent_compaction_queues_into_the_parked_run() {
         )
         .await
         .expect("request compact");
-    let mailbox = || harness.mailbox.lock().unwrap().clone();
     wait_for(
-        || mailbox().len() == 2,
-        "the compaction and the agent's follow-up",
+        || entries(&core).iter().any(|e| e.role == MessageRole::System),
+        "the boundary entry",
     )
     .await;
-    assert_eq!(mailbox(), ["/compact keep the plan", "go on"]);
     assert_eq!(requests.lock().unwrap().len(), 1, "no second process");
+    let mailbox = || harness.mailbox.lock().unwrap().clone();
+    assert_eq!(mailbox()[0], "/compact keep the plan");
 
     wait_for(
         || {
             entries(&core)
                 .iter()
-                .any(|e| e.role == MessageRole::User && entry_text(e) == "go on")
+                .any(|e| e.role == MessageRole::Assistant && entry_text(e) == "ack: go on")
         },
-        "the follow-up entry",
+        "the follow-up's reply",
     )
     .await;
+    assert_eq!(mailbox(), ["/compact keep the plan", "go on"]);
     let entries = entries(&core);
+    assert_eq!(entries.len(), 5, "{entries:#?}");
     let boundaries: Vec<String> = entries
         .iter()
         .filter(|e| e.role == MessageRole::System)
