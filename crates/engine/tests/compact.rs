@@ -416,6 +416,32 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_auto_continue_keeps_its_caption() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, _requests) = engine_with_one_turn_on(tmp.path(), true).await;
+    let (_release, gate) = tokio::sync::oneshot::channel::<()>();
+    *harness.gate.lock().unwrap() = Some(gate);
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue second run");
+    wait_for(|| core.sessions.turn_in_flight(CHAT), "second turn starts").await;
+
+    core.doc_host
+        .queue_auto_continue(CHAT, "go on")
+        .await
+        .expect("queue auto-continue");
+    let row = core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap()[0].id.clone();
+    assert!(core.doc_host.steer_queued_now(CHAT, &row).await.expect("steer"));
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("stop");
+
+    wait_for(|| entries(&core).iter().any(|e| e.id == row), "the cancelled row's entry").await;
+    let entry = entries(&core).into_iter().find(|e| e.id == row).unwrap();
+    assert_eq!(entry.from_chat_id.as_deref(), Some(CHAT));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_filling_context_nudges_the_agent_on_every_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
