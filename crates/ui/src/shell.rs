@@ -2498,12 +2498,9 @@ pub struct Shell {
     tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     accounts_page: Option<Entity<AccountsPage>>,
-    /// Polls this device's agent logins + usage into the shared accounts
-    /// cache read by the rail rings, the account menu and the sidecar.
     device_accounts: Entity<crate::account_usage::DeviceAccounts>,
     _device_accounts: Subscription,
     _accounts_cache: Subscription,
-    /// The rail ring whose popover is up, by account id.
     rail_usage_menu: popover::Popup<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
@@ -6907,6 +6904,10 @@ impl Shell {
         if self.user_menu.get().is_some() {
             return true;
         }
+        if self.rail_usage_menu.is_open() {
+            self.close_rail_usage(cx);
+            return true;
+        }
         let Route::Settings(section) = self.route else {
             return false;
         };
@@ -8820,7 +8821,6 @@ impl Shell {
         app_rail::WIDTH
     }
 
-    /// The inset card's gap to the window's right and bottom edges.
     pub(super) fn content_inset(&self) -> f32 {
         if self.settings.inset_shell {
             CARD_INSET
@@ -9622,14 +9622,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The sidebar column's tone, spanning its container's full height, with
-    /// a hairline on its right edge so the column reads as its own surface.
-    /// Flush, it starts at the window edge under the rail and carries the
-    /// window's left corners when the CSD window floats; inset, it fills the
-    /// card's left side and carries the card's corners. A corner radius is
-    /// clamped to the element's own size, and the COLLAPSED sidebar is a ~1px
-    /// border sliver: like macOS's native corner clip, the sliver is inset
-    /// vertically to where the curve begins, so its tips never float past it.
+    /// A corner radius is clamped to the element's own size, so the collapsed
+    /// ~1px sliver is inset vertically to where the curve begins instead.
     fn sidebar_tone(width: f32, corner: f32, theme: &Theme) -> gpui::Div {
         div()
             .absolute()
@@ -12631,7 +12625,8 @@ impl Shell {
         if matches!(self.route, Route::Chat | Route::Terminal) {
             return;
         }
-        if matches!(self.route, Route::Settings(_)) {
+        let from_settings = matches!(self.route, Route::Settings(_));
+        if from_settings {
             self.settings_search
                 .update(cx, |input, cx| input.set_text("", cx));
             self.settings_focus_pending = false;
@@ -12647,7 +12642,9 @@ impl Shell {
         self.nav.push(NavEntry::Chat(chat));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
-        self.focus_composer(cx);
+        if !from_settings {
+            self.focus_composer(cx);
+        }
         cx.notify();
     }
 
@@ -12686,9 +12683,7 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The app rail below the titlebar: destinations on top, Settings at the
-    /// bottom. Base scene, never deferred: a deferred draw would capture all
-    /// native browser input.
+    /// Never deferred: a deferred draw would capture all native browser input.
     fn render_app_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let top: Vec<AnyElement> = app_rail::TOP
@@ -12743,9 +12738,6 @@ impl Shell {
         }
     }
 
-    /// Up to two plan-usage rings; with nothing to show yet, one bare track
-    /// whose tooltip says why. Hovering re-probes (throttled), a click opens
-    /// the account's windows.
     fn render_rail_rings(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let loading = self.device_accounts.read(cx).loading()
             || crate::account_usage::local_snapshot(cx).is_none();
@@ -12839,9 +12831,6 @@ impl Shell {
             .collect()
     }
 
-    /// Places `content` right of the rail. Inset, it sits in the rounded card
-    /// below the titlebar: clipped to the card, over its fill and the sidebar
-    /// tone, under its border. Flush, the tone is [`Self::flush_tone`].
     fn content_frame(
         &self,
         tone_width: f32,
@@ -12891,8 +12880,6 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The flush layout's sidebar tone: from the window edge under the rail,
-    /// full height, carrying the CSD window's left corners.
     fn flush_tone(&self, sidebar_width: f32, window: &Window, cx: &App) -> Option<gpui::Div> {
         (!self.settings.inset_shell).then(|| {
             Self::sidebar_tone(
@@ -12903,10 +12890,8 @@ impl Shell {
         })
     }
 
-    /// The sidebar's bottom row: the voice button on the left, the account
-    /// menu on the right. Shared by the chat sidebar and the settings page so
-    /// both sit in one position. Local runtimes advertise their storage
-    /// boundary and offer sync; synced runtimes offer sign-out.
+    /// Shared by the chat sidebar and the settings page so both sit in one
+    /// position.
     fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("sidebar-footer-row")
@@ -17773,8 +17758,7 @@ impl Render for Shell {
                 }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its
                 // Usage section) once the first usage probe has landed.
-                // `=rail-usage` opens the first rail ring's usage popover once
-                // the accounts have loaded.
+                // `=rail-usage` opens the first ring's popover once accounts load.
                 if self.debug_dialog.as_deref() == Some("rail-usage")
                     && let Some(id) =
                         crate::account_usage::local_snapshot(cx).and_then(|snapshot| {
@@ -18128,9 +18112,6 @@ impl Render for Shell {
                 // Full-window voice stage: above the page chrome, below dialogs.
                 let voice_stage = self.render_voice_stage(window, cx);
                 let under_stage = self.voice_stage_underlay_opacity(cx);
-                // The conversation column has no fill of its own: the
-                // transcript paints on the inset card or, flush, directly on
-                // the frost glass (see `content_frame`).
                 // The split pane flexes into whatever the fixed-width main
                 // column leaves, so the seam's share holds.
                 let split_side = self

@@ -1,5 +1,3 @@
-//! The app rail: a narrow column at the window's left edge, below the
-//! titlebar, holding the top-level destinations and the plan-usage rings.
 use chrono::{DateTime, Utc};
 use gpui::{AnyElement, Div, SharedString, Stateful, div, prelude::*, px};
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot};
@@ -65,7 +63,6 @@ pub(crate) const BOTTOM: [RailEntry; 1] = [RailEntry {
     icon: icons::LUCIDE_SETTINGS,
 }];
 
-/// A rail button: hover wash fading in, held while `active`.
 pub(crate) fn button(entry: &RailEntry, active: bool, theme: &Theme) -> Stateful<Div> {
     let id = entry.id;
     div()
@@ -95,8 +92,6 @@ pub(crate) fn button(entry: &RailEntry, active: bool, theme: &Theme) -> Stateful
         }))
 }
 
-/// The accounts the rail rings show: the active account of each of the first
-/// two usage-reporting harnesses with a landed probe. Pure.
 pub(crate) fn ring_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {
     accounts::sidebar_accounts(snapshot)
         .into_iter()
@@ -105,8 +100,6 @@ pub(crate) fn ring_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccou
         .collect()
 }
 
-/// One ring's tooltip: the provider with its window readings, or why there
-/// is nothing to read.
 pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> SharedString {
     let Some(account) = account else {
         return if loading {
@@ -134,8 +127,6 @@ pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> Sha
     }
 }
 
-/// The ring glyph: a used-fraction arc around the harness mark. Without an
-/// account (nothing probed yet) only the track shows.
 pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
     let fraction = account.and_then(used_fraction);
     let color = usage_color(usage_level(fraction.unwrap_or(0.0)), theme);
@@ -169,8 +160,6 @@ pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
         )
 }
 
-/// The ring's popover: the account, one bar per usage window with its
-/// reset, and `footer` (the "Open Usage" row) underneath.
 pub(crate) fn ring_card(
     account: &AgentAccount,
     footer: AnyElement,

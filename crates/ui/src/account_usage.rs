@@ -1,7 +1,5 @@
-//! Plan usage of this device's agent logins. [`DeviceAccounts`] keeps the
-//! local entry of [`AccountsSnapshotCache`] fresh for the app rail's rings and
-//! the account menu; Settings → Accounts writes the same cache, so a switch
-//! there shows up in both.
+//! Plan usage of this device's agent logins, shared with Settings → Accounts
+//! through [`AccountsSnapshotCache`].
 use std::time::{Duration, Instant};
 
 use gpui::{App, Context, Entity, Task};
@@ -37,12 +35,10 @@ pub fn active_account(
         .find(|account| account.harness == harness && account.active)
 }
 
-/// This device's accounts, as last loaded by anyone.
 pub(crate) fn local_snapshot(cx: &App) -> Option<&AgentAccountsSnapshot> {
     cx.try_global::<AccountsSnapshotCache>()?.0.get(&None)
 }
 
-/// Owns the polling of this device's accounts.
 pub struct DeviceAccounts {
     state: Entity<AppState>,
     last_forced: Option<Instant>,
@@ -72,9 +68,8 @@ impl DeviceAccounts {
         self.load_task.is_some()
     }
 
-    /// Probe usage, at most once per [`FORCE_MIN_INTERVAL`]. With nothing
-    /// cached the plain list paints first (the engine's persisted usage),
-    /// then the forced probe replaces it.
+    /// With nothing cached the plain list paints first: the engine serves its
+    /// persisted usage at once.
     pub fn load(&mut self, cx: &mut Context<Self>) {
         if self
             .last_forced

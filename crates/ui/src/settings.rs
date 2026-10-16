@@ -1407,7 +1407,6 @@ pub struct UiSettings {
     pub sidebar_collapsed: bool,
     /// Reveal the collapsed sidebar when hovering over the left window edge.
     pub sidebar_hover_enabled: bool,
-    /// Sidebar and content sit in one rounded card inset from the window.
     pub inset_shell: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.

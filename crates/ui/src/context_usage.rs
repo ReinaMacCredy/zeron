@@ -8,8 +8,6 @@ use gpui::{
 };
 use zeron_proto::ContextUsage;
 
-/// The composer footer's context ring. Clicking it opens [`card`] with the
-/// compact action.
 pub struct FooterContext {
     state: Entity<AppState>,
     composer: WeakEntity<crate::composer::Composer>,
@@ -33,7 +31,6 @@ impl FooterContext {
         }
     }
 
-    /// Point at the session's chat. Cheap enough to call every render.
     pub fn track(&mut self, chat: Option<String>) {
         self.chat = chat;
     }

@@ -2,12 +2,10 @@
 use super::*;
 use gpui::{AppContext, Bounds, TestAppContext, VisualTestContext};
 
-/// The window x where the columns start: right of the app rail.
 fn origin() -> f32 {
     app_rail::WIDTH
 }
 
-/// Window width the columns do not share: the rail and the card's inset.
 fn chrome() -> f32 {
     origin() + CARD_INSET
 }
