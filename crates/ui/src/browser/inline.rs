@@ -11,14 +11,22 @@ use gpui::{Bounds, IntoElement, Pixels, Point, RenderImage, SharedString, Styled
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventType, NSImage, NSView, NSWindowOrderingMode};
-use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_app_kit::{
+    NSEvent, NSEventMask, NSEventType, NSImage, NSView, NSWindow,
+    NSWindowDidChangeOcclusionStateNotification, NSWindowDidDeminiaturizeNotification,
+    NSWindowOcclusionState, NSWindowOrderingMode,
+};
+use objc2_foundation::{
+    NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSOperationQueue,
+    NSPoint, NSRect, NSSize, NSString,
+};
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
     WKNavigationType, WKSnapshotConfiguration, WKWebView,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -190,7 +198,9 @@ struct Host {
     concealed: Cell<bool>,
     snapshotting: Arc<AtomicBool>,
     last_snapshot: Cell<Option<Instant>>,
+    missed: Arc<AtomicBool>,
     monitor: Option<Retained<AnyObject>>,
+    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
 
 #[derive(Clone)]
@@ -342,6 +352,8 @@ impl InlineWebView {
             key.clone(),
             tx.clone(),
         );
+        let missed = Arc::new(AtomicBool::new(false));
+        let observers = shown_observers(parent.window(), &missed, &key, &tx);
         let host = Rc::new(RefCell::new(Host {
             web,
             view,
@@ -356,7 +368,9 @@ impl InlineWebView {
             concealed: Cell::new(true),
             snapshotting: Arc::new(AtomicBool::new(false)),
             last_snapshot: Cell::new(None),
+            missed,
             monitor,
+            observers,
         }));
         host.borrow()
             .web
@@ -466,7 +480,18 @@ fn reported_height(value: &serde_json::Value) -> Option<f32> {
 
 impl Host {
     fn painted(&self) -> bool {
-        !self.concealed.get() && self.stamp.get() == tick(self.window)
+        if self.concealed.get() || self.stamp.get() != tick(self.window) {
+            return false;
+        }
+        // A hidden window presents nothing, so its last stamp never goes stale.
+        let shown = self
+            .parent
+            .window()
+            .is_some_and(|window| on_screen(&window));
+        if !shown {
+            self.missed.store(true, Ordering::Release);
+        }
+        shown
     }
 
     fn sync(&self, bounds: Bounds<Pixels>, mask: Bounds<Pixels>) {
@@ -478,10 +503,24 @@ impl Host {
         }
         if !(f32::from(visible.size.width) > 0. && f32::from(visible.size.height) > 0.) {
             set_armed(&self.input, &self.key, false, "covered");
+        } else if self.pointer_rests_inside() {
+            set_armed(&self.input, &self.key, true, "rest");
         }
         if self.concealed.replace(false) {
             let _ = self.tx.send((self.key.clone(), InlineEvent::Active));
         }
+    }
+
+    fn pointer_rests_inside(&self) -> bool {
+        let Some(window) = self.parent.window() else {
+            return false;
+        };
+        if !window.isKeyWindow() || NSEvent::pressedMouseButtons() != 0 {
+            return false;
+        }
+        let in_window = window.convertPointFromScreen(NSEvent::mouseLocation());
+        let point = self.parent.convertPoint_fromView(in_window, None);
+        contains(self.input.ivars().region.get(), point)
     }
 
     fn place(&self, bounds: Bounds<Pixels>, visible: Bounds<Pixels>) {
@@ -635,6 +674,57 @@ fn input_monitor(
     }
 }
 
+fn on_screen(window: &NSWindow) -> bool {
+    window
+        .occlusionState()
+        .contains(NSWindowOcclusionState::Visible)
+        && !window.isMiniaturized()
+}
+
+/// Wakes a page whose snapshots stopped while its window was hidden: the
+/// window may show again without presenting, so no sync would re-stamp it.
+fn shown_observers(
+    window: Option<Retained<NSWindow>>,
+    missed: &Arc<AtomicBool>,
+    key: &SharedString,
+    tx: &InlineSender,
+) -> Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>> {
+    let Some(window) = window else {
+        return Vec::new();
+    };
+    let center = NSNotificationCenter::defaultCenter();
+    let names = unsafe {
+        [
+            NSWindowDidChangeOcclusionStateNotification,
+            NSWindowDidDeminiaturizeNotification,
+        ]
+    };
+    names
+        .into_iter()
+        .map(|name| {
+            let (missed, key, tx) = (missed.clone(), key.clone(), tx.clone());
+            let block = block2::RcBlock::new(move |notification: NonNull<NSNotification>| {
+                let shown = unsafe { notification.as_ref() }
+                    .object()
+                    .and_then(|object| object.downcast::<NSWindow>().ok())
+                    .is_some_and(|window| on_screen(&window));
+                if shown && missed.swap(false, Ordering::AcqRel) {
+                    let _ = tx.send((key.clone(), InlineEvent::Active));
+                }
+            });
+            let object: &AnyObject = &window;
+            unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(name),
+                    Some(object),
+                    Some(&NSOperationQueue::mainQueue()),
+                    &block,
+                )
+            }
+        })
+        .collect()
+}
+
 fn has_focus(view: &NSView) -> bool {
     view.window()
         .and_then(|w| w.firstResponder())
@@ -651,6 +741,10 @@ impl Drop for Host {
         unsafe {
             if let Some(monitor) = self.monitor.take() {
                 NSEvent::removeMonitor(&monitor);
+            }
+            let center = NSNotificationCenter::defaultCenter();
+            for observer in self.observers.drain(..) {
+                center.removeObserver(observer.as_ref());
             }
             self.view.setNavigationDelegate(None);
             self.view.stopLoading();

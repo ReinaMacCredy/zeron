@@ -622,13 +622,15 @@ fn page_surface(
                             px(pixels.height.0 as f32 / scale),
                         ),
                     );
-                    let _ = window.paint_image(
-                        painted,
-                        gpui::Corners::default(),
-                        image.clone(),
-                        0,
-                        false,
-                    );
+                    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                        let _ = window.paint_image(
+                            painted,
+                            gpui::Corners::default(),
+                            image.clone(),
+                            0,
+                            false,
+                        );
+                    });
                 }
             },
         )
