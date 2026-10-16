@@ -230,14 +230,14 @@ impl Render for CompactionCard {
                 .child(row_text(
                     &theme,
                     "Remind at",
-                    "Context used, as the footer ring shows it. Every message past it carries the reminder until the chat compacts.",
+                    "Context tokens; a chat with a smaller window is reminded at 70% of it. Every message past it carries the reminder until the chat compacts.",
                 ))
                 .child(widgets::segmented(
                     &theme,
                     "agent-compaction-nudge",
-                    &[(0, "Off"), (60, "60%"), (70, "70%"), (85, "85%")],
-                    u64::from(settings.nudge_percent),
-                    pick(|next, value| next.nudge_percent = value as u8),
+                    &[(0, "Off"), (100_000, "100K"), (150_000, "150K"), (200_000, "200K")],
+                    settings.nudge_tokens,
+                    pick(|next, value| next.nudge_tokens = value),
                 ))
                 .into_any_element(),
         ];

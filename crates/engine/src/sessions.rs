@@ -3017,8 +3017,8 @@ impl Inner {
 
     /// Slash commands go out untouched: the note would become their arguments.
     fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
-        let first = self.registry.compaction_settings().nudge_percent;
-        if first == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
+        let floor = self.registry.compaction_settings().nudge_tokens;
+        if floor == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
         if self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
@@ -3042,16 +3042,18 @@ impl Inner {
         }
         let usage = self.doc_host()?.open(chat_id).ok()?.doc().context_usage()?;
         let tokens = usage.tokens?;
-        let window = config
+        // A window smaller than the floor would never see the reminder.
+        let floor = config
             .as_ref()
             .and_then(zeron_harness::claude::catalog::chat_budget)
             .or(usage.window)
-            .filter(|window| *window > 0)?;
-        if tokens.saturating_mul(100) < u64::from(first) * window {
+            .filter(|window| *window > 0)
+            .map_or(floor, |window| floor.min(window * 7 / 10));
+        if tokens < floor {
             return None;
         }
         Some(format!(
-            "<system-reminder>\nContext {}. Compact at a boundary, not mid-task: if this message starts a new phase, call compact first with the request as continueWith; if this turn finishes a piece of work and what comes next needs only its conclusions, call compact last. A follow-up question about the current work is not a boundary. It runs after the turn ends; name what to keep.\n</system-reminder>",
+            "<system-reminder>\nContext {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>",
             format_tokens(tokens),
         ))
     }
