@@ -2355,6 +2355,7 @@ pub(super) fn compare_sidebar_rows(
 pub(super) struct InboxMark {
     working: bool,
     since: Option<DateTime<Utc>>,
+    settled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2365,10 +2366,10 @@ pub(super) enum InboxShelf {
 }
 
 impl InboxShelf {
-    fn of(status: ChatIndicator, settled_at: Option<DateTime<Utc>>) -> Self {
+    fn of(status: ChatIndicator, settled_at: Option<DateTime<Utc>>, working_shelf: bool) -> Self {
         if settled_at.is_some() {
             Self::Settled
-        } else if status == ChatIndicator::Working {
+        } else if working_shelf && status == ChatIndicator::Working {
             Self::Working
         } else {
             Self::Inbox
@@ -2392,7 +2393,10 @@ pub(super) fn inbox_settled_at(
     after_days: u32,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    if status != ChatIndicator::Idle {
+    if matches!(
+        status,
+        ChatIndicator::Working | ChatIndicator::AwaitingInput
+    ) {
         return None;
     }
     let activity = chat.last_message_at;
@@ -2408,18 +2412,22 @@ pub(super) fn inbox_rank(
     started_at: Option<DateTime<Utc>>,
     mark: Option<InboxMark>,
     settled_at: Option<DateTime<Utc>>,
+    unsettled_at: Option<DateTime<Utc>>,
+    working_shelf: bool,
 ) -> (InboxShelf, std::cmp::Reverse<DateTime<Utc>>) {
-    let shelf = InboxShelf::of(status, settled_at);
+    let shelf = InboxShelf::of(status, settled_at, working_shelf);
     if let Some(at) = settled_at {
         return (shelf, std::cmp::Reverse(at));
+    }
+    let anchor = unsettled_at.map_or(chat.created_at, |at| at.max(chat.created_at));
+    if !working_shelf {
+        return (shelf, std::cmp::Reverse(anchor));
     }
     let working = shelf == InboxShelf::Working;
     let since = mark
         .filter(|mark| mark.working == working)
         .and_then(|mark| mark.since);
-    let base = chat
-        .last_message_at
-        .map_or(chat.created_at, |at| at.max(chat.created_at));
+    let base = chat.last_message_at.map_or(anchor, |at| at.max(anchor));
     let key = if working {
         started_at.or(since).unwrap_or(base)
     } else {
@@ -2492,6 +2500,7 @@ enum SidebarViewRow {
     ShowPullRequest,
     ShowHarness,
     ShowProjectFilter,
+    ShowWorking,
     ShowArchived,
 }
 
@@ -2510,15 +2519,19 @@ impl SidebarViewRow {
         )
     }
 
-    fn sorts(self) -> bool {
-        matches!(self, Self::LastUpdated | Self::Created | Self::ActiveFirst)
+    fn inert(self, inbox: bool) -> bool {
+        match self {
+            Self::LastUpdated | Self::Created | Self::ActiveFirst | Self::ShowArchived => inbox,
+            Self::ShowWorking => !inbox,
+            _ => false,
+        }
     }
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..4), ("Sort", 4..7), ("Show", 7..14)];
+    [("Organize", 0..4), ("Sort", 4..7), ("Show", 7..15)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 14] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 15] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
@@ -2532,6 +2545,7 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 14] = [
     SidebarViewRow::ShowProjectIcon,
     SidebarViewRow::ShowProjectLabel,
     SidebarViewRow::ShowProjectFilter,
+    SidebarViewRow::ShowWorking,
     SidebarViewRow::ShowArchived,
 ];
 
@@ -4286,7 +4300,7 @@ impl Shell {
         if let Some(menu) = self.sidebar_view_menu.open_mut() {
             menu.hover_intent.cancel();
         }
-        if row.sorts() && self.settings.sidebar_organization == SidebarOrganization::Inbox {
+        if row.inert(self.settings.sidebar_organization == SidebarOrganization::Inbox) {
             return;
         }
         self.cancel_sidebar_session_transfer(cx);
@@ -4330,6 +4344,9 @@ impl Shell {
             }
             SidebarViewRow::ShowHarness => {
                 self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness
+            }
+            SidebarViewRow::ShowWorking => {
+                self.settings.sidebar_working_shelf = !self.settings.sidebar_working_shelf
             }
             SidebarViewRow::ShowArchived => {
                 self.settings.sidebar_show_archived = !self.settings.sidebar_show_archived
@@ -4514,6 +4531,7 @@ impl Shell {
             "Project icon",
             "Location",
             "Project filter",
+            "Working",
             "Archived",
         ];
         let icons: [&str; SIDEBAR_VIEW_ROWS.len()] = [
@@ -4531,6 +4549,7 @@ impl Shell {
             // Location names the host: the remote glyph sidebar rows wear.
             icons::REMOTE_SERVER,
             icons::FOLDER,
+            icons::PLAY,
             icons::ARCHIVE_MINIMALISTIC,
         ];
         let selected: [bool; SIDEBAR_VIEW_ROWS.len()] = [
@@ -4547,6 +4566,7 @@ impl Shell {
             self.settings.sidebar_show_project_icon,
             self.settings.sidebar_show_project_label,
             self.settings.sidebar_show_project_filter,
+            self.settings.sidebar_working_shelf,
             self.settings.sidebar_show_archived,
         ];
         let inbox = organization == SidebarOrganization::Inbox;
@@ -4662,7 +4682,7 @@ impl Shell {
                             format!("sidebar-view-row-{ix}"),
                         )
                         .id(("sidebar-view-row", ix))
-                        .when(inbox && row.sorts(), |el| el.opacity(0.45))
+                        .when(row.inert(inbox), |el| el.opacity(0.45))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.activate_sidebar_view_row(row, cx);
                             cx.stop_propagation();
@@ -5563,7 +5583,11 @@ impl Shell {
         chat: &zeron_proto::Chat,
         now: DateTime<Utc>,
     ) -> InboxShelf {
-        InboxShelf::of(status, self.sidebar_settled_at(status, chat, now))
+        InboxShelf::of(
+            status,
+            self.sidebar_settled_at(status, chat, now),
+            self.settings.sidebar_working_shelf,
+        )
     }
 
     fn sorted_sidebar_chats<'a>(
@@ -5583,6 +5607,8 @@ impl Shell {
                         .and_then(|session| session.started_at),
                     self.sidebar_inbox_marks.get(&chat.id).copied(),
                     self.sidebar_settled_at(*status, chat, now),
+                    self.settings.sidebar_unsettled_at.get(&chat.id).copied(),
+                    self.settings.sidebar_working_shelf,
                 )
             });
         } else {
@@ -5598,38 +5624,57 @@ impl Shell {
         chats
     }
 
-    fn note_inbox_marks(&mut self, now: DateTime<Utc>, cx: &gpui::App) {
+    fn note_inbox_marks(&mut self, now: DateTime<Utc>, cx: &mut Context<Self>) {
         if self.settings.sidebar_organization != SidebarOrganization::Inbox {
             return;
         }
+        let mut unsettled = Vec::new();
         let state = self.state.read(cx);
         for (status, chat) in state.overview_chats(now) {
             let working = status == ChatIndicator::Working;
-            match self.sidebar_inbox_marks.entry(chat.id.clone()) {
+            let settled = self.sidebar_settled_at(status, chat, now).is_some();
+            let woke = match self.sidebar_inbox_marks.entry(chat.id.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(InboxMark {
                         working,
                         since: None,
+                        settled,
                     });
+                    false
                 }
-                std::collections::hash_map::Entry::Occupied(mut entry)
-                    if entry.get().working != working =>
-                {
-                    let since = if working {
-                        now
-                    } else {
-                        state
-                            .session_for(&chat.id)
-                            .map_or(now, |session| session.updated_at.min(now))
-                    };
-                    entry.insert(InboxMark {
-                        working,
-                        since: Some(since),
-                    });
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let mark = entry.get_mut();
+                    if mark.working != working {
+                        mark.working = working;
+                        mark.since = Some(if working {
+                            now
+                        } else {
+                            state
+                                .session_for(&chat.id)
+                                .map_or(now, |session| session.updated_at.min(now))
+                        });
+                    }
+                    let woke = mark.settled && !settled;
+                    mark.settled = settled;
+                    woke
                 }
-                std::collections::hash_map::Entry::Occupied(_) => {}
+            };
+            if woke {
+                unsettled.push((chat.id.clone(), Some(now)));
+            } else if settled && self.settings.sidebar_unsettled_at.contains_key(&chat.id) {
+                unsettled.push((chat.id.clone(), None));
             }
         }
+        if unsettled.is_empty() {
+            return;
+        }
+        for (id, at) in unsettled {
+            match at {
+                Some(at) => self.settings.sidebar_unsettled_at.insert(id, at),
+                None => self.settings.sidebar_unsettled_at.remove(&id),
+            };
+        }
+        self.schedule_save(cx);
     }
 
     /// A device/project group's key in `sidebar_collapsed_groups`.
@@ -5701,6 +5746,14 @@ impl Shell {
                 self.queue_sidebar_reveal("sessions");
             }
         } else if let Some(index) = archived {
+            if self.settings.sidebar_organization == SidebarOrganization::Inbox {
+                self.show_notice(
+                    crate::toast::ToastKind::Error,
+                    "Inbox has no Archived section; rename this session from another view",
+                    cx,
+                );
+                return false;
+            }
             if !self.settings.sidebar_show_archived {
                 self.settings.sidebar_show_archived = true;
                 self.schedule_save(cx);
@@ -6692,7 +6745,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.settings.sidebar_show_archived {
+        if !self.settings.sidebar_show_archived
+            || self.settings.sidebar_organization == SidebarOrganization::Inbox
+        {
             return None;
         }
         const INITIAL: usize = SHELF_INITIAL_ROWS;
@@ -8689,25 +8744,42 @@ mod tests {
         );
     }
 
+    type InboxRow = (
+        ChatIndicator,
+        zeron_proto::Chat,
+        Option<chrono::DateTime<Utc>>,
+        Option<InboxMark>,
+        Option<SidebarSettle>,
+        Option<chrono::DateTime<Utc>>,
+    );
+
+    const DAY: i64 = 86_400;
+
+    fn inbox_at(secs: i64) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(10 * DAY + secs, 0).unwrap()
+    }
+
+    fn inbox_ids(rows: &mut [InboxRow], working_shelf: bool) -> Vec<String> {
+        let now = inbox_at(1_000);
+        rows.sort_by_key(|(status, chat, started, mark, settle, unsettled)| {
+            let settled = inbox_settled_at(*status, chat, *settle, 3, now);
+            inbox_rank(
+                *status,
+                chat,
+                *started,
+                *mark,
+                settled,
+                *unsettled,
+                working_shelf,
+            )
+        });
+        rows.iter().map(|row| row.1.id.clone()).collect()
+    }
+
     #[test]
     fn inbox_orders_returns_then_working_then_settled() {
-        type Row = (
-            ChatIndicator,
-            zeron_proto::Chat,
-            Option<chrono::DateTime<Utc>>,
-            Option<InboxMark>,
-            Option<SidebarSettle>,
-        );
-        const DAY: i64 = 86_400;
-        let at = |secs: i64| Utc.timestamp_opt(10 * DAY + secs, 0).unwrap();
-        let now = at(1_000);
-        let ids = |rows: &mut [Row]| -> Vec<String> {
-            rows.sort_by_key(|(status, chat, started, mark, settle)| {
-                let settled = inbox_settled_at(*status, chat, *settle, 3, now);
-                inbox_rank(*status, chat, *started, *mark, settled)
-            });
-            rows.iter().map(|row| row.1.id.clone()).collect()
-        };
+        let at = inbox_at;
+        let ids = |rows: &mut [InboxRow]| inbox_ids(rows, true);
         let replied = |id: &str, secs| {
             let mut chat = chat(id);
             chat.last_message_at = Some(at(secs));
@@ -8724,29 +8796,38 @@ mod tests {
         let returned = InboxMark {
             working: false,
             since: Some(at(450)),
+            settled: false,
         };
         use ChatIndicator::{Completed, Errored, Idle, Working};
-        let mut rows: Vec<Row> = vec![
-            (Working, replied("a", 500), Some(at(100)), None, None),
-            (Working, replied("b", 300), Some(at(200)), None, None),
-            (Idle, replied("c", 400), None, None, None),
-            (Errored, replied("d", 50), None, Some(returned), None),
-            (Idle, replied("e", -4 * DAY), None, None, None),
-            (Idle, silent, None, None, None),
-            (Idle, replied("g", 600), None, None, settle(true, 700)),
-            (Idle, replied("h", -5 * DAY), None, None, settle(false, 800)),
-            (Completed, replied("i", -6 * DAY), None, None, None),
+        let mut rows: Vec<InboxRow> = vec![
+            (Working, replied("a", 500), Some(at(100)), None, None, None),
+            (Working, replied("b", 300), Some(at(200)), None, None, None),
+            (Idle, replied("c", 400), None, None, None, None),
+            (Errored, replied("d", 50), None, Some(returned), None, None),
+            (Idle, replied("e", -4 * DAY), None, None, None, None),
+            (Idle, silent, None, None, None, None),
+            (Idle, replied("g", 600), None, None, settle(true, 700), None),
+            (
+                Idle,
+                replied("h", -5 * DAY),
+                None,
+                None,
+                settle(false, 800),
+                Some(at(800)),
+            ),
+            (Completed, replied("i", -6 * DAY), None, None, None, None),
             (
                 Working,
                 replied("j", -6 * DAY),
                 Some(at(150)),
                 None,
                 settle(true, 900),
+                None,
             ),
         ];
         assert_eq!(
             ids(&mut rows),
-            ["d", "c", "h", "i", "f", "b", "j", "a", "g", "e"]
+            ["h", "d", "c", "f", "b", "j", "a", "g", "e", "i"]
         );
         for (id, secs) in [("a", 900), ("g", 950), ("h", 960)] {
             rows.iter_mut()
@@ -8757,7 +8838,34 @@ mod tests {
         }
         assert_eq!(
             ids(&mut rows),
-            ["h", "g", "d", "c", "i", "f", "b", "j", "a", "e"]
+            ["h", "g", "d", "c", "f", "b", "j", "a", "e", "i"]
+        );
+    }
+
+    #[test]
+    fn inbox_without_working_shelf_keeps_creation_order() {
+        let at = inbox_at;
+        let row = |id: &str, status, created, last, unsettled: Option<i64>| -> InboxRow {
+            let mut chat = chat(id);
+            chat.created_at = at(created);
+            chat.last_message_at = Some(at(last));
+            (status, chat, None, None, None, unsettled.map(at))
+        };
+        use ChatIndicator::{Completed, Idle, Working};
+        let mut rows = vec![
+            row("old", Working, -2 * DAY, 900, None),
+            row("new", Idle, 100, 200, None),
+            row("finished", Completed, -DAY, 950, None),
+            row("woke", Idle, -10 * DAY, 980, Some(970)),
+            row("stale", Idle, -8 * DAY, -5 * DAY, None),
+        ];
+        assert_eq!(
+            inbox_ids(&mut rows, false),
+            ["woke", "new", "finished", "old", "stale"]
+        );
+        assert_eq!(
+            inbox_ids(&mut rows, true),
+            ["woke", "finished", "new", "old", "stale"]
         );
     }
 

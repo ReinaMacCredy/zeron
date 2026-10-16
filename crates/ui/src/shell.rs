@@ -12832,8 +12832,12 @@ impl Shell {
                         .iter()
                         .find(|chat| chat.id == chat_id && !chat.archived)?;
                     let status = state.display_status_for(chat, now);
-                    (status == zeron_proto::ChatIndicator::Idle)
-                        .then(|| self.sidebar_settled_at(status, chat, now).is_some())
+                    (!matches!(
+                        status,
+                        zeron_proto::ChatIndicator::Working
+                            | zeron_proto::ChatIndicator::AwaitingInput
+                    ))
+                    .then(|| self.sidebar_settled_at(status, chat, now).is_some())
                 })
                 .flatten();
             let rename_id = chat_id.clone();

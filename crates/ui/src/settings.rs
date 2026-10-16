@@ -1418,6 +1418,9 @@ pub struct UiSettings {
     pub sidebar_settle_after_days: u32,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_settle_overrides: HashMap<String, SidebarSettle>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sidebar_unsettled_at: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub sidebar_working_shelf: bool,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
     pub sidebar_show_project_label: bool,
@@ -1642,6 +1645,8 @@ impl Default for UiSettings {
             sidebar_active_first: false,
             sidebar_settle_after_days: 3,
             sidebar_settle_overrides: HashMap::new(),
+            sidebar_unsettled_at: HashMap::new(),
+            sidebar_working_shelf: false,
             sidebar_show_project_label: true,
             // Upstream boots compact; this fork keeps its detailed rows.
             sidebar_compact: false,
@@ -2335,6 +2340,8 @@ impl UiSettings {
             sidebar_active_first,
             sidebar_settle_after_days,
             sidebar_settle_overrides,
+            sidebar_unsettled_at,
+            sidebar_working_shelf,
             sidebar_show_project_label,
             sidebar_compact,
             sidebar_show_project_icon,
@@ -3775,6 +3782,11 @@ mod tests {
                     at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
                 },
             )]),
+            sidebar_unsettled_at: HashMap::from([(
+                "chat-2".to_string(),
+                chrono::DateTime::from_timestamp(1_700_000_100, 0).unwrap(),
+            )]),
+            sidebar_working_shelf: true,
             sidebar_compact: true,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
