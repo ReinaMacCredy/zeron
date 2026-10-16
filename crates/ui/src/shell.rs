@@ -1211,39 +1211,34 @@ fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bo
             .any(|((old_key, _), (new_key, _))| old_key != new_key)
 }
 
-/// Exact active-session row height. Harness identity lives on the title line
-/// and the Working glyph lives in the status corner, so neither adds a third
-/// line. Compact rows omit the metadata line and its preceding gap entirely;
-/// branch / pull-request rows add the exact height of their tallest child.
-/// Keeping this calculation beside the renderer's metrics prevents disclosure
-/// clips when view options alter the row structure.
-pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
-    let mut metadata_height: f32 = 0.0;
-    if shows_branch {
-        metadata_height = metadata_height.max(14.0);
-    }
-    if shows_pull_request {
-        metadata_height = metadata_height.max(16.0);
-    }
-    if metadata_height == 0.0 {
-        45.0
-    } else {
-        47.0 + metadata_height
-    }
+const SIDEBAR_CARD_INSET: f32 = 2.0;
+const SIDEBAR_CARD_HEIGHT: f32 = 78.0;
+const SIDEBAR_CARD_TWO_LINE_HEIGHT: f32 = 54.0;
+const SIDEBAR_SLIM_HEIGHT: f32 = 36.0;
+
+pub(super) fn chat_row_height(show_label: bool) -> f32 {
+    2.0 * SIDEBAR_CARD_INSET
+        + if show_label {
+            SIDEBAR_CARD_HEIGHT
+        } else {
+            SIDEBAR_CARD_TWO_LINE_HEIGHT
+        }
 }
-fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -> f32 {
+fn sidebar_row_height(compact: bool, slim: bool, show_label: bool) -> f32 {
     if compact {
         29.0
+    } else if slim {
+        SIDEBAR_SLIM_HEIGHT
     } else {
-        chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
+        chat_row_height(show_label)
     }
 }
 
 /// Flex gap between sidebar list items.
-const SIDEBAR_LIST_GAP: f32 = 2.0;
+const SIDEBAR_LIST_GAP: f32 = 1.0;
 /// Fixed vertical slot occupied by one active sidebar card.
 #[cfg(test)]
-const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
+const SIDEBAR_SESSION_SLOT: f32 = 82.0 + SIDEBAR_LIST_GAP;
 const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
 const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
 const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
@@ -1257,8 +1252,7 @@ const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 /// The sidebar footer's profile and settings buttons share one hit target.
-const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
-const SIDEBAR_FOOTER_AVATAR_SIZE: f32 = 16.0;
+const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 32.0;
 
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
@@ -8851,7 +8845,27 @@ impl Shell {
             self.titlebar_tween,
             cluster_buttons_start(is_macos, fullscreen, self.linux_left_caption_count()),
         );
-        cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
+        cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP + self.titlebar_nav_shift()
+    }
+
+    fn titlebar_toggle_start(&self) -> f32 {
+        self.eval_tween(
+            self.titlebar_tween,
+            cluster_buttons_start(
+                cfg!(target_os = "macos"),
+                self.fullscreen.unwrap_or(false),
+                self.linux_left_caption_count(),
+            ),
+        )
+    }
+
+    fn sidebar_reveal(&self) -> f32 {
+        (self.sidebar_now() / self.sidebar_content_width().max(1.0)).clamp(0.0, 1.0)
+    }
+
+    fn titlebar_nav_shift(&self) -> f32 {
+        let natural = self.titlebar_toggle_start() + 24.0 + TITLEBAR_GROUP_GAP;
+        (self.sidebar_now() + Theme::SPACE_SM - natural).max(0.0)
     }
 
     /// The session titlebar, or on the Pull requests route the open pull
@@ -8976,6 +8990,8 @@ impl Shell {
         }
         let island = self.eval_tween(self.titlebar_island, island_target);
         let (island_top, island_height) = titlebar_island_vertical_geometry(island);
+        let reveal = self.sidebar_reveal();
+        let brand_left = self.titlebar_toggle_start() + 24.0 + 10.0;
         div()
             .absolute()
             .top_0()
@@ -9033,6 +9049,23 @@ impl Shell {
                 &theme,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
+            .when(reveal > 0.01, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(brand_left))
+                        .top(px(Theme::TITLEBAR_TOP_PAD))
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .opacity(reveal)
+                        .text_size(crate::typography::ui_rems(14.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child("Zeron"),
+                )
+            })
+            .child(div().flex_none().w(px(self.titlebar_nav_shift())))
             .child(
                 div()
                     .ml(px(TITLEBAR_GROUP_GAP))
@@ -9072,20 +9105,12 @@ impl Shell {
     /// back over the control cluster on a narrow sidebar.
     fn render_sidebar_options_titlebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let sidebar = self.sidebar_now();
-        let reveal = (sidebar / self.sidebar_content_width().max(1.0)).clamp(0.0, 1.0);
+        let reveal = self.sidebar_reveal();
         if reveal <= 0.01 {
             return None;
         }
-        let cluster_end = self.eval_tween(
-            self.titlebar_tween,
-            cluster_buttons_start(
-                cfg!(target_os = "macos"),
-                self.fullscreen.unwrap_or(false),
-                self.linux_left_caption_count(),
-            ),
-        ) + CLUSTER_BUTTONS_WIDTH
-            + TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
-        let left = (sidebar - Theme::SPACE_SM - 24.0).max(cluster_end + TITLEBAR_GROUP_GAP);
+        let toggle_end = self.titlebar_toggle_start() + 24.0;
+        let left = (sidebar - Theme::SPACE_SM - 24.0).max(toggle_end + TITLEBAR_GROUP_GAP);
         let theme = Theme::of(cx).clone();
         let trigger = self.render_sidebar_view_trigger(&theme, cx);
         Some(
@@ -9113,13 +9138,14 @@ impl Shell {
                 .active_draft
                 .as_deref()
                 .is_some_and(|id| crate::draft_store::has_content(id, cx));
+        let hidden_by_sidebar = 1.0 - self.sidebar_reveal();
         if matches!(self.route, Route::Terminal) {
-            return 1.0;
+            return hidden_by_sidebar;
         }
         titlebar_new_session_alpha(
             &self.route,
             state.selected_chat.is_some() || leaving_invested_draft,
-        )
+        ) * hidden_by_sidebar
     }
 
     /// Native Windows caption controls integrated into Zeron's unified
@@ -9488,7 +9514,7 @@ impl Shell {
     /// corner clip; we reproduce the same trim by insetting the sliver
     /// vertically to where the curve begins, so its tips never float over the
     /// transparent corner cutouts.
-    fn sidebar_tone(width: f32, border_color: gpui::Hsla, window: &Window) -> gpui::Div {
+    fn sidebar_tone(width: f32, theme: &Theme, window: &Window) -> gpui::Div {
         let window_corner = Self::window_corner_radius(window);
         div()
             .absolute()
@@ -9504,9 +9530,12 @@ impl Shell {
                     el.top(px(window_corner)).bottom(px(window_corner))
                 }
             })
-            .bg(crate::theme::wash(0.05))
+            .bg(gpui::Hsla {
+                a: 1.0,
+                ..theme.surface
+            })
             .border_r_1()
-            .border_color(border_color)
+            .border_color(theme.border)
     }
 
     /// Settings takes over the window: the section list stands where the
@@ -9600,7 +9629,7 @@ impl Shell {
                         ),
                     )
                     .child(div().flex_1().min_h_0().child(nav))
-                    .child(div().p(px(Theme::SPACE_SM)).flex_none().child(footer)),
+                    .child(div().px(px(8.0)).py(px(4.0)).flex_none().child(footer)),
             )
             .child(
                 div()
@@ -9829,6 +9858,7 @@ impl Shell {
         // Whether the row wears its project icon. Rows inside a project
         // group leave it to the group header.
         project_icon: bool,
+        in_project_group: bool,
         slim: bool,
         search_query: Option<&str>,
         theme: &Theme,
@@ -9840,6 +9870,30 @@ impl Shell {
         // relative time instead. Hovering the ROW swaps the corner for the
         // ARCHIVE button. Compact rows keep status first and elapsed time last;
         // their archive control occupies the remote-icon slot on hover.
+        if search_query.is_none() && !self.settings.sidebar_compact {
+            return self.render_sidebar_card(
+                id,
+                title,
+                time_ago,
+                space_name,
+                branch,
+                change_request,
+                harnesses,
+                created_by,
+                status,
+                selected,
+                split_side,
+                archived,
+                preview,
+                drag,
+                jump_label,
+                project_icon,
+                in_project_group,
+                slim,
+                theme,
+                cx,
+            );
+        }
         // A chat can appear on both surfaces at once. Namespace every hover
         // key and child id so the palette never animates the sidebar copy.
         let row_id = if search_query.is_some() {
@@ -10227,8 +10281,6 @@ impl Shell {
             None => corner,
         };
         let mut corner = Some(corner);
-        let select_id = id.clone();
-        let menu_id = id.clone();
         let search_query_none = search_query.is_none();
         let rename_input = (search_query_none && !preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
@@ -10259,20 +10311,38 @@ impl Shell {
         } else {
             text.opacity(0.8)
         };
-        div()
-            .id(SharedString::from(row_id.clone()))
-            .group("sidebar-session-row")
-            .debug_selector({
-                let row_id = row_id.clone();
-                move || row_id.clone()
-            })
-            .h(px(sidebar_row_height(
-                compact,
-                show_label,
-                branch.is_some() || created_by.is_some(),
-                change_request.is_some(),
-            )))
-            .flex()
+        let legacy_height = if compact {
+            29.0
+        } else {
+            let metadata = if change_request.is_some() {
+                16.0
+            } else if branch.is_some() || created_by.is_some() {
+                14.0
+            } else {
+                0.0
+            };
+            let full = if metadata == 0.0 {
+                45.0
+            } else {
+                47.0 + metadata
+            };
+            full - if show_label { 0.0 } else { 16.0 }
+        };
+        self.chat_row_frame(
+            &row_id,
+            &id,
+            &title,
+            &harnesses,
+            drag,
+            preview,
+            search_query_none,
+            rename_input.is_some(),
+            corner_hovered,
+            &fade_key,
+            cx,
+        )
+        .h(px(legacy_height))
+        .flex()
             .flex_col()
             .gap(px(2.0))
             .rounded(px(if search_query.is_some() {
@@ -10284,127 +10354,6 @@ impl Shell {
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
-            // No selection ring (user request) — the wash alone marks the
-            // active row.
-            // Row hover drives BOTH the wash blend and the corner's
-            // status→Archive swap (one listener — gpui allows a single
-            // hover listener per element).
-            .when(!preview, |el| {
-                el.on_hover({
-                    let fade_hover = motion::hover_listener(fade_key.clone());
-                    let hover_id = row_id.clone();
-                    cx.listener(move |this, hovered: &bool, window, cx| {
-                        fade_hover(hovered, window, cx);
-                        this.chat_hover_resync = false;
-                        if *hovered {
-                            if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                this.chat_status_hover = Some(hover_id.clone());
-                                cx.notify();
-                            }
-                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.chat_status_hover = None;
-                            cx.notify();
-                        }
-                    })
-                })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                    // The palette's copy of the row only opens; the sidebar's
-                    // double-click edits the title in place.
-                    if event.click_count() >= 2 && search_query_none {
-                        this.open_rename_chat(select_id.clone(), cx);
-                    } else {
-                        this.open_chat(select_id.clone(), cx);
-                    }
-                }))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.chat_menu.open(ChatMenuState {
-                            tab: None,
-                            chat_id: menu_id.clone(),
-                            position: event.position,
-                            page: ChatMenuPage::Root,
-                        });
-                        cx.notify();
-                    }),
-                )
-            })
-            .when_some(drag, |el, payload| {
-                let shell = cx.weak_entity();
-                let title = title.clone();
-                let brand = harnesses
-                    .last()
-                    .copied()
-                    .map(crate::pickers::harness_brand_icon);
-                el.on_drag(payload, move |payload, point, window, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.begin_sidebar_session_transfer(payload, point, window, cx);
-                        })
-                        .ok();
-                    cx.stop_propagation();
-                    let tab = cx.new(|_| tabs::TabGhost {
-                        title: title.clone(),
-                        brand,
-                    });
-                    let shell = shell.clone();
-                    cx.new(|_| SessionRowGhost { shell, tab })
-                })
-            })
-            // A row revealed for an inline rename reports where it painted,
-            // frame by frame while its disclosure opens, so the list can
-            // scroll it clear of the edges.
-            .when(
-                rename_input.is_some() && self.chat_rename_revealing(),
-                |el| {
-                    let shell = cx.weak_entity();
-                    el.child(
-                        gpui::canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, cx| {
-                                window.defer(cx, move |_, cx| {
-                                    shell
-                                        .update(cx, |this, cx| {
-                                            this.keep_rename_row_in_view(bounds, cx)
-                                        })
-                                        .ok();
-                                });
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                },
-            )
-            .when(self.chat_hover_resync && !preview, |el| {
-                let shell = cx.weak_entity();
-                let row_id = row_id.clone();
-                el.child(
-                    gpui::canvas(
-                        |bounds, window, _| {
-                            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
-                        },
-                        move |_, hitbox, window, cx| {
-                            // The hit test is final by paint, so popovers
-                            // over the row still occlude it.
-                            let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
-                            if hovered == corner_hovered {
-                                return;
-                            }
-                            window.defer(cx, move |_, cx| {
-                                shell
-                                    .update(cx, |this, cx| {
-                                        this.sync_chat_row_hover(row_id, hovered, cx)
-                                    })
-                                    .ok();
-                            });
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-            })
             // Line 1: "project @ device", status word / time-ago right.
             .when(!compact && show_label, |el| {
                 el.child(
@@ -10685,6 +10634,724 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_sidebar_card(
+        &self,
+        id: String,
+        title: SharedString,
+        time_ago: SharedString,
+        space_name: SharedString,
+        branch: Option<SharedString>,
+        change_request: Option<zeron_proto::ChangeRequestSummary>,
+        harnesses: Vec<zeron_proto::HarnessId>,
+        created_by: Option<SharedString>,
+        status: zeron_proto::ChatIndicator,
+        selected: bool,
+        split_side: Option<split::SplitSide>,
+        archived: bool,
+        preview: bool,
+        drag: Option<SidebarSessionDrag>,
+        jump_label: Option<SharedString>,
+        project_icon: bool,
+        in_project_group: bool,
+        slim: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_proto::ChatIndicator as Status;
+        let row_id = format!("chat-{id}");
+        let fade_key = format!("{row_id}-hover");
+        let now = Utc::now();
+        let (device, remote, queued, undelivered, expired, started_at, subagents) = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == id);
+            (
+                chat.map(|chat| chat.device_id.clone()),
+                chat.is_some_and(|chat| {
+                    state.local_device_id.as_deref() != Some(chat.device_id.as_str())
+                }),
+                state.send_queued(&id, now),
+                state.send_undelivered(&id, now),
+                chat.is_some_and(|chat| chat.sidechat_expired(now)),
+                state
+                    .session_for(&id)
+                    .and_then(|session| session.started_at),
+                state.running_subagents_for(&id, now),
+            )
+        };
+        let queued = queued && !undelivered;
+        let settled_state = queued || undelivered || expired;
+        let working = status == Status::Working && !settled_state;
+        let ring =
+            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+                .filter(|_| !settled_state);
+        let work_label = ring.filter(|_| working).and_then(|_| {
+            let state = self.state.read(cx);
+            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+        });
+        let dark = theme.appearance == crate::theme::Appearance::Dark;
+        let (status_label, status_icon, status_color): (Option<SharedString>, &str, gpui::Hsla) =
+            if expired {
+                (
+                    Some("Expired".into()),
+                    icons::LUCIDE_CIRCLE_DOT_DASHED,
+                    theme.text_muted,
+                )
+            } else if undelivered {
+                (
+                    Some("Failed".into()),
+                    icons::LUCIDE_CIRCLE_ALERT,
+                    theme.danger,
+                )
+            } else if queued {
+                (
+                    Some("Queued".into()),
+                    icons::LUCIDE_CIRCLE_DOT_DASHED,
+                    theme.warning,
+                )
+            } else {
+                match status {
+                    Status::Working => (
+                        Some(work_label.map_or("Working".into(), SharedString::from)),
+                        icons::LUCIDE_CIRCLE_DASHED,
+                        gpui::rgb(0x2b7fff).into(),
+                    ),
+                    Status::AwaitingInput => (
+                        Some("Input".into()),
+                        icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
+                        gpui::rgb(if dark { 0xa3b3ff } else { 0x4f39f6 }).into(),
+                    ),
+                    Status::Errored => (
+                        Some("Failed".into()),
+                        icons::LUCIDE_CIRCLE_ALERT,
+                        theme.danger,
+                    ),
+                    Status::Completed => (
+                        Some("Done".into()),
+                        icons::LUCIDE_CIRCLE_CHECK,
+                        gpui::rgb(0x00bc7d).into(),
+                    ),
+                    Status::Idle => (None, icons::LUCIDE_CIRCLE_DASHED, theme.text_muted),
+                }
+            };
+        let unread = !settled_state && matches!(status, Status::Completed | Status::AwaitingInput);
+        let failed = undelivered || (!settled_state && status == Status::Errored);
+        let recede = !selected && !unread && !failed;
+        let hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let unsent = crate::draft_store::has_content(&id, cx) && !selected;
+        let secondary = split_side.is_some() && !selected && self.split.is_some();
+        let bg = if selected {
+            crate::theme::glass_selected_bg()
+        } else if secondary {
+            crate::theme::glass_secondary_bg()
+        } else if unsent && !slim {
+            theme.warning.opacity(if hovered { 0.08 } else { 0.04 })
+        } else if hovered {
+            theme.glass_hover()
+        } else {
+            crate::theme::wash(0.0)
+        };
+        let sec = theme.text_muted;
+        let faint = theme.text_muted.opacity(0.4);
+        let rename_input = (!preview)
+            .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
+            .flatten();
+        let project_icon = project_icon.then(|| self.render_project_icon(&id, 16.0, selected, cx));
+        let title_el =
+            |size: f32, weight: gpui::FontWeight, color: gpui::Hsla| match rename_input.clone() {
+                Some(input) => {
+                    chat_title_editor(format!("chat-title-editor-{id}").into(), input, theme)
+                }
+                None => sidebar_faded_label(
+                    format!("chat-title-{id}").into(),
+                    true,
+                    div()
+                        .text_size(crate::typography::ui_rems(size))
+                        .line_height(px(20.0))
+                        .font_weight(weight)
+                        .text_color(color)
+                        .child(title.clone()),
+                )
+                .into_any_element(),
+            };
+        let jump_badge = jump_label.map(|label| {
+            div()
+                .flex_none()
+                .h(px(20.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border.opacity(0.8))
+                .font_family(crate::popover::KEY_GLYPH_FONT)
+                .text_size(crate::typography::ui_rems(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(label)
+                .into_any_element()
+        });
+        let action = |key: &str, label: &'static str, tooltip: &'static str| {
+            let group = SharedString::from(format!("{row_id}-{key}"));
+            (
+                div()
+                    .id(group.clone())
+                    .group(group.clone())
+                    .debug_selector({
+                        let selector = format!("{row_id}-{key}");
+                        move || selector.clone()
+                    })
+                    .h_full()
+                    .px(px(6.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .tooltip(crate::settings::widgets::text_tooltip_above(tooltip)),
+                group,
+            )
+        };
+        let archive_action = {
+            let (button, group) = action(
+                "archive",
+                if archived { "Unarchive" } else { "Archive" },
+                if archived {
+                    "Unarchive session"
+                } else {
+                    ShortcutId::ArchiveSession.label()
+                },
+            );
+            let archive_id = id.clone();
+            button
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.chat_hover_resync = true;
+                    this.set_chat_archived(archive_id.clone(), !archived, cx);
+                }))
+                .child(
+                    icon(if archived {
+                        icons::ARCHIVE_UP_MINIMALISTIC
+                    } else {
+                        icons::LUCIDE_ARCHIVE
+                    })
+                    .size(px(if archived { 14.0 } else { 12.0 }))
+                    .text_color(sec)
+                    .group_hover(group, |s| s.text_color(theme.text)),
+                )
+                .into_any_element()
+        };
+        let inbox = self.settings.sidebar_organization == SidebarOrganization::Inbox;
+        let settle_action = |settled: bool| {
+            let (button, group) = action(
+                if settled { "unsettle" } else { "settle" },
+                if settled { "Un-settle" } else { "Settle" },
+                if settled {
+                    "Un-settle thread"
+                } else {
+                    "Settle thread"
+                },
+            );
+            let settle_id = id.clone();
+            button
+                .gap(px(4.0))
+                .mr(px(-4.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.chat_hover_resync = true;
+                    this.set_chat_settled(settle_id.clone(), !settled, cx);
+                }))
+                .child(
+                    icon(if settled {
+                        icons::LUCIDE_UNDO_2
+                    } else {
+                        icons::LUCIDE_CHECK
+                    })
+                    .size(px(14.0))
+                    .text_color(sec)
+                    .group_hover(group.clone(), |s| s.text_color(theme.text)),
+                )
+                .when(!settled, |el| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(sec)
+                            .group_hover(group, |s| s.text_color(theme.text))
+                            .child("Settle"),
+                    )
+                })
+                .into_any_element()
+        };
+        let settle_action = (!archived && (slim || inbox)).then(|| settle_action(slim));
+        let frame = self.chat_row_frame(
+            &row_id,
+            &id,
+            &title,
+            &harnesses,
+            drag,
+            preview,
+            true,
+            rename_input.is_some(),
+            hovered,
+            &fade_key,
+            cx,
+        );
+
+        if slim {
+            let lifted = hovered || selected;
+            let rest = sec.opacity(0.7);
+            let slot: AnyElement = if let Some(badge) = jump_badge {
+                badge
+            } else if hovered && !preview {
+                settle_action.unwrap_or(archive_action)
+            } else {
+                div()
+                    .whitespace_nowrap()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(if lifted { sec } else { rest })
+                    .child(time_ago)
+                    .into_any_element()
+            };
+            return frame
+                .h(px(SIDEBAR_SLIM_HEIGHT))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(bg)
+                .children(project_icon.map(|icon| {
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .opacity(if lifted { 1.0 } else { 0.4 })
+                        .child(icon)
+                }))
+                .child(title_el(
+                    14.0,
+                    if lifted && !recede {
+                        gpui::FontWeight::MEDIUM
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    },
+                    if lifted { theme.text } else { rest },
+                ))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-corner")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-time-{id}")
+                        })
+                        .ml_auto()
+                        .h(px(24.0))
+                        .min_w(px(32.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .child(slot),
+                )
+                .into_any_element();
+        }
+
+        let show_label = self.settings.sidebar_show_project_label && !in_project_group;
+        let status_el = || -> AnyElement {
+            match status_label.clone() {
+                Some(label) => div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(status_color)
+                    .child(
+                        icon(status_icon)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(status_color),
+                    )
+                    .child(label)
+                    .when_some(started_at.filter(|_| working), |el, since| {
+                        el.child(crate::loaders::elapsed_label(
+                            format!("{row_id}-elapsed"),
+                            since,
+                            crate::typography::ui_rems(12.0),
+                            status_color,
+                        ))
+                    })
+                    .into_any_element(),
+                None => div()
+                    .text_color(sec)
+                    .child(time_ago.clone())
+                    .into_any_element(),
+            }
+        };
+        let slot: AnyElement = if let Some(badge) = jump_badge {
+            badge
+        } else if hovered && !preview {
+            div()
+                .flex()
+                .flex_row()
+                .items_stretch()
+                .h_full()
+                .child(archive_action)
+                .children(settle_action)
+                .into_any_element()
+        } else {
+            status_el()
+        };
+        let slot = div()
+            .id(SharedString::from(format!("{row_id}-corner")))
+            .debug_selector({
+                let row_id = row_id.clone();
+                move || format!("{row_id}-corner")
+            })
+            .ml_auto()
+            .h(px(20.0))
+            .min_w(px(32.0))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(16.0))
+            .aria_label(status_label.clone().unwrap_or_else(|| "Idle".into()))
+            .child(slot);
+        let split_glyph = split_side.map(|side| {
+            let tone = if selected { theme.accent } else { sec };
+            div()
+                .flex_none()
+                .w(px(12.0))
+                .h(px(10.0))
+                .rounded(px(2.5))
+                .border_1()
+                .border_color(tone)
+                .flex()
+                .flex_row()
+                .when(side == split::SplitSide::Right, |el| el.justify_end())
+                .child(div().w(px(5.0)).h_full().bg(tone.opacity(0.7)))
+        });
+        let pen = unsent.then(|| {
+            icon(icons::LUCIDE_SQUARE_PEN)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.warning)
+        });
+        let title_weight = if recede {
+            gpui::FontWeight::NORMAL
+        } else {
+            gpui::FontWeight::MEDIUM
+        };
+        let title_color = if recede {
+            sec
+        } else if unread {
+            theme.text
+        } else if failed {
+            theme.text.opacity(0.95)
+        } else {
+            theme.text.opacity(0.9)
+        };
+        let line_one = div()
+            .h(px(20.0))
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .children(pen)
+            .map(|el| {
+                if show_label {
+                    el.children(project_icon).child(sidebar_faded_label(
+                        format!("chat-device-{id}").into(),
+                        true,
+                        div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .line_height(px(16.0))
+                            .font_weight(if recede {
+                                gpui::FontWeight::NORMAL
+                            } else {
+                                gpui::FontWeight::MEDIUM
+                            })
+                            .text_color(sec)
+                            .child(space_name.clone()),
+                    ))
+                } else {
+                    el.child(title_el(14.0, title_weight, title_color))
+                }
+            })
+            .children(split_glyph)
+            .child(slot);
+        let presence = crate::computer::presence::chat_glyph("chat-row", &id, 14.0, 0.6, theme, cx);
+        let line_three = div()
+            .mt(px(2.0))
+            .h(px(16.0))
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(16.0))
+            .text_color(sec)
+            .map(|el| match (created_by, branch) {
+                (Some(creator), _) => el.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .text_color(faint)
+                        .child(
+                            icon(icons::LUCIDE_CORNER_DOWN_RIGHT)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(faint),
+                        )
+                        .child(sidebar_faded_label(
+                            format!("chat-by-{id}").into(),
+                            true,
+                            div().child(creator),
+                        )),
+                ),
+                (None, Some(branch)) => el.child(div().flex_1().min_w_0().text_color(faint).child(
+                    sidebar_faded_label(
+                        format!("chat-branch-{id}").into(),
+                        true,
+                        div().child(branch),
+                    ),
+                )),
+                (None, None) => el.child(div().flex_1().min_w_0()),
+            })
+            .when_some(change_request, |el, summary| {
+                el.child(if preview {
+                    crate::change_requests::pull_request_badge_preview(
+                        format!("{row_id}-pr").into(),
+                        summary,
+                        crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                        theme,
+                    )
+                } else {
+                    crate::change_requests::pull_request_badge(
+                        format!("{row_id}-pr").into(),
+                        summary,
+                        crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                        device.clone(),
+                        theme,
+                    )
+                })
+            })
+            .child(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .children(
+                        ring.filter(|_| !working).map(|count| {
+                            crate::composer::background::sidebar_ring_mark(count, theme)
+                        }),
+                    )
+                    .when(subagents > 0, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(icon(icons::LUCIDE_BOT).size(px(12.0)).text_color(sec))
+                                .child(SharedString::from(subagents.to_string())),
+                        )
+                    })
+                    .when(remote, |el| {
+                        el.child(
+                            icon(icons::LUCIDE_MONITOR)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted.opacity(0.7)),
+                        )
+                    })
+                    .map(|el| match presence {
+                        Some(glyph) => el.child(glyph),
+                        None => el.when(!harnesses.is_empty(), |el| {
+                            el.child(crate::pickers::harness_mark_stack(
+                                &harnesses, 14.0, sec, 0.6,
+                            ))
+                        }),
+                    }),
+            );
+        frame
+            .h(px(chat_row_height(show_label)))
+            .py(px(SIDEBAR_CARD_INSET))
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(8.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .bg(bg)
+                    .when(recede && working && !hovered, |el| el.opacity(0.7))
+                    .child(line_one)
+                    .when(show_label, |el| {
+                        el.child(div().mt(px(4.0)).min_w_0().flex().child(title_el(
+                            14.0,
+                            title_weight,
+                            title_color,
+                        )))
+                    })
+                    .child(line_three),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn chat_row_frame(
+        &self,
+        row_id: &str,
+        id: &str,
+        title: &SharedString,
+        harnesses: &[zeron_proto::HarnessId],
+        drag: Option<SidebarSessionDrag>,
+        preview: bool,
+        search_query_none: bool,
+        has_rename: bool,
+        corner_hovered: bool,
+        fade_key: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let select_id = id.to_string();
+        let menu_id = id.to_string();
+        div()
+            .id(SharedString::from(row_id.to_string()))
+            .group("sidebar-session-row")
+            .debug_selector({
+                let row_id = row_id.to_string();
+                move || row_id.clone()
+            })
+            .when(!preview, |el| {
+                el.on_hover({
+                    let fade_hover = motion::hover_listener(fade_key.to_string());
+                    let hover_id = row_id.to_string();
+                    cx.listener(move |this, hovered: &bool, window, cx| {
+                        fade_hover(hovered, window, cx);
+                        this.chat_hover_resync = false;
+                        if *hovered {
+                            if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                                this.chat_status_hover = Some(hover_id.clone());
+                                cx.notify();
+                            }
+                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                            this.chat_status_hover = None;
+                            cx.notify();
+                        }
+                    })
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                    // The palette's copy of the row only opens; the sidebar's
+                    // double-click edits the title in place.
+                    if event.click_count() >= 2 && search_query_none {
+                        this.open_rename_chat(select_id.clone(), cx);
+                    } else {
+                        this.open_chat(select_id.clone(), cx);
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.chat_menu.open(ChatMenuState {
+                            tab: None,
+                            chat_id: menu_id.clone(),
+                            position: event.position,
+                            page: ChatMenuPage::Root,
+                        });
+                        cx.notify();
+                    }),
+                )
+            })
+            .when_some(drag, |el, payload| {
+                let shell = cx.weak_entity();
+                let title = title.clone();
+                let brand = harnesses
+                    .last()
+                    .copied()
+                    .map(crate::pickers::harness_brand_icon);
+                el.on_drag(payload, move |payload, point, window, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.begin_sidebar_session_transfer(payload, point, window, cx);
+                        })
+                        .ok();
+                    cx.stop_propagation();
+                    let tab = cx.new(|_| tabs::TabGhost {
+                        title: title.clone(),
+                        brand,
+                    });
+                    let shell = shell.clone();
+                    cx.new(|_| SessionRowGhost { shell, tab })
+                })
+            })
+            // A row revealed for an inline rename reports where it painted,
+            // frame by frame while its disclosure opens, so the list can
+            // scroll it clear of the edges.
+            .when(has_rename && self.chat_rename_revealing(), |el| {
+                let shell = cx.weak_entity();
+                el.child(
+                    gpui::canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            window.defer(cx, move |_, cx| {
+                                shell
+                                    .update(cx, |this, cx| this.keep_rename_row_in_view(bounds, cx))
+                                    .ok();
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
+            .when(self.chat_hover_resync && !preview, |el| {
+                let shell = cx.weak_entity();
+                let row_id = row_id.to_string();
+                el.child(
+                    gpui::canvas(
+                        |bounds, window, _| {
+                            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+                        },
+                        move |_, hitbox, window, cx| {
+                            // The hit test is final by paint, so popovers
+                            // over the row still occlude it.
+                            let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
+                            if hovered == corner_hovered {
+                                return;
+                            }
+                            window.defer(cx, move |_, cx| {
+                                shell
+                                    .update(cx, |this, cx| {
+                                        this.sync_chat_row_hover(row_id, hovered, cx)
+                                    })
+                                    .ok();
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
     }
 
     fn render_pinned_session_group(
@@ -11275,7 +11942,8 @@ impl Shell {
             .when_some(update_strip, |el, strip| el.child(strip))
             .child(
                 div()
-                    .p(px(Theme::SPACE_SM))
+                    .px(px(8.0))
+                    .py(px(4.0))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -11686,7 +12354,7 @@ impl Shell {
                 cx.notify();
             }))
             .tooltip(crate::settings::widgets::text_tooltip("Pull requests"))
-            .child(icon(icons::PULL_REQUEST).size(px(15.0)).text_color(
+            .child(icon(icons::LUCIDE_GIT_PULL_REQUEST).size(px(16.0)).text_color(
                 if matches!(self.route, Route::PullRequests) {
                     theme.text
                 } else {
@@ -11744,34 +12412,23 @@ impl Shell {
             .tab_index(0)
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .relative()
-            .h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-            .min_w_0()
-            .flex_shrink_1()
-            .w_full()
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
+            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+            .flex_none()
+            .rounded_full()
             .flex()
-            .flex_row()
             .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(if open {
-                theme.text
-            } else {
-                motion::hover_blend("user-menu-trigger", theme.text.opacity(0.8), theme.text)
-            })
+            .justify_center()
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.text)
             .cursor_pointer()
-            // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
-            // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
-            // the hover wash fades over `transition-colors`.
             .bg(if open {
-                theme.glass_hover()
+                theme.glass_hover().opacity(1.6)
             } else {
                 motion::hover_blend(
                     "user-menu-trigger",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover().opacity(0.8),
+                    theme.glass_hover(),
+                    theme.glass_hover().opacity(1.6),
                 )
             })
             .on_hover(motion::hover_listener("user-menu-trigger"))
@@ -11790,42 +12447,15 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(
-                // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
-                div()
-                    .size(px(SIDEBAR_FOOTER_AVATAR_SIZE))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(10.0))
-                    .line_height(px(SIDEBAR_FOOTER_AVATAR_SIZE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(div().w_full().text_center().child(initial)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(sidebar_faded_label(
-                        "user-menu-label".into(),
-                        false,
-                        div().line_height(px(17.0)).child(user_line),
-                    )),
-            );
+            .tooltip(crate::settings::widgets::text_tooltip_above(
+                user_line.clone(),
+            ))
+            .child(initial);
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
 
             let menu = popover::popover_card(theme)
-                .w(px(self.sidebar_content_width()
-                    - 2.0 * Theme::SPACE_SM
-                    - SIDEBAR_FOOTER_ACTION_SIZE
-                    - SIDEBAR_FOOTER_ACTION_GAP))
+                .w(px(self.sidebar_content_width() - 16.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
                 }))
@@ -11932,7 +12562,7 @@ impl Shell {
                 .into_any_element();
             // Opens upward, left-aligned with the pill: the card is as wide as
             // the footer row, so it covers the row instead of the pane beside it.
-            trigger = trigger.child(popover::anchored_menu_above(
+            trigger = trigger.child(popover::anchored_menu_above_end(
                 "user-menu-popover",
                 menu,
                 closing,
@@ -11948,21 +12578,45 @@ impl Shell {
             (true, false) => "Close settings · Ctrl+,".into(),
         };
         let voice_trigger = self.render_voice_trigger(theme, cx);
+        let usage_open = matches!(self.route, Route::Usage);
+        let usage = div()
+            .id("open-usage")
+            .debug_selector(|| "open-usage".into())
+            .group("open-usage")
+            .role(gpui::Role::Button)
+            .aria_label("Usage")
+            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .when(usage_open, |el| el.bg(theme.glass_hover()))
+            .hover(|s| s.bg(theme.glass_hover()))
+            .on_click(cx.listener(|this, _, _, cx| this.open_usage(cx)))
+            .tooltip(crate::settings::widgets::text_tooltip("Usage"))
+            .child(
+                icon(icons::LUCIDE_CHART_NO_AXES_COLUMN)
+                    .size(px(16.0))
+                    .text_color(if usage_open {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .group_hover("open-usage", |s| s.text_color(theme.text)),
+            );
         div()
             .w_full()
             .flex()
             .items_center()
-            .justify_between()
             .gap(px(4.0))
-            .child(trigger)
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(px(4.0))
-                    .children(voice_trigger)
-                    .child(pull_requests)
                     .child(
                         div()
                             .id("settings-trigger")
@@ -12002,7 +12656,7 @@ impl Shell {
                             .on_hover(motion::hover_listener("settings-trigger"))
                             .focus_visible(|s| s.border_2().border_color(theme.accent))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
-                            .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
+                            .child(icon(icons::LUCIDE_SETTINGS).size(px(16.0)).text_color(
                                 if settings_open {
                                     theme.text
                                 } else {
@@ -12013,8 +12667,13 @@ impl Shell {
                                     )
                                 },
                             )),
-                    ),
+                    )
+                    .child(pull_requests)
+                    .child(usage)
+                    .children(voice_trigger),
             )
+            .child(div().flex_1())
+            .child(trigger)
             .into_any_element()
     }
 
@@ -16011,6 +16670,7 @@ fn nav_history_button(
 ) -> AnyElement {
     if !enabled {
         return div()
+            .debug_selector(move || id.to_owned())
             .size(px(24.0))
             .flex_none()
             .flex()
@@ -16819,9 +17479,11 @@ impl Render for Shell {
                     // A call started from Settings opens its stage here too.
                     let voice_stage = self.render_voice_stage(window, cx);
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                    let border_color = Theme::of(cx).border;
-                    let sidebar_tone =
-                        Self::sidebar_tone(self.settings.sidebar_width, border_color, window);
+                    let sidebar_tone = Self::sidebar_tone(
+                        self.settings.sidebar_width,
+                        &Theme::of(cx).clone(),
+                        window,
+                    );
                     let drag = self.titlebar_drag_region(
                         "settings-titlebar",
                         div()
@@ -16968,8 +17630,6 @@ impl Render for Shell {
                 // Full-window voice stage: above the page chrome, below dialogs.
                 let voice_stage = self.render_voice_stage(window, cx);
                 let under_stage = self.voice_stage_underlay_opacity(cx);
-                // Copied out (not held) — `render_title_bar` needs `cx` mutable.
-                let border_color = Theme::of(cx).border;
                 // No inset cards (user request): the conversation column sits
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
@@ -17110,7 +17770,7 @@ impl Render for Shell {
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
                 let sidebar_now = self.sidebar_now();
-                let sidebar_tone = Self::sidebar_tone(sidebar_now, border_color, window);
+                let sidebar_tone = Self::sidebar_tone(sidebar_now, &Theme::of(cx).clone(), window);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -18638,14 +19298,6 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false), 45.0);
-        assert_eq!(chat_row_height(true, false), 61.0);
-        assert_eq!(chat_row_height(false, true), 63.0);
-        assert_eq!(chat_row_height(true, true), 63.0);
-    }
-
-    #[test]
     fn sidebar_harness_geometry_reflects_row_hierarchy() {
         assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
     }
@@ -19640,7 +20292,7 @@ mod exit_regressions {
         let shell = host.read_with(cx, |host, _| host.0.clone());
         for expect_open in [true, false] {
             cx.update(|window, cx| window.draw(cx).clear());
-            assert!(cx.debug_bounds("user-menu-label").is_some());
+            assert!(cx.debug_bounds("user-menu").is_some());
             let trigger = cx.debug_bounds("settings-trigger").unwrap().center();
             cx.simulate_click(trigger, gpui::Modifiers::default());
             shell.read_with(cx, |shell, _| {
@@ -19706,8 +20358,7 @@ mod exit_regressions {
             .debug_bounds("open-pull-requests")
             .expect("Settings keeps the Pull requests entry");
         let gear = cx.debug_bounds("settings-trigger").unwrap();
-        // Just left of Settings, in the same action group.
-        assert!(entry.right() <= gear.left() && entry.left() >= row.left());
+        assert!(entry.left() >= gear.right() && entry.right() <= row.right());
         assert!((entry.center().y - gear.center().y).abs() < px(1.0));
         cx.simulate_click(entry.center(), gpui::Modifiers::default());
         shell.read_with(cx, |shell, _| {
@@ -19808,7 +20459,10 @@ mod exit_regressions {
                         window.draw(cx).clear();
                     });
                     cx.run_until_parked();
-                    let new_session = cx.debug_bounds("titlebar-new-session").unwrap();
+                    let new_session = cx
+                        .debug_bounds("titlebar-new-session")
+                        .or_else(|| cx.debug_bounds("nav-forward"))
+                        .unwrap();
                     let title = cx.debug_bounds("pr-detail-title").unwrap();
                     assert!(
                         title.left() >= new_session.right() + px(8.0),

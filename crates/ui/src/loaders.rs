@@ -530,3 +530,129 @@ mod tests {
         }
     }
 }
+
+/// Repaints from its own cached view so the sidebar around it stays put.
+pub fn elapsed_label(
+    key: impl Into<SharedString>,
+    since: chrono::DateTime<chrono::Utc>,
+    size: gpui::Rems,
+    color: gpui::Hsla,
+) -> impl IntoElement {
+    ElapsedLabel {
+        key: key.into(),
+        style: ElapsedStyle { since, size, color },
+    }
+}
+
+pub fn format_elapsed(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct ElapsedStyle {
+    since: chrono::DateTime<chrono::Utc>,
+    size: gpui::Rems,
+    color: gpui::Hsla,
+}
+
+#[derive(IntoElement)]
+struct ElapsedLabel {
+    key: SharedString,
+    style: ElapsedStyle,
+}
+
+impl RenderOnce for ElapsedLabel {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let view = window.with_global_id(self.key.into(), |id, window| {
+            window.with_element_state(id, |previous: Option<Entity<ElapsedView>>, _| {
+                let view = previous.unwrap_or_else(|| {
+                    cx.new(|_| ElapsedView {
+                        style: self.style,
+                        ticking: false,
+                    })
+                });
+                view.update(cx, |view, cx| {
+                    if view.style != self.style {
+                        view.style = self.style;
+                        cx.notify();
+                    }
+                });
+                (view.clone(), view)
+            })
+        });
+        let seconds = (chrono::Utc::now() - self.style.since).num_seconds();
+        let widest = if seconds < 60 {
+            "00s"
+        } else if seconds < 3600 {
+            "00m"
+        } else {
+            "00h 00m"
+        };
+        let run = gpui::TextRun {
+            len: widest.len(),
+            font: window.text_style().font(),
+            color: self.style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let width = window
+            .text_system()
+            .shape_line(
+                widest.into(),
+                self.style.size.to_pixels(window.rem_size()),
+                &[run],
+                None,
+            )
+            .width()
+            .ceil();
+        view.cached(
+            gpui::StyleRefinement::default()
+                .flex_none()
+                .w(width)
+                .h(px(16.0)),
+        )
+    }
+}
+
+struct ElapsedView {
+    style: ElapsedStyle,
+    ticking: bool,
+}
+
+impl Render for ElapsedView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let seconds = (chrono::Utc::now() - self.style.since).num_seconds().max(0);
+        if !self.ticking {
+            self.ticking = true;
+            let wait = if seconds < 60 { 1 } else { 60 - seconds % 60 };
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(wait as u64))
+                    .await;
+                this.update(cx, |view, cx| {
+                    view.ticking = false;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        div()
+            .size_full()
+            .flex()
+            .justify_end()
+            .whitespace_nowrap()
+            .text_size(self.style.size)
+            .line_height(px(16.0))
+            .text_color(self.style.color)
+            .child(format_elapsed(seconds))
+    }
+}
