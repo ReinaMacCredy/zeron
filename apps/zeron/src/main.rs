@@ -52,6 +52,15 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Claude Code PostToolUse hook: prints the compaction reminder the
+    /// engine has for this chat's running turn, if any.
+    #[command(hide = true)]
+    Hook {
+        #[arg(long)]
+        chat: String,
+        #[arg(long)]
+        port: Option<u16>,
+    },
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
@@ -198,7 +207,10 @@ fn main() -> anyhow::Result<()> {
         use tracing_subscriber::util::SubscriberInitExt;
         // `zeron mcp` owns stdout for the protocol: a single log line on it
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
-        if matches!(&cli.command, Some(Command::Mcp { .. })) {
+        if matches!(
+            &cli.command,
+            Some(Command::Mcp { .. } | Command::Hook { .. })
+        ) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -274,6 +286,17 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             let port = port.unwrap_or_else(|| engine_config_from_env().ipc_port);
             runtime.block_on(mcp_cli(chat, port))
+        }
+        Some(Command::Hook { chat, port }) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let port = port.unwrap_or_else(|| engine_config_from_env().ipc_port);
+            // A failing hook shows as an error on the agent's tool call: say nothing instead.
+            if let Err(error) = runtime.block_on(hook_cli(chat, port)) {
+                tracing::debug!(%error, "context hook skipped");
+            }
+            Ok(())
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
@@ -395,6 +418,37 @@ async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
         &tools,
     )
     .await?;
+    Ok(())
+}
+
+async fn hook_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+    let event: serde_json::Value = serde_json::from_str(&input)?;
+    // A subagent's tool call: it cannot compact the chat it runs under.
+    if event
+        .get("agent_id")
+        .and_then(|id| id.as_str())
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Ok(());
+    }
+    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+        .await
+        .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
+    let reply = client
+        .call(
+            zeron_rpc::methods::MID_TURN_NUDGE,
+            serde_json::json!({ "chatId": chat }),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("MidTurnNudge failed: {e}"))?;
+    if let Some(text) = reply.get("text").and_then(|text| text.as_str()) {
+        let output = serde_json::json!({
+            "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": text }
+        });
+        println!("{output}");
+    }
     Ok(())
 }
 
