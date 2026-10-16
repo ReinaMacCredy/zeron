@@ -136,7 +136,7 @@ fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'stat
     }
 }
 
-fn chat_status_tone(
+pub(crate) fn chat_status_tone(
     status: zeron_proto::ChatIndicator,
     theme: &Theme,
 ) -> (Option<SharedString>, &'static str, gpui::Hsla) {
@@ -951,6 +951,7 @@ pub enum Route {
     Usage,
     Settings(SettingsSection),
     Terminal,
+    Tasks,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -1116,6 +1117,7 @@ pub enum NavEntry {
     },
     Settings(SettingsSection),
     Usage,
+    Tasks,
 }
 
 /// Browser-style navigation history for the titlebar back/forward buttons
@@ -2466,6 +2468,8 @@ pub struct Shell {
     swipe: swipe_nav::SwipeNav,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
+    tasks_page: Option<Entity<crate::tasks::TasksPage>>,
+    _tasks_events: Option<gpui::Subscription>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -2955,6 +2959,7 @@ impl Shell {
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
             Some("usage") => Route::Usage,
+            Some("tasks") => Route::Tasks,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -2999,6 +3004,7 @@ impl Shell {
             Route::PullRequests => NavEntry::PullRequests,
             Route::Usage => NavEntry::Usage,
             Route::Settings(section) => NavEntry::Settings(section),
+            Route::Tasks => NavEntry::Tasks,
         });
         // Parent notifications carry presentation changes (session status,
         // elapsed labels, menus); sibling animation/caret ticks do not.
@@ -3136,6 +3142,8 @@ impl Shell {
             swipe: swipe_nav::SwipeNav::default(),
             pull_requests_page: None,
             usage_page: None,
+            tasks_page: None,
+            _tasks_events: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -6981,6 +6989,21 @@ impl Shell {
         cx.notify();
     }
 
+    pub(crate) fn open_tasks(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Tasks) {
+            return;
+        }
+        self.enter_tasks_route(cx);
+        self.nav.push(NavEntry::Tasks);
+    }
+
+    fn enter_tasks_route(&mut self, cx: &mut Context<Self>) {
+        self.set_route(Route::Tasks, cx);
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        cx.notify();
+    }
+
     /// Show the board's route without recording a navigation.
     fn enter_pull_requests_route(&mut self, cx: &mut Context<Self>) {
         if matches!(self.route, Route::PullRequests) {
@@ -7215,6 +7238,7 @@ impl Shell {
                 self.pending_pull_request = Some((url, device));
             }
             NavEntry::Usage => self.enter_usage_route(cx),
+            NavEntry::Tasks => self.enter_tasks_route(cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -8969,6 +8993,9 @@ impl Shell {
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
     fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if matches!(self.route, Route::Tasks) {
+            return self.render_tasks_title_bar(cx);
+        }
         if !matches!(self.route, Route::PullRequests) {
             return self.render_session_title_bar(window, cx);
         }
@@ -14427,6 +14454,10 @@ impl Shell {
                 .into_any_element();
         }
 
+        if matches!(self.route, Route::Tasks) {
+            return self.render_tasks_page(window, cx);
+        }
+
         if matches!(self.route, Route::PullRequests) {
             if let Some((url, device)) = self.pending_pull_request.take() {
                 self.show_pull_request_detail(url, device, window, cx);
@@ -17380,7 +17411,7 @@ impl Render for Shell {
                         this.toggle_pr_chat(cx)
                     }
                     Route::PullRequests => {}
-                    Route::Settings(_) | Route::Terminal | Route::Usage => {}
+                    Route::Settings(_) | Route::Terminal | Route::Usage | Route::Tasks => {}
                 }),
             )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
@@ -17790,7 +17821,7 @@ impl Render for Shell {
                 // for the return trip.
                 let pr_route = matches!(self.route, Route::PullRequests);
                 let page_route =
-                    pr_route || matches!(self.route, Route::Terminal | Route::Usage);
+                    pr_route || matches!(self.route, Route::Terminal | Route::Usage | Route::Tasks);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     let swipe = self.swipe_layers(0.0, cx);

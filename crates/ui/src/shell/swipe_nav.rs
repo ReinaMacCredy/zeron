@@ -324,6 +324,7 @@ impl Shell {
                 .unwrap_or_else(|| "Pull request".into()),
             NavEntry::Settings(_) => "Settings".into(),
             NavEntry::Usage => "Usage".into(),
+            NavEntry::Tasks => "Tasks".into(),
         }
     }
 

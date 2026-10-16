@@ -259,6 +259,7 @@ enum Command {
     NewProject,
     Settings,
     Usage,
+    Tasks,
     Theme(AppearanceMode),
     ArchiveThread,
 }
@@ -271,6 +272,7 @@ impl Command {
             Self::NewProject => "New project",
             Self::Settings => "Open settings",
             Self::Usage => "Open usage",
+            Self::Tasks => "Tasks",
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
             Self::Theme(AppearanceMode::Light) => "Switch to light theme",
             Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
@@ -285,6 +287,7 @@ impl Command {
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
             Self::Usage => icons::USAGE_CHART,
+            Self::Tasks => icons::LUCIDE_LIST_CHECKS,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
         }
@@ -407,6 +410,7 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
             Command::NewProject,
             Command::Settings,
             Command::Usage,
+            Command::Tasks,
             Command::Theme(if is_dark {
                 AppearanceMode::Light
             } else {
@@ -1018,6 +1022,7 @@ impl Shell {
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
+            RowKind::Command(Command::Tasks) => self.open_tasks(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
@@ -1074,7 +1079,9 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::Theme(_) | Command::NewTerminal(_) | Command::Usage => return None,
+            Command::Theme(_) | Command::NewTerminal(_) | Command::Usage | Command::Tasks => {
+                return None;
+            }
         };
         let combo = self.settings.keymap.get(id);
         let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
@@ -2974,6 +2981,7 @@ mod tests {
                 Command::NewProject,
                 Command::Settings,
                 Command::Usage,
+                Command::Tasks,
                 Command::Theme(AppearanceMode::Light)
             ]
         );
