@@ -3,7 +3,7 @@
 //! as text, later turns resume its own session, and the old harness's
 //! checkpoints can no longer be branched at.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,6 +39,7 @@ struct TestHarness {
     name: &'static str,
     runs: Arc<Mutex<Vec<Seen>>>,
     turns: AtomicUsize,
+    fail_next: AtomicBool,
 }
 
 impl TestHarness {
@@ -48,6 +49,7 @@ impl TestHarness {
             name,
             runs: Arc::new(Mutex::new(Vec::new())),
             turns: AtomicUsize::new(0),
+            fail_next: AtomicBool::new(false),
         }
     }
 }
@@ -85,6 +87,20 @@ impl Harness for TestHarness {
             resume: request.resume.clone(),
             branch: request.branch.clone(),
         });
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            let events = vec![
+                AgentEvent::Error {
+                    message: "start failed".into(),
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some("start failed".into()),
+                    session_id: None,
+                },
+            ];
+            return Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed());
+        }
         let n = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
         let session_id = match (&request.resume, &request.branch) {
             (Some(_), Some(_)) => format!("{}-forked", self.name),
@@ -596,3 +612,70 @@ async fn a_model_change_after_an_unsent_switch_folds_into_its_divider() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continued_thread_resends_its_source_packet_after_a_failed_first_turn() {
+    const CONT: &str = "chat-cont";
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    let chat: zeron_proto::Chat = serde_json::from_value(
+        rig.client
+            .call(
+                zeron_rpc::methods::CONTINUE_IN_NEW_THREAD,
+                serde_json::json!({
+                    "sourceChatId": CHAT, "chatId": CONT, "harness": "pi", "model": "pi-1",
+                }),
+            )
+            .await
+            .expect("ContinueInNewThread"),
+    )
+    .unwrap();
+    assert_eq!(chat.title.as_deref(), Some("Auth work (cont.)"));
+    assert_eq!(chat.created_by_chat_id, None);
+    assert_eq!(chat.previous_harnesses, vec![HarnessId::Mock]);
+    assert_eq!(chat.config.as_ref().map(|c| c.harness), Some(HarnessId::Pi));
+    let doc = entries(&rig.core, CONT);
+    assert_eq!(doc.len(), 1, "no source message is copied");
+    let (to, packet, route) = handoff_route(&doc[0]);
+    assert_eq!(to, HarnessId::Pi);
+    assert_eq!(route.from_harness, Some(HarnessId::Mock));
+    assert_eq!(route.to_model.as_deref(), Some("pi-1"));
+    assert_eq!(route.source_chat_id.as_deref(), Some(CHAT));
+    assert_eq!(route.source_title.as_deref(), Some("Auth work"));
+    assert!(packet.contains("User: first\n\nAssistant: Old answer 1"));
+
+    rig.new.fail_next.store(true, Ordering::SeqCst);
+    rig.core
+        .doc_host
+        .queue_command(CONT, run_payload("hello", "c1", &rig.cwd))
+        .expect("queue run");
+    wait_for(
+        || {
+            entries(&rig.core, CONT).len() >= 3
+                && entries(&rig.core, CONT)
+                    .last()
+                    .is_some_and(|e| e.status == Some(MessageStatus::Complete))
+                && !rig.core.sessions.turn_in_flight(CONT)
+        },
+        "failed first turn settles",
+    )
+    .await;
+
+    rig.core
+        .doc_host
+        .queue_command(CONT, run_payload("hello again", "c2", &rig.cwd))
+        .expect("queue run");
+    wait_for(|| rig.new.runs.lock().unwrap().len() >= 2, "re-sent turn").await;
+    let seen = rig.new.runs.lock().unwrap().clone();
+    assert_eq!(seen[1].resume, None);
+    assert!(
+        seen[1].prompt.starts_with(packet.as_str()),
+        "{}",
+        seen[1].prompt
+    );
+    assert!(
+        seen[1]
+            .prompt
+            .ends_with("<latest_user_message>\nhello again\n</latest_user_message>")
+    );
+}

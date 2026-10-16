@@ -141,6 +141,20 @@ struct CreateSidechatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ContinueInNewThreadParams {
+    source_chat_id: String,
+    chat_id: String,
+    harness: HarnessId,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning: Option<zeron_proto::ReasoningLevel>,
+    #[serde(flatten)]
+    profile: crate::doc_host::ProfileParams,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CreateThreadParams {
     from_chat_id: String,
     prompt: String,
@@ -2300,6 +2314,7 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::CONTINUE_IN_NEW_THREAD
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -3030,6 +3045,26 @@ impl RpcService for EngineRpc {
                 let chat = self
                     .workspace
                     .create_sidechat(&p.source_chat_id, &p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&chat)
+            }
+            methods::CONTINUE_IN_NEW_THREAD => {
+                let p: ContinueInNewThreadParams = parse_params(params)?;
+                let packet = self
+                    .sessions
+                    .provider_switch_packet(&p.source_chat_id)
+                    .unwrap_or_default();
+                let chat = self
+                    .doc_host
+                    .continue_in_new_thread(
+                        &p.source_chat_id,
+                        &p.chat_id,
+                        p.harness,
+                        p.model.as_deref(),
+                        p.reasoning,
+                        &p.profile,
+                        &packet,
+                    )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chat)
             }

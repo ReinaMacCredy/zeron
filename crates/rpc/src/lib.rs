@@ -99,6 +99,8 @@ pub mod methods {
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.
     pub const CREATE_SIDECHAT: &str = "CreateSidechat";
+    /// `{sourceChatId, chatId, harness, model?, reasoning?, profileId?}` → `Chat`.
+    pub const CONTINUE_IN_NEW_THREAD: &str = "ContinueInNewThread";
     // Thread tools (peer chats, d25). IPC-only; the caller identity comes from
     // the engine-spawned `zeron mcp --chat` process, never from the agent.
     /// Open a peer chat in `fromChatId`'s project, stamped `createdByChatId`,

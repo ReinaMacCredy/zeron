@@ -3901,6 +3901,53 @@ impl DocHost {
         Ok(chat_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_in_new_thread(
+        &self,
+        source_chat_id: &str,
+        chat_id: &str,
+        harness: zeron_proto::HarnessId,
+        model: Option<&str>,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+        profile: &ProfileParams,
+        packet: &str,
+    ) -> Result<zeron_proto::Chat, EngineError> {
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
+        if let Some(existing) = workspace.chat(chat_id)? {
+            return Ok(existing);
+        }
+        let source = workspace
+            .chat(source_chat_id)?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {source_chat_id}")))?;
+        let config = self.derived_config(&source, Some(harness), model, reasoning, profile)?;
+        let from = self.harness_for(source_chat_id);
+        let chat = workspace.create_handoff_chat(&source, chat_id, from, config)?;
+        let title = source
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("chat")
+            .to_string();
+        let route = zeron_doc::HandoffRoute {
+            from_harness: Some(from),
+            from_model: source.config.and_then(|config| config.model),
+            to_model: chat.config.as_ref().and_then(|config| config.model.clone()),
+            source_chat_id: Some(source.id),
+            source_title: Some(title.clone()),
+        };
+        self.open(chat_id)?.write_system_note_with(
+            &new_id(),
+            &format!("Continued from {title}."),
+            None,
+            Some((harness, packet, route)),
+            now_ms(),
+        )?;
+        Ok(chat)
+    }
+
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
     pub fn update_queued_message(
