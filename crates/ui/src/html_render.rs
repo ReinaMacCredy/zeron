@@ -216,9 +216,6 @@ const SIZE_SCRIPT: &str = r#"(function(){var h,z=function(){var r=document.docum
 // Snapshots are taken only while the page reports a change, at most every 250ms.
 const ACTIVITY_SCRIPT: &str = r#"(function(){var t=0;function a(){var n=Date.now();if(n-t<250||!window.ipc)return;t=n;window.ipc.postMessage(JSON.stringify({active:1}));}function w(f){return typeof f==="function"?function(){a();return f.apply(this,arguments);}:f;}var r=window.requestAnimationFrame;window.requestAnimationFrame=function(f){a();return r.call(window,f);};var st=window.setTimeout,si=window.setInterval;window.setTimeout=function(f){var g=[].slice.call(arguments);g[0]=w(f);return st.apply(window,g);};window.setInterval=function(f){var g=[].slice.call(arguments);g[0]=w(f);return si.apply(window,g);};new MutationObserver(a).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});["transitionrun","transitionend","animationstart","animationiteration","animationend","input","change","scroll","load"].forEach(function(e){window.addEventListener(e,a,true);});})();"#;
 
-// Snapshots omit WebKit's selection highlight, so the page draws its own.
-const SELECTION_SCRIPT: &str = r#"(function(){var l=null;function d(){var s=getSelection();if(l){l.remove();l=null;}if(!s||s.isCollapsed||!s.rangeCount)return;var c=getComputedStyle(document.documentElement).getPropertyValue("--selection").trim()||"rgba(0,122,255,.3)";l=document.createElement("div");l.setAttribute("aria-hidden","true");l.style.cssText="position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647";for(var i=0;i<s.rangeCount;i++){var rs=s.getRangeAt(i).getClientRects();for(var j=0;j<rs.length;j++){var r=rs[j];if(!r.width||!r.height)continue;var b=document.createElement("div");b.style.cssText="position:absolute;border-radius:2px;background:"+c+";left:"+(r.left+scrollX)+"px;top:"+(r.top+scrollY)+"px;width:"+r.width+"px;height:"+r.height+"px";l.appendChild(b);}}document.documentElement.appendChild(l);}document.addEventListener("selectionchange",d);window.addEventListener("resize",d);})();"#;
-
 fn attributes_script(theme: &Theme) -> String {
     format!(
         "(function(){{var d=document.documentElement;d.setAttribute(\"data-surface\",\"{}\");d.setAttribute(\"data-appearance\",\"{}\");}})();",
@@ -253,7 +250,6 @@ fn bootstrap_markup(scan: &str, theme: &Theme, font_size: f32, inline: bool) -> 
     if inline {
         markup.push_str(SIZE_SCRIPT);
         markup.push_str(ACTIVITY_SCRIPT);
-        markup.push_str(SELECTION_SCRIPT);
     }
     markup.push_str("</script>");
     markup
@@ -496,10 +492,9 @@ mod tests {
         let inline = inject_bootstrap("<p>x</p>", &theme(), 16.0, true);
         let preview = inject_bootstrap("<p>x</p>", &theme(), 16.0, false);
         assert!(inline.contains("window.ipc.postMessage"));
-        assert!(inline.contains("{active:1}") && inline.contains("selectionchange"));
+        assert!(inline.contains("{active:1}"));
         assert!(inline.contains("html{background:transparent"));
         assert!(!preview.contains("window.ipc"));
-        assert!(!preview.contains("selectionchange"));
         assert!(preview.contains("html{background:var(--background)"));
     }
 

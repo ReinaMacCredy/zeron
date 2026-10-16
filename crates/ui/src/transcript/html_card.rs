@@ -269,7 +269,13 @@ impl Transcript {
             .cloned()
         {
             Some(page) => {
-                page.snapshot();
+                if page.snapshot() {
+                    let until =
+                        std::time::Instant::now() + crate::browser::inline::FRAME_INTERVAL * 2;
+                    if let Some(live) = pages.live_until.get_mut(key) {
+                        *live = (*live).max(until);
+                    }
+                }
                 true
             }
             None => {
@@ -605,12 +611,14 @@ fn page_surface(
         gpui::canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
+                let mut shown = None;
                 if let Some(page) = &page {
                     let mut mask = window.content_mask().bounds;
                     if let Some(region) = region {
                         mask = mask.intersect(&region);
                     }
                     page.sync_on_present(bounds, mask, window);
+                    shown = Some(bounds.intersect(&mask));
                 }
                 if let Some((image, scale)) = &frame {
                     // At the frame's own scale, so a reflowing page is clipped, never stretched.
@@ -622,20 +630,43 @@ fn page_surface(
                             px(pixels.height.0 as f32 / scale),
                         ),
                     );
-                    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                        let _ = window.paint_image(
-                            painted,
-                            gpui::Corners::default(),
-                            image.clone(),
-                            0,
-                            false,
+                    // The native page shows through `shown`; a frame under it would double its pixels.
+                    for part in covered_parts(bounds, shown) {
+                        window.with_content_mask(
+                            Some(gpui::ContentMask { bounds: part }),
+                            |window| {
+                                let _ = window.paint_image(
+                                    painted,
+                                    gpui::Corners::default(),
+                                    image.clone(),
+                                    0,
+                                    false,
+                                );
+                            },
                         );
-                    });
+                    }
                 }
             },
         )
         .size_full(),
     )
+}
+
+fn covered_parts(bounds: Bounds<Pixels>, shown: Option<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
+    let Some(shown) =
+        shown.filter(|shown| shown.size.width > px(0.5) && shown.size.height > px(0.5))
+    else {
+        return vec![bounds];
+    };
+    [
+        Bounds::from_corners(bounds.origin, point(bounds.right(), shown.top())),
+        Bounds::from_corners(point(bounds.left(), shown.bottom()), bounds.bottom_right()),
+        Bounds::from_corners(point(bounds.left(), shown.top()), shown.bottom_left()),
+        Bounds::from_corners(shown.top_right(), point(bounds.right(), shown.bottom())),
+    ]
+    .into_iter()
+    .filter(|part| part.size.width > px(0.5) && part.size.height > px(0.5))
+    .collect()
 }
 
 /// The transcript region a page takes pointer input in: the list's clip
@@ -1164,6 +1195,28 @@ mod tests {
         let tiny = native_mask(list, 38.0, 2000.0, 2000.0);
         assert_eq!(tiny.size.height, px(0.0));
         assert_eq!(tiny.size.width, px(0.0));
+    }
+
+    #[test]
+    fn frames_fill_only_the_parts_chrome_covers() {
+        let card = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(400.0), px(600.0)));
+        let shown = Bounds::from_corners(point(px(0.0), px(100.0)), point(px(300.0), px(500.0)));
+        let parts = covered_parts(card, Some(shown));
+        let area: f32 = parts
+            .iter()
+            .map(|part| f32::from(part.size.width) * f32::from(part.size.height))
+            .sum();
+        assert_eq!(area, 400.0 * 600.0 - 300.0 * 400.0);
+        assert!(
+            parts
+                .iter()
+                .all(|part| part.intersect(&shown).size.height <= px(0.0)
+                    || part.intersect(&shown).size.width <= px(0.0))
+        );
+        assert!(covered_parts(card, Some(card)).is_empty());
+        assert_eq!(covered_parts(card, None), vec![card]);
+        let hidden = Bounds::from_corners(point(px(0.0), px(700.0)), point(px(400.0), px(700.0)));
+        assert_eq!(covered_parts(card, Some(hidden)), vec![card]);
     }
 
     #[test]

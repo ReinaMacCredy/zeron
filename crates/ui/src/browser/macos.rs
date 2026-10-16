@@ -357,31 +357,40 @@ pub(super) fn attach_clip(
         });
         msg_send![super(object), initWithFrame: objc2_foundation::NSRect::ZERO]
     };
-    clip.setWantsLayer(true);
     clip.setAutoresizesSubviews(false);
-    let clip_mask: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
+    let clip_mask = mask_layer(&clip);
+    clip.setHidden(true);
+    add_below_overlay(&parent, &clip);
+    clip.addSubview(view);
+    Ok((parent, clip, clip_mask))
+}
+
+pub(super) fn mask_layer(view: &NSView) -> Retained<AnyObject> {
+    view.setWantsLayer(true);
+    let mask: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
     unsafe {
         let color = NSColor::blackColor().CGColor();
-        let _: () = msg_send![&*clip_mask, setBackgroundColor: &*color];
-        let layer: *mut AnyObject = msg_send![&*clip, layer];
+        let _: () = msg_send![&*mask, setBackgroundColor: &*color];
+        let layer: *mut AnyObject = msg_send![view, layer];
         let _: () = msg_send![layer, setMasksToBounds: true];
-        let _: () = msg_send![layer, setMask: &*clip_mask];
+        let _: () = msg_send![layer, setMask: &*mask];
     }
-    clip.setHidden(true);
-    parent.addSubview(&clip);
-    // Keep every native tab beneath the shared GPUI overlay plane.
+    mask
+}
+
+// Beneath the shared GPUI overlay plane, so menus and popovers keep their pixels and clicks.
+pub(super) fn add_below_overlay(parent: &NSView, view: &NSView) {
+    parent.addSubview(view);
     for sibling in parent.subviews() {
         if sibling.class().name() == c"GPUIOverlayView" {
             parent.addSubview_positioned_relativeTo(
-                &clip,
+                view,
                 NSWindowOrderingMode::Below,
                 Some(&sibling),
             );
             break;
         }
     }
-    clip.addSubview(view);
-    Ok((parent, clip, clip_mask))
 }
 
 /// Shows `bounds ∩ mask` of a webview laid out at the full `bounds`.

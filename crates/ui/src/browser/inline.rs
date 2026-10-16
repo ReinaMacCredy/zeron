@@ -1,20 +1,22 @@
 //! Live agent HTML pages inside the transcript. Each card owns a WKWebView
-//! kept at the card's exact bounds but fully transparent: WebKit still lays
-//! it out, animates it and answers snapshots, and the card paints the latest
-//! snapshot, so the page clips, fades and blurs under the transcript chrome
-//! like text and GPUI popovers draw over it. The transparent view takes
-//! pointer input only while armed and inside the card's input region. Rows
-//! scrolled out of the list are never painted, so a window-level sweep
-//! disarms any page whose card did not sync during the frame being presented.
+//! kept at the card's exact bounds and shown natively only inside the card's
+//! input region, the part no transcript chrome covers; there the reader
+//! hovers, clicks, types and scrolls the real page. Where chrome covers the
+//! card, the card paints the page's latest WebKit snapshot, so the page still
+//! fades under the titlebar and runs on under the composer glass. The view
+//! takes pointer input only while armed and inside the region. Rows scrolled
+//! out of the list are never painted, so a window-level sweep hides any page
+//! whose card did not sync during the frame being presented.
+use super::macos::{add_below_overlay, mask_layer};
 use super::model::allowed_navigation;
-use gpui::{Bounds, IntoElement, Pixels, Point, RenderImage, SharedString, Styled, Window};
+use gpui::{Bounds, IntoElement, Pixels, Point, RenderImage, SharedString, Styled, Window, px};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send};
 use objc2_app_kit::{
     NSEvent, NSEventMask, NSEventType, NSImage, NSView, NSWindow,
     NSWindowDidChangeOcclusionStateNotification, NSWindowDidDeminiaturizeNotification,
-    NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowOcclusionState,
 };
 use objc2_foundation::{
     NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSOperationQueue,
@@ -46,6 +48,7 @@ pub(crate) type InlineSender = tokio::sync::mpsc::UnboundedSender<(SharedString,
 
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const POINTER_INTERVAL: Duration = Duration::from_millis(100);
+const WHEEL_SETTLE: Duration = Duration::from_millis(150);
 
 struct PolicyState {
     key: SharedString,
@@ -192,10 +195,13 @@ struct Host {
     parent: Retained<NSView>,
     key: SharedString,
     tx: InlineSender,
+    mask: Retained<AnyObject>,
     placed: Cell<Option<(Bounds<Pixels>, Bounds<Pixels>)>>,
     window: u64,
     stamp: Cell<u64>,
     concealed: Cell<bool>,
+    covered: Cell<bool>,
+    stale: Arc<AtomicBool>,
     snapshotting: Arc<AtomicBool>,
     last_snapshot: Cell<Option<Instant>>,
     missed: Arc<AtomicBool>,
@@ -209,6 +215,7 @@ pub(crate) struct InlineWebView(Rc<RefCell<Host>>);
 thread_local! {
     static TICKS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     static HOSTS: RefCell<Vec<Weak<RefCell<Host>>>> = const { RefCell::new(Vec::new()) };
+    static WHEELED: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 fn tick(window: u64) -> u64 {
@@ -277,6 +284,8 @@ impl InlineWebView {
         let link_key = key.clone();
         let clicked = Arc::new(AtomicU64::new(0));
         let link_clicked = clicked.clone();
+        let stale = Arc::new(AtomicBool::new(true));
+        let ipc_stale = stale.clone();
         let configuration = unsafe {
             let configuration = objc2_web_kit::WKWebViewConfiguration::new(mtm);
             configuration
@@ -293,6 +302,7 @@ impl InlineWebView {
             .with_accept_first_mouse(true)
             .with_ipc_handler(move |request| {
                 if let Some(event) = page_signal(request.body()) {
+                    ipc_stale.store(true, Ordering::Release);
                     let _ = ipc_tx.send((ipc_key.clone(), event));
                 }
             })
@@ -318,20 +328,10 @@ impl InlineWebView {
             msg_send![super(object), initWithFrame: parent.bounds()]
         };
         input.setAutoresizesSubviews(false);
-        parent.addSubview(&input);
-        // Beneath GPUI's overlay plane, so popovers and menus keep their clicks.
-        for sibling in parent.subviews() {
-            if sibling.class().name() == c"GPUIOverlayView" {
-                parent.addSubview_positioned_relativeTo(
-                    &input,
-                    NSWindowOrderingMode::Below,
-                    Some(&sibling),
-                );
-                break;
-            }
-        }
+        let mask = mask_layer(&input);
+        add_below_overlay(&parent, &input);
         input.addSubview(&view);
-        // Transparent, never hidden: WebKit stops rendering a hidden view.
+        // Transparent until painted, never hidden: WebKit stops rendering a hidden view.
         view.setAlphaValue(0.0);
         view.setHidden(false);
         let policy: Retained<Policy> = {
@@ -349,6 +349,7 @@ impl InlineWebView {
             parent.clone(),
             view.clone(),
             clicked,
+            stale.clone(),
             key.clone(),
             tx.clone(),
         );
@@ -362,10 +363,13 @@ impl InlineWebView {
             parent,
             key,
             tx,
+            mask,
             placed: Cell::new(None),
             window: window.window_handle().window_id().as_u64(),
             stamp: Cell::new(u64::MAX),
             concealed: Cell::new(true),
+            covered: Cell::new(false),
+            stale,
             snapshotting: Arc::new(AtomicBool::new(false)),
             last_snapshot: Cell::new(None),
             missed,
@@ -423,21 +427,29 @@ impl InlineWebView {
         self.0.borrow().painted()
     }
 
-    pub(crate) fn snapshot(&self) {
+    /// Whether a frame is still owed once the transcript stops scrolling.
+    pub(crate) fn snapshot(&self) -> bool {
         let host = self.0.borrow();
+        let first = host.last_snapshot.get().is_none();
         if !host.painted()
             || host.snapshotting.load(Ordering::Acquire)
             || host
                 .last_snapshot
                 .get()
                 .is_some_and(|at| at.elapsed() < FRAME_INTERVAL)
+            // Only chrome-covered parts show frames; the first is kept for a card scrolled under it later.
+            || !(first || host.covered.get())
         {
-            return;
+            return false;
+        }
+        if !first && wheeling() {
+            return host.stale.load(Ordering::Acquire);
         }
         let Some(mtm) = MainThreadMarker::new() else {
-            return;
+            return false;
         };
         host.snapshotting.store(true, Ordering::Release);
+        host.stale.store(false, Ordering::Release);
         host.last_snapshot.set(Some(Instant::now()));
         if debug() {
             tracing::info!(page = %host.key, "inline page snapshot");
@@ -462,6 +474,7 @@ impl InlineWebView {
             host.view
                 .takeSnapshotWithConfiguration_completionHandler(Some(&config), &done);
         }
+        false
     }
 }
 
@@ -506,7 +519,13 @@ impl Host {
         } else if self.pointer_rests_inside() {
             set_armed(&self.input, &self.key, true, "rest");
         }
+        let covered = visible.size.width < bounds.size.width - px(0.5)
+            || visible.size.height < bounds.size.height - px(0.5);
+        let newly_covered = covered && !self.covered.replace(covered);
         if self.concealed.replace(false) {
+            self.view.setAlphaValue(1.0);
+            let _ = self.tx.send((self.key.clone(), InlineEvent::Active));
+        } else if newly_covered && self.stale.load(Ordering::Acquire) {
             let _ = self.tx.send((self.key.clone(), InlineEvent::Active));
         }
     }
@@ -530,7 +549,11 @@ impl Host {
             previous
         };
         self.input.setFrame(self.parent.bounds());
-        self.input.ivars().region.set(self.rect(visible));
+        let region = self.rect(visible);
+        self.input.ivars().region.set(region);
+        unsafe {
+            let _: () = msg_send![&*self.mask, setFrame: region];
+        }
         self.view.setFrame(self.rect(bounds));
         unsafe {
             // Left open for the matching Metal presentation, like browser tabs.
@@ -549,6 +572,7 @@ impl Host {
             let _ = self.web.focus_parent();
         }
         set_armed(&self.input, &self.key, false, "unpainted");
+        self.view.setAlphaValue(0.0);
         self.input.ivars().region.set(NSRect::ZERO);
         self.placed.set(None);
     }
@@ -603,6 +627,7 @@ fn input_monitor(
     parent: Retained<NSView>,
     view: Retained<WKWebView>,
     clicked: Arc<AtomicU64>,
+    stale: Arc<AtomicBool>,
     key: SharedString,
     tx: InlineSender,
 ) -> Option<Retained<AnyObject>> {
@@ -628,16 +653,18 @@ fn input_monitor(
                 .is_none_or(|at| at.elapsed() >= POINTER_INTERVAL)
             {
                 last_pointer.set(Some(Instant::now()));
+                stale.store(true, Ordering::Release);
                 let _ = tx.send((key.clone(), InlineEvent::Pointer));
             }
         };
         match kind {
             NSEventType::MouseMoved if inside => pointer(),
             NSEventType::MouseMoved => set_armed(&input, &key, false, "left"),
-            NSEventType::ScrollWheel if state.armed.get() => {
-                if inside && state.scrolls.get() && same_window {
+            NSEventType::ScrollWheel => {
+                if state.armed.get() && inside && state.scrolls.get() && same_window {
                     pointer();
                 } else {
+                    WHEELED.set(Some(Instant::now()));
                     set_armed(&input, &key, false, "wheel");
                 }
             }
@@ -671,6 +698,10 @@ fn input_monitor(
             &callback,
         )
     }
+}
+
+fn wheeling() -> bool {
+    WHEELED.get().is_some_and(|at| at.elapsed() < WHEEL_SETTLE)
 }
 
 fn on_screen(window: &NSWindow) -> bool {
