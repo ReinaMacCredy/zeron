@@ -1310,7 +1310,7 @@ impl SessionsEngine {
                     prompt: {
                         let wrapped = self
                             .inner
-                            .harness_prompt(chat_id, delivered, &user_id, turn_computer)
+                            .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer)
                             .map_or_else(|| delivered.to_owned(), |wrapped| wrapped.prompt);
                         if harness_id == HarnessId::Opencode {
                             wrapped
@@ -1681,7 +1681,7 @@ impl SessionsEngine {
             prompt: {
                 let wrapped = self
                     .inner
-                    .harness_prompt(chat_id, delivered, &user_id, turn_computer)
+                    .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer)
                     .map_or_else(|| delivered.to_string(), |wrapped| wrapped.prompt);
                 if harness_id == HarnessId::Opencode {
                     wrapped
@@ -2998,12 +2998,13 @@ impl Inner {
     fn harness_prompt(
         &self,
         chat_id: &str,
+        harness_id: HarnessId,
         typed: &str,
         user_entry_id: &str,
         computer: bool,
     ) -> Option<HarnessPrompt> {
         let wrapped = self.wrapped_prompt(chat_id, typed, user_entry_id, computer);
-        let Some(nudge) = self.context_nudge(chat_id, typed) else {
+        let Some(nudge) = self.context_nudge(chat_id, harness_id, typed) else {
             return wrapped;
         };
         let mut wrapped = wrapped.unwrap_or_else(|| HarnessPrompt {
@@ -3015,9 +3016,12 @@ impl Inner {
     }
 
     /// Slash commands go out untouched: the note would become their arguments.
-    fn context_nudge(&self, chat_id: &str, typed: &str) -> Option<String> {
+    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
         let first = self.registry.compaction_settings().nudge_percent;
         if first == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
+            return None;
+        }
+        if self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
             return None;
         }
         if lock(&self.agent_compacted).remove(chat_id) {
@@ -4577,6 +4581,7 @@ async fn drive_run(
     // typed text: only what crosses into the harness carries the sidechat wrap.
     let mut request = match inner.harness_prompt(
         &chat_id,
+        harness_id,
         &request.prompt,
         &resume_state.user_message_id,
         resume_state.turn_computer,

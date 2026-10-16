@@ -32,6 +32,8 @@ struct TestHarness {
     /// True makes a completed turn PARK its run in the chat's slot, the way
     /// every real steerable harness does.
     steerable: AtomicBool,
+    /// False reports `Compaction::None`, like Pi or an ACP agent without `/compact`.
+    can_compact: AtomicBool,
     /// Held by the next run until the test releases it.
     gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
@@ -42,6 +44,7 @@ impl TestHarness {
             requests,
             compacts: AtomicBool::new(true),
             steerable: AtomicBool::new(steerable),
+            can_compact: AtomicBool::new(true),
             gate: Mutex::new(None),
         }
     }
@@ -65,7 +68,11 @@ impl Harness for TestHarness {
         &[ReasoningLevel::Medium]
     }
     fn compaction(&self) -> Compaction {
-        Compaction::SlashText("/compact".into())
+        if self.can_compact.load(Ordering::SeqCst) {
+            Compaction::SlashText("/compact".into())
+        } else {
+            Compaction::None
+        }
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
@@ -399,7 +406,7 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_filling_context_nudges_the_agent_on_every_message() {
     let tmp = tempfile::tempdir().unwrap();
-    let (core, _harness, requests) = engine_with_one_turn(tmp.path()).await;
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
     core.registry
         .set_compaction_settings(zeron_engine::registry::CompactionSettings {
             nudge_percent: 10,
@@ -407,7 +414,10 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         })
         .unwrap();
     let cwd = tmp.path().to_string_lossy().to_string();
-    for (ix, id) in ["msg-2", "msg-3"].into_iter().enumerate() {
+    for (ix, id) in ["msg-2", "msg-3", "msg-4"].into_iter().enumerate() {
+        if id == "msg-4" {
+            harness.can_compact.store(false, Ordering::SeqCst);
+        }
         core.doc_host
             .queue_command(CHAT, run_payload(id, &cwd))
             .expect("queue run");
@@ -418,12 +428,13 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
     let nudged = "hello\n\n<system-reminder>\nContext 22.8k. Compact at a boundary, not mid-task: if this message starts a new phase, call compact first with the request as continueWith; if this turn finishes a piece of work and what comes next needs only its conclusions, call compact last. A follow-up question about the current work is not a boundary. It runs after the turn ends; name what to keep.\n</system-reminder>";
     assert_eq!(prompts[1], nudged);
     assert_eq!(prompts[2], nudged, "the reminder repeats until the chat compacts");
+    assert_eq!(prompts[3], "hello", "no reminder when the harness cannot compact");
     let typed: Vec<String> = entries(&core)
         .iter()
         .filter(|e| e.role == MessageRole::User)
         .map(entry_text)
         .collect();
-    assert_eq!(typed, ["hello", "hello", "hello"], "the transcript keeps what was typed");
+    assert_eq!(typed, ["hello", "hello", "hello", "hello"], "the transcript keeps what was typed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
