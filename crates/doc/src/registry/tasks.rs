@@ -107,8 +107,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
     ])
 }
 
-/// A re-seed sends the whole row with every field's clock in one op, and the
-/// room rejects an oversized op together with its whole batch.
+/// A re-seed sends the whole row and its clocks as one op; the room rejects an oversized op's batch.
 fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
     if !fits_op_budget(&row_to_seed_op(row)) {
         return Err(invalid("This task is too large to sync; shorten its notes"));
@@ -116,8 +115,6 @@ fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
     Ok(())
 }
 
-/// The registry's own checks on `task` as a whole row, for a client to run
-/// before it sends an edit.
 pub fn check_task_syncs(task: &Task) -> Result<(), DocError> {
     let title = checked_title(&task.title)?;
     check_notes(&task.notes)?;
