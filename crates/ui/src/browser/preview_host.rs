@@ -57,8 +57,14 @@ pub(crate) fn spawn(engine: EngineHandle, cx: &gpui::App) -> gpui::Task<()> {
                 let _ = reply.send(Err("The preview waited too long behind others.".into()));
                 continue;
             }
-            let theme = cx.update(|cx| theme_for(Theme::of(cx), request.appearance));
-            let html = crate::html_render::inject_bootstrap(&request.html, &theme, false);
+            let (theme, font_size) = cx.update(|cx| {
+                (
+                    theme_for(Theme::of(cx), request.appearance),
+                    crate::typography::font_size(cx).pixels(),
+                )
+            });
+            let html =
+                crate::html_render::inject_bootstrap(&request.html, &theme, font_size, false);
             let timeout = cx.background_executor().timer(LOAD_TIMEOUT);
             let _ = reply.send(render(&html, request.width, timeout).await);
         }

@@ -54,7 +54,7 @@ pub(super) struct HtmlPages {
     heights: HashMap<SharedString, f32>,
     sheet: Option<Sheet>,
     sheet_focus: gpui::FocusHandle,
-    theme_generation: u32,
+    style_generations: (u32, u32),
     /// The list's viewport as of this render: rows lay out while the list
     /// state is borrowed, so they cannot ask it.
     pub(super) viewport: Bounds<Pixels>,
@@ -91,13 +91,20 @@ impl HtmlPages {
             sheet: None,
             sheet_focus: cx.focus_handle(),
             viewport: Bounds::default(),
-            theme_generation: crate::theme::style_generation(),
+            style_generations: page_style(cx),
             #[cfg(target_os = "macos")]
             tx,
             #[cfg(target_os = "macos")]
             _events: events,
         }
     }
+}
+
+fn page_style(cx: &gpui::App) -> (u32, u32) {
+    (
+        crate::theme::style_generation(),
+        crate::typography::generation(cx),
+    )
 }
 
 pub(super) fn html_render_row(entry: &SessionMessageEntry, part: &MessagePart) -> Option<Row> {
@@ -367,10 +374,14 @@ impl Transcript {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let generation = crate::theme::style_generation();
-        if self.html_pages.theme_generation != generation {
-            self.html_pages.theme_generation = generation;
-            let script = crate::html_render::retheme_script(Theme::of(cx), true);
+        let style = page_style(cx);
+        if self.html_pages.style_generations != style {
+            self.html_pages.style_generations = style;
+            let script = crate::html_render::retheme_script(
+                Theme::of(cx),
+                crate::typography::font_size(cx).pixels(),
+                true,
+            );
             for page in self.html_pages.pages.values() {
                 page.eval(&script);
             }
@@ -393,7 +404,12 @@ impl Transcript {
             {
                 self.html_pages.pages.remove(&oldest);
             }
-            let html = crate::html_render::inject_bootstrap(html, Theme::of(cx), true);
+            let html = crate::html_render::inject_bootstrap(
+                html,
+                Theme::of(cx),
+                crate::typography::font_size(cx).pixels(),
+                true,
+            );
             match crate::browser::inline::InlineWebView::new(
                 window,
                 row_id.clone(),
@@ -706,7 +722,12 @@ impl Transcript {
     ) -> AnyElement {
         let sheet = self.html_pages.sheet.as_mut().expect("sheet is open");
         if sheet.page.is_none() {
-            let html = crate::html_render::inject_bootstrap(source, Theme::of(cx), true);
+            let html = crate::html_render::inject_bootstrap(
+                source,
+                Theme::of(cx),
+                crate::typography::font_size(cx).pixels(),
+                true,
+            );
             match crate::browser::inline::InlineWebView::new(
                 window,
                 format!("{row}{SHEET_SUFFIX}").into(),
