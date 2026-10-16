@@ -201,7 +201,7 @@ impl Shell {
                 && tween.is_some_and(|tween| self.tween_active(Some(tween)) && tween.from > 0.5))
         };
         let inputs: FitInputs = (
-            self.viewport_width,
+            self.content_width(),
             self.settings.sidebar_width,
             (
                 present(!self.settings.sidebar_collapsed, self.sidebar_tween),
@@ -396,7 +396,7 @@ impl Shell {
         }
         let files = self.files_width_for(fit, sidebar, cx);
         self.settings.right_pane_width =
-            content_split((self.viewport_width - sidebar - files).max(0.0));
+            content_split((self.content_width() - sidebar - files).max(0.0));
         true
     }
 
@@ -550,7 +550,7 @@ impl Shell {
         // Sizing the composer from sidebar_target() made it overflow that
         // column while the sidebar closed beside an open right pane.
         conversation_width(
-            self.viewport_width - self.files_reserved_width(cx),
+            self.content_width() - self.files_reserved_width(cx),
             self.sidebar_now(),
             right_width,
         )
@@ -566,7 +566,8 @@ impl Shell {
     pub(super) fn main_content_width(&self, target: f32, cx: &App) -> f32 {
         if self.main_takeover_active() {
             let available =
-                (self.viewport_width - self.files_reserved_width(cx) - self.sidebar_now()).max(0.0);
+                (self.content_width() - self.files_reserved_width(cx) - self.sidebar_now())
+                    .max(0.0);
             let retained = self
                 .main_takeover_tween
                 .map(|tween| {
@@ -577,7 +578,7 @@ impl Shell {
                         // conversation will rest, which a panel opening or
                         // closing meanwhile may have moved.
                         let settled = conversation_width(
-                            self.viewport_width - self.files_settled_width(cx),
+                            self.content_width() - self.files_settled_width(cx),
                             self.sidebar_target(),
                             self.right_settled_target(cx),
                         );

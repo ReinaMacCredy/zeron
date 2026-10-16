@@ -1596,7 +1596,7 @@ impl Render for SessionRowGhost {
                 .sidebar_session_transfer
                 .as_ref()
                 .is_some_and(|transfer| transfer.row_height > 0.0)
-                && f32::from(window.mouse_position().x) <= shell.sidebar_now()
+                && f32::from(window.mouse_position().x) <= shell.sidebar_edge()
         });
         if lifted {
             Empty.into_any_element()
@@ -3986,10 +3986,10 @@ impl Shell {
             // intentionally consumes it completely. Both ride the sidebar
             // tween so toggling it remains seamless.
             if self.right_pane_expanded {
-                right_pane_takeover_width(self.viewport_width - files, sidebar)
+                right_pane_takeover_width(self.content_width() - files, sidebar)
             } else {
                 self.settings.right_pane_width.min(right_pane_max_width(
-                    self.viewport_width - files,
+                    self.content_width() - files,
                     sidebar,
                     CHAT_PANEL_MIN,
                 ))
@@ -4100,7 +4100,7 @@ impl Shell {
         self.main_takeover_tween = was_expanded.then(|| WidthTween {
             from: from_main,
             to: conversation_width(
-                self.viewport_width - self.files_reserved_width(cx),
+                self.content_width() - self.files_reserved_width(cx),
                 sidebar_now,
                 to,
             ),
@@ -6188,7 +6188,7 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let x = f32::from(event.event.position.x);
+        let x = f32::from(event.event.position.x) - self.content_left();
         let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion);
         let was_collapsed = self.settings.sidebar_collapsed;
         self.settings.sidebar_width = sample.width;
@@ -6221,7 +6221,7 @@ impl Shell {
         }
         let inside_window = event.bounds.contains(&event.event.position);
         let pointer_x = f32::from(event.event.position.x);
-        let sidebar_left = f32::from(event.bounds.left());
+        let sidebar_left = f32::from(event.bounds.left()) + self.content_left();
         let inside_sidebar =
             pointer_x >= sidebar_left && pointer_x <= sidebar_left + self.sidebar_now();
         if !inside_window || !inside_sidebar {
@@ -6253,20 +6253,19 @@ impl Shell {
     fn on_split_drag(
         &mut self,
         event: &gpui::DragMoveEvent<SplitResize>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let viewport = f32::from(window.viewport_size().width);
         let left = self.sidebar_target();
         let column = conversation_width(
-            viewport - self.files_reserved_width(cx),
+            self.content_width() - self.files_reserved_width(cx),
             left,
             self.right_visible_width(cx),
         );
         if column < SPLIT_PANE_MIN * 2.0 {
             return;
         }
-        let mut x = f32::from(event.event.position.x) - left;
+        let mut x = f32::from(event.event.position.x) - self.content_left() - left;
         if (x - column / 2.0).abs() < SPLIT_SNAP {
             x = column / 2.0;
         }
@@ -6285,7 +6284,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let viewport = f32::from(window.viewport_size().width);
+        let viewport = f32::from(window.viewport_size().width) - self.content_inset();
         let width = viewport - self.files_reserved_width(cx) - f32::from(event.event.position.x);
         // Use the same shared budget as rendering, including compact windows.
         let max = self.surface_max_width(cx);
@@ -8779,6 +8778,22 @@ impl Shell {
         motion::resize_bounce_offset(bounce.edge, raw)
     }
 
+    pub(super) fn content_left(&self) -> f32 {
+        0.0
+    }
+
+    pub(super) fn content_inset(&self) -> f32 {
+        0.0
+    }
+
+    pub(super) fn content_width(&self) -> f32 {
+        (self.viewport_width - self.content_left() - self.content_inset()).max(0.0)
+    }
+
+    pub(super) fn sidebar_edge(&self) -> f32 {
+        self.content_left() + self.sidebar_now()
+    }
+
     pub(super) fn sidebar_now(&self) -> f32 {
         let fit = self.horizontal_fit();
         if !fit.sidebar {
@@ -8907,7 +8922,7 @@ impl Shell {
 
     fn titlebar_nav_shift(&self) -> f32 {
         let natural = self.titlebar_toggle_start() + 24.0 + TITLEBAR_GROUP_GAP;
-        (self.sidebar_now() + Theme::SPACE_SM - natural).max(0.0)
+        (self.sidebar_edge() + Theme::SPACE_SM - natural).max(0.0)
     }
 
     /// The session titlebar, or on the Pull requests route the open pull
@@ -8921,7 +8936,7 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pl(px((self.sidebar_now() + Theme::SPACE_LG)
+            .pl(px((self.sidebar_edge() + Theme::SPACE_LG)
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
             .when_some(
@@ -8948,7 +8963,7 @@ impl Shell {
         (reveal > 0.01).then(|| {
             div()
                 .absolute()
-                .left(px(self.sidebar_now()))
+                .left(px(self.sidebar_edge()))
                 .top(px((Theme::TITLEBAR_HEIGHT - 20.0) / 2.0))
                 .w(px(1.0))
                 .h(px(20.0))
@@ -9166,7 +9181,7 @@ impl Shell {
     /// edge, sliding and fading with it as it collapses. They never cross
     /// back over the control cluster on a narrow sidebar.
     fn render_sidebar_options_titlebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sidebar = self.sidebar_now();
+        let sidebar = self.sidebar_edge();
         let reveal = self.sidebar_reveal();
         if reveal <= 0.01 {
             return None;
@@ -9326,7 +9341,7 @@ impl Shell {
             cfg!(target_os = "windows"),
             self.linux_right_caption_count(),
             base,
-        )
+        ) + self.content_inset()
     }
 
     /// Zeron-drawn Linux caption controls, one overlay per populated side.
@@ -9618,7 +9633,7 @@ impl Shell {
         }
         let sidebar_width = self.settings.sidebar_width;
         // Dropdowns contain themselves to the page pane beside this column.
-        settings::widgets::set_sidebar_width(sidebar_width, cx);
+        settings::widgets::set_sidebar_width(self.content_left() + sidebar_width, cx);
         let nav = self.render_settings_nav(section, &theme, window, cx);
         // The footer uses the chat sidebar's theme so the account and
         // settings buttons render identically in both places.
@@ -14519,7 +14534,7 @@ impl Shell {
             if artwork_frame.active {
                 window.request_animation_frame();
             }
-            let width = (self.viewport_width - self.sidebar_now()).max(0.0);
+            let width = (self.content_width() - self.sidebar_now()).max(0.0);
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
             let full_height = new_thread_background_height(self.viewport_height);
@@ -14570,7 +14585,7 @@ impl Shell {
                 if chat_artwork.is_some() && chat_artwork_opacity < 1.0 {
                     window.request_animation_frame();
                 }
-                let full_width = (self.viewport_width - self.sidebar_now()).max(0.0);
+                let full_width = (self.content_width() - self.sidebar_now()).max(0.0);
                 let height = crate::chat_background::layer_height(
                     chat_background.placement,
                     self.viewport_height,
@@ -14593,7 +14608,7 @@ impl Shell {
                         .absolute()
                         .top_0()
                         .left(px(-(conversation_width(
-                            self.viewport_width - self.files_reserved_width(cx),
+                            self.content_width() - self.files_reserved_width(cx),
                             self.sidebar_target(),
                             self.right_visible_width(cx),
                         ) - main_content_width)))
@@ -16301,7 +16316,7 @@ impl Shell {
         self.main_takeover_tween = Some(WidthTween {
             from: from_main,
             to: conversation_width(
-                self.viewport_width - self.files_reserved_width(cx),
+                self.content_width() - self.files_reserved_width(cx),
                 sidebar_now,
                 to,
             ),
@@ -18101,7 +18116,7 @@ impl Render for Shell {
                                 div()
                                     .id("sidebar-peek-edge")
                                     .absolute()
-                                    .left_0()
+                                    .left(px(self.content_left()))
                                     .top(px(Theme::TITLEBAR_HEIGHT))
                                     .bottom_0()
                                     .w(px(sidebar_peek::EDGE))

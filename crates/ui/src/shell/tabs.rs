@@ -1528,13 +1528,13 @@ impl Shell {
 
     /// The trailing titlebar strip follows the columns beneath it.
     pub(super) fn titlebar_trailing_layout(&self, cx: &App) -> TitlebarTrailing {
-        let sidebar_now = self.sidebar_now();
+        let sidebar_edge = self.sidebar_edge();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Content starts at the inset card's left edge while the sidebar is
         // open, and slides toward the control cluster as it collapses.
         let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
+            (sidebar_edge + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
 
         // Trailing titlebar section. With the changes pane open this is the
         // PANE'S HEADER — a strip exactly as wide as the pane carrying its
@@ -1570,7 +1570,7 @@ impl Shell {
             // collapsed (the chips clear it instead of underlapping).
             let cluster_end =
                 self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP + plus_inset - 14.0;
-            (sidebar_now - 8.0).max(cluster_end)
+            (sidebar_edge - 8.0).max(cluster_end)
         } else {
             content_left
         };

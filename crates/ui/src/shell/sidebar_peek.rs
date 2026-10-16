@@ -86,7 +86,7 @@ impl Shell {
 
     fn sidebar_peek_input(&self, window: &Window, cx: &App) -> PeekInput {
         let position = window.mouse_position();
-        let x = f32::from(position.x);
+        let x = f32::from(position.x) - self.content_left();
         let y = f32::from(position.y);
         // MouseExit can be delivered when handing input to a native child,
         // while the window still reports hovered and its last position is stale.
@@ -305,7 +305,7 @@ impl Shell {
         gpui::deferred(
             div()
                 .absolute()
-                .left_0()
+                .left(px(self.content_left()))
                 .top(px(Theme::TITLEBAR_HEIGHT))
                 .bottom_0()
                 .w(px(INSET + card_width))

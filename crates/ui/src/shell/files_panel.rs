@@ -79,7 +79,7 @@ impl Shell {
     fn files_layout(&self, visible: f32, cx: &App) -> FilesPanelLayout {
         let fit = self.horizontal_fit();
         files_panel_layout(
-            self.viewport_width,
+            self.content_width(),
             self.sidebar_now(),
             if fit.files && (self.files_panel_open(cx) || self.tween_active(self.files_tween)) {
                 self.settings.files_panel_width
@@ -134,7 +134,7 @@ impl Shell {
             && let Some(exiting) = self.fit_exit_width(2)
         {
             // Exits clamp in layout order so the columns never overflow.
-            return exiting.min((self.viewport_width - self.sidebar_now()).max(0.0));
+            return exiting.min((self.content_width() - self.sidebar_now()).max(0.0));
         }
         self.files_layout(
             self.ease_toward(self.files_tween, self.files_target(cx)),
@@ -164,7 +164,7 @@ impl Shell {
         };
         let right = fit.right && self.right_pane_open(cx);
         files_panel_layout(
-            self.viewport_width,
+            self.content_width(),
             sidebar,
             preferred,
             preferred,
@@ -182,13 +182,13 @@ impl Shell {
     pub(super) fn right_visible_width(&self, cx: &App) -> f32 {
         if !self.horizontal_fit().right {
             let available =
-                (self.viewport_width - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
+                (self.content_width() - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
             return self
                 .fit_exit_width(1)
                 .map_or(0.0, |width| width.min(available));
         }
         let available =
-            (self.viewport_width - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
+            (self.content_width() - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
         // Leaving takeover returns the conversation's width over the same
         // tween. Applying its settled minimum here jumps the seam by 300px
         // before that first frame (and breaks mid-flight reversals).
@@ -429,7 +429,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let requested = f32::from(window.viewport_size().width) - f32::from(event.event.position.x);
+        let requested = f32::from(window.viewport_size().width)
+            - self.content_inset()
+            - f32::from(event.event.position.x);
         self.settings.files_panel_width = requested.clamp(FILES_PANEL_MIN, FILES_PANEL_MAX);
         self.pane_resize_dragging = Some(PaneResizeKind::Files);
         self.pane_resize_active = (requested > FILES_PANEL_MIN && requested < FILES_PANEL_MAX)
