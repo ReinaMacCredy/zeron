@@ -229,7 +229,12 @@ async fn engine_with_one_turn_on(
     client
         .call(
             zeron_rpc::methods::MUTATE,
-            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": CHAT,
+                "deviceId": core.device_id,
+                "cwd": dir.to_string_lossy(),
+            }),
         )
         .await
         .expect("createChat");
@@ -361,6 +366,13 @@ async fn idle_compaction_says_why_it_ran() {
 async fn an_agent_compaction_waits_for_its_turn_then_continues() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    // Below the 2.3k the compaction leaves: the follow-up must still go out bare.
+    core.registry
+        .set_compaction_settings(zeron_engine::registry::CompactionSettings {
+            nudge_tokens: 2_000,
+            ..Default::default()
+        })
+        .unwrap();
     let (release, gate) = tokio::sync::oneshot::channel();
     *harness.gate.lock().unwrap() = Some(gate);
     core.doc_host
