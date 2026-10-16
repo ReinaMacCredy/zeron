@@ -3002,7 +3002,8 @@ fn sidechat_prompt(typed: &str, source_copy: &str) -> String {
 /// until `budget` characters are spent, then joined oldest-first. Tool,
 /// reasoning and error parts are not conversation, and a streaming entry is
 /// half-written; the oldest kept message is truncated from its start so the
-/// text nearest the sidechat's question always survives.
+/// text nearest the sidechat's question always survives. A handoff divider's
+/// packet already holds everything before it, so the walk ends on it.
 fn bounded_source_copy(entries: &[SessionMessageEntry], budget: usize) -> String {
     let mut selected: Vec<String> = Vec::new();
     let mut remaining = budget;
@@ -3013,30 +3014,66 @@ fn bounded_source_copy(entries: &[SessionMessageEntry], budget: usize) -> String
         if entry.status == Some(MessageStatus::Streaming) {
             continue;
         }
-        let role = match entry.role {
-            MessageRole::User => "User",
-            MessageRole::Assistant => "Assistant",
-            MessageRole::System => continue,
+        let (text, earlier) = match entry.role {
+            MessageRole::User | MessageRole::Assistant => {
+                let text = text_parts(entry);
+                if text.is_empty() {
+                    continue;
+                }
+                let role = match entry.role {
+                    MessageRole::User => "User",
+                    _ => "Assistant",
+                };
+                (format!("{role}: {text}"), false)
+            }
+            MessageRole::System => match handoff_packet(entry) {
+                Some(packet) => (packet_conversation(packet).to_string(), true),
+                None => continue,
+            },
         };
-        let text: String = entry
-            .parts
-            .iter()
-            .filter_map(|part| match part {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let text = text.trim();
-        if text.is_empty() {
-            continue;
+        if !text.is_empty() {
+            let separator = if selected.is_empty() { 0 } else { 2 };
+            let retained = last_chars(&text, remaining);
+            remaining = remaining.saturating_sub(retained.chars().count() + separator);
+            selected.push(retained);
         }
-        let separator = if selected.is_empty() { 0 } else { 2 };
-        let retained = last_chars(&format!("{role}: {text}"), remaining);
-        remaining = remaining.saturating_sub(retained.chars().count() + separator);
-        selected.push(retained);
+        if earlier {
+            break;
+        }
     }
     selected.reverse();
     selected.join("\n\n")
+}
+
+fn text_parts(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn handoff_packet(entry: &SessionMessageEntry) -> Option<&str> {
+    entry.parts.iter().find_map(|part| match part {
+        MessagePart::Handoff { text, .. } if entry.role == MessageRole::System => {
+            Some(text.as_str())
+        }
+        _ => None,
+    })
+}
+
+/// Unwrapped, so a later packet never nests the earlier one's wrapper.
+fn packet_conversation(packet: &str) -> &str {
+    packet
+        .split_once("<previous_conversation>\n")
+        .and_then(|(_, rest)| rest.strip_suffix("\n</previous_conversation>"))
+        .unwrap_or(packet)
+        .trim()
 }
 
 /// The last `max` characters of `text` — whole scalar values, because a byte
@@ -3069,15 +3106,9 @@ fn provider_switch_context(history: &str) -> String {
 /// A seeded chat holds none of its source's conversation, so a re-sent first
 /// turn must resend the recorded packet rather than rebuild one.
 fn unanswered_packet(history: &[SessionMessageEntry]) -> Option<String> {
-    let packet = |entry: &SessionMessageEntry| {
-        entry.parts.iter().find_map(|part| match part {
-            MessagePart::Handoff { text, .. } if entry.role == MessageRole::System => {
-                Some(text.clone())
-            }
-            _ => None,
-        })
-    };
-    let ix = history.iter().rposition(|entry| packet(entry).is_some())?;
+    let ix = history
+        .iter()
+        .rposition(|entry| handoff_packet(entry).is_some())?;
     let answered = history[ix + 1..].iter().any(|entry| {
         entry.role == MessageRole::Assistant
             && entry.status == Some(MessageStatus::Complete)
@@ -3085,7 +3116,9 @@ fn unanswered_packet(history: &[SessionMessageEntry]) -> Option<String> {
                 |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
             )
     });
-    packet(&history[ix]).filter(|text| !answered && !text.is_empty())
+    handoff_packet(&history[ix])
+        .filter(|text| !answered && !text.is_empty())
+        .map(str::to_owned)
 }
 
 /// What crosses into the harness in place of the typed text, and the

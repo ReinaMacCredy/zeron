@@ -179,8 +179,9 @@ pub enum MessagePart {
     /// The conversation as text, as handed to `harness` on its first turn
     /// under an already-running chat (a provider switch). Sits on that turn's
     /// user entry. Its own kind, not a `Text` part: the next switch's copy
-    /// collects `Text` only, so a packet never nests inside a later packet,
-    /// and older readers degrade it to an empty part like `Reasoning`.
+    /// collects `Text` only (plus the conversation inside a divider's packet,
+    /// unwrapped), so a packet never nests inside a later packet, and older
+    /// readers degrade it to an empty part like `Reasoning`.
     Handoff {
         id: String,
         harness: HarnessId,

@@ -692,3 +692,33 @@ async fn a_continued_thread_resends_its_source_packet_after_a_failed_first_turn(
             .ends_with("<latest_user_message>\nhello again\n</latest_user_message>")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_continued_twice_still_carries_the_first_conversation() {
+    const B: &str = "chat-b";
+    const C: &str = "chat-c";
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    let continue_to = |source: &'static str, chat: &'static str, harness: &'static str| {
+        rig.client.call(
+            zeron_rpc::methods::CONTINUE_IN_NEW_THREAD,
+            serde_json::json!({ "sourceChatId": source, "chatId": chat, "harness": harness }),
+        )
+    };
+    continue_to(CHAT, B, "pi").await.expect("A to B");
+    rig.turn(B, "hello", "b1").await;
+    continue_to(B, C, "mock").await.expect("B to C");
+
+    let doc = entries(&rig.core, C);
+    assert_eq!(doc.len(), 1);
+    let (_, packet, route) = handoff_route(&doc[0]);
+    assert_eq!(route.source_chat_id.as_deref(), Some(B));
+    assert_eq!(packet.matches("<provider_switch>").count(), 1, "{packet}");
+    assert!(
+        packet.contains(
+            "<previous_conversation>\nUser: first\n\nAssistant: Old answer 1\n\nUser: hello\n\nAssistant: New answer 1\n</previous_conversation>"
+        ),
+        "{packet}"
+    );
+}
