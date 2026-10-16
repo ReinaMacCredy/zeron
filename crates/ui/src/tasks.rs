@@ -884,7 +884,7 @@ impl TasksPage {
                     .id(SharedString::from(format!("tasks-column-{column:?}")))
                     .debug_selector(move || format!("tasks-column-{column:?}"))
                     .flex_1()
-                    .min_w(px(180.0))
+                    .min_w_0()
                     .h_full()
                     .flex()
                     .flex_col()
@@ -1357,7 +1357,14 @@ impl Render for TasksPage {
                     page.close_card(cx);
                 }
             }))
-            .child(div().flex_1().min_w_0().h_full().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(body),
+            )
             .children(card.map(|card| {
                 div()
                     .flex_none()
