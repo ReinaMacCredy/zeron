@@ -448,14 +448,12 @@ impl Shell {
 
     /// The most-used usage window of the active account on the chat's
     /// harness: `(label, fraction)`.
-    fn summary_usage(&self, chat: &zeron_proto::Chat) -> Option<(String, f32)> {
+    fn summary_usage(&self, chat: &zeron_proto::Chat, cx: &App) -> Option<(String, f32)> {
         let harness = chat.config.as_ref()?.harness;
-        let account = self
-            .account_usage
-            .as_ref()?
-            .accounts
-            .iter()
-            .find(|account| account.active && account.harness == harness)?;
+        let account = crate::account_usage::active_account(
+            crate::account_usage::local_snapshot(cx)?,
+            harness,
+        )?;
         account
             .usage_windows
             .iter()
@@ -660,7 +658,7 @@ impl Shell {
             .and_then(|chat| chat.cwd.as_deref())
             .map(basename);
         let counts = self.summary_change_counts(cx);
-        let usage = chat.as_ref().and_then(|chat| self.summary_usage(chat));
+        let usage = chat.as_ref().and_then(|chat| self.summary_usage(chat, cx));
         let working = chat_status_tone(zeron_proto::ChatIndicator::Working, theme).2;
 
         let mut sections = Vec::new();

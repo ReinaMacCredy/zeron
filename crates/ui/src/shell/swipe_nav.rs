@@ -107,7 +107,7 @@ impl Shell {
                 let Ok(point) = this.update(cx, |shell, cx| {
                     shell.navigate_to(Some(id), true, cx);
                     gpui::point(
-                        px(shell.sidebar_now() + 160.0),
+                        px(shell.sidebar_edge() + 160.0),
                         px(shell.viewport_height / 2.0),
                     )
                 }) else {

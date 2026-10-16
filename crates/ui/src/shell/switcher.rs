@@ -256,8 +256,8 @@ impl Shell {
             return;
         };
         let Some(crop) = column_crop(
-            self.sidebar_now(),
-            self.right_visible_width(cx) + self.files_reserved_width(cx),
+            self.sidebar_edge(),
+            self.right_visible_width(cx) + self.files_reserved_width(cx) + self.content_inset(),
             frame.width,
             frame.height,
         ) else {

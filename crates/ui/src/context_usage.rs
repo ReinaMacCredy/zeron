@@ -1,10 +1,156 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
+use crate::popover;
+use crate::state::AppState;
 use crate::theme::Theme;
-use gpui::{IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px};
+use gpui::{
+    Context, Entity, IntoElement, PathBuilder, Render, SharedString, Subscription, WeakEntity,
+    Window, canvas, div, point, prelude::*, px,
+};
 use zeron_proto::ContextUsage;
 
-/// The context ring's trigger chip; the footer ([`crate::account_usage`])
-/// opens [`card`] from it on click.
+pub struct FooterContext {
+    state: Entity<AppState>,
+    composer: WeakEntity<crate::composer::Composer>,
+    chat: Option<String>,
+    popup: popover::Popup<()>,
+    _state: Subscription,
+}
+
+impl FooterContext {
+    pub fn new(
+        state: Entity<AppState>,
+        composer: WeakEntity<crate::composer::Composer>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _state: cx.observe(&state, |_, _, cx| cx.notify()),
+            state,
+            composer,
+            chat: None,
+            popup: popover::Popup::default(),
+        }
+    }
+
+    pub fn track(&mut self, chat: Option<String>) {
+        self.chat = chat;
+    }
+
+    /// A trigger click: open the card, or close it when the press found it
+    /// open (the card's mouse-down-out already began that close — see
+    /// `Popup::note_trigger_press`).
+    fn toggle(&mut self, cx: &mut Context<Self>) {
+        if self.popup.take_press_was_open() || self.popup.as_open().is_some() {
+            self.dismiss(cx);
+            return;
+        }
+        self.popup.open(());
+        cx.notify();
+    }
+
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.popup.begin_close() {
+            popover::reap_popup(cx, |ring: &mut Self| &mut ring.popup);
+        }
+        cx.notify();
+    }
+
+    fn context_card(&self, context: Option<ContextUsage>, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = Theme::of(cx).for_popup();
+        let card = card(context, &theme);
+        let Some(composer) = self.composer.upgrade() else {
+            return card;
+        };
+        let reason = composer.read(cx).compact_disabled_reason(cx);
+        let resume = composer.read(cx).resume_compaction(cx);
+        card.child(
+            div()
+                .px(px(8.0))
+                .pb(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .when_some(resume, |col, offer| {
+                    col.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.warning)
+                            .child(format!(
+                                "Idle for {}; the prompt cache has expired.",
+                                offer.idle_label()
+                            )),
+                    )
+                })
+                .child(
+                    div()
+                        .id("compact-context")
+                        .h(px(26.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.1))
+                        .text_size(px(12.0))
+                        .text_color(theme.text)
+                        .when(reason.is_some(), |button| button.opacity(0.45))
+                        .when(reason.is_none(), |button| {
+                            button
+                                .cursor_pointer()
+                                .hover(|s| s.bg(crate::theme::ink(0.06)))
+                                .on_click(cx.listener(move |ring, _, _, cx| {
+                                    composer.update(cx, |composer, cx| {
+                                        composer.request_compaction(None, cx)
+                                    });
+                                    ring.dismiss(cx);
+                                }))
+                        })
+                        .child("Compact context"),
+                )
+                // Never hidden: the reason is why the button is there at all.
+                .when_some(reason, |col, reason| {
+                    col.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.8))
+                            .child(reason),
+                    )
+                }),
+        )
+    }
+}
+
+impl Render for FooterContext {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        let context = self.state.read(cx).context_usage_for(self.chat.as_deref());
+        let ring = has_window(context).then(|| {
+            let chip = chip(context, self.popup.get().is_some(), &theme)
+                .relative()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|ring, _, _, _| ring.popup.note_trigger_press()),
+                )
+                .on_click(cx.listener(|ring, _, _, cx| ring.toggle(cx)));
+            if self.popup.get().is_none() {
+                return chip.into_any_element();
+            }
+            let content = self
+                .context_card(context, cx)
+                .on_mouse_down_out(cx.listener(|ring, _, _, cx| ring.dismiss(cx)))
+                .into_any_element();
+            chip.child(popover::anchored_menu_above_end(
+                "context-usage-menu",
+                content,
+                self.popup.closing_since(),
+            ))
+            .into_any_element()
+        });
+        div().flex().items_center().children(ring)
+    }
+}
+
+/// The context ring's trigger chip; [`FooterContext`] opens [`card`] from it
+/// on click.
 pub fn chip(usage: Option<ContextUsage>, open: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
     let color = match fraction {
@@ -27,10 +173,9 @@ pub fn chip(usage: Option<ContextUsage>, open: bool, theme: &Theme) -> gpui::Sta
     )
 }
 
-/// One footer ring indicator: ring + percent, identical geometry for every
-/// ring so they sit side by side as equals. `arc` colours the ring's fill,
+/// One footer ring indicator: ring + percent. `arc` colours the ring's fill,
 /// `text` the label; `open` holds the hover wash while its popover is up.
-pub(crate) fn ring_chip(
+fn ring_chip(
     id: &'static str,
     fraction: f32,
     arc: gpui::Hsla,
@@ -58,8 +203,8 @@ pub(crate) fn ring_chip(
 }
 
 /// The footer's 16px progress ring: a faint full track under a `fraction` arc
-/// starting at twelve o'clock. Shared with the account usage indicator.
-pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl IntoElement {
+/// starting at twelve o'clock.
+fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl IntoElement {
     progress_ring(
         16.0,
         6.0,
