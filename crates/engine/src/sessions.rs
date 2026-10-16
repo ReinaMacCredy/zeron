@@ -3040,7 +3040,7 @@ impl Inner {
             return None;
         }
         Some(format!(
-            "<system-reminder>\nContext {}. Compact at a boundary: if this message starts a new phase, call compact first with the request as continueWith; if this turn ends handing work back to the person, call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>",
+            "<system-reminder>\nContext {}. Compact at a boundary, not mid-task: if this message starts a new phase, call compact first with the request as continueWith; if this turn finishes a piece of work and what comes next needs only its conclusions, call compact last. A follow-up question about the current work is not a boundary. It runs after the turn ends; name what to keep.\n</system-reminder>",
             format_tokens(tokens),
         ))
     }
