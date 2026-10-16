@@ -118,34 +118,25 @@ pub fn gradient_spinner(
     _id: &'static str,
     _theme: &Theme,
     cell_px: f32,
-    view: EntityId,
-    cx: &mut App,
+    _view: EntityId,
+    _cx: &mut App,
 ) -> impl IntoElement {
     let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
     let max = MATRIX_SIDE as f32 - 1.0 + center;
-    let pulse = motion::activity_pulse_slow(view, cx);
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(cell_px / 2.0))
-        .children((0..MATRIX_SIDE).map(move |row| {
-            let tint: gpui::Hsla = gpui::rgb(GSPIN_ROW_TINTS[row]).into();
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(cell_px / 2.0))
-                .children((0..MATRIX_SIDE).map(move |col| {
-                    // Distance of this cell from the wave origin, normalized
-                    // into a phase offset (gradient-spin's `--gspin-phase`).
-                    let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
-                    let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
-                    div()
-                        .size(px(cell_px))
-                        .rounded(px(cell_px / 2.0))
-                        .bg(tint)
-                        .opacity(pulse.opacity(phase, GSPIN_DIM))
-                }))
-        }))
+    let phases = (0..MATRIX_SIDE)
+        .flat_map(|row| {
+            (0..MATRIX_SIDE).map(move |col| {
+                // Distance of this cell from the wave origin, normalized
+                // into a phase offset (gradient-spin's `--gspin-phase`).
+                let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
+                if max == 0.0 { 0.0 } else { d / (max + 1.0) }
+            })
+        })
+        .collect();
+    let tints = (0..MATRIX_SIDE)
+        .map(|row| gpui::rgb(GSPIN_ROW_TINTS[row]).into())
+        .collect();
+    activity_grid(MATRIX_SIDE, cell_px, tints, phases, 2)
 }
 
 /// A 2×3 activity glyph sized for compact status slots. Its color is an
@@ -175,176 +166,86 @@ pub fn mini_mono_spinner(
 }
 
 fn mini_spinner_tinted(
-    key: impl Into<SharedString>,
+    _key: impl Into<SharedString>,
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
     _view: EntityId,
     _cx: &mut App,
 ) -> impl IntoElement {
-    MiniSpinner {
-        key: key.into(),
-        cell_px,
-        row_tints,
-    }
-}
-
-#[derive(IntoElement)]
-struct MiniSpinner {
-    key: SharedString,
-    cell_px: f32,
-    row_tints: [gpui::Hsla; 3],
-}
-
-impl RenderOnce for MiniSpinner {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Keep pulse invalidation separate from container state changes so
-        // cached sibling rows can be reused while these six cells animate.
-        let view = window.with_global_id(self.key.into(), |id, window| {
-            window.with_element_state(id, |previous: Option<Entity<MiniSpinnerView>>, _| {
-                let view = previous.unwrap_or_else(|| {
-                    cx.new(|_| MiniSpinnerView {
-                        cell_px: self.cell_px,
-                        row_tints: self.row_tints,
-                    })
-                });
-                view.update(cx, |view, cx| {
-                    if view.cell_px != self.cell_px || view.row_tints != self.row_tints {
-                        view.cell_px = self.cell_px;
-                        view.row_tints = self.row_tints;
-                        cx.notify();
-                    }
-                });
-                (view.clone(), view)
-            })
-        });
-        view.cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.cell_px * 2.5))
-                .h(px(self.cell_px * 4.0)),
-        )
-    }
-}
-
-struct MiniSpinnerView {
-    cell_px: f32,
-    row_tints: [gpui::Hsla; 3],
-}
-
-impl Render for MiniSpinnerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        mini_spinner_cells(self.cell_px, self.row_tints, cx.entity_id(), cx)
-    }
-}
-
-fn mini_spinner_cells(
-    cell_px: f32,
-    row_tints: [gpui::Hsla; 3],
-    view: EntityId,
-    cx: &mut App,
-) -> impl IntoElement {
-    const COLS: usize = 2;
-    const ROWS: usize = 3;
     /// Clockwise ring position of each `(row, col)` cell, top-left first:
     /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
-    const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
-    const RING_LEN: f32 = (COLS * ROWS) as f32;
-    let pulse = motion::activity_pulse(view, cx);
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(cell_px / 2.0))
-        .children((0..ROWS).map(move |row| {
-            let tint = row_tints[row];
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(cell_px / 2.0))
-                .children((0..COLS).map(move |col| {
-                    let phase = RING[row][col] as f32 / RING_LEN;
-                    div()
-                        .size(px(cell_px))
-                        .rounded(px(cell_px / 2.0))
-                        .bg(tint)
-                        .opacity(pulse.opacity(phase, GSPIN_DIM))
-                }))
-        }))
+    const RING: [[usize; 2]; 3] = [[0, 1], [5, 2], [4, 3]];
+    let phases = RING
+        .iter()
+        .flatten()
+        .map(|&position| position as f32 / 6.0)
+        .collect();
+    activity_grid(2, cell_px, row_tints.to_vec(), phases, 1)
+}
+
+fn activity_grid(
+    cols: usize,
+    cell_px: f32,
+    tints: Vec<gpui::Hsla>,
+    phases: Vec<f32>,
+    stride: u32,
+) -> impl IntoElement {
+    let rows = tints.len();
+    let gap = cell_px / 2.0;
+    let extent = |n: usize| n as f32 * cell_px + n.saturating_sub(1) as f32 * gap;
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            for (index, phase) in phases.into_iter().enumerate() {
+                let (row, col) = (index / cols, index % cols);
+                let cell = gpui::Bounds::new(
+                    bounds.origin
+                        + point(
+                            px(col as f32 * (cell_px + gap)),
+                            px(row as f32 * (cell_px + gap)),
+                        ),
+                    gpui::size(px(cell_px), px(cell_px)),
+                );
+                let fill = gpui::fill(cell, tints[row]).corner_radii(px(cell_px / 2.0));
+                match motion::activity_cell(phase, stride, cx) {
+                    motion::ActivityCell::Still(opacity) => window.paint_quad(
+                        gpui::fill(cell, tints[row].opacity(opacity))
+                            .corner_radii(px(cell_px / 2.0)),
+                    ),
+                    motion::ActivityCell::Animated(animation) => {
+                        window.paint_animated_quad(fill, animation)
+                    }
+                }
+            }
+        },
+    )
+    .flex_none()
+    .w(px(extent(cols)))
+    .h(px(extent(rows)))
 }
 
 /// A rounded fill that breathes on the zeron pulse clock between `floor` and
-/// `peak` opacity, filling whatever positioned box it is placed in. Like [`pulse_dot`] it repaints from its own cached
-/// view, so the surrounding chrome stays still.
+/// `peak` opacity, filling whatever positioned box it is placed in. The window
+/// animates it, so the surrounding chrome stays still.
 pub fn pulse_glow(
-    key: impl Into<SharedString>,
+    _key: impl Into<SharedString>,
     radius: f32,
     tint: gpui::Hsla,
     floor: f32,
     peak: f32,
 ) -> impl IntoElement {
-    PulseGlow {
-        key: key.into(),
-        style: GlowStyle {
-            radius,
-            tint,
-            floor,
-            peak,
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            let fill = gpui::fill(bounds, tint).corner_radii(px(radius));
+            match motion::breathing(floor, peak, cx) {
+                Some(animation) => window.paint_animated_quad(fill, animation),
+                None => window
+                    .paint_quad(gpui::fill(bounds, tint.opacity(floor)).corner_radii(px(radius))),
+            }
         },
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct GlowStyle {
-    radius: f32,
-    tint: gpui::Hsla,
-    floor: f32,
-    peak: f32,
-}
-
-#[derive(IntoElement)]
-struct PulseGlow {
-    key: SharedString,
-    style: GlowStyle,
-}
-
-impl RenderOnce for PulseGlow {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = self.style;
-        let view = window.with_global_id(self.key.into(), |id, window| {
-            window.with_element_state(id, |previous: Option<Entity<PulseGlowView>>, _| {
-                let view = previous.unwrap_or_else(|| cx.new(|_| PulseGlowView { style }));
-                view.update(cx, |view, cx| {
-                    if view.style != style {
-                        view.style = style;
-                        cx.notify();
-                    }
-                });
-                (view.clone(), view)
-            })
-        });
-        view.cached(gpui::StyleRefinement::default().size_full())
-    }
-}
-
-struct PulseGlowView {
-    style: GlowStyle,
-}
-
-impl Render for PulseGlowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let GlowStyle {
-            radius,
-            tint,
-            floor,
-            peak,
-        } = self.style;
-        let delta = motion::pulse_delta_slow(&ZERON_PULSE, cx.entity_id(), cx);
-        // pulse_opacity spans 0.08..1; renormalise to 0..1 before mapping.
-        let wave = (motion::pulse_opacity(delta) - 0.08) / 0.92;
-        div()
-            .size_full()
-            .rounded(px(radius))
-            .bg(tint)
-            .opacity(motion::lerp(floor, peak, wave))
-    }
+    )
+    .size_full()
 }
 
 /// Stroke width of [`upload_progress_ring`].

@@ -152,29 +152,69 @@ impl ActivityPulse {
     }
 }
 
-pub fn activity_pulse(view: EntityId, cx: &mut App) -> ActivityPulse {
-    activity_pulse_every(view, 1, cx)
-}
-
-pub fn activity_pulse_slow(view: EntityId, cx: &mut App) -> ActivityPulse {
-    activity_pulse_every(view, 2, cx)
-}
-
-fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPulse {
-    let subtle = cx.reduce_motion();
-    let animate = !subtle
+fn activity_animates(subtle: bool, cx: &App) -> bool {
+    !subtle
         || cx.try_global::<MotionState>().is_some_and(|state| {
             state.preference == ReduceMotion::System
                 && state.system
                 && !(state.pause_in_background && !state.active)
-        });
-    let phase = if animate {
-        schedule_pulse_every(view, if subtle { 2 } else { stride }, cx);
-        pulse_phase(if subtle { &ZERON_PULSE } else { &GRADIENT_SPIN }, cx)
+        })
+}
+
+pub enum ActivityCell {
+    Still(f32),
+    Animated(gpui::QuadAnimation),
+}
+
+pub fn activity_cell(cell_phase: f32, stride: u32, cx: &mut App) -> ActivityCell {
+    fn spin(phase: f32) -> f32 {
+        gspin_opacity(phase, zeron_proto::motion::GSPIN_DIM)
+    }
+    fn breathe(phase: f32) -> f32 {
+        0.6 + 0.2 * pulse_wave(phase)
+    }
+    let subtle = cx.reduce_motion();
+    if !activity_animates(subtle, cx) {
+        let pulse = ActivityPulse { phase: 0.0, subtle };
+        return ActivityCell::Still(pulse.opacity(cell_phase, zeron_proto::motion::GSPIN_DIM));
+    }
+    let epoch = cx.default_global::<PulseClock>().epoch;
+    ActivityCell::Animated(if subtle {
+        gpui::QuadAnimation {
+            epoch,
+            period: ZERON_PULSE.total(),
+            phase_offset: 0.0,
+            curve: breathe,
+            from: 0.0,
+            to: 1.0,
+            interval: PULSE_TICK * 2,
+        }
     } else {
-        0.0
-    };
-    ActivityPulse { phase, subtle }
+        gpui::QuadAnimation {
+            epoch,
+            period: GRADIENT_SPIN.total(),
+            phase_offset: cell_phase,
+            curve: spin,
+            from: 0.0,
+            to: 1.0,
+            interval: PULSE_TICK * stride,
+        }
+    })
+}
+
+pub fn breathing(floor: f32, peak: f32, cx: &mut App) -> Option<gpui::QuadAnimation> {
+    if cx.reduce_motion() {
+        return None;
+    }
+    Some(gpui::QuadAnimation {
+        epoch: cx.default_global::<PulseClock>().epoch,
+        period: ZERON_PULSE.total(),
+        phase_offset: 0.0,
+        curve: pulse_wave,
+        from: floor,
+        to: peak,
+        interval: PULSE_TICK * 2,
+    })
 }
 
 /// Schedule cosmetic animation through the same bounded clock as loaders.
@@ -1463,17 +1503,19 @@ mod tests {
                     active,
                 });
                 apply(cx);
-                let view = cx.new(|_| ());
-                let pulse = activity_pulse(view.entity_id(), cx);
-                let leased = cx
-                    .try_global::<PulseClock>()
-                    .is_some_and(|clock| clock.leases.contains_key(&view.entity_id()));
+                let animation = match activity_cell(0.0, 1, cx) {
+                    ActivityCell::Animated(animation) => Some(animation),
+                    ActivityCell::Still(_) => None,
+                };
                 assert_eq!(
-                    leased, animates,
+                    animation.is_some(),
+                    animates,
                     "{preference:?}, system={system}, pause={pause_in_background}, active={active}"
                 );
                 if reduced_motion(cx) {
-                    assert!(pulse.subtle);
+                    if let Some(animation) = animation {
+                        assert_eq!(animation.period, ZERON_PULSE.total(), "slow uniform pulse");
+                    }
                     let decorative_view = cx.new(|_| ());
                     assert_eq!(
                         pulse_delta(&ZERON_PULSE, decorative_view.entity_id(), cx),
@@ -1488,9 +1530,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cached_activity_loaders_keep_renewing_under_system_reduced_motion(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn activity_loaders_animate_without_the_pulse_clock(cx: &mut gpui::TestAppContext) {
         use gpui::{AppContext as _, Context, ParentElement as _, Render};
 
         struct Loaders;
@@ -1512,14 +1552,17 @@ mod tests {
                         cx.entity_id(),
                         cx,
                     ))
+                    .child(crate::loaders::pulse_glow(
+                        "glow", 4.0, theme.busy, 0.1, 0.3,
+                    ))
             }
         }
 
         cx.update(|cx| {
             cx.set_global(MotionState {
-                preference: ReduceMotion::System,
+                preference: ReduceMotion::Off,
                 pause_in_background: false,
-                system: true,
+                system: false,
                 active: true,
             });
             apply(cx);
@@ -1527,54 +1570,15 @@ mod tests {
         let window = cx.add_window(|_, _| Loaders);
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
-        cx.run_until_parked();
         for _ in 0..20 {
             cx.background_executor.advance_clock(PULSE_TICK);
             cx.run_until_parked();
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-                .unwrap();
         }
         cx.update(|cx| {
-            let clock = cx.global::<PulseClock>();
-            assert!(clock.tick >= 20);
-            assert_eq!(
-                clock.leases.len(),
-                2,
-                "transcript and cached sidebar loader"
-            );
-            assert!(
-                clock.leases.values().all(|lease| lease.stride == 2),
-                "both loaders renew at 15Hz"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn system_reduced_motion_keeps_activity_loaders_ticking(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
-
-        cx.update(|cx| {
-            cx.set_global(MotionState {
-                preference: ReduceMotion::System,
-                pause_in_background: false,
-                system: true,
-                active: true,
-            });
-            apply(cx);
-            assert!(reduced_motion(cx));
-
-            let view = cx.new(|_| ());
-            drop(crate::loaders::gradient_spinner(
-                "working",
-                &crate::theme::Theme::dark(),
-                2.5,
-                view.entity_id(),
-                cx,
-            ));
             assert!(
                 cx.try_global::<PulseClock>()
-                    .is_some_and(|clock| clock.leases.contains_key(&view.entity_id())),
-                "a working indicator must keep receiving ticks with system reduced motion"
+                    .is_none_or(|clock| clock.leases.is_empty() && !clock.running),
+                "painted loaders must not tick views through the pulse clock"
             );
         });
     }
@@ -1816,12 +1820,18 @@ mod tests {
 
         // Reverse mid-flight re-anchors — no jump — then lands at 1.
         let at_flip = morph(&mut morphs, true, ms(80));
-        assert!((at_flip - mid).abs() < 1e-4, "continuity: {mid} vs {at_flip}");
+        assert!(
+            (at_flip - mid).abs() < 1e-4,
+            "continuity: {mid} vs {at_flip}"
+        );
         assert_eq!(morph(&mut morphs, true, ms(400)), 1.0);
         assert!(!morphs.tick_at(ms(400)));
 
         // Reduced motion snaps a flip.
-        assert_eq!(morphs.value_at("glyph", false, GLYPH_STATE, true, ms(500)), 0.0);
+        assert_eq!(
+            morphs.value_at("glyph", false, GLYPH_STATE, true, ms(500)),
+            0.0
+        );
 
         // Unread for a full frame: pruned (a remount snaps again).
         morphs.tick_at(ms(600));

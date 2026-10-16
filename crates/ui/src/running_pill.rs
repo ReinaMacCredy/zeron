@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::loaders;
-use crate::motion::{self, ZERON_PULSE};
+use crate::motion;
 use crate::theme::Theme;
 
 /// Pill height. The sidebar's status slot is 13px and its rows 29px; 16px
@@ -167,16 +167,14 @@ struct PillView {
 }
 
 impl Render for PillView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let spec = self.spec.clone();
         let font_size = pill_font_size(window);
         let line = spec.shape(window, font_size);
-        let delta = motion::pulse_delta_slow(&ZERON_PULSE, cx.entity_id(), cx);
-        let wave = motion::lerp(0.4, 1.0, (motion::pulse_opacity(delta) - 0.08) / 0.92);
         canvas(
             |_, _, _| (),
             move |bounds: Bounds<gpui::Pixels>, _, window, cx| {
-                paint_pill(bounds, &spec, &line, font_size, wave, window, cx);
+                paint_pill(bounds, &spec, &line, font_size, window, cx);
             },
         )
         .size_full()
@@ -212,7 +210,6 @@ fn paint_pill(
     spec: &PillSpec,
     line: &gpui::ShapedLine,
     font_size: gpui::Pixels,
-    wave: f32,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -244,7 +241,13 @@ fn paint_pill(
         ),
         size(px(diameter), px(diameter)),
     );
-    window.paint_quad(fill(dot, spec.tone.opacity(wave)).corner_radii(px(diameter / 2.0)));
+    let radius = px(diameter / 2.0);
+    match motion::breathing(0.4, 1.0, cx) {
+        Some(animation) => {
+            window.paint_animated_quad(fill(dot, spec.tone).corner_radii(radius), animation)
+        }
+        None => window.paint_quad(fill(dot, spec.tone.opacity(0.4)).corner_radii(radius)),
+    }
 
     let _ = line.paint(text_origin, height, TextAlign::Left, None, window, cx);
 }
