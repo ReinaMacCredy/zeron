@@ -953,6 +953,7 @@ pub enum Route {
     Chat,
     PullRequests,
     Usage,
+    Inbox,
     Settings(SettingsSection),
     Terminal,
     Tasks,
@@ -1121,6 +1122,7 @@ pub enum NavEntry {
     },
     Settings(SettingsSection),
     Usage,
+    Inbox,
     Tasks,
 }
 
@@ -2470,6 +2472,7 @@ pub struct Shell {
     swipe: swipe_nav::SwipeNav,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
+    inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
     _tasks_events: Option<gpui::Subscription>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
@@ -2966,6 +2969,7 @@ impl Shell {
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
             Some("usage") => Route::Usage,
+            Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
@@ -3010,6 +3014,7 @@ impl Shell {
             Route::Chat | Route::Terminal => NavEntry::Chat(String::new()),
             Route::PullRequests => NavEntry::PullRequests,
             Route::Usage => NavEntry::Usage,
+            Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
         });
@@ -3149,6 +3154,7 @@ impl Shell {
             swipe: swipe_nav::SwipeNav::default(),
             pull_requests_page: None,
             usage_page: None,
+            inbox_page: None,
             tasks_page: None,
             _tasks_events: None,
             pull_request_detail: None,
@@ -6971,6 +6977,61 @@ impl Shell {
         cx.notify();
     }
 
+    fn open_inbox(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Inbox) {
+            return;
+        }
+        self.enter_inbox_route(cx);
+        self.nav.push(NavEntry::Inbox);
+    }
+
+    fn enter_inbox_route(&mut self, cx: &mut Context<Self>) {
+        self.set_route(Route::Inbox, cx);
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        self.refresh_device_accounts(cx);
+        cx.notify();
+    }
+
+    fn inbox_page(&mut self, cx: &mut Context<Self>) -> Entity<crate::inbox::InboxPage> {
+        if let Some((page, _)) = &self.inbox_page {
+            return page.clone();
+        }
+        let (state, composer) = (self.state.clone(), self.composer.clone());
+        let page = cx.new(|cx| crate::inbox::InboxPage::new(state, composer, cx));
+        let events = cx.subscribe(&page, |this, _, event: &crate::inbox::InboxEvent, cx| {
+            this.on_inbox_event(event, cx)
+        });
+        self.inbox_page = Some((page.clone(), events));
+        page
+    }
+
+    fn on_inbox_event(&mut self, event: &crate::inbox::InboxEvent, cx: &mut Context<Self>) {
+        match event {
+            crate::inbox::InboxEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
+            crate::inbox::InboxEvent::OpenPullRequests => self.open_pull_requests(cx),
+            crate::inbox::InboxEvent::CreateTask { title, due_on } => {
+                let Some(engine) = self.state.read(cx).engine().cloned() else {
+                    self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+                    cx.notify();
+                    return;
+                };
+                let params = serde_json::json!({
+                    "op": "createTask", "taskId": uuid::Uuid::new_v4().to_string(),
+                    "title": title, "dueOn": due_on,
+                });
+                Self::spawn_mutate(engine, params, cx).detach();
+            }
+            crate::inbox::InboxEvent::SetTaskCompleted { task_id, completed } => {
+                let patch = zeron_proto::TaskPatch {
+                    completed: Some(*completed),
+                    ..Default::default()
+                };
+                self.update_task(task_id, patch, cx);
+            }
+        }
+    }
+
     pub(crate) fn open_tasks(&mut self, cx: &mut Context<Self>) {
         if matches!(self.route, Route::Tasks) {
             return;
@@ -7220,6 +7281,7 @@ impl Shell {
                 self.pending_pull_request = Some((url, device));
             }
             NavEntry::Usage => self.enter_usage_route(cx),
+            NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
@@ -12625,6 +12687,7 @@ impl Shell {
     fn rail_item_active(&self, item: RailItem) -> bool {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
+            RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::Tasks => matches!(self.route, Route::Tasks),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
@@ -12635,6 +12698,10 @@ impl Shell {
     fn activate_rail_item(&mut self, item: RailItem, cx: &mut Context<Self>) {
         match item {
             RailItem::Home => self.open_home(cx),
+            RailItem::Inbox => {
+                self.settings_focus_pending = false;
+                self.open_inbox(cx);
+            }
             RailItem::PullRequests => {
                 // Leaving Settings through the rail is a plain route change;
                 // nothing there should grab focus on the way out.
@@ -12688,13 +12755,17 @@ impl Shell {
     ) -> AnyElement {
         let item = entry.item;
         let active = self.rail_item_active(item);
-        let badge = (item == RailItem::Tasks)
+        let awaiting = (item == RailItem::Inbox)
+            .then(|| crate::inbox::awaiting_chats(self.state.read(cx), Utc::now()).len())
+            .filter(|count| *count > 0);
+        let needs_you = (item == RailItem::Tasks)
             .then(|| crate::tasks::needs_you_count(self.state.read(cx)))
-            .filter(|count| *count > 0)
-            .map(|count| app_rail::count_badge(count, theme));
+            .filter(|count| *count > 0);
         let button = app_rail::button(entry, active, theme)
             .relative()
-            .children(badge)
+            .when_some(awaiting.or(needs_you), |el, count| {
+                el.child(app_rail::badge(count, theme))
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {
             return button
@@ -14613,6 +14684,18 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
+
+        if matches!(self.route, Route::Inbox) {
+            let accounts = crate::account_usage::local_snapshot(cx).cloned();
+            let page = self.inbox_page(cx);
+            page.update(cx, |page, cx| page.set_accounts(accounts, cx));
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(page)
+                .into_any_element();
+        }
 
         if matches!(self.route, Route::Usage) {
             let state = self.state.clone();
@@ -17587,7 +17670,11 @@ impl Render for Shell {
                         this.toggle_pr_chat(cx)
                     }
                     Route::PullRequests => {}
-                    Route::Settings(_) | Route::Terminal | Route::Usage | Route::Tasks => {}
+                    Route::Settings(_)
+                    | Route::Terminal
+                    | Route::Usage
+                    | Route::Inbox
+                    | Route::Tasks => {}
                 }),
             )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
@@ -18009,8 +18096,11 @@ impl Render for Shell {
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
                 let pr_route = matches!(self.route, Route::PullRequests);
-                let page_route =
-                    pr_route || matches!(self.route, Route::Terminal | Route::Usage | Route::Tasks);
+                let page_route = pr_route
+                    || matches!(
+                        self.route,
+                        Route::Terminal | Route::Usage | Route::Inbox | Route::Tasks
+                    );
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     let swipe = self.swipe_layers(0.0, cx);

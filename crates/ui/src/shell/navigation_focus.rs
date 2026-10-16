@@ -92,7 +92,7 @@ impl Shell {
             (self.settings_focus.clone(), self.unfocused.clone())
         } else if matches!(
             self.route,
-            Route::PullRequests | Route::Usage | Route::Tasks
+            Route::PullRequests | Route::Usage | Route::Inbox | Route::Tasks
         ) {
             (self.unfocused.clone(), self.unfocused.clone())
         } else if self.right_pane_open(cx)

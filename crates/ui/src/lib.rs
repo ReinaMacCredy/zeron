@@ -46,6 +46,7 @@ mod glass;
 mod haptics;
 pub mod history;
 mod home;
+mod inbox;
 pub(crate) mod html_open;
 pub(crate) mod html_render;
 pub mod icons;

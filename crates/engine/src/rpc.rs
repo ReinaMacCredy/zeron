@@ -3992,6 +3992,26 @@ impl RpcService for EngineRpc {
                     crate::home_widgets::listening_services(roots, p.all_ports).await;
                 RpcReply::value(&zeron_proto::ListeningServices { services })
             }
+            methods::GET_TODAY_RUNS => {
+                let p: zeron_proto::TodayRunsRequest = parse_params(params)?;
+                let chats = self
+                    .workspace
+                    .read_chats()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let host = self.doc_host.clone();
+                let runs = tokio::task::spawn_blocking(move || {
+                    crate::today_runs::today_runs(&chats, p.since_ms, |chat| {
+                        host.open_local(&chat.id)
+                            .map(|handle| {
+                                crate::today_runs::turns_since(handle.doc().doc(), p.since_ms)
+                            })
+                            .unwrap_or_default()
+                    })
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&runs)
+            }
             methods::GET_SYSTEM_STATS => {
                 RpcReply::value(&crate::home_widgets::system_stats().await)
             }

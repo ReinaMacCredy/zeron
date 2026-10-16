@@ -150,6 +150,18 @@ impl Composer {
         self.ask.fetches.insert(chat_id, task);
     }
 
+    pub(crate) fn ask_kinds(&self) -> HashMap<String, bool> {
+        self.ask
+            .entries
+            .iter()
+            .filter(|entry| !self.ask.answered.contains_key(&entry.wizard.request_id))
+            .map(|entry| {
+                let approval = entry.wizard.questions.iter().any(|q| q.approval);
+                (entry.chat_id.clone(), approval)
+            })
+            .collect()
+    }
+
     fn land_ask(&mut self, chat_id: String, wizard: Wizard, cx: &mut Context<Self>) {
         if !self.ask.awaiting.contains(&chat_id)
             || self.ask.answered.contains_key(&wizard.request_id)

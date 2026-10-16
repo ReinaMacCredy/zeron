@@ -258,6 +258,7 @@ enum Command {
     NewTerminal(TerminalLaunch),
     NewProject,
     Settings,
+    Inbox,
     Usage,
     Tasks,
     Theme(AppearanceMode),
@@ -271,6 +272,7 @@ impl Command {
             Self::NewTerminal(launch) => launch.menu_label(),
             Self::NewProject => "New project",
             Self::Settings => "Open settings",
+            Self::Inbox => "Open inbox",
             Self::Usage => "Open usage",
             Self::Tasks => "Tasks",
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
@@ -286,6 +288,7 @@ impl Command {
             Self::NewTerminal(launch) => launch.brand().0,
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
+            Self::Inbox => icons::BELL,
             Self::Usage => icons::USAGE_CHART,
             Self::Tasks => icons::LUCIDE_LIST_CHECKS,
             Self::Theme(mode) => mode.icon(),
@@ -409,6 +412,7 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
         .chain([
             Command::NewProject,
             Command::Settings,
+            Command::Inbox,
             Command::Usage,
             Command::Tasks,
             Command::Theme(if is_dark {
@@ -1021,6 +1025,7 @@ impl Shell {
             RowKind::Command(Command::NewTerminal(launch)) => self.open_terminal_tab(launch, cx),
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
+            RowKind::Command(Command::Inbox) => self.open_inbox(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Tasks) => self.open_tasks(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
@@ -1079,7 +1084,11 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::Theme(_) | Command::NewTerminal(_) | Command::Usage | Command::Tasks => {
+            Command::Theme(_)
+            | Command::NewTerminal(_)
+            | Command::Inbox
+            | Command::Usage
+            | Command::Tasks => {
                 return None;
             }
         };
@@ -2980,6 +2989,7 @@ mod tests {
                 Command::NewTerminal(TerminalLaunch::Codex),
                 Command::NewProject,
                 Command::Settings,
+                Command::Inbox,
                 Command::Usage,
                 Command::Tasks,
                 Command::Theme(AppearanceMode::Light)
