@@ -2347,6 +2347,15 @@ fn fold_switch_note(
             text: previous.text.clone(),
             hint: previous.hint.clone(),
         }
+    } else if config.harness == origin {
+        SystemNote {
+            text: format!(
+                "Model changed from {} to {}.",
+                route.from_model.as_deref().unwrap_or("default"),
+                route.to_model.as_deref().unwrap_or("default"),
+            ),
+            hint: None,
+        }
     } else {
         SystemNote {
             text: format!(
@@ -6000,10 +6009,11 @@ mod tests {
         assert!(
             fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m1"), &next).is_none()
         );
-        // The origin harness on another model is still a handoff.
-        assert!(
-            fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m2"), &next).is_some()
-        );
+        // The origin harness on another model is still a handoff, worded as the model change.
+        let (back, _) =
+            fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m2"), &next).unwrap();
+        assert_eq!(back.text, "Model changed from m1 to m2.");
+        assert_eq!(back.hint, None);
 
         // A model change on the harness the handoff reached keeps its divider.
         let (same, route) = fold_switch_note(
