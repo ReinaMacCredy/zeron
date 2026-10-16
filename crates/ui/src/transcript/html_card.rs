@@ -16,6 +16,17 @@ const MAX_CRASHES: u8 = 2;
 /// The Source view shows at most this much text; inlined image data is
 /// summarized first, since a page can carry megabytes of it.
 const MAX_SOURCE_CHARS: usize = 200_000;
+#[cfg(target_os = "macos")]
+const LOAD_LIVE: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(target_os = "macos")]
+const HEIGHT_LIVE: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(target_os = "macos")]
+const ACTIVE_LIVE: std::time::Duration = std::time::Duration::from_millis(700);
+#[cfg(target_os = "macos")]
+const POINTER_LIVE: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[cfg(target_os = "macos")]
+type PageFrame = (Arc<gpui::RenderImage>, f32);
 
 #[derive(Clone, Copy, PartialEq)]
 enum SheetView {
@@ -59,6 +70,14 @@ pub(super) struct HtmlPages {
     /// state is borrowed, so they cannot ask it.
     pub(super) viewport: Bounds<Pixels>,
     #[cfg(target_os = "macos")]
+    snapshots: HashMap<SharedString, PageFrame>,
+    #[cfg(target_os = "macos")]
+    retired: Vec<Arc<gpui::RenderImage>>,
+    #[cfg(target_os = "macos")]
+    live_until: HashMap<SharedString, std::time::Instant>,
+    #[cfg(target_os = "macos")]
+    pacing: HashSet<SharedString>,
+    #[cfg(target_os = "macos")]
     tx: crate::browser::inline::InlineSender,
     #[cfg(target_os = "macos")]
     _events: Task<()>,
@@ -93,9 +112,29 @@ impl HtmlPages {
             viewport: Bounds::default(),
             style_generations: page_style(cx),
             #[cfg(target_os = "macos")]
+            snapshots: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            retired: Vec::new(),
+            #[cfg(target_os = "macos")]
+            live_until: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            pacing: HashSet::new(),
+            #[cfg(target_os = "macos")]
             tx,
             #[cfg(target_os = "macos")]
             _events: events,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn page(&self, key: &str) -> Option<&crate::browser::inline::InlineWebView> {
+        match key.strip_suffix(SHEET_SUFFIX) {
+            Some(row) => self
+                .sheet
+                .as_ref()
+                .filter(|sheet| sheet.row.as_ref() == row)
+                .and_then(|sheet| sheet.page.as_ref()),
+            None => self.pages.get(key),
         }
     }
 }
@@ -146,8 +185,11 @@ impl Transcript {
     ) {
         use crate::browser::inline::InlineEvent;
         match event {
-            InlineEvent::Height(_) if key.ends_with(SHEET_SUFFIX) => {}
+            InlineEvent::Height(_) if key.ends_with(SHEET_SUFFIX) => {
+                self.keep_html_page_live(key, HEIGHT_LIVE, cx);
+            }
             InlineEvent::Height(height) => {
+                self.keep_html_page_live(key.clone(), HEIGHT_LIVE, cx);
                 let height = height.round();
                 let previous = self.html_pages.heights.insert(key.clone(), height);
                 if previous.is_none_or(|previous| (previous - height).abs() >= 1.0) {
@@ -169,6 +211,92 @@ impl Transcript {
                 }
                 cx.notify();
             }
+            InlineEvent::Frame(image, scale) => {
+                let pages = &mut self.html_pages;
+                if pages.page(&key).is_none() {
+                    return;
+                }
+                if let Some((previous, _)) = pages.snapshots.insert(key, (image, scale)) {
+                    pages.retired.push(previous);
+                }
+                cx.notify();
+            }
+            InlineEvent::Active => self.keep_html_page_live(key, ACTIVE_LIVE, cx),
+            InlineEvent::Pointer => self.keep_html_page_live(key, POINTER_LIVE, cx),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn keep_html_page_live(
+        &mut self,
+        key: SharedString,
+        duration: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let until = std::time::Instant::now() + duration;
+        let live = self
+            .html_pages
+            .live_until
+            .entry(key.clone())
+            .or_insert(until);
+        *live = (*live).max(until);
+        if !self.html_pages.pacing.insert(key.clone()) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            while this
+                .update(cx, |this, _| this.snapshot_html_page(&key))
+                .unwrap_or(false)
+            {
+                cx.background_executor()
+                    .timer(crate::browser::inline::FRAME_INTERVAL)
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn snapshot_html_page(&mut self, key: &SharedString) -> bool {
+        let pages = &mut self.html_pages;
+        let live = pages
+            .live_until
+            .get(key)
+            .is_some_and(|until| *until > std::time::Instant::now());
+        match pages
+            .page(key)
+            .filter(|page| live && page.painted())
+            .cloned()
+        {
+            Some(page) => {
+                page.snapshot();
+                true
+            }
+            None => {
+                pages.pacing.remove(key);
+                false
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn release_html_frames(&mut self, window: &mut Window) {
+        let pages = &mut self.html_pages;
+        let closed: Vec<SharedString> = pages
+            .snapshots
+            .keys()
+            .chain(pages.live_until.keys())
+            .filter(|key| pages.page(key).is_none())
+            .cloned()
+            .collect();
+        for key in closed {
+            pages.live_until.remove(&key);
+            if let Some((image, _)) = pages.snapshots.remove(&key) {
+                pages.retired.push(image);
+            }
+        }
+        for image in pages.retired.drain(..) {
+            let _ = window.drop_image(image);
         }
     }
 
@@ -418,6 +546,7 @@ impl Transcript {
             ) {
                 Ok(page) => {
                     self.html_pages.pages.insert(row_id.clone(), page);
+                    self.keep_html_page_live(row_id.clone(), LOAD_LIVE, cx);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "html render page unavailable");
@@ -425,8 +554,12 @@ impl Transcript {
                 }
             }
         }
+        let frame = self.html_pages.snapshots.get(row_id).cloned();
         if self.html_pages.sheet.is_some() {
-            return gpui::Empty.into_any_element();
+            return page_surface(None, frame, None)
+                .absolute()
+                .inset_0()
+                .into_any_element();
         }
         let page = self.html_pages.pages[row_id].clone();
         page.set_scrolls(scrolls_inside(height, content));
@@ -437,22 +570,75 @@ impl Transcript {
         };
         let bottom = self.bottom_clearance + if self.show_jump_button { 44.0 } else { 0.0 };
         let region = native_mask(self.html_pages.viewport, top, bottom, self.preview_inset);
-        gpui::canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                let mask = window.content_mask().bounds.intersect(&region);
-                page.sync_on_present(bounds, mask, window);
-            },
-        )
-        .absolute()
-        .inset_0()
-        .into_any_element()
+        page_surface(Some(page), frame, Some(region))
+            .absolute()
+            .inset_0()
+            .on_mouse_move(self.html_page_pointer(row_id.clone(), cx))
+            .into_any_element()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn html_page_pointer(
+        &self,
+        key: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseMoveEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            if event.pressed_button.is_some() || cx.has_active_drag() {
+                return;
+            }
+            if let Some(page) = this.html_pages.page(&key) {
+                page.arm(event.position);
+            }
+            this.keep_html_page_live(key.clone(), POINTER_LIVE, cx);
+        })
     }
 }
 
-/// The transcript region a native page may cover: the list's clip minus the
-/// chrome painted over the list (titlebar, composer stack and jump pill,
-/// docked computer preview), which a native view would otherwise hide.
+#[cfg(target_os = "macos")]
+fn page_surface(
+    page: Option<crate::browser::inline::InlineWebView>,
+    frame: Option<PageFrame>,
+    region: Option<Bounds<Pixels>>,
+) -> gpui::Div {
+    div().child(
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                if let Some(page) = &page {
+                    let mut mask = window.content_mask().bounds;
+                    if let Some(region) = region {
+                        mask = mask.intersect(&region);
+                    }
+                    page.sync_on_present(bounds, mask, window);
+                }
+                if let Some((image, scale)) = &frame {
+                    // At the frame's own scale, so a reflowing page is clipped, never stretched.
+                    let pixels = image.size(0);
+                    let painted = Bounds::new(
+                        bounds.origin,
+                        size(
+                            px(pixels.width.0 as f32 / scale),
+                            px(pixels.height.0 as f32 / scale),
+                        ),
+                    );
+                    let _ = window.paint_image(
+                        painted,
+                        gpui::Corners::default(),
+                        image.clone(),
+                        0,
+                        false,
+                    );
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// The transcript region a page takes pointer input in: the list's clip
+/// minus the chrome painted over the list (titlebar, composer stack and jump
+/// pill, docked computer preview), which must keep its own clicks.
 pub(super) fn native_mask(
     list: Bounds<Pixels>,
     top: f32,
@@ -565,13 +751,14 @@ impl Transcript {
     }
 
     /// The expanded page, over the conversation column and under the
-    /// composer. Inline pages hide while it is open: they are native views
-    /// and would draw over it.
+    /// composer. Inline pages take no input while it is open.
     pub(super) fn render_html_sheet(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        #[cfg(target_os = "macos")]
+        self.release_html_frames(window);
         let sheet = self.html_pages.sheet.as_ref()?;
         let (row, title, view) = (sheet.row.clone(), sheet.title.clone(), sheet.view);
         let theme = Theme::of(cx).clone();
@@ -720,6 +907,7 @@ impl Transcript {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let key: SharedString = format!("{row}{SHEET_SUFFIX}").into();
         let sheet = self.html_pages.sheet.as_mut().expect("sheet is open");
         if sheet.page.is_none() {
             let html = crate::html_render::inject_bootstrap(
@@ -730,32 +918,31 @@ impl Transcript {
             );
             match crate::browser::inline::InlineWebView::new(
                 window,
-                format!("{row}{SHEET_SUFFIX}").into(),
+                key.clone(),
                 &html,
                 self.html_pages.tx.clone(),
             ) {
-                Ok(page) => sheet.page = Some(page),
+                Ok(page) => {
+                    sheet.page = Some(page);
+                    self.keep_html_page_live(key.clone(), LOAD_LIVE, cx);
+                }
                 Err(error) => {
                     tracing::warn!(%error, "html sheet page unavailable");
                     return gpui::Empty.into_any_element();
                 }
             }
         }
-        let page = sheet.page.clone().expect("sheet page");
+        let page = self.html_pages.page(&key).cloned().expect("sheet page");
         page.set_scrolls(true);
-        gpui::canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                let mask = window.content_mask().bounds;
-                page.sync_on_present(bounds, mask, window);
-            },
-        )
-        .absolute()
-        .top(px(12.0))
-        .bottom_0()
-        .left(px(16.0))
-        .right(px(16.0))
-        .into_any_element()
+        let frame = self.html_pages.snapshots.get(&key).cloned();
+        page_surface(Some(page), frame, None)
+            .on_mouse_move(self.html_page_pointer(key, cx))
+            .absolute()
+            .top(px(12.0))
+            .bottom_0()
+            .left(px(16.0))
+            .right(px(16.0))
+            .into_any_element()
     }
 }
 
@@ -966,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn native_pages_never_cover_the_titlebar_composer_or_docked_preview() {
+    fn pages_take_no_input_under_the_titlebar_composer_or_docked_preview() {
         let list = Bounds::from_corners(point(px(0.0), px(0.0)), point(px(800.0), px(900.0)));
         let mask = native_mask(list, 38.0, 160.0, 220.0);
         assert_eq!(mask.top(), px(38.0));
