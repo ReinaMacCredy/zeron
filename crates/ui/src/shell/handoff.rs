@@ -37,7 +37,14 @@ impl Shell {
     }
 
     pub(super) fn handoff_disabled(&self, cx: &App) -> bool {
-        self.handoff_blocked(cx) || self.in_place_handoff_targets(cx).is_empty()
+        self.handoff_blocked(cx)
+            || self
+                .composer
+                .read(cx)
+                .pickers()
+                .read(cx)
+                .handoff_targets()
+                .is_empty()
     }
 
     pub(super) fn open_handoff_menu(&mut self, cx: &mut Context<Self>) {
@@ -126,6 +133,7 @@ impl Shell {
                 })
             })
             .collect();
+        let has_in_place = !in_place.is_empty();
         let card = popover::popover_card(&popup)
             .id("handoff-menu-card")
             .w(px(224.0))
@@ -134,10 +142,12 @@ impl Shell {
             .flex_col()
             .gap(px(popover::MENU_GAP))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_handoff_menu(cx)))
-            .child(popover::menu_heading(&popup, "Continue in this thread"))
-            .children(in_place)
+            .when(!in_place.is_empty(), |card| {
+                card.child(popover::menu_heading(&popup, "Continue in this thread"))
+                    .children(in_place)
+            })
             .when(!new_thread.is_empty(), |card| {
-                card.child(popover::menu_separator())
+                card.when(has_in_place, |card| card.child(popover::menu_separator()))
                     .child(popover::menu_heading(&popup, "Continue in a new thread"))
                     .children(new_thread)
             })

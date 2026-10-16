@@ -5609,7 +5609,15 @@ impl Shell {
                         });
                         shell.open_chat(chat.id, cx);
                     }
-                    Err(err) => tracing::warn!(%err, "ContinueInNewThread failed"),
+                    Err(err) => {
+                        tracing::warn!(%err, "ContinueInNewThread failed");
+                        shell.show_notice(
+                            crate::toast::ToastKind::Error,
+                            format!("Couldn't continue in a new thread: {err}"),
+                            cx,
+                        );
+                        cx.notify();
+                    }
                 }
             })
             .ok();
