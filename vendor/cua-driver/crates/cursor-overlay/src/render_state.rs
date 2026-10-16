@@ -1312,6 +1312,98 @@ pub fn paint_cursor(
     // either — the label state above is dormant by design.
 }
 
+pub fn paint_extent(
+    core: &RenderStateCore,
+    origin_x: f64,
+    origin_y: f64,
+    focus_rect: Option<FocusRect>,
+    backing_scale: f32,
+) -> Option<[i64; 4]> {
+    let fading_out = core.codex_look() && core.codex.reveal() > 0.0;
+    if (!core.visible && !fading_out) || !core.is_placed() || core.idle_alpha < 0.004 {
+        return None;
+    }
+    let s = backing_scale.max(1.0) as f64;
+    let alpha_scale = core.idle_alpha as f32;
+    let union = |a: Option<[i64; 4]>, b: Option<[i64; 4]>| match (a, b) {
+        (Some(a), Some(b)) => Some([
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]),
+        (a, b) => a.or(b),
+    };
+
+    if core.codex_look() {
+        let (x, y) = core.compact_display_pos();
+        let mut channels = core.codex.channels();
+        channels.alpha *= alpha_scale as f64;
+        return crate::codex_cursor::extent(&crate::codex_cursor::CodexPaint {
+            x: (x - origin_x) * s,
+            y: (y - origin_y) * s,
+            device_scale: s,
+            channels,
+            fog: crate::codex_cursor::FOG_FALLBACK,
+            fill: None,
+            rim: [0; 3],
+        });
+    }
+
+    if core.cfg.compact {
+        let channels = core.compact_paint_channels();
+        let arrow = crate::compact_cursor::extent(&crate::compact_cursor::CompactPaint {
+            x: (channels.x - origin_x) * s,
+            y: (channels.y - origin_y) * s,
+            device_scale: s,
+            scale: channels.scale,
+            stretch: channels.stretch,
+            squash: channels.squash,
+            pivot_x: channels.pivot_x,
+            rotation: channels.rotation,
+            alpha: alpha_scale as f64,
+            pressed: core.pressed,
+            fill: [0; 3],
+            fill_pressed: [0; 3],
+            rim: [0; 3],
+            shadow: [0; 3],
+        });
+        let ring = core
+            .compact_pulse_ring()
+            .and_then(|(ring_x, ring_y, radius, ring_alpha)| {
+                crate::compact_cursor::pulse_extent(
+                    ((ring_x - origin_x) * s) as f32,
+                    ((ring_y - origin_y) * s) as f32,
+                    (radius * s) as f32,
+                    (ring_alpha * alpha_scale as f64) as f32,
+                    s as f32,
+                )
+            });
+        return union(arrow, ring);
+    }
+
+    let focus = focus_rect.map(|fr| {
+        let [fx, fy, fw, fh] = fr.rect;
+        let pad = 2.5 * s / 2.0 + 1.0;
+        let (x, y) = ((fx - origin_x) * s, (fy - origin_y) * s);
+        [
+            (x - pad).floor() as i64,
+            (y - pad).floor() as i64,
+            (x + fw * s + pad).ceil() as i64,
+            (y + fh * s + pad).ceil() as i64,
+        ]
+    });
+    let (px, py) = ((core.pos.0 - origin_x) * s, (core.pos.1 - origin_y) * s);
+    let reach = f64::from(crate::theme::DISPLAY_SIZE) * s;
+    let pointer = [
+        (px - reach).floor() as i64,
+        (py - reach).floor() as i64,
+        (px + reach).ceil() as i64,
+        (py + reach).ceil() as i64,
+    ];
+    union(Some(pointer), focus)
+}
+
 #[cfg(test)]
 mod glide_duration_tests {
     use super::*;
@@ -1847,3 +1939,138 @@ mod backing_scale_tests {
 #[cfg(test)]
 #[path = "render_state_codex_tests.rs"]
 mod codex_look_tests;
+
+#[cfg(test)]
+mod paint_extent_tests {
+    use super::*;
+    use crate::{CursorAction, CursorConfig};
+
+    fn assert_extent_holds_every_pixel(
+        core: &RenderStateCore,
+        focus: Option<FocusRect>,
+        label: &str,
+    ) -> bool {
+        let scale = 2.0_f32;
+        let mut pm = tiny_skia::Pixmap::new(1200, 1200).unwrap();
+        paint_cursor(&mut pm, core, 0.0, 0.0, focus, scale);
+        let mut ink: Option<[i64; 4]> = None;
+        for (i, p) in pm.pixels().iter().enumerate() {
+            if p.alpha() == 0 {
+                continue;
+            }
+            let (x, y) = ((i % 1200) as i64, (i / 1200) as i64);
+            ink = Some(match ink {
+                None => [x, y, x + 1, y + 1],
+                Some(b) => [b[0].min(x), b[1].min(y), b[2].max(x + 1), b[3].max(y + 1)],
+            });
+        }
+        let extent = paint_extent(core, 0.0, 0.0, focus, scale);
+        match (ink, extent) {
+            (None, _) => {}
+            (Some(ink), None) => panic!("{label}: painted {ink:?} but extent is None"),
+            (Some(ink), Some(e)) => assert!(
+                e[0] <= ink[0] && e[1] <= ink[1] && e[2] >= ink[2] && e[3] >= ink[3],
+                "{label}: ink {ink:?} escapes extent {e:?}"
+            ),
+        }
+        if let (Some(e), None) = (extent, focus) {
+            assert!(
+                (e[2] - e[0]) * (e[3] - e[1]) < 400 * 400,
+                "{label}: extent {e:?} is not cursor-sized"
+            );
+        }
+        ink.is_some()
+    }
+
+    fn core(compact: bool, theme_id: Option<&str>) -> RenderStateCore {
+        let mut cfg = CursorConfig {
+            compact,
+            ..CursorConfig::default()
+        };
+        if let Some(id) = theme_id {
+            cfg.theme_id = id.into();
+        }
+        let mut core = RenderStateCore::new(cfg);
+        core.motion.idle_hide_ms = 0.0;
+        core.screen_size = Some((600.0, 600.0));
+        core
+    }
+
+    fn drive(core: &mut RenderStateCore, focus: Option<FocusRect>, label: &str, swift: bool) {
+        let mut inked = 0;
+        let mut step = |core: &mut RenderStateCore, cmd: OverlayCommand, frames: usize| {
+            core.apply_command_base(cmd, swift, swift);
+            for frame in 0..frames {
+                if core.cfg.compact {
+                    core.tick_compact(1.0 / 60.0);
+                } else {
+                    core.tick_swift_constants(1.0 / 60.0);
+                }
+                if assert_extent_holds_every_pixel(core, focus, &format!("{label} frame {frame}")) {
+                    inked += 1;
+                }
+            }
+        };
+        step(
+            core,
+            OverlayCommand::SnapTo {
+                x: 150.0,
+                y: 150.0,
+                heading_radians: None,
+            },
+            30,
+        );
+        step(
+            core,
+            OverlayCommand::MoveTo {
+                x: 450.0,
+                y: 380.0,
+                end_heading_radians: std::f64::consts::FRAC_PI_4,
+            },
+            90,
+        );
+        step(core, OverlayCommand::ClickPulse { x: 450.0, y: 380.0 }, 40);
+        step(
+            core,
+            OverlayCommand::BeginAction {
+                action: CursorAction::Text,
+                delivery: None,
+                target: None,
+            },
+            90,
+        );
+        step(core, OverlayCommand::SetPressed(true), 20);
+        step(core, OverlayCommand::SetPressed(false), 20);
+        step(core, OverlayCommand::SetEnabled(false), 40);
+        assert!(inked > 200, "{label}: only {inked} frames painted anything");
+    }
+
+    #[test]
+    fn codex_extent_holds_every_painted_pixel() {
+        drive(
+            &mut core(true, Some(crate::CODEX_THEME_ID)),
+            None,
+            "codex",
+            true,
+        );
+    }
+
+    #[test]
+    fn compact_extent_holds_every_painted_pixel() {
+        drive(
+            &mut core(true, Some(crate::COMPACT_THEME_ID)),
+            None,
+            "compact",
+            true,
+        );
+    }
+
+    #[test]
+    fn theme_extent_holds_every_painted_pixel_and_the_focus_ring() {
+        let focus = Some(FocusRect {
+            rect: [300.0, 260.0, 160.0, 90.0],
+            t: 0.2,
+        });
+        drive(&mut core(false, None), focus, "theme", true);
+    }
+}

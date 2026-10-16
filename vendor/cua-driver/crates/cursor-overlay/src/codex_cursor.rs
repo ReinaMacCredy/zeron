@@ -287,24 +287,44 @@ fn paint_silhouette(pm: &mut Pixmap, rgb: [u8; 3], outset: f32, ts: Transform) {
         None,
     );
 }
-pub fn paint(pm: &mut Pixmap, paint: &CodexPaint) {
+fn fade_blur(paint: &CodexPaint) -> i64 {
+    let alpha = paint.channels.alpha.clamp(0.0, 1.0);
+    ((1.0 - alpha) * FADE_BLUR_POINTS * paint.device_scale.max(0.0))
+        .round()
+        .max(0.0) as i64
+}
+
+pub fn extent(paint: &CodexPaint) -> Option<[i64; 4]> {
     let ch = paint.channels;
     let device = paint.device_scale.max(0.0);
     if ch.alpha <= 0.004 || ch.scale <= 0.0 || !ch.scale.is_finite() || device <= 0.0 {
-        return;
+        return None;
     }
-    let alpha = ch.alpha.clamp(0.0, 1.0);
-    let blur = ((1.0 - alpha) * FADE_BLUR_POINTS * device).round().max(0.0) as i64;
     let center = (
         paint.x + device * f64::from(FOG_CENTER.0),
         paint.y + device * f64::from(FOG_CENTER.1),
     );
     let reach = device * f64::from(FOG_RADIUS) * ch.scale.max(1.0) * ch.stretch.max(1.0)
-        + (blur * 3 + 2) as f64;
-    let x0 = ((center.0 - reach).floor() as i64).max(0);
-    let y0 = ((center.1 - reach).floor() as i64).max(0);
-    let x1 = ((center.0 + reach).ceil() as i64).min(pm.width() as i64);
-    let y1 = ((center.1 + reach).ceil() as i64).min(pm.height() as i64);
+        + (fade_blur(paint) * 3 + 2) as f64;
+    Some([
+        (center.0 - reach).floor() as i64,
+        (center.1 - reach).floor() as i64,
+        (center.0 + reach).ceil() as i64,
+        (center.1 + reach).ceil() as i64,
+    ])
+}
+
+pub fn paint(pm: &mut Pixmap, paint: &CodexPaint) {
+    let Some([x0, y0, x1, y1]) = extent(paint) else {
+        return;
+    };
+    let ch = paint.channels;
+    let device = paint.device_scale.max(0.0);
+    let alpha = ch.alpha.clamp(0.0, 1.0);
+    let blur = fade_blur(paint);
+    let (x0, y0) = (x0.max(0), y0.max(0));
+    let x1 = x1.min(pm.width() as i64);
+    let y1 = y1.min(pm.height() as i64);
     if x1 <= x0 || y1 <= y0 {
         return;
     }
