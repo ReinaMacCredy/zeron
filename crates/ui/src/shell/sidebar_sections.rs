@@ -818,14 +818,29 @@ mod tests {
                 })
             })
         };
+        let unsettled = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            cx.update(|_, cx| {
+                shell
+                    .read(cx)
+                    .settings
+                    .sidebar_unsettled_at
+                    .contains_key("regular")
+            })
+        };
         assert_eq!(
             toggle(&mut cx),
             (true, vec!["elsewhere".into(), "regular".into()])
         );
+        assert!(!unsettled(&mut cx));
         assert_eq!(
             toggle(&mut cx),
             (false, vec!["elsewhere".into(), "regular".into()])
         );
+        assert!(unsettled(&mut cx));
     }
 
     #[gpui::test]
