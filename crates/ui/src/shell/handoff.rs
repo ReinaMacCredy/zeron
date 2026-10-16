@@ -99,45 +99,31 @@ impl Shell {
 
     fn render_handoff_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let popup = theme.for_popup();
-        let rows: Vec<AnyElement> = self
+        let in_place: Vec<AnyElement> = self
             .in_place_handoff_targets(cx)
             .into_iter()
             .map(|target| {
-                let (mark, tint) = crate::pickers::harness_brand_icon(target.harness);
-                let id = SharedString::from(format!("handoff-this-{:?}", target.harness));
-                let selector = id.clone();
-                let HandoffTarget {
-                    harness,
-                    name,
-                    model,
-                    model_label,
-                } = target;
-                popover::menu_row(&popup, false, id.clone())
-                    .id(id)
-                    .debug_selector(move || selector.to_string())
-                    .role(gpui::Role::MenuItem)
-                    .gap(px(8.0))
-                    .child(
-                        icon(mark)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(tint.unwrap_or(popup.text_muted)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("{name} · {model_label}")),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.close_handoff_menu(cx);
-                        let pickers = this.composer.read(cx).pickers().clone();
-                        let model = model.clone();
-                        pickers.update(cx, |pickers, cx| {
-                            pickers.hand_off_in_place(harness, model, cx)
-                        });
-                    }))
-                    .into_any_element()
+                handoff_row(&popup, "this", target, cx, |this, harness, model, cx| {
+                    let pickers = this.composer.read(cx).pickers().clone();
+                    pickers.update(cx, |pickers, cx| {
+                        pickers.hand_off_in_place(harness, model, cx)
+                    });
+                })
+            })
+            .collect();
+        let new_thread: Vec<AnyElement> = self
+            .composer
+            .read(cx)
+            .pickers()
+            .read(cx)
+            .handoff_targets()
+            .into_iter()
+            .map(|target| {
+                handoff_row(&popup, "new", target, cx, |this, harness, model, cx| {
+                    if let Some(chat_id) = this.state.read(cx).selected_chat.clone() {
+                        this.continue_in_new_thread(chat_id, harness, Some(model), cx);
+                    }
+                })
             })
             .collect();
         let card = popover::popover_card(&popup)
@@ -149,8 +135,53 @@ impl Shell {
             .gap(px(popover::MENU_GAP))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_handoff_menu(cx)))
             .child(popover::menu_heading(&popup, "Continue in this thread"))
-            .children(rows)
+            .children(in_place)
+            .when(!new_thread.is_empty(), |card| {
+                card.child(popover::menu_separator())
+                    .child(popover::menu_heading(&popup, "Continue in a new thread"))
+                    .children(new_thread)
+            })
             .into_any_element();
         popover::anchored_menu_below_end("handoff-menu", card, self.handoff_menu.closing_since())
     }
+}
+
+fn handoff_row(
+    popup: &Theme,
+    group: &str,
+    target: HandoffTarget,
+    cx: &mut Context<Shell>,
+    pick: fn(&mut Shell, HarnessId, String, &mut Context<Shell>),
+) -> AnyElement {
+    let (mark, tint) = crate::pickers::harness_brand_icon(target.harness);
+    let id = SharedString::from(format!("handoff-{group}-{:?}", target.harness));
+    let selector = id.clone();
+    let HandoffTarget {
+        harness,
+        name,
+        model,
+        model_label,
+    } = target;
+    popover::menu_row(popup, false, id.clone())
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .role(gpui::Role::MenuItem)
+        .gap(px(8.0))
+        .child(
+            icon(mark)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(tint.unwrap_or(popup.text_muted)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(format!("{name} · {model_label}")),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.close_handoff_menu(cx);
+            pick(this, harness, model.clone(), cx);
+        }))
+        .into_any_element()
 }

@@ -5550,6 +5550,62 @@ impl Shell {
         self.create_sidechat(source_chat_id, prompt, staged, cx);
     }
 
+    pub fn continue_in_new_thread(
+        &mut self,
+        source_chat_id: String,
+        harness: HarnessId,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let host_device_id = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == source_chat_id)
+            .map(|chat| chat.device_id.clone());
+        let mut params = serde_json::json!({
+            "sourceChatId": source_chat_id,
+            "chatId": uuid::Uuid::new_v4().to_string(),
+            "harness": harness,
+            "model": model,
+        });
+        if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
+            object.insert("targetDeviceId".into(), device.into());
+        }
+        cx.spawn(async move |this, cx| {
+            let reply = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::CONTINUE_IN_NEW_THREAD,
+                params,
+                Duration::from_secs(30),
+            )
+            .await;
+            this.update(cx, |shell, cx| {
+                match reply.map_err(|e| e.to_string()).and_then(|value| {
+                    serde_json::from_value::<zeron_proto::Chat>(value).map_err(|e| e.to_string())
+                }) {
+                    Ok(chat) => {
+                        shell.state.update(cx, |state, cx| {
+                            if !state.chats.iter().any(|row| row.id == chat.id) {
+                                state.chats.push(chat.clone());
+                                cx.notify();
+                            }
+                        });
+                        shell.open_chat(chat.id, cx);
+                    }
+                    Err(err) => tracing::warn!(%err, "ContinueInNewThread failed"),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn create_sidechat(
         &mut self,
         source_chat_id: String,

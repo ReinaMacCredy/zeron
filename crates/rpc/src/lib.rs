@@ -83,6 +83,9 @@ pub mod methods {
     /// there is no live transcript to watch it through.
     pub const COMPACT_CHAT: &str = "CompactChat";
     pub const REQUEST_COMPACT: &str = "RequestCompact";
+    /// `{chatId}` -> `{text}`: the compaction reminder for a turn still
+    /// running, asked by `zeron hook` after each Claude Code tool call.
+    pub const MID_TURN_NUDGE: &str = "MidTurnNudge";
     /// Stop one live background task (a shell, or a subagent by its spawn
     /// tool id) of `chatId`'s running harness: `{chatId, taskId}`.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
@@ -99,6 +102,8 @@ pub mod methods {
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.
     pub const CREATE_SIDECHAT: &str = "CreateSidechat";
+    /// `{sourceChatId, chatId, harness, model?, reasoning?, profileId?}` → `Chat`.
+    pub const CONTINUE_IN_NEW_THREAD: &str = "ContinueInNewThread";
     // Thread tools (peer chats, d25). IPC-only; the caller identity comes from
     // the engine-spawned `zeron mcp --chat` process, never from the agent.
     /// Open a peer chat in `fromChatId`'s project, stamped `createdByChatId`,

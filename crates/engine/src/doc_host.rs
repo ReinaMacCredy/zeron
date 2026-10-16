@@ -959,7 +959,7 @@ impl ChatDocHandle {
         message_id: &str,
         text: &str,
         hint: Option<&str>,
-        handoff: Option<(zeron_proto::HarnessId, &str)>,
+        handoff: Option<(zeron_proto::HarnessId, &str, zeron_doc::HandoffRoute)>,
         created_at: i64,
     ) -> Result<(), DocError> {
         let mut parts = vec![MessagePart::Text {
@@ -972,11 +972,12 @@ impl ChatDocHandle {
                 text: hint.to_string(),
             });
         }
-        if let Some((harness, packet)) = handoff {
+        if let Some((harness, packet, route)) = handoff {
             parts.push(MessagePart::Handoff {
                 id: format!("{message_id}-handoff"),
                 harness,
                 text: packet.to_string(),
+                route,
             });
         }
         self.doc.push_message(&SessionMessageEntry {
@@ -3900,6 +3901,53 @@ impl DocHost {
         Ok(chat_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_in_new_thread(
+        &self,
+        source_chat_id: &str,
+        chat_id: &str,
+        harness: zeron_proto::HarnessId,
+        model: Option<&str>,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+        profile: &ProfileParams,
+        packet: &str,
+    ) -> Result<zeron_proto::Chat, EngineError> {
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
+        if let Some(existing) = workspace.chat(chat_id)? {
+            return Ok(existing);
+        }
+        let source = workspace
+            .chat(source_chat_id)?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {source_chat_id}")))?;
+        let config = self.derived_config(&source, Some(harness), model, reasoning, profile)?;
+        let from = self.harness_for(source_chat_id);
+        let chat = workspace.create_handoff_chat(&source, chat_id, from, config)?;
+        let title = source
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("chat")
+            .to_string();
+        let route = zeron_doc::HandoffRoute {
+            from_harness: Some(from),
+            from_model: source.config.and_then(|config| config.model),
+            to_model: chat.config.as_ref().and_then(|config| config.model.clone()),
+            source_chat_id: Some(source.id),
+            source_title: Some(title.clone()),
+        };
+        self.open(chat_id)?.write_system_note_with(
+            &new_id(),
+            &format!("Continued from {title}."),
+            None,
+            Some((harness, packet, route)),
+            now_ms(),
+        )?;
+        Ok(chat)
+    }
+
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
     pub fn update_queued_message(
@@ -4648,7 +4696,13 @@ impl DocHost {
                 continue;
             };
             changed = true;
-            if let Err(err) = handle.write_user_message(&row.id, &row.text, row.issued_at) {
+            let from = row
+                .from_chat_id
+                .as_deref()
+                .or(row.delegated_tasks.first().map(String::as_str));
+            if let Err(err) =
+                handle.write_user_message_from(&row.id, &row.text, row.issued_at, from)
+            {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "cancelled held send write failed");
             }
         }

@@ -122,6 +122,28 @@ pub enum SubagentStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HandoffRoute {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_harness: Option<HarnessId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_model: Option<String>,
+    /// Set only when the packet seeded a new thread, never on an in-place switch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+}
+
+impl HandoffRoute {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// One rendered part of an assistant message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -163,6 +185,8 @@ pub enum MessagePart {
         id: String,
         harness: HarnessId,
         text: String,
+        #[serde(default, skip_serializing_if = "HandoffRoute::is_empty")]
+        route: HandoffRoute,
     },
     #[serde(rename_all = "camelCase")]
     Tool {

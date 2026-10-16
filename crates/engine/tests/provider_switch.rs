@@ -3,7 +3,7 @@
 //! as text, later turns resume its own session, and the old harness's
 //! checkpoints can no longer be branched at.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +12,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
+    HandoffRoute, MessagePart, MessageRole, MessageStatus, SessionCommandPayload,
+    SessionMessageEntry,
 };
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
@@ -38,6 +39,7 @@ struct TestHarness {
     name: &'static str,
     runs: Arc<Mutex<Vec<Seen>>>,
     turns: AtomicUsize,
+    fail_next: AtomicBool,
 }
 
 impl TestHarness {
@@ -47,6 +49,7 @@ impl TestHarness {
             name,
             runs: Arc::new(Mutex::new(Vec::new())),
             turns: AtomicUsize::new(0),
+            fail_next: AtomicBool::new(false),
         }
     }
 }
@@ -84,6 +87,20 @@ impl Harness for TestHarness {
             resume: request.resume.clone(),
             branch: request.branch.clone(),
         });
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            let events = vec![
+                AgentEvent::Error {
+                    message: "start failed".into(),
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some("start failed".into()),
+                    session_id: None,
+                },
+            ];
+            return Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed());
+        }
         let n = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
         let session_id = match (&request.resume, &request.branch) {
             (Some(_), Some(_)) => format!("{}-forked", self.name),
@@ -400,8 +417,8 @@ async fn a_second_switch_before_any_message_replaces_the_first_divider() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path()).await;
     rig.turn(CHAT, "first", "m1").await;
-    switch(&rig, "pi", "Old", "New").await;
-    switch(&rig, "codex", "New", "Codex").await;
+    switch(&rig, "pi", "Mock", "Pi").await;
+    switch(&rig, "codex", "Pi", "Codex").await;
     let doc = entries(&rig.core, CHAT);
     // user, reply, one divider
     assert_eq!(doc.len(), 3);
@@ -409,7 +426,7 @@ async fn a_second_switch_before_any_message_replaces_the_first_divider() {
     assert_eq!(divider.role, MessageRole::System);
     assert_eq!(
         entry_text(divider),
-        "Provider changed from Old to Codex.Old session closed. Handed to Codex; Old's files were not carried."
+        "Provider changed from Mock to Codex.Mock session closed. Handed to Codex; Mock's files were not carried."
     );
     assert!(matches!(
         &divider.parts[2],
@@ -515,5 +532,163 @@ async fn old_checkpoints_cannot_be_branched_after_the_switch() {
         last.prompt.contains("<previous_conversation>\nUser: first\n\nAssistant: Old answer 1\n</previous_conversation>"),
         "{}",
         last.prompt
+    );
+}
+
+async fn set_config(rig: &Rig, harness: &str, model: &str, text: &str) {
+    rig.client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig",
+                "chatId": CHAT,
+                "config": {
+                    "harness": harness, "model": model, "reasoning": null,
+                    "modelOptions": {}, "sandbox": "workspace-write",
+                },
+                "note": { "text": text, "hint": "hint" },
+            }),
+        )
+        .await
+        .expect("setChatConfig");
+}
+
+fn handoff_route(entry: &SessionMessageEntry) -> (HarnessId, String, HandoffRoute) {
+    entry
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            MessagePart::Handoff {
+                harness,
+                text,
+                route,
+                ..
+            } => Some((*harness, text.clone(), route.clone())),
+            _ => None,
+        })
+        .expect("a handoff part")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_change_after_an_unsent_switch_folds_into_its_divider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    set_config(
+        &rig,
+        "mock",
+        "old-1",
+        "Model changed from default to old-1.",
+    )
+    .await;
+    rig.turn(CHAT, "first", "m1").await;
+    set_config(&rig, "pi", "pi-1", "Provider changed from Mock to Pi.").await;
+    set_config(&rig, "pi", "pi-2", "Model changed from pi-1 to pi-2.").await;
+
+    let doc = entries(&rig.core, CHAT);
+    // model note, user, reply, one handoff divider
+    assert_eq!(doc.len(), 4, "{doc:#?}");
+    let divider = doc.last().unwrap();
+    assert_eq!(entry_text(divider), "Provider changed from Mock to Pi.hint");
+    let (to, _, route) = handoff_route(divider);
+    assert_eq!(to, HarnessId::Pi);
+    assert_eq!(route.from_harness, Some(HarnessId::Mock));
+    assert_eq!(route.from_model.as_deref(), Some("old-1"));
+    assert_eq!(route.to_model.as_deref(), Some("pi-2"));
+    assert_eq!(previous_harnesses(&rig), vec![HarnessId::Mock]);
+
+    // The first turn carries the recorded packet once and records no second.
+    rig.turn(CHAT, "second", "m2").await;
+    let seen = rig.new.runs.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].prompt.matches("<provider_switch>").count(), 1);
+    let doc = entries(&rig.core, CHAT);
+    assert!(
+        doc.iter()
+            .filter(|entry| entry.role == MessageRole::User)
+            .all(|entry| !entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Handoff { .. })))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continued_thread_resends_its_source_packet_after_a_failed_first_turn() {
+    const CONT: &str = "chat-cont";
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    let chat: zeron_proto::Chat = serde_json::from_value(
+        rig.client
+            .call(
+                zeron_rpc::methods::CONTINUE_IN_NEW_THREAD,
+                serde_json::json!({
+                    "sourceChatId": CHAT, "chatId": CONT, "harness": "pi", "model": "pi-1",
+                }),
+            )
+            .await
+            .expect("ContinueInNewThread"),
+    )
+    .unwrap();
+    assert_eq!(chat.title.as_deref(), Some("Auth work (cont.)"));
+    assert_eq!(chat.created_by_chat_id, None);
+    assert_eq!(chat.previous_harnesses, vec![HarnessId::Mock]);
+    assert_eq!(chat.config.as_ref().map(|c| c.harness), Some(HarnessId::Pi));
+    let same: zeron_proto::Chat = serde_json::from_value(
+        rig.client
+            .call(
+                zeron_rpc::methods::CONTINUE_IN_NEW_THREAD,
+                serde_json::json!({
+                    "sourceChatId": CHAT, "chatId": "chat-same", "harness": "mock",
+                }),
+            )
+            .await
+            .expect("ContinueInNewThread on the same agent"),
+    )
+    .unwrap();
+    assert!(same.previous_harnesses.is_empty(), "one agent, one mark");
+    let doc = entries(&rig.core, CONT);
+    assert_eq!(doc.len(), 1, "no source message is copied");
+    let (to, packet, route) = handoff_route(&doc[0]);
+    assert_eq!(to, HarnessId::Pi);
+    assert_eq!(route.from_harness, Some(HarnessId::Mock));
+    assert_eq!(route.to_model.as_deref(), Some("pi-1"));
+    assert_eq!(route.source_chat_id.as_deref(), Some(CHAT));
+    assert_eq!(route.source_title.as_deref(), Some("Auth work"));
+    assert!(packet.contains("User: first\n\nAssistant: Old answer 1"));
+
+    rig.new.fail_next.store(true, Ordering::SeqCst);
+    rig.core
+        .doc_host
+        .queue_command(CONT, run_payload("hello", "c1", &rig.cwd))
+        .expect("queue run");
+    wait_for(
+        || {
+            entries(&rig.core, CONT).len() >= 3
+                && entries(&rig.core, CONT)
+                    .last()
+                    .is_some_and(|e| e.status == Some(MessageStatus::Complete))
+                && !rig.core.sessions.turn_in_flight(CONT)
+        },
+        "failed first turn settles",
+    )
+    .await;
+
+    rig.core
+        .doc_host
+        .queue_command(CONT, run_payload("hello again", "c2", &rig.cwd))
+        .expect("queue run");
+    wait_for(|| rig.new.runs.lock().unwrap().len() >= 2, "re-sent turn").await;
+    let seen = rig.new.runs.lock().unwrap().clone();
+    assert_eq!(seen[1].resume, None);
+    assert!(
+        seen[1].prompt.starts_with(packet.as_str()),
+        "{}",
+        seen[1].prompt
+    );
+    assert!(
+        seen[1]
+            .prompt
+            .ends_with("<latest_user_message>\nhello again\n</latest_user_message>")
     );
 }

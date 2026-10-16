@@ -29,7 +29,7 @@ use tokio::sync::watch;
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
 use zeron_proto::{
-    Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space, Task, TaskPatch,
+    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskPatch,
 };
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -1192,6 +1192,54 @@ impl WorkspaceHost {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
+            settle: None,
+            unsettled_at: None,
+        };
+        self.mutate(|doc| doc.upsert_chat(&chat))?;
+        Ok(chat)
+    }
+
+    /// The session starts tombstoned so the first turn sends the handoff packet.
+    pub fn create_handoff_chat(
+        &self,
+        source: &Chat,
+        new_chat_id: &str,
+        from: HarnessId,
+        config: Option<ChatConfig>,
+    ) -> Result<Chat, EngineError> {
+        let seed = source
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("chat");
+        let previous_harnesses = config
+            .as_ref()
+            .filter(|config| config.harness != from)
+            .map(|_| vec![from])
+            .unwrap_or_default();
+        let chat = Chat {
+            id: new_chat_id.to_string(),
+            device_id: source.device_id.clone(),
+            title: Some(format!("{seed} (cont.)")),
+            archived: false,
+            cwd: source.cwd.clone(),
+            branch: source.branch.clone(),
+            checkout_id: source.checkout_id.clone(),
+            source_context: None,
+            config,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: Some(String::new()),
+            harness_session_cwd: source.cwd.clone(),
+            room_gen: Some(2),
+            space_id: source.space_id.clone(),
+            last_seen_at: None,
+            sidechat_source_chat_id: None,
+            created_by_chat_id: None,
+            previous_harnesses,
             delegation: None,
             settle: None,
             unsettled_at: None,

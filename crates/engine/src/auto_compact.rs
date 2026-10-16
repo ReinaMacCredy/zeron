@@ -95,6 +95,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
         .ok()
         .and_then(|value| value.parse().ok());
     tokio::spawn(async move {
+        sessions.surface_waiting_agent_compacts();
         let mut statuses = sessions.watch_sessions();
         let mut seen: HashMap<String, DateTime<Utc>> = HashMap::new();
         let mut armed: HashMap<String, Armed> = HashMap::new();

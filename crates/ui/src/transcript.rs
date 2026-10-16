@@ -1217,11 +1217,12 @@ pub enum RowKind {
         hint: Option<SharedString>,
     },
     /// The conversation as text, as the engine handed it to `harness` on the
-    /// first turn after a provider switch (`MessagePart::Handoff`): a dashed
-    /// packet under the user bubble showing exactly what crossed.
+    /// first turn after a provider switch (`MessagePart::Handoff`): a divider
+    /// naming both sides that expands to exactly what crossed.
     Handoff {
         harness: zeron_proto::HarnessId,
         text: SharedString,
+        route: zeron_doc::HandoffRoute,
     },
     /// The fork seam: a labeled divider between copied history and the
     /// chat's own turns.
@@ -1444,13 +1445,19 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// The entry's provider-switch packet as its own row, without a hover strip.
 fn handoff_row(entry: &SessionMessageEntry) -> Option<Row> {
     entry.parts.iter().find_map(|p| match p {
-        MessagePart::Handoff { harness, text, .. } => Some(Row {
+        MessagePart::Handoff {
+            harness,
+            text,
+            route,
+            ..
+        } => Some(Row {
             id: format!("{}#handoff", entry.id).into(),
             version: fnv1a(text.as_bytes()),
             turn_start: false,
             kind: RowKind::Handoff {
                 harness: *harness,
                 text: text.clone().into(),
+                route: route.clone(),
             },
             entry_id: entry.id.clone().into(),
             timestamp: None,
@@ -1577,6 +1584,14 @@ pub fn rows_for_entry(
     }
 
     if entry.role == MessageRole::System {
+        // The note's label and hint text are only the fallback for readers without this row.
+        if let Some(row) = handoff_row(entry) {
+            return vec![Row {
+                id: entry.id.clone().into(),
+                turn_start: true,
+                ..row
+            }];
+        }
         // First text part = the divider label, second = its hover hint
         // (`ChatDocHandle::write_system_note`).
         let mut texts = entry.parts.iter().filter_map(|p| match p {
@@ -1606,7 +1621,7 @@ pub fn rows_for_entry(
                 compact_fold: None,
             }];
         }
-        let mut rows = vec![Row {
+        return vec![Row {
             id: entry.id.clone().into(),
             version: fnv1a(text.as_bytes()),
             turn_start: true,
@@ -1619,10 +1634,6 @@ pub fn rows_for_entry(
             copy_text: None,
             compact_fold: None,
         }];
-        // The provider-switch divider carries the packet the next harness
-        // will receive, shown from the moment of the switch.
-        rows.extend(handoff_row(entry));
-        return rows;
     }
 
     // Assistant: split parts into block rows, folding consecutive
@@ -2732,6 +2743,55 @@ fn handoff_message_count(packet: &str) -> usize {
         .lines()
         .filter(|line| line.starts_with("User: ") || line.starts_with("Assistant: "))
         .count()
+}
+
+struct HandoffSide {
+    icon: (&'static str, Option<gpui::Hsla>),
+    harness: &'static str,
+    model: Option<String>,
+}
+
+impl HandoffSide {
+    fn new(harness: zeron_proto::HarnessId, model: Option<&str>, cx: &gpui::App) -> Self {
+        Self {
+            icon: crate::pickers::agent_brand_icon(Some(harness), model),
+            harness: crate::composer::harness_display_name(harness),
+            model: model.map(|id| crate::pickers::model_display_label(harness, id, cx)),
+        }
+    }
+
+    fn chip(&self, theme: &Theme) -> AnyElement {
+        let (path, tint) = self.icon;
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                crate::icons::icon(path)
+                    .size(px(13.0))
+                    .text_color(tint.unwrap_or(theme.text_muted)),
+            )
+            .child(SharedString::from(
+                self.model
+                    .clone()
+                    .unwrap_or_else(|| self.harness.to_string()),
+            ))
+            .into_any_element()
+    }
+
+    fn detail(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{} · {model}", self.harness),
+            None => self.harness.to_string(),
+        }
+    }
+}
+
+/// Capture knob (`ZERON_OPEN_HANDOFF=1`): synthetic clicks never reach a Dev bundle.
+fn handoff_open_knob() -> bool {
+    static OPEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OPEN.get_or_init(|| std::env::var_os("ZERON_OPEN_HANDOFF").is_some())
 }
 
 /// "612 chars" up to four digits, "12.3k chars" past that.
@@ -9510,9 +9570,11 @@ impl Transcript {
             RowKind::Divider { text, hint } => {
                 divider_row(&row.id, text.clone(), hint.clone(), &theme)
             }
-            RowKind::Handoff { harness, text } => {
-                self.render_handoff(&row.id, *harness, text.clone(), &theme, cx)
-            }
+            RowKind::Handoff {
+                harness,
+                text,
+                route,
+            } => self.render_handoff(&row.id, *harness, text.clone(), route, &theme, cx),
             RowKind::ForkMarker {
                 source_chat_id,
                 source_title,
@@ -9979,120 +10041,176 @@ impl Transcript {
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
     }
 
-    /// The provider-switch packet: one muted line under the divider naming
-    /// how much crossed and to whom, with "view" opening the verbatim text in
-    /// a popover. The open state rides `folds` like a tool group's.
     fn render_handoff(
         &mut self,
         row_id: &SharedString,
         harness: zeron_proto::HarnessId,
         text: SharedString,
+        route: &zeron_doc::HandoffRoute,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.folds.get(row_id).and_then(|fold| fold.open) == Some(true);
+        let open = self
+            .folds
+            .get(row_id)
+            .and_then(|fold| fold.open)
+            .unwrap_or_else(handoff_open_knob);
         let muted = theme.text_muted.opacity(0.7);
         let bright = theme.text_muted;
-        let messages = handoff_message_count(&text);
-        let summary = format!(
-            "{} · {} handed to {} as text",
-            match messages {
-                1 => "1 message".to_string(),
-                n => format!("{n} messages"),
-            },
-            handoff_size_label(text.chars().count()),
-            crate::composer::harness_display_name(harness)
-        );
+        let from = route
+            .from_harness
+            .map(|from| HandoffSide::new(from, route.from_model.as_deref(), cx));
+        let to = HandoffSide::new(harness, route.to_model.as_deref(), cx);
+        let label = match &route.source_title {
+            Some(title) => format!("Continued from {title}"),
+            None => "Context handoff".to_string(),
+        };
         let toggle_id = row_id.clone();
-        let close_id = row_id.clone();
-        let popover = open.then(|| {
-            let content = crate::popover::popover_card(theme)
-                .w(px(560.0))
-                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
-                    if let Some(fold) = this.folds.get_mut(&close_id) {
-                        fold.open = None;
-                    }
-                    cx.notify();
-                }))
+        let rule = || {
+            div()
+                .flex_1()
+                .min_w(px(12.0))
+                .h(px(1.0))
+                .bg(crate::theme::hairline(0.08))
+        };
+        let header = div()
+            .id(SharedString::from(format!("{row_id}-toggle")))
+            .flex_none()
+            .max_w(gpui::relative(0.9))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(muted)
+            .hover(move |s| s.text_color(bright))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.folds.entry(toggle_id.clone()).or_default().open = Some(!open);
+                this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
+            }))
+            .child(
+                crate::icons::icon(crate::icons::LUCIDE_ARROW_LEFT_RIGHT)
+                    .size(px(12.0))
+                    .text_color(muted),
+            )
+            .child(div().min_w_0().truncate().child(SharedString::from(label)))
+            .children(from.as_ref().map(|side| side.chip(theme)))
+            .child(
+                crate::icons::icon(crate::icons::LUCIDE_ARROW_RIGHT)
+                    .size(px(11.0))
+                    .text_color(muted.opacity(0.7)),
+            )
+            .child(to.chip(theme));
+        let details = open.then(|| {
+            let messages = handoff_message_count(&text);
+            let context = if text.is_empty() {
+                "None".to_string()
+            } else {
+                format!(
+                    "{} · {}",
+                    match messages {
+                        1 => "1 message".to_string(),
+                        n => format!("{n} messages"),
+                    },
+                    handoff_size_label(text.chars().count())
+                )
+            };
+            let field = |key: &'static str, value: String| {
+                div()
+                    .flex()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .flex_none()
+                            .text_color(theme.text_muted.opacity(0.56))
+                            .child(key),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_color(theme.text)
+                            .child(SharedString::from(value)),
+                    )
+            };
+            div()
+                .w_full()
+                .max_w(px(560.0))
+                .mx_auto()
+                .pt(px(6.0))
+                .pb(px(4.0))
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(10.0))
+                .text_size(crate::typography::ui_rems(12.5))
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .px(px(6.0))
-                        .pt(px(4.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "Context handed to {}",
-                            crate::composer::harness_display_name(harness)
-                        )))
+                        .flex_col()
+                        .gap(px(6.0))
+                        .p(px(10.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface.opacity(0.6))
+                        .children(from.as_ref().map(|side| field("From", side.detail())))
+                        .child(field("To", to.detail()))
+                        .child(field("Context", context)),
+                )
+                .when(!text.is_empty(), |details| {
+                    details
                         .child(
                             div()
-                                .ml_auto()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(format!(
-                                    "first turn · {}",
-                                    handoff_size_label(text.chars().count())
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("{row_id}-packet")))
-                        .max_h(px(260.0))
-                        .overflow_y_scroll()
-                        .px(px(6.0))
-                        .pb(px(4.0))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(12.5))
-                        .line_height(px(18.0))
-                        .text_color(theme.text_faint)
-                        .children(text.lines().map(|line| {
+                                .text_color(theme.text_muted)
+                                .child("Transferred context"),
+                        )
+                        .child(
                             div()
-                                .w_full()
-                                .min_h(px(18.0))
-                                .child(SharedString::from(line.to_string()))
-                        })),
-                )
-                .into_any_element();
-            crate::popover::anchored_menu_below(format!("{row_id}-popover"), content, None)
+                                .id(SharedString::from(format!("{row_id}-packet")))
+                                .max_h(px(224.0))
+                                .overflow_y_scroll()
+                                .p(px(10.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .font_family(theme.font_mono.clone())
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(theme.text_faint)
+                                .children(text.lines().map(|line| {
+                                    div()
+                                        .w_full()
+                                        .min_h(px(18.0))
+                                        .child(SharedString::from(line.to_string()))
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(theme.text_muted.opacity(0.7))
+                                .child(
+                                    "Sent ahead of your next message so the new model can continue this thread.",
+                                ),
+                        )
+                })
         });
         div()
             .w_full()
             .flex()
-            .justify_center()
-            .pb(px(2.0))
+            .flex_col()
             .child(
                 div()
-                    .relative()
+                    .py(px(4.0))
+                    .w_full()
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(muted)
-                    .child(SharedString::from(summary))
-                    .child(div().text_color(theme.text_faint).child("·"))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{row_id}-view")))
-                            .cursor_pointer()
-                            .text_color(muted)
-                            .hover(move |s| s.text_color(bright))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let fold = this.folds.entry(toggle_id.clone()).or_default();
-                                fold.open = Some(fold.open != Some(true));
-                                cx.notify();
-                            }))
-                            .child("view"),
-                    )
-                    .children(popover),
+                    .gap(px(10.0))
+                    .child(rule())
+                    .child(header)
+                    .child(rule()),
             )
+            .children(details)
             .into_any_element()
     }
 
@@ -15119,6 +15237,7 @@ mod tests {
                     id: "m3-handoff".into(),
                     harness: zeron_proto::HarnessId::Codex,
                     text: "<provider_switch>\nmoved\n</provider_switch>".into(),
+                    route: Default::default(),
                 },
             ],
         );
@@ -15130,7 +15249,7 @@ mod tests {
         assert!(rows[0].timestamp.is_none() && rows[0].copy_text.is_none());
         assert!(matches!(
             &rows[1].kind,
-            RowKind::Handoff { harness: zeron_proto::HarnessId::Codex, text }
+            RowKind::Handoff { harness: zeron_proto::HarnessId::Codex, text, .. }
                 if text == "<provider_switch>\nmoved\n</provider_switch>"
         ));
         assert!(!rows[1].turn_start);
@@ -15148,6 +15267,12 @@ mod tests {
 
     #[test]
     fn a_provider_switch_divider_shows_its_packet_from_the_switch_on() {
+        let route = zeron_doc::HandoffRoute {
+            from_harness: Some(zeron_proto::HarnessId::ClaudeCode),
+            from_model: Some("claude-opus-5-5".into()),
+            to_model: Some("gpt-5.6-luna".into()),
+            ..Default::default()
+        };
         let mut entry = assistant(
             "s1",
             MessageStatus::Complete,
@@ -15158,24 +15283,24 @@ mod tests {
                     id: "s1-handoff".into(),
                     harness: zeron_proto::HarnessId::Codex,
                     text: "<provider_switch>\nmoved\n</provider_switch>".into(),
+                    route: route.clone(),
                 },
             ],
         );
         entry.role = MessageRole::System;
         let rows = rows_for_entry(&entry, false, false, &mut parse);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_ref(), "s1");
+        assert!(rows[0].turn_start);
         assert!(matches!(
             &rows[0].kind,
-            RowKind::Divider { hint: Some(_), .. }
-        ));
-        assert!(matches!(
-            &rows[1].kind,
             RowKind::Handoff {
                 harness: zeron_proto::HarnessId::Codex,
+                route: r,
                 ..
-            }
+            } if *r == route
         ));
-        assert!(rows[1].timestamp.is_none() && rows[1].copy_text.is_none());
+        assert!(rows[0].timestamp.is_none() && rows[0].copy_text.is_none());
     }
 
     #[test]

@@ -96,6 +96,21 @@ pub(crate) fn is_computer_tool_name(name: &str) -> bool {
 impl ToolServer {
     /// The `{"mcpServers": {name: {command, args}}}` document Claude's
     /// `--mcp-config` takes inline.
+    /// The same bridge as a shell command for a Claude Code hook:
+    /// `<command> hook …` with the arguments that follow `mcp`.
+    pub fn hook_command(&self) -> Option<String> {
+        let (subcommand, rest) = self.args.split_first()?;
+        let quote = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
+        (subcommand == "mcp").then(|| {
+            [self.command.as_str(), "hook"]
+                .into_iter()
+                .chain(rest.iter().map(String::as_str))
+                .map(quote)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
     pub fn mcp_config_json(&self, name: &str) -> String {
         serde_json::json!({
             "mcpServers": { name: {
@@ -138,6 +153,7 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    compact: std::sync::Arc<(std::sync::Mutex<Option<String>>, tokio::sync::Notify)>,
 }
 
 impl TurnControl {
@@ -149,6 +165,26 @@ impl TurnControl {
     /// Driver: resolves once per [`Self::stop_turn`].
     pub async fn stop_requested(&self) {
         self.stop.notified().await;
+    }
+
+    pub fn compact(&self, command: String) {
+        *self.compact.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(command);
+        self.compact.1.notify_one();
+    }
+
+    pub async fn compact_requested(&self) -> String {
+        loop {
+            if let Some(command) = self
+                .compact
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                return command;
+            }
+            self.compact.1.notified().await;
+        }
     }
 
     /// Driver: how many background tasks the runtime currently holds.
@@ -264,6 +300,9 @@ pub trait Harness: Send + Sync {
     /// with its background work. Otherwise stopping a turn tears the runtime
     /// down through the `interrupt` token.
     fn stops_turn_in_place(&self) -> bool {
+        false
+    }
+    fn compacts_in_place(&self) -> bool {
         false
     }
     /// Whether a live runtime started for `live` can take `next` as its
@@ -859,6 +898,26 @@ mod tool_server_tests {
         assert!(!server.mcp_config_json("zeron").contains("computer use"));
         let debug = format!("{server:?}");
         assert!(debug.contains("ZERON_RUN_SECRET") && !debug.contains("s3cret"));
+    }
+
+    #[test]
+    fn the_hook_command_survives_spaces_and_quotes_in_the_path() {
+        let server = ToolServer {
+            command: "/Apps/Zeron Dev 2.app/zeron's".into(),
+            args: vec!["mcp".into(), "--chat".into(), "c1".into()],
+            env: vec![],
+            guidance: None,
+        };
+        let command = server.hook_command().expect("an mcp bridge has a hook");
+        assert_eq!(command, r#"'/Apps/Zeron Dev 2.app/zeron'\''s' 'hook' '--chat' 'c1'"#);
+        let words = std::process::Command::new("sh")
+            .args(["-c", &format!("for w in {command}; do echo \"$w\"; done")])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(words.stdout).unwrap(),
+            "/Apps/Zeron Dev 2.app/zeron's\nhook\n--chat\nc1\n"
+        );
     }
 
     #[test]

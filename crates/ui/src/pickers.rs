@@ -1460,6 +1460,13 @@ impl Pickers {
             .as_deref()
             .map(ComposerDefaults::load)
             .unwrap_or_default();
+        ModelLabels::learn(
+            cx,
+            defaults
+                .model_labels
+                .iter()
+                .map(|(id, label)| (id.as_str(), label.as_str())),
+        );
         // Restore explicit opt-outs as well as project picks before the first frame.
         if title.is_none() {
             state.update(cx, |s, _| s.restore_composer_target(&defaults));
@@ -2520,6 +2527,7 @@ impl Pickers {
             return;
         }
         if let Loadable::Ready(models) = &loaded {
+            ModelLabels::learn(cx, models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
             let fresh = self
                 .defaults
                 .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
@@ -2890,10 +2898,13 @@ impl Pickers {
         let state = self.state.read(cx);
         !state.transcript_replayed
             || !state.pending_echoes().is_empty()
-            || state
-                .transcript
-                .iter()
-                .any(|entry| entry.role != MessageRole::System)
+            || state.transcript.iter().any(|entry| {
+                entry.role != MessageRole::System
+                    || entry
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, zeron_doc::MessagePart::Handoff { .. }))
+            })
     }
 
     /// The dialog's "Yes": land the parked pick and mark it in the transcript.
@@ -8407,15 +8418,17 @@ pub(crate) fn harness_mark_stack(
 ) -> gpui::Div {
     // Explicit width + absolute children: a negative margin shrank the
     // container to one mark and the rest spilled under the title.
+    let mut icons: Vec<_> = marks.iter().map(|h| harness_brand_icon(*h)).collect();
+    // Agents sharing a brand (Mock wears Claude's mark) would stack two identical marks.
+    icons.dedup_by_key(|(path, _)| *path);
     let step = size * 0.65;
-    let width = size + step * marks.len().saturating_sub(1) as f32;
+    let width = size + step * icons.len().saturating_sub(1) as f32;
     div()
         .flex_none()
         .relative()
         .w(px(width))
         .h(px(size))
-        .children(marks.iter().enumerate().map(|(ix, harness)| {
-            let (path, tint) = harness_brand_icon(*harness);
+        .children(icons.into_iter().enumerate().map(|(ix, (path, tint))| {
             div()
                 .absolute()
                 .top_0()
@@ -8427,6 +8440,28 @@ pub(crate) fn harness_mark_stack(
                         .text_color(tint.unwrap_or(fallback).opacity(opacity)),
                 )
         }))
+}
+
+/// Model labels for surfaces that hold no picker of their own (the transcript).
+#[derive(Default)]
+pub(crate) struct ModelLabels(HashMap<String, String>);
+
+impl gpui::Global for ModelLabels {}
+
+impl ModelLabels {
+    fn learn<'a>(cx: &mut App, labels: impl Iterator<Item = (&'a str, &'a str)>) {
+        let known = &mut cx.default_global::<Self>().0;
+        for (id, label) in labels {
+            known.insert(id.to_owned(), label.to_owned());
+        }
+    }
+}
+
+pub(crate) fn model_display_label(harness: HarnessId, id: &str, cx: &App) -> String {
+    cx.try_global::<ModelLabels>()
+        .and_then(|labels| labels.0.get(id).cloned())
+        .or_else(|| curated_model_label(harness, id))
+        .unwrap_or_else(|| id.to_owned())
 }
 
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {

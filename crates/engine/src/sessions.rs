@@ -52,7 +52,8 @@ pub struct JournaledEvent {
     pub event: AgentEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AgentCompact {
     pub focus: Option<String>,
     pub continue_with: Option<String>,
@@ -244,6 +245,24 @@ struct RunHandle {
     /// is unambiguously before the stop (cancelled with it) or after it
     /// (re-dispatched to a fresh runtime — never lost).
     retiring: Arc<std::sync::atomic::AtomicBool>,
+    compaction: Arc<Mutex<Option<QueuedCompaction>>>,
+}
+
+struct QueuedCompaction {
+    note: &'static str,
+    started: bool,
+    compacted: Option<(Option<u64>, Option<u64>)>,
+    done: oneshot::Sender<CompactionDrain>,
+}
+
+impl QueuedCompaction {
+    fn finish(self, result: Option<String>, failure: Option<String>) {
+        let _ = self.done.send(CompactionDrain {
+            compacted: self.compacted,
+            result,
+            failure,
+        });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +499,7 @@ impl RunSetup {
                 delegate_binds: Arc::new(Mutex::new(Vec::new())),
                 html_binds: Arc::new(Mutex::new(Vec::new())),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                compaction: Arc::new(Mutex::new(None)),
             },
             controls,
             engine_rx,
@@ -559,6 +579,8 @@ struct Inner {
     agent_compacts: Mutex<HashMap<String, AgentCompact>>,
     /// Skips one reminder so a summary still over the floor cannot re-compact on its own continuation.
     agent_compacted: Mutex<std::collections::HashSet<String>>,
+    /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
+    nudged_at: Mutex<HashMap<String, u64>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -741,6 +763,7 @@ impl SessionsEngine {
         registry: Arc<HarnessRegistry>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
+        let agent_compacts = journal.agent_compacts();
         Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
@@ -763,8 +786,9 @@ impl SessionsEngine {
                 sidechat_contexts: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
-                agent_compacts: Mutex::new(HashMap::new()),
+                agent_compacts: Mutex::new(agent_compacts),
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
+                nudged_at: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
@@ -1898,6 +1922,11 @@ impl SessionsEngine {
         self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
     }
 
+    /// The reminder a Claude Code PostToolUse hook hands the running turn, if one is due.
+    pub fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
+        self.inner.mid_turn_nudge(chat_id)
+    }
+
     pub fn request_compact(
         &self,
         chat_id: &str,
@@ -1916,16 +1945,31 @@ impl SessionsEngine {
             text.map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
         };
-        lock(&self.inner.agent_compacts).insert(
-            chat_id.to_string(),
-            AgentCompact {
-                focus: trimmed(focus),
-                continue_with: trimmed(continue_with),
-            },
-        );
+        self.inner.edit_agent_compacts(|compacts| {
+            compacts.insert(
+                chat_id.to_string(),
+                AgentCompact {
+                    focus: trimmed(focus),
+                    continue_with: trimmed(continue_with),
+                },
+            )
+        });
         self.inner
             .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
         Ok(())
+    }
+
+    /// After a restart: a chat whose agent asked for a compaction that never
+    /// ran has no status row yet, and auto_compact only sees settled rows.
+    pub(crate) fn surface_waiting_agent_compacts(&self) {
+        let waiting: Vec<String> = lock(&self.inner.agent_compacts).keys().cloned().collect();
+        for chat_id in waiting {
+            if !lock(&self.inner.statuses).contains_key(&chat_id) {
+                self.inner.set_status(&chat_id, SessionStatus::Idle, false);
+            }
+            self.inner
+                .set_compact_plan(&chat_id, Some(zeron_proto::CompactPlan::Agent));
+        }
     }
 
     pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {
@@ -1950,7 +1994,11 @@ impl SessionsEngine {
             .await
         {
             Ok(outcome) => {
-                if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
+                if self
+                    .inner
+                    .edit_agent_compacts(|compacts| compacts.remove(chat_id))
+                    .is_some()
+                {
                     self.inner.set_compact_plan(chat_id, None);
                 }
                 lock(&self.inner.agent_compacted).insert(chat_id.to_string());
@@ -1958,7 +2006,8 @@ impl SessionsEngine {
             }
             Err(_) if busy(self) => Ok(None),
             Err(err) => {
-                lock(&self.inner.agent_compacts).remove(chat_id);
+                self.inner
+                    .edit_agent_compacts(|compacts| compacts.remove(chat_id));
                 self.inner.set_compact_plan(chat_id, None);
                 let note = self.doc_handle(chat_id).and_then(|handle| {
                     Ok(handle.write_system_note(
@@ -1990,7 +2039,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         focus: Option<String>,
-        note: &str,
+        note: &'static str,
     ) -> Result<CompactOutcome, EngineError> {
         {
             let mut pending = lock(&self.inner.compacting);
@@ -2035,6 +2084,38 @@ impl SessionsEngine {
                     None => command.clone(),
                 };
             }
+        }
+        let warm = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| {
+                h.steerable
+                    && h.runtime_config.harness_id == harness_id
+                    && h.started.load(std::sync::atomic::Ordering::Acquire)
+                    && !h.retiring.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .map(|h| (h.turn.clone(), h.compaction.clone()));
+        if matches!(compaction, Compaction::SlashText(_))
+            && harness.compacts_in_place()
+            && let Some((turn, queued)) = warm
+        {
+            let (done, finished) = oneshot::channel();
+            *lock(&queued) = Some(QueuedCompaction {
+                note,
+                started: false,
+                compacted: None,
+                done,
+            });
+            turn.compact(request.prompt);
+            return match tokio::time::timeout(COMPACT_TIMEOUT, finished).await {
+                Ok(Ok(drain)) => self.compaction_outcome(chat_id, drain),
+                Ok(Err(_)) => Err(EngineError::Other(
+                    "Context compaction was interrupted.".into(),
+                )),
+                Err(_elapsed) => {
+                    lock(&queued).take();
+                    Err(EngineError::Other("Context compaction timed out.".into()))
+                }
+            };
         }
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
@@ -2098,6 +2179,23 @@ impl SessionsEngine {
         drain: CompactionDrain,
         note: &str,
     ) -> Result<CompactOutcome, EngineError> {
+        if let Some((pre_tokens, post_tokens)) = drain.compacted {
+            record_compaction(
+                handle.doc(),
+                &self.inner.device_id,
+                note,
+                pre_tokens,
+                post_tokens,
+            )?;
+        }
+        self.compaction_outcome(handle.chat_id(), drain)
+    }
+
+    fn compaction_outcome(
+        &self,
+        chat_id: &str,
+        drain: CompactionDrain,
+    ) -> Result<CompactOutcome, EngineError> {
         let Some((pre_tokens, post_tokens)) = drain.compacted else {
             if let Some(failure) = drain.failure {
                 return Err(EngineError::Other(failure));
@@ -2115,18 +2213,12 @@ impl SessionsEngine {
                 ),
             });
         };
-        record_compaction(
-            handle.doc(),
-            &self.inner.device_id,
-            note,
-            pre_tokens,
-            post_tokens,
-        )?;
-        if lock(&self.inner.agent_compacts)
-            .remove(handle.chat_id())
+        if self
+            .inner
+            .edit_agent_compacts(|compacts| compacts.remove(chat_id))
             .is_some()
         {
-            self.inner.set_compact_plan(handle.chat_id(), None);
+            self.inner.set_compact_plan(chat_id, None);
         }
         Ok(CompactOutcome {
             compacted: true,
@@ -2974,6 +3066,28 @@ fn provider_switch_context(history: &str) -> String {
     )
 }
 
+/// A seeded chat holds none of its source's conversation, so a re-sent first
+/// turn must resend the recorded packet rather than rebuild one.
+fn unanswered_packet(history: &[SessionMessageEntry]) -> Option<String> {
+    let packet = |entry: &SessionMessageEntry| {
+        entry.parts.iter().find_map(|part| match part {
+            MessagePart::Handoff { text, .. } if entry.role == MessageRole::System => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+    };
+    let ix = history.iter().rposition(|entry| packet(entry).is_some())?;
+    let answered = history[ix + 1..].iter().any(|entry| {
+        entry.role == MessageRole::Assistant
+            && entry.status == Some(MessageStatus::Complete)
+            && entry.parts.iter().any(
+                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
+            )
+    });
+    packet(&history[ix]).filter(|text| !answered && !text.is_empty())
+}
+
 /// What crosses into the harness in place of the typed text, and the
 /// provider-switch packet inside it when this is that first turn.
 struct HarnessPrompt {
@@ -3015,16 +3129,20 @@ impl Inner {
         Some(wrapped)
     }
 
-    /// Slash commands go out untouched: the note would become their arguments.
-    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+    fn edit_agent_compacts<R>(
+        &self,
+        edit: impl FnOnce(&mut HashMap<String, AgentCompact>) -> R,
+    ) -> R {
+        let mut compacts = lock(&self.agent_compacts);
+        let result = edit(&mut compacts);
+        self.journal.save_agent_compacts(&compacts);
+        result
+    }
+
+    /// Context tokens once past the reminder floor, when the agent can act on a reminder.
+    fn nudge_tokens(&self, chat_id: &str, harness_id: HarnessId) -> Option<u64> {
         let floor = self.registry.compaction_settings().nudge_tokens;
-        if floor == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
-            return None;
-        }
-        if self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
-            return None;
-        }
-        if lock(&self.agent_compacted).remove(chat_id) {
+        if floor == 0 || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
             return None;
         }
         let config = self
@@ -3049,11 +3167,43 @@ impl Inner {
             .or(usage.window)
             .filter(|window| *window > 0)
             .map_or(floor, |window| floor.min(window * 7 / 10));
-        if tokens < floor {
+        (tokens >= floor).then_some(tokens)
+    }
+
+    /// Slash commands go out untouched: the note would become their arguments.
+    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+        if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
+        if lock(&self.agent_compacted).remove(chat_id) {
+            return None;
+        }
+        let tokens = self.nudge_tokens(chat_id, harness_id)?;
+        lock(&self.nudged_at).insert(chat_id.to_string(), tokens);
         Some(format!(
             "<system-reminder>\nContext {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>",
+            format_tokens(tokens),
+        ))
+    }
+
+    /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
+    /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.
+    fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
+        let harness_id = self.doc_host()?.harness_for(chat_id);
+        let tokens = self.nudge_tokens(chat_id, harness_id)?;
+        let mut nudged = lock(&self.nudged_at);
+        let last = nudged.entry(chat_id.to_string()).or_insert(0);
+        // Smaller than at the last reminder: the chat compacted since.
+        if tokens < *last {
+            *last = tokens;
+            return None;
+        }
+        if *last > 0 && tokens < *last + MID_TURN_NUDGE_STEP {
+            return None;
+        }
+        *last = tokens;
+        Some(format!(
+            "Context {}, and this turn is still running. Keep going unless the step you just finished closes a piece of work and the rest needs only its conclusions. Then call compact with continueWith naming the remaining steps and end your turn: the chat compacts and resumes from continueWith.",
             format_tokens(tokens),
         ))
     }
@@ -3110,20 +3260,7 @@ impl Inner {
             .into_iter()
             .filter(|entry| entry.id != user_entry_id)
             .collect();
-        // The switch's divider already recorded the packet; send exactly
-        // that while it is still the newest thing said. Anything after it
-        // (a first turn that died and was re-sent) needs a fresh copy, which
-        // then lands on the user entry instead.
-        let recorded = history
-            .last()
-            .filter(|entry| entry.role == MessageRole::System)
-            .and_then(|entry| {
-                entry.parts.iter().find_map(|part| match part {
-                    MessagePart::Handoff { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-            });
-        let (context, handoff) = match recorded {
+        let (context, handoff) = match unanswered_packet(&history) {
             Some(context) => (context, None),
             None => {
                 let history = bounded_source_copy(&history, SIDECHAT_CONTEXT_BUDGET_CHARS);
@@ -3935,6 +4072,17 @@ async fn drain_compaction(
     drain
 }
 
+fn queued_compaction(
+    inner: &Inner,
+    chat_id: &str,
+    run_id: &str,
+) -> Option<Arc<Mutex<Option<QueuedCompaction>>>> {
+    lock(&inner.runs)
+        .get(chat_id)
+        .filter(|h| h.run_id == run_id)
+        .map(|h| h.compaction.clone())
+}
+
 fn record_compaction(
     doc: &SessionDoc,
     device_id: &str,
@@ -3984,6 +4132,8 @@ fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>
         _ => note.into(),
     }
 }
+
+const MID_TURN_NUDGE_STEP: u64 = 50_000;
 
 fn format_tokens(tokens: u64) -> String {
     if tokens >= 1000 {
@@ -4596,6 +4746,7 @@ async fn drive_run(
                     id: format!("{}-handoff", resume_state.user_message_id),
                     harness: harness_id,
                     text,
+                    route: Default::default(),
                 };
                 if let Err(err) = doc.append_part(&resume_state.user_message_id, &part) {
                     tracing::warn!(chat = %chat_id, error = %err, "provider-switch packet not recorded");
@@ -5402,13 +5553,17 @@ async fn drive_run(
                     clock.start(false, now);
                 }
             }
-            if let Err(err) = record_compaction(
-                doc_ref,
-                &device_id,
-                COMPACTED_NOTE,
-                *pre_tokens,
-                *post_tokens,
-            ) {
+            let note = queued_compaction(&inner, &chat_id, &run_id)
+                .and_then(|queued| {
+                    let mut queued = lock(&queued);
+                    let queued = queued.as_mut().filter(|queued| queued.started)?;
+                    queued.compacted = Some((*pre_tokens, *post_tokens));
+                    Some(queued.note)
+                })
+                .unwrap_or(COMPACTED_NOTE);
+            if let Err(err) =
+                record_compaction(doc_ref, &device_id, note, *pre_tokens, *post_tokens)
+            {
                 tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
             }
             continue;
@@ -5679,11 +5834,27 @@ async fn drive_run(
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
             inner.set_status(&chat_id, SessionStatus::Working, true);
+            let compaction_started =
+                queued_compaction(&inner, &chat_id, &run_id).is_some_and(|queued| {
+                    let mut queued = lock(&queued);
+                    match queued.take() {
+                        Some(mut compaction) if !compaction.started => {
+                            compaction.started = true;
+                            *queued = Some(compaction);
+                            true
+                        }
+                        Some(compaction) => {
+                            compaction.finish(None, None);
+                            false
+                        }
+                        None => false,
+                    }
+                });
             // The boundary confirms delivery of the oldest accepted steer —
             // retire its at-least-once ledger entry.
             let steer = lock(&inner.runs)
                 .get(&chat_id)
-                .filter(|h| h.run_id == run_id)
+                .filter(|h| h.run_id == run_id && !compaction_started)
                 .and_then(|h| lock(&h.routed_steers).pop_front());
             if let Some(steer) = steer {
                 // Consumed: a steer carrying the fork history delivered it to
@@ -5798,7 +5969,30 @@ async fn drive_run(
         if let AgentEvent::UsageLimit { resets_at } = &event {
             turn_limit = Some(resets_at.or(turn_limit.flatten()));
         }
-        if let AgentEvent::Done { status, .. } = &event {
+        if let AgentEvent::Done {
+            status,
+            result,
+            error,
+            ..
+        } = &event
+        {
+            let ends_compaction = queued_compaction(&inner, &chat_id, &run_id)
+                .and_then(|queued| {
+                    let mut queued = lock(&queued);
+                    queued
+                        .as_ref()
+                        .is_some_and(|q| q.started || *status == DoneStatus::Interrupted)
+                        .then(|| queued.take())
+                        .flatten()
+                })
+                .map(|queued| {
+                    let failure = error.clone().or_else(|| {
+                        (*status == DoneStatus::Interrupted)
+                            .then(|| "Context compaction was interrupted.".to_string())
+                    });
+                    queued.finish(result.clone(), failure);
+                })
+                .is_some();
             if let Some(resets_at) = turn_limit.take()
                 && !interrupted
                 && let Some(schedule) = inner.resume_schedule.get()
@@ -5900,6 +6094,7 @@ async fn drive_run(
             let completed_turn = (*status == DoneStatus::Completed
                 && !interrupted
                 && turn_was_active
+                && !ends_compaction
                 && !pending_steer
                 && !inner.continues_with_sent_message(&chat_id))
             .then(|| entry_id.clone());
@@ -6238,6 +6433,43 @@ mod tests {
     }
 
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[test]
+    fn an_agent_compaction_request_survives_a_restart() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = || {
+            SessionsEngine::new(
+                "host".into(),
+                Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+                Arc::new(HarnessRegistry::new()),
+            )
+        };
+        let request = AgentCompact {
+            focus: Some("keep the plan".into()),
+            continue_with: Some("go on".into()),
+        };
+        engine()
+            .inner
+            .edit_agent_compacts(|compacts| compacts.insert("chat".into(), request.clone()));
+
+        let restarted = engine();
+        assert_eq!(
+            lock(&restarted.inner.agent_compacts).get("chat"),
+            Some(&request)
+        );
+        restarted.surface_waiting_agent_compacts();
+        let row = restarted
+            .session_status("chat")
+            .expect("a settled row to schedule from");
+        assert_eq!(row.status, SessionStatus::Idle);
+        assert_eq!(row.compact_plan, Some(zeron_proto::CompactPlan::Agent));
+
+        restarted
+            .inner
+            .edit_agent_compacts(|compacts| compacts.remove("chat"));
+        assert!(!engine().agent_compact_waiting("chat"));
+    }
 
     #[test]
     fn pending_branch_caches_misses_and_tracks_lifecycle_updates() {
