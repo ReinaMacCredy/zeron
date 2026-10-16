@@ -86,7 +86,8 @@ impl Shell {
 
     fn sidebar_peek_input(&self, window: &Window, cx: &App) -> PeekInput {
         let position = window.mouse_position();
-        let x = f32::from(position.x) - self.content_left();
+        let x = f32::from(position.x);
+        let origin = self.content_left();
         let y = f32::from(position.y);
         // MouseExit can be delivered when handing input to a native child,
         // while the window still reports hovered and its last position is stale.
@@ -107,12 +108,15 @@ impl Shell {
                 && !modal
                 && matches!(self.state.read(cx).gate(), GatePhase::Ready)
                 && self.splash == SplashPhase::Gone,
-            edge: hovered && in_height && y >= Theme::TITLEBAR_HEIGHT && (0.0..=EDGE).contains(&x),
+            edge: hovered
+                && in_height
+                && y >= Theme::TITLEBAR_HEIGHT
+                && (origin..=origin + EDGE).contains(&x),
             // Measure the painted panel during reversals, not its final width.
             panel: hovered
                 && in_height
                 && x >= 0.0
-                && x <= self.sidebar_peek_right_edge() + LEAVE_SLOP,
+                && x <= origin + self.sidebar_peek_right_edge() + LEAVE_SLOP,
             held: self.sidebar_peek_menu_open()
                 || self
                     .chat_rename
@@ -467,7 +471,7 @@ mod tests {
     #[gpui::test]
     fn sidebar_peek_pointer_intent_cancels_and_menus_hold_until_dismissed(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        let edge = gpui::point(px(3.0), px(150.0));
+        let edge = gpui::point(px(app_rail::WIDTH + 3.0), px(150.0));
         let chat = gpui::point(px(650.0), px(150.0));
         cx.simulate_mouse_move(edge, None, gpui::Modifiers::default());
         advance(cx, OPEN_DELAY / 2);
@@ -513,7 +517,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| settings::init(UiSettings::default(), dir.path(), cx));
         let (shell, cx) = setup(cx);
-        let edge = gpui::point(px(3.0), px(150.0));
+        let edge = gpui::point(px(app_rail::WIDTH + 3.0), px(150.0));
         cx.simulate_mouse_move(edge, None, Default::default());
         advance(cx, OPEN_DELAY / 2);
         cx.update(|_, cx| settings::set_sidebar_hover_enabled(false, cx));
@@ -536,7 +540,7 @@ mod tests {
     #[gpui::test]
     fn sidebar_peek_click_focus_does_not_hold_but_keyboard_focus_does(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        let edge = gpui::point(px(3.0), px(150.0));
+        let edge = gpui::point(px(app_rail::WIDTH + 3.0), px(150.0));
         let chat = gpui::point(px(650.0), px(150.0));
         cx.simulate_mouse_move(edge, None, Default::default());
         advance(cx, OPEN_DELAY);
@@ -566,7 +570,7 @@ mod tests {
     #[gpui::test]
     fn sidebar_peek_stays_closed_where_the_sidebar_is_docked(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        let edge = gpui::point(px(3.0), px(150.0));
+        let edge = gpui::point(px(app_rail::WIDTH + 3.0), px(150.0));
         shell.update(cx, |shell, _| {
             shell.route = Route::Settings(SettingsSection::Devices);
         });
@@ -592,7 +596,7 @@ mod tests {
     #[gpui::test]
     fn sidebar_peek_drag_across_edge_does_not_open_and_exit_cancels(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        let edge = gpui::point(px(3.0), px(150.0));
+        let edge = gpui::point(px(app_rail::WIDTH + 3.0), px(150.0));
         cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
         advance(cx, OPEN_DELAY * 2);
         shell.read_with(cx, |shell, _| assert!(!shell.sidebar_peek.open));
@@ -611,7 +615,7 @@ mod tests {
     #[gpui::test]
     fn sidebar_peek_escape_requires_leaving_the_edge_before_reopening(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
-        let edge = gpui::point(px(3.0), px(150.0));
+        let edge = gpui::point(px(app_rail::WIDTH + 3.0), px(150.0));
         cx.simulate_mouse_move(edge, None, gpui::Modifiers::default());
         advance(cx, OPEN_DELAY);
         cx.update(|window, cx| {

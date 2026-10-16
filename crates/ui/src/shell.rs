@@ -27,9 +27,10 @@ use gpui::{
 
 use gpui_tokio::Tokio;
 use zeron_engine::InstanceLock;
-use zeron_proto::{AgentAccountsSnapshot, AuthState, ChatConfig, HarnessId, WorkspaceScope};
+use zeron_proto::{AuthState, ChatConfig, HarnessId, WorkspaceScope};
 use zeron_rpc::methods;
 
+use crate::app_rail::{self, RailItem};
 use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent, SidechatStaged};
 use crate::computer::cards::ComputerRequest;
@@ -299,6 +300,9 @@ const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 /// Chrome layers that paint full-bleed at a window edge round their own
 /// backgrounds with it — see [`Shell::window_corner_radius`].
 pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
+const CARD_INSET: f32 = 8.0;
+/// The terminal dock rounds its card corners with the window radius.
+const CARD_RADIUS: f32 = LINUX_WINDOW_CORNER_RADIUS;
 const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
 
 fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
@@ -1312,8 +1316,6 @@ pub(crate) fn sidebar_faded_label(
     .fade_right(true)
     .fade_label_overflow(&overflow)
 }
-/// Square action beside the account trigger in the sidebar footer.
-const SIDEBAR_FOOTER_ACTION_SIZE: f32 = SIDEBAR_FOOTER_BUTTON_SIZE;
 /// Breathing room between the account trigger and its adjacent action.
 const SIDEBAR_FOOTER_ACTION_GAP: f32 = 4.0;
 
@@ -2496,11 +2498,13 @@ pub struct Shell {
     tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     accounts_page: Option<Entity<AccountsPage>>,
-    /// This device's agent logins + usage for the sidebar user row and its
-    /// menu's Usage section; loaded once the engine is Ready and re-probed
-    /// on every menu open. The last good snapshot survives a failed refresh.
-    account_usage: Option<AgentAccountsSnapshot>,
-    account_usage_task: Option<Task<()>>,
+    /// Polls this device's agent logins + usage into the shared accounts
+    /// cache read by the rail rings, the account menu and the sidecar.
+    device_accounts: Entity<crate::account_usage::DeviceAccounts>,
+    _device_accounts: Subscription,
+    _accounts_cache: Subscription,
+    /// The rail ring whose popover is up, by account id.
+    rail_usage_menu: popover::Popup<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -2842,6 +2846,12 @@ impl Shell {
                 .visible(false)
         });
         let voice_observation = cx.observe(&voice, |_: &mut Shell, _, cx| cx.notify());
+        let device_accounts =
+            cx.new(|cx| crate::account_usage::DeviceAccounts::new(state.clone(), cx));
+        let device_accounts_observation =
+            cx.observe(&device_accounts, |_: &mut Shell, _, cx| cx.notify());
+        let accounts_cache_observation =
+            cx.observe_global::<accounts::AccountsSnapshotCache>(|_: &mut Shell, cx| cx.notify());
         // Settings → Agents installed or toggled Codex: voice follows.
         let voice_catalog =
             cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Shell, cx| {
@@ -3162,8 +3172,10 @@ impl Shell {
             tools_page: None,
             pending_computer_guide: None,
             accounts_page: None,
-            account_usage: None,
-            account_usage_task: None,
+            device_accounts,
+            _device_accounts: device_accounts_observation,
+            _accounts_cache: accounts_cache_observation,
+            rail_usage_menu: popover::Popup::default(),
             harnesses_page: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -3887,8 +3899,9 @@ impl Shell {
         self.sync_layout_key(cx);
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
-                if self.account_usage.is_none() && self.account_usage_task.is_none() {
-                    self.load_account_usage(cx);
+                if crate::account_usage::local_snapshot(cx).is_none() {
+                    self.device_accounts
+                        .update(cx, |accounts, cx| accounts.load(cx));
                 }
                 if self.splash == SplashPhase::Visible {
                     self.splash = SplashPhase::FadingOut;
@@ -6377,37 +6390,6 @@ impl Shell {
         }
     }
 
-    /// Reuse fresh usage, probing only missing or expired slots.
-    fn load_account_usage(&mut self, cx: &mut Context<Self>) {
-        if self.account_usage_task.is_some() {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = serde_json::json!({ "forceUsage": true });
-        self.account_usage_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_AGENT_ACCOUNTS, params)
-                .await;
-            this.update(cx, |shell, cx| {
-                shell.account_usage_task = None;
-                if let Ok(value) = result
-                    && let Ok(snapshot) = serde_json::from_value::<AgentAccountsSnapshot>(value)
-                {
-                    shell.account_usage = Some(snapshot);
-                } else {
-                    // Record the attempt: `on_state_changed` retries only
-                    // while this is `None`, and it fires on every notify.
-                    shell.account_usage.get_or_insert_with(Default::default);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
     /// Close the session-row context menu through the exit animation.
     fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
         self.chat_copy_intent.reset();
@@ -8779,11 +8761,16 @@ impl Shell {
     }
 
     pub(super) fn content_left(&self) -> f32 {
-        0.0
+        app_rail::WIDTH
     }
 
+    /// The inset card's gap to the window's right and bottom edges.
     pub(super) fn content_inset(&self) -> f32 {
-        0.0
+        if self.settings.inset_shell {
+            CARD_INSET
+        } else {
+            0.0
+        }
     }
 
     pub(super) fn content_width(&self) -> f32 {
@@ -9341,7 +9328,7 @@ impl Shell {
             cfg!(target_os = "windows"),
             self.linux_right_caption_count(),
             base,
-        ) + self.content_inset()
+        )
     }
 
     /// Zeron-drawn Linux caption controls, one overlay per populated side.
@@ -9579,30 +9566,26 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The sidebar column's tone, spanning the FULL window height (under the
-    /// traffic lights, through the titlebar, down to the bottom edge), with a
-    /// hairline on its right edge so the column reads as its own surface.
-    /// The tone carries the window's left corners when the CSD window floats
-    /// — with one caveat: a corner radius is clamped to the element's own
-    /// size, and the COLLAPSED sidebar is a ~1px border sliver (the grab
-    /// affordance). macOS trims that hairline with the window server's native
-    /// corner clip; we reproduce the same trim by insetting the sliver
-    /// vertically to where the curve begins, so its tips never float over the
-    /// transparent corner cutouts.
-    fn sidebar_tone(width: f32, theme: &Theme, window: &Window) -> gpui::Div {
-        let window_corner = Self::window_corner_radius(window);
+    /// The sidebar column's tone, spanning its container's full height, with
+    /// a hairline on its right edge so the column reads as its own surface.
+    /// Flush, it starts at the window edge under the rail and carries the
+    /// window's left corners when the CSD window floats; inset, it fills the
+    /// card's left side and carries the card's corners. A corner radius is
+    /// clamped to the element's own size, and the COLLAPSED sidebar is a ~1px
+    /// border sliver: like macOS's native corner clip, the sliver is inset
+    /// vertically to where the curve begins, so its tips never float past it.
+    fn sidebar_tone(width: f32, corner: f32, theme: &Theme) -> gpui::Div {
         div()
             .absolute()
             .top_0()
             .bottom_0()
             .left_0()
             .w(px(width))
-            .when(window_corner > 0.0, |el| {
-                if width >= 2.0 * window_corner {
-                    el.rounded_tl(px(window_corner))
-                        .rounded_bl(px(window_corner))
+            .when(corner > 0.0, |el| {
+                if width >= 2.0 * corner {
+                    el.rounded_tl(px(corner)).rounded_bl(px(corner))
                 } else {
-                    el.top(px(window_corner)).bottom(px(window_corner))
+                    el.top(px(corner)).bottom(px(corner))
                 }
             })
             .bg(gpui::Hsla {
@@ -12562,12 +12545,312 @@ impl Shell {
         Some(popover::modal("update-prompt-dialog", viewport, card))
     }
 
-    /// The sidebar's bottom row: account menu on the left, settings toggle on
-    /// the right. Shared by the chat sidebar and the settings page so both
-    /// sit in one position. Local runtimes advertise their storage boundary
-    /// and offer sync; synced runtimes offer sign-out.
-    /// Account, settings, and the Pull requests entry. Chat and Settings both
-    /// render this exact row so the footer holds still across the swap.
+    fn rail_item_active(&self, item: RailItem) -> bool {
+        match item {
+            RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
+            RailItem::PullRequests => matches!(self.route, Route::PullRequests),
+            RailItem::Usage => matches!(self.route, Route::Usage),
+            RailItem::Settings => matches!(self.route, Route::Settings(_)),
+        }
+    }
+
+    fn activate_rail_item(&mut self, item: RailItem, cx: &mut Context<Self>) {
+        match item {
+            RailItem::Home => self.open_home(cx),
+            RailItem::PullRequests => {
+                // Leaving Settings through the rail is a plain route change;
+                // nothing there should grab focus on the way out.
+                self.settings_focus_pending = false;
+                self.dismiss_pull_request_detail(cx);
+                self.enter_pull_requests_route(cx);
+                self.nav.push(NavEntry::PullRequests);
+                cx.notify();
+            }
+            RailItem::Usage => self.open_usage(cx),
+            RailItem::Settings => self.toggle_settings(cx),
+        }
+    }
+
+    fn open_home(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat | Route::Terminal) {
+            return;
+        }
+        if matches!(self.route, Route::Settings(_)) {
+            self.settings_search
+                .update(cx, |input, cx| input.set_text("", cx));
+            self.settings_focus_pending = false;
+            self.settings_restore_pending = true;
+        }
+        let chat = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .unwrap_or_default();
+        self.set_route(Route::Chat, cx);
+        self.nav.push(NavEntry::Chat(chat));
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    fn render_rail_button(
+        &mut self,
+        entry: &app_rail::RailEntry,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let item = entry.item;
+        let active = self.rail_item_active(item);
+        let button = app_rail::button(entry, active, theme)
+            .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
+        if item != RailItem::Settings {
+            return button
+                .tooltip(crate::settings::widgets::text_tooltip(entry.label))
+                .into_any_element();
+        }
+        let tooltip: SharedString = match (active, cfg!(target_os = "macos")) {
+            (false, true) => "Settings · ⌘,".into(),
+            (false, false) => "Settings · Ctrl+,".into(),
+            (true, true) => "Close settings · ⌘,".into(),
+            (true, false) => "Close settings · Ctrl+,".into(),
+        };
+        button
+            .aria_label(if active { "Close settings" } else { "Settings" })
+            .aria_toggled(if active {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .tooltip(move |_, cx| {
+                let text = tooltip.clone();
+                cx.new(|_| SurfaceTabTooltip { text }).into()
+            })
+            .into_any_element()
+    }
+
+    /// The app rail below the titlebar: destinations on top, Settings at the
+    /// bottom. Base scene, never deferred: a deferred draw would capture all
+    /// native browser input.
+    fn render_app_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let top: Vec<AnyElement> = app_rail::TOP
+            .iter()
+            .map(|entry| self.render_rail_button(entry, &theme, cx))
+            .collect();
+        let rings = self.render_rail_rings(&theme, cx);
+        let bottom: Vec<AnyElement> = app_rail::BOTTOM
+            .iter()
+            .map(|entry| self.render_rail_button(entry, &theme, cx))
+            .collect();
+        div()
+            .id("app-rail")
+            .debug_selector(|| "app-rail".into())
+            .absolute()
+            .left_0()
+            .top(px(Theme::TITLEBAR_HEIGHT))
+            .bottom(px(self.content_inset()))
+            .w(px(app_rail::WIDTH))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(app_rail::GAP))
+            .py(px(app_rail::PAD_Y))
+            .children(top)
+            .child(div().flex_1())
+            .children(rings)
+            .children(bottom)
+            .into_any_element()
+    }
+
+    fn refresh_device_accounts(&mut self, cx: &mut Context<Self>) {
+        self.device_accounts
+            .update(cx, |accounts, cx| accounts.load(cx));
+    }
+
+    fn toggle_rail_usage(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.rail_usage_menu.take_press_was_open() || self.rail_usage_menu.as_open() == Some(&id)
+        {
+            self.close_rail_usage(cx);
+            return;
+        }
+        self.rail_usage_menu.open(id);
+        self.refresh_device_accounts(cx);
+        cx.notify();
+    }
+
+    fn close_rail_usage(&mut self, cx: &mut Context<Self>) {
+        if self.rail_usage_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.rail_usage_menu);
+            cx.notify();
+        }
+    }
+
+    /// Up to two plan-usage rings; with nothing to show yet, one bare track
+    /// whose tooltip says why. Hovering re-probes (throttled), a click opens
+    /// the account's windows.
+    fn render_rail_rings(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let loading = self.device_accounts.read(cx).loading()
+            || crate::account_usage::local_snapshot(cx).is_none();
+        let ring_accounts: Vec<zeron_proto::AgentAccount> =
+            crate::account_usage::local_snapshot(cx)
+                .map(|snapshot| {
+                    app_rail::ring_accounts(snapshot)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+        let hover = cx.listener(|this, hovered: &bool, _, cx| {
+            if *hovered {
+                this.refresh_device_accounts(cx);
+            }
+        });
+        if ring_accounts.is_empty() {
+            return vec![
+                div()
+                    .id("rail-usage-empty")
+                    .debug_selector(|| "rail-usage-empty".into())
+                    .child(app_rail::ring(None, theme))
+                    .on_hover(hover)
+                    .tooltip(crate::settings::widgets::text_tooltip(
+                        app_rail::ring_tooltip(None, loading),
+                    ))
+                    .into_any_element(),
+            ];
+        }
+        let popup_theme = theme.for_popup();
+        let hover = std::rc::Rc::new(hover);
+        ring_accounts
+            .into_iter()
+            .enumerate()
+            .map(|(ix, account)| {
+                let open = self.rail_usage_menu.as_open() == Some(&account.id);
+                let tooltip = app_rail::ring_tooltip(Some(&account), false);
+                let id = account.id.clone();
+                let hover = hover.clone();
+                let mut trigger = div()
+                    .id(("rail-usage", ix))
+                    .debug_selector(move || format!("rail-usage-{ix}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(tooltip.clone())
+                    .aria_expanded(open)
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_2().border_color(theme.accent))
+                    .relative()
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .when(open, |el| el.bg(theme.glass_hover()))
+                    .hover(|style| style.bg(theme.glass_hover()))
+                    .child(app_rail::ring(Some(&account), theme))
+                    .on_hover(move |hovered, window, cx| hover(hovered, window, cx))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.rail_usage_menu.note_trigger_press()),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_rail_usage(id.clone(), cx)),
+                    );
+                if !open {
+                    trigger = trigger.tooltip(crate::settings::widgets::text_tooltip(tooltip));
+                }
+                if self.rail_usage_menu.get() == Some(&account.id) {
+                    let footer = popover::menu_row(&popup_theme, false, "rail-usage-open-usage")
+                        .id("rail-usage-open-usage")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close_rail_usage(cx);
+                            this.open_usage(cx);
+                        }))
+                        .child(
+                            icon(icons::USAGE_CHART)
+                                .size(px(16.0))
+                                .text_color(popup_theme.text_muted),
+                        )
+                        .child(SharedString::from("Open Usage"))
+                        .into_any_element();
+                    let card = app_rail::ring_card(&account, footer, &popup_theme, Utc::now())
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_rail_usage(cx)))
+                        .into_any_element();
+                    trigger = trigger.child(popover::anchored_menu_right(
+                        "rail-usage-popover",
+                        card,
+                        self.rail_usage_menu.closing_since(),
+                    ));
+                }
+                trigger.into_any_element()
+            })
+            .collect()
+    }
+
+    /// Places `content` right of the rail. Inset, it sits in the rounded card
+    /// below the titlebar: clipped to the card, over its fill and the sidebar
+    /// tone, under its border. Flush, the tone is [`Self::flush_tone`].
+    fn content_frame(
+        &self,
+        tone_width: f32,
+        content: impl IntoElement,
+        theme: &Theme,
+    ) -> AnyElement {
+        let inset = self.content_inset();
+        let frame = div()
+            .absolute()
+            .top_0()
+            .bottom(px(inset))
+            .left(px(self.content_left()))
+            .right(px(inset));
+        if !self.settings.inset_shell {
+            return frame
+                .child(div().absolute().inset_0().child(content))
+                .into_any_element();
+        }
+        let card = || {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .top(px(Theme::TITLEBAR_HEIGHT))
+        };
+        frame
+            .child(card().rounded(px(CARD_RADIUS)).bg(theme.panel_bg()))
+            .child(card().child(Self::sidebar_tone(tone_width, CARD_RADIUS, theme)))
+            .child(
+                card().overflow_hidden().child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .top(px(-Theme::TITLEBAR_HEIGHT))
+                        .child(content),
+                ),
+            )
+            .child(
+                card()
+                    .rounded(px(CARD_RADIUS))
+                    .border_1()
+                    .border_color(theme.border),
+            )
+            .into_any_element()
+    }
+
+    /// The flush layout's sidebar tone: from the window edge under the rail,
+    /// full height, carrying the CSD window's left corners.
+    fn flush_tone(&self, sidebar_width: f32, window: &Window, cx: &App) -> Option<gpui::Div> {
+        (!self.settings.inset_shell).then(|| {
+            Self::sidebar_tone(
+                self.content_left() + sidebar_width,
+                Self::window_corner_radius(window),
+                Theme::of(cx),
+            )
+        })
+    }
+
+    /// The sidebar's bottom row: the voice button on the left, the account
+    /// menu on the right. Shared by the chat sidebar and the settings page so
+    /// both sit in one position. Local runtimes advertise their storage
+    /// boundary and offer sync; synced runtimes offer sign-out.
     fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("sidebar-footer-row")
@@ -12582,56 +12865,6 @@ impl Shell {
                     .min_w_0()
                     .child(self.render_sidebar_footer(theme, cx)),
             )
-            .into_any_element()
-    }
-
-    fn render_pull_requests_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("open-pull-requests")
-            .role(gpui::Role::Button)
-            .aria_label("Pull requests")
-            .tab_index(0)
-            .debug_selector(|| "open-pull-requests".into())
-            .focus_visible(|style| style.border_2().border_color(theme.accent))
-            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .text_color(if matches!(self.route, Route::PullRequests) {
-                theme.text
-            } else {
-                theme.text_muted
-            })
-            .bg(if matches!(self.route, Route::PullRequests) {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "open-pull-requests",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("open-pull-requests"))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                // Leaving Settings through its own footer is a plain route
-                // change; nothing there should grab focus on the way out.
-                this.settings_focus_pending = false;
-                this.dismiss_pull_request_detail(cx);
-                this.enter_pull_requests_route(cx);
-                this.nav.push(NavEntry::PullRequests);
-                cx.notify();
-            }))
-            .tooltip(crate::settings::widgets::text_tooltip("Pull requests"))
-            .child(icon(icons::LUCIDE_GIT_PULL_REQUEST).size(px(16.0)).text_color(
-                if matches!(self.route, Route::PullRequests) {
-                    theme.text
-                } else {
-                    motion::hover_blend("open-pull-requests", theme.text_muted, theme.text)
-                },
-            ))
             .into_any_element()
     }
 
@@ -12650,21 +12883,18 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Pull requests sits just left of Settings, in the same action group.
-        let pull_requests = self.render_pull_requests_button(theme, cx);
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
-        let sidebar_accounts: Vec<zeron_proto::AgentAccount> = self
-            .account_usage
-            .as_ref()
-            .map(|snapshot| {
-                accounts::sidebar_accounts(snapshot)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let sidebar_accounts: Vec<zeron_proto::AgentAccount> =
+            crate::account_usage::local_snapshot(cx)
+                .map(|snapshot| {
+                    accounts::sidebar_accounts(snapshot)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
         // The profile pill hugs avatar + name (shrinking so long names fade
         // out); the gap between it and the settings button is not interactive.
         let initial: SharedString = user_line
@@ -12714,7 +12944,8 @@ impl Shell {
                     this.close_user_menu(cx);
                 } else {
                     this.user_menu.open(());
-                    this.load_account_usage(cx);
+                    this.device_accounts
+                        .update(cx, |accounts, cx| accounts.load(cx));
                 }
                 cx.notify();
             }))
@@ -12839,110 +13070,13 @@ impl Shell {
                 closing,
             ));
         }
-        // Settings is a toggle: while its page is up the button keeps the
-        // hover wash + full-strength glyph, and a click returns to chat.
-        let settings_open = matches!(self.route, Route::Settings(_));
-        let settings_tooltip: SharedString = match (settings_open, cfg!(target_os = "macos")) {
-            (false, true) => "Settings · ⌘,".into(),
-            (false, false) => "Settings · Ctrl+,".into(),
-            (true, true) => "Close settings · ⌘,".into(),
-            (true, false) => "Close settings · Ctrl+,".into(),
-        };
         let voice_trigger = self.render_voice_trigger(theme, cx);
-        let usage_open = matches!(self.route, Route::Usage);
-        let usage = div()
-            .id("open-usage")
-            .debug_selector(|| "open-usage".into())
-            .group("open-usage")
-            .role(gpui::Role::Button)
-            .aria_label("Usage")
-            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .when(usage_open, |el| el.bg(theme.glass_hover()))
-            .hover(|s| s.bg(theme.glass_hover()))
-            .on_click(cx.listener(|this, _, _, cx| this.open_usage(cx)))
-            .tooltip(crate::settings::widgets::text_tooltip("Usage"))
-            .child(
-                icon(icons::LUCIDE_CHART_NO_AXES_COLUMN)
-                    .size(px(16.0))
-                    .text_color(if usage_open {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .group_hover("open-usage", |s| s.text_color(theme.text)),
-            );
         div()
             .w_full()
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .id("settings-trigger")
-                            .debug_selector(|| "settings-trigger".into())
-                            .role(gpui::Role::Button)
-                            .aria_label(if settings_open {
-                                "Close settings"
-                            } else {
-                                "Settings"
-                            })
-                            .aria_toggled(if settings_open {
-                                gpui::Toggled::True
-                            } else {
-                                gpui::Toggled::False
-                            })
-                            .tooltip(move |_, cx| {
-                                let text = settings_tooltip.clone();
-                                cx.new(|_| SurfaceTabTooltip { text }).into()
-                            })
-                            .tab_index(0)
-                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-                            .flex_none()
-                            .rounded(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .bg(if settings_open {
-                                theme.glass_hover()
-                            } else {
-                                motion::hover_blend(
-                                    "settings-trigger",
-                                    theme.glass_hover().opacity(0.0),
-                                    theme.glass_hover(),
-                                )
-                            })
-                            .on_hover(motion::hover_listener("settings-trigger"))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
-                            .child(icon(icons::LUCIDE_SETTINGS).size(px(16.0)).text_color(
-                                if settings_open {
-                                    theme.text
-                                } else {
-                                    motion::hover_blend(
-                                        "settings-trigger",
-                                        theme.text_muted,
-                                        theme.text,
-                                    )
-                                },
-                            )),
-                    )
-                    .child(pull_requests)
-                    .child(usage)
-                    .children(voice_trigger),
-            )
+            .children(voice_trigger)
             .child(div().flex_1())
             .child(trigger)
             .into_any_element()
@@ -12958,7 +13092,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let now = Utc::now();
-        let refreshing = self.account_usage_task.is_some();
+        let refreshing = self.device_accounts.read(cx).loading();
         let title = div()
             .flex()
             .flex_row()
@@ -12980,7 +13114,10 @@ impl Shell {
                     .cursor_pointer()
                     .text_color(theme.text_muted.opacity(0.6))
                     .hover(|s| s.text_color(theme.text_muted))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_account_usage(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.device_accounts
+                            .update(cx, |accounts, cx| accounts.load(cx))
+                    }))
                     .child(icon(icons::REFRESH).size(px(10.0)))
                     .child(SharedString::from(if refreshing {
                         "Refreshing…"
@@ -12989,11 +13126,9 @@ impl Shell {
                     })),
             );
         let rows = accounts.iter().map(|account| {
-            let (name, mark, tint) = match account.harness {
-                zeron_proto::HarnessId::Codex => ("Codex", icons::OPENAI_MARK, theme.text_muted),
-                zeron_proto::HarnessId::Cursor => ("Cursor", icons::CURSOR_MARK, theme.text_muted),
-                _ => ("Claude Code", icons::CLAUDE_MARK, icons::claude_brand()),
-            };
+            let name = accounts::provider_name(account.harness);
+            let (mark, tint) = crate::pickers::harness_brand_icon(account.harness);
+            let tint = tint.unwrap_or(theme.text_muted);
             div()
                 .px(px(8.0))
                 .py(px(6.0))
@@ -15068,14 +15203,15 @@ impl Shell {
         let Some(panel) = self.terminal.clone() else {
             return gpui::Empty.into_any_element();
         };
-        // The dock spans the main column's bottom: when the sidebar is fully
-        // closed the column IS the window's left edge (and likewise the right
-        // edge when the right pane is closed) — the panel's fill then carries
-        // the CSD window's bottom corners.
-        let window_corner = Self::window_corner_radius(window) > 0.0;
+        // The dock spans the main column's bottom: with the right pane closed
+        // the column IS the right edge, and inset, with the sidebar fully
+        // closed, the card's left edge — the panel's fill then carries those
+        // bottom corners. Flush, the rail owns the window's left edge.
         {
-            let bl = window_corner && self.sidebar_now() < 0.5;
-            let br = window_corner && !self.right_pane_open(cx) && !self.files_panel_open(cx);
+            let inset = self.settings.inset_shell;
+            let right_corner = inset || Self::window_corner_radius(window) > 0.0;
+            let bl = inset && self.sidebar_now() < 0.5;
+            let br = right_corner && !self.right_pane_open(cx) && !self.files_panel_open(cx);
             panel.update(cx, |panel, cx| panel.set_window_corners(bl, br, cx));
         }
         let border = Theme::of(cx).border;
@@ -15417,6 +15553,7 @@ impl Shell {
             // directly (gpui cannot clip children rounded — each full-bleed
             // layer rounds itself; see [`Self::window_corner_radius`]). Docked,
             // the explorer column is the rightmost layer and rounds instead.
+            // Inset, the card paints this fill and rounds the corners.
             .when(
                 Self::window_corner_radius(window) > 0.0 && self.files_visible_width(cx) <= 0.0,
                 |el| {
@@ -15424,7 +15561,7 @@ impl Shell {
                     el.rounded_tr(px(corner)).rounded_br(px(corner))
                 },
             )
-            .bg(panel_bg)
+            .when(!self.settings.inset_shell, |el| el.bg(panel_bg))
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
@@ -17580,7 +17717,21 @@ impl Render for Shell {
                 }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its
                 // Usage section) once the first usage probe has landed.
-                if self.debug_dialog.as_deref() == Some("user-menu") && self.account_usage.is_some()
+                // `=rail-usage` opens the first rail ring's usage popover once
+                // the accounts have loaded.
+                if self.debug_dialog.as_deref() == Some("rail-usage")
+                    && let Some(id) =
+                        crate::account_usage::local_snapshot(cx).and_then(|snapshot| {
+                            app_rail::ring_accounts(snapshot)
+                                .first()
+                                .map(|account| account.id.clone())
+                        })
+                {
+                    self.debug_dialog = None;
+                    self.rail_usage_menu.open(id);
+                }
+                if self.debug_dialog.as_deref() == Some("user-menu")
+                    && crate::account_usage::local_snapshot(cx).is_some()
                 {
                     self.debug_dialog = None;
                     self.user_menu.open(());
@@ -17769,11 +17920,11 @@ impl Render for Shell {
                     // A call started from Settings opens its stage here too.
                     let voice_stage = self.render_voice_stage(window, cx);
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                    let sidebar_tone = Self::sidebar_tone(
-                        self.settings.sidebar_width,
-                        &Theme::of(cx).clone(),
-                        window,
-                    );
+                    let flush_tone = self.flush_tone(self.settings.sidebar_width, window, cx);
+                    let theme = Theme::of(cx).clone();
+                    let settings_page =
+                        self.content_frame(self.settings.sidebar_width, settings_page, &theme);
+                    let rail = self.render_app_rail(cx);
                     let drag = self.titlebar_drag_region(
                         "settings-titlebar",
                         div()
@@ -17788,12 +17939,13 @@ impl Render for Shell {
                         .size_full()
                         .relative()
                         .child(settings_page)
+                        .child(rail)
                         .children(voice_stage)
                         .child(drag)
                         .children(overlays);
                     break 'ready root
                         .child(self.swipe_layer(cx))
-                        .child(sidebar_tone)
+                        .children(flush_tone)
                         .child(motion::fade_in("phase-app", page));
                 }
                 // The Pull requests route shares this layout without the
@@ -17920,10 +18072,9 @@ impl Render for Shell {
                 // Full-window voice stage: above the page chrome, below dialogs.
                 let voice_stage = self.render_voice_stage(window, cx);
                 let under_stage = self.voice_stage_underlay_opacity(cx);
-                // No inset cards (user request): the conversation column sits
-                // flush and unbordered, the transcript directly on the frost
-                // glass; the changes pane is a flush left-bordered glass panel
-                // (built inside `render_right_pane`).
+                // The conversation column has no fill of its own: the
+                // transcript paints on the inset card or, flush, directly on
+                // the frost glass (see `content_frame`).
                 // The split pane flexes into whatever the fixed-width main
                 // column leaves, so the seam's share holds.
                 let split_side = self
@@ -18060,50 +18211,52 @@ impl Render for Shell {
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
                 let sidebar_now = self.sidebar_now();
-                let sidebar_tone = Self::sidebar_tone(sidebar_now, &Theme::of(cx).clone(), window);
+                let flush_tone = self.flush_tone(sidebar_now, window, cx);
+                let theme = Theme::of(cx).clone();
+                let rail = self.render_app_rail(cx);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
                 // must NOT underlap (sidebar content, the changes panel,
                 // settings) pad themselves down by the titlebar height.
-                let page = div()
+                let row = div()
                     .size_full()
-                    .relative()
+                    .flex()
+                    .flex_row()
+                    .child(sidebar)
+                    .child(sidebar_seam)
+                    .child(card)
+                    // The right pane is ONE container: the surface host column
+                    // and the docked explorer column sit side by side under a
+                    // shared titlebar strip; the resize seam straddles its
+                    // left edge.
                     .child(
                         div()
-                            .size_full()
-                            .flex()
-                            .flex_row()
-                            .child(sidebar)
-                            .child(sidebar_seam)
-                            .child(card)
-                            // The right pane is ONE container: the surface
-                            // host column and the docked explorer column
-                            // sit side by side under a shared titlebar
-                            // strip; the resize seam straddles its left edge.
+                            .h_full()
+                            .flex_none()
+                            .relative()
+                            .opacity(under_stage)
                             .child(
                                 div()
                                     .h_full()
-                                    .flex_none()
-                                    .relative()
-                                    .opacity(under_stage)
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .flex()
-                                            .flex_row()
-                                            .child(right)
-                                            .child(files_panel),
-                                    )
-                                    .child(right_seam),
-                            ),
-                    )
+                                    .flex()
+                                    .flex_row()
+                                    .child(right)
+                                    .child(files_panel),
+                            )
+                            .child(right_seam),
+                    );
+                let page = div()
+                    .size_full()
+                    .relative()
+                    .child(self.content_frame(sidebar_now, row, &theme))
+                    .child(rail)
                     .child(
                         div()
                             .absolute()
                             .top_0()
                             .left_0()
-                            .right_0()
+                            .right(px(self.content_inset()))
                             .opacity(under_stage)
                             .child(title_bar),
                     )
@@ -18139,7 +18292,7 @@ impl Render for Shell {
                     .children(self.render_sidebar_options_titlebar(cx))
                     .children(overlays);
                 root.child(self.swipe_layer(cx))
-                    .child(sidebar_tone)
+                    .children(flush_tone)
                     .child(motion::fade_in("phase-app", page))
             }
             GatePhase::Loading => root, // splash overlay covers boot
@@ -20543,15 +20696,16 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn sidebar_settings_trigger_toggles_the_settings_route(cx: &mut TestAppContext) {
-        // Just the footer row: the full shell's settings modal would cover it.
-        struct FooterHost(Entity<Shell>);
-        impl Render for FooterHost {
+    fn rail_settings_trigger_toggles_the_settings_route(cx: &mut TestAppContext) {
+        // Just the rail: the full shell's settings modal would cover it.
+        struct RailHost(Entity<Shell>);
+        impl Render for RailHost {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 self.0.update(cx, |shell, cx| {
                     div()
-                        .w(px(256.0))
-                        .child(shell.render_sidebar_footer(&Theme::default(), cx))
+                        .size_full()
+                        .relative()
+                        .child(shell.render_app_rail(cx))
                 })
             }
         }
@@ -20564,7 +20718,7 @@ mod exit_regressions {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
-            FooterHost(cx.new(|cx| {
+            RailHost(cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
                 Shell::new(
                     state,
@@ -20584,7 +20738,7 @@ mod exit_regressions {
         let shell = host.read_with(cx, |host, _| host.0.clone());
         for expect_open in [true, false] {
             cx.update(|window, cx| window.draw(cx).clear());
-            assert!(cx.debug_bounds("user-menu").is_some());
+            assert!(cx.debug_bounds("app-rail").is_some());
             let trigger = cx.debug_bounds("settings-trigger").unwrap().center();
             cx.simulate_click(trigger, gpui::Modifiers::default());
             shell.read_with(cx, |shell, _| {
@@ -20601,16 +20755,17 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn settings_footer_keeps_the_pull_requests_entry(cx: &mut TestAppContext) {
-        // Chat and Settings both render this row; host it alone so the full
+    fn settings_rail_keeps_the_pull_requests_entry(cx: &mut TestAppContext) {
+        // Chat and Settings both render the rail; host it alone so the full
         // shell's pages don't cover it.
-        struct FooterRow(Entity<Shell>);
-        impl Render for FooterRow {
+        struct RailHost(Entity<Shell>);
+        impl Render for RailHost {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 self.0.update(cx, |shell, cx| {
                     div()
-                        .w(px(256.0))
-                        .child(shell.render_sidebar_footer_row(&Theme::default(), cx))
+                        .size_full()
+                        .relative()
+                        .child(shell.render_app_rail(cx))
                 })
             }
         }
@@ -20623,7 +20778,7 @@ mod exit_regressions {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
-            FooterRow(cx.new(|cx| {
+            RailHost(cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
                 Shell::new(
                     state,
@@ -20645,13 +20800,13 @@ mod exit_regressions {
             shell.open_settings(SettingsSection::General, cx)
         });
         cx.update(|window, cx| window.draw(cx).clear());
-        let row = cx.debug_bounds("sidebar-footer-row").unwrap();
+        let rail = cx.debug_bounds("app-rail").unwrap();
         let entry = cx
             .debug_bounds("open-pull-requests")
             .expect("Settings keeps the Pull requests entry");
         let gear = cx.debug_bounds("settings-trigger").unwrap();
-        assert!(entry.left() >= gear.right() && entry.right() <= row.right());
-        assert!((entry.center().y - gear.center().y).abs() < px(1.0));
+        assert!(entry.bottom() <= gear.top() && entry.top() >= rail.top());
+        assert!((entry.center().x - gear.center().x).abs() < px(1.0));
         cx.simulate_click(entry.center(), gpui::Modifiers::default());
         shell.read_with(cx, |shell, _| {
             assert!(
@@ -23343,7 +23498,10 @@ mod settings_modal_regressions {
             assert!(matches!(shell.route, Route::Settings(_)));
             assert!(shell.voice.read(cx).stage_open);
             // The settings sidebar stays usable beside the stage.
-            assert_eq!(f32::from(stage.origin.x), shell.settings.sidebar_width);
+            assert_eq!(
+                f32::from(stage.origin.x),
+                shell.content_left() + shell.settings.sidebar_width
+            );
         });
     }
 

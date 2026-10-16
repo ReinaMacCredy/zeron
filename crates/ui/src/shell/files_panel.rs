@@ -487,7 +487,7 @@ impl Shell {
             .occlude()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.panel_bg())
+            .when(!self.settings.inset_shell, |el| el.bg(theme.panel_bg()))
             .when(corner > 0.0, |el| {
                 el.rounded_tr(px(corner)).rounded_br(px(corner))
             })

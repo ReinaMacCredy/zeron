@@ -1585,7 +1585,7 @@ impl Shell {
         let widths = panel_titlebar_widths(
             right_visible,
             files_width,
-            self.viewport_width - row_left - right_pad - gap_budget,
+            self.viewport_width - self.content_inset() - row_left - right_pad - gap_budget,
             right_pad,
         );
         // Match the pane's stable inner width during open/close. Reflowing
@@ -1594,7 +1594,7 @@ impl Shell {
         let content_width = panel_titlebar_widths(
             self.right_content_width(self.right_target(cx)),
             files_width,
-            self.viewport_width - row_left - right_pad - gap_budget,
+            self.viewport_width - self.content_inset() - row_left - right_pad - gap_budget,
             right_pad,
         )
         .surface_reveal
