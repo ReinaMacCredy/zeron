@@ -9,6 +9,20 @@ fn failed(error: crate::EngineError) -> RpcError {
     RpcError::Failed(error.to_string())
 }
 
+struct Starting<'a> {
+    tasks: &'a std::sync::Mutex<std::collections::HashSet<String>>,
+    task_id: String,
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.task_id);
+    }
+}
+
 impl EngineRpc {
     pub(super) fn create_task(
         &self,
@@ -45,7 +59,6 @@ impl EngineRpc {
         }
     }
 
-    /// Linked before the send so a failed send stays visible on the task.
     pub(super) async fn start_task(
         &self,
         task_id: &str,
@@ -54,6 +67,18 @@ impl EngineRpc {
         harness: Option<HarnessId>,
         model: Option<String>,
     ) -> Result<(), RpcError> {
+        let first = self
+            .starting_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task_id.to_string());
+        if !first {
+            return Err(refused("This task is already starting"));
+        }
+        let _starting = Starting {
+            tasks: &self.starting_tasks,
+            task_id: task_id.to_string(),
+        };
         let task = self
             .workspace
             .task(task_id)
@@ -112,17 +137,40 @@ impl EngineRpc {
                 None,
             )
             .map_err(failed)?;
+        let started = self.link_and_send(&task, chat_id, space_id);
+        if started.is_err() {
+            if self
+                .workspace
+                .task(task_id)
+                .and_then(|t| t.chat_id)
+                .as_deref()
+                == Some(chat_id)
+            {
+                let cleared = TaskPatch {
+                    chat_id: Some(None),
+                    ..Default::default()
+                };
+                self.workspace.update_task(task_id, &cleared).ok();
+            }
+            self.delete_chat(chat_id).ok();
+        }
+        started
+    }
+
+    fn link_and_send(
+        &self,
+        task: &Task,
+        chat_id: &str,
+        space_id: Option<String>,
+    ) -> Result<(), RpcError> {
         self.workspace
             .rename_chat(chat_id, &task.title)
             .map_err(failed)?;
         self.update_task(
-            task_id,
+            &task.id,
             &TaskPatch {
                 chat_id: Some(Some(chat_id.to_string())),
-                space_id: space_id
-                    .clone()
-                    .filter(|_| task.space_id.is_none())
-                    .map(Some),
+                space_id: space_id.filter(|_| task.space_id.is_none()).map(Some),
                 ..Default::default()
             },
         )?;
@@ -130,8 +178,7 @@ impl EngineRpc {
             "" => task.title.clone(),
             notes => format!("{}\n\n{notes}", task.title),
         };
-        let sent = self
-            .doc_host
+        self.doc_host
             .request_from_chat_row(chat_id, &prompt)
             .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
             .and_then(|request| {
@@ -143,15 +190,8 @@ impl EngineRpc {
                     },
                     Vec::new(),
                 )
-            });
-        if let Err(error) = sent {
-            let unlink = TaskPatch {
-                chat_id: Some(None),
-                ..Default::default()
-            };
-            self.workspace.update_task(task_id, &unlink).ok();
-            return Err(failed(error));
-        }
-        Ok(())
+            })
+            .map(drop)
+            .map_err(failed)
     }
 }

@@ -1005,6 +1005,7 @@ pub struct EngineRpc {
     computer: Option<std::sync::Arc<ComputerRuntime>>,
     device_hub: Option<std::sync::Arc<crate::device_hub::DeviceHub>>,
     html_preview: std::sync::Arc<crate::html_render::PreviewHost>,
+    starting_tasks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     engine_info: EngineInfo,
 }
 
@@ -1058,8 +1059,19 @@ impl EngineRpc {
             computer: None,
             device_hub: None,
             html_preview: Default::default(),
+            starting_tasks: Default::default(),
             engine_info,
         }
+    }
+
+    fn delete_chat(&self, chat_id: &str) -> Result<(), RpcError> {
+        self.voice.retire_chat(chat_id);
+        self.workspace
+            .delete_chat(chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        self.doc_host.purge_chat(chat_id);
+        crate::html_render::remove_chat_pages(&self.uploads, chat_id);
+        Ok(())
     }
 
     pub fn with_agent_profiles(mut self, agent_profiles: AgentProfilesStore) -> Self {
@@ -2068,13 +2080,7 @@ impl EngineRpc {
                     .map_err(|e| failed(e.into()))?;
                 Ok(())
             }
-            MutateParams::DeleteChat { chat_id } => {
-                self.voice.retire_chat(&chat_id);
-                self.workspace.delete_chat(&chat_id).map_err(failed)?;
-                self.doc_host.purge_chat(&chat_id);
-                crate::html_render::remove_chat_pages(&self.uploads, &chat_id);
-                Ok(())
-            }
+            MutateParams::DeleteChat { chat_id } => self.delete_chat(&chat_id),
             MutateParams::RenameDevice { device_id, name } => self
                 .workspace
                 .rename_device(&device_id, &name)
