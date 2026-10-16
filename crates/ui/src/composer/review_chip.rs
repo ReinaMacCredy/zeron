@@ -1811,7 +1811,7 @@ impl Composer {
         self.review.submenu_bounds = None;
     }
 
-    pub(super) fn review_menu_open(&self) -> bool {
+    pub(crate) fn review_menu_open(&self) -> bool {
         self.review.menu.is_open()
     }
 

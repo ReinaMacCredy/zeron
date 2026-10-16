@@ -17584,11 +17584,18 @@ impl Render for Shell {
                     self.debug_dialog = None;
                     self.open_handoff_menu(cx);
                 }
+                // The chip drops a menu opened before its counts land, so the
+                // knob only lets go once the menu survives a frame.
                 if self.debug_dialog.as_deref() == Some("review")
-                    && self.state.read(cx).selected_chat.is_some()
+                    && self.composer.update(cx, |c, cx| {
+                        let open = c.review_menu_open();
+                        if !open {
+                            c.open_review_menu(cx);
+                        }
+                        open
+                    })
                 {
                     self.debug_dialog = None;
-                    self.composer.update(cx, |c, cx| c.open_review_menu(cx));
                 }
                 // `=summary` / `=sidecar-popover` / `=sidecar-terminal` (capture
                 // knobs): one browser tab, then the sidecar expanded, railed with
