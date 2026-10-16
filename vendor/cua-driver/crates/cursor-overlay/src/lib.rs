@@ -33,8 +33,9 @@ pub use feel::{
 pub use motion::{MotionConfig, Spring};
 pub use path_planner::{PathPlanner, PathState, PlannedPath};
 pub use render_state::{
-    paint_cursor, render_frame, CompactPulse, FocusRect, RenderStateCore, COMPACT_FADE_SECS,
-    COMPACT_PULSE_SECS, COMPACT_TRAVEL_MIN_DIST, SESSION_BADGE_FADE_SECS, SESSION_BADGE_HOLD_SECS,
+    paint_cursor, paint_extent, render_frame, CompactPulse, FocusRect, RenderStateCore,
+    COMPACT_FADE_SECS, COMPACT_PULSE_SECS, COMPACT_TRAVEL_MIN_DIST, SESSION_BADGE_FADE_SECS,
+    SESSION_BADGE_HOLD_SECS,
 };
 pub use session_badge::{
     paint_session_badge, sanitize_session_label, session_badge_extents, session_badge_layout,

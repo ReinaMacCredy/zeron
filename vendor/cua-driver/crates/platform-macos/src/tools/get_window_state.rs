@@ -392,26 +392,15 @@ impl Tool for GetWindowStateTool {
                 let bounds = crate::windows::window_bounds_by_id(window_id)
                     .filter(|b| b.width > 0.0 && b.height > 0.0)
                     .ok_or(super::px_frame::PxFrameError::WindowNotFound { window_id })?;
-                let raw = crate::capture::screenshot_window_bytes(window_id).map_err(|e| {
-                    super::px_frame::PxFrameError::CaptureUnavailable {
+                let capture = crate::capture::screenshot_window_fitted(window_id, max_dim)
+                    .map_err(|e| super::px_frame::PxFrameError::CaptureUnavailable {
                         window_id,
                         reason: e.to_string(),
-                    }
-                })?;
-                let (orig_w, orig_h) = crate::capture::png_dimensions(&raw).map_err(|e| {
-                    super::px_frame::PxFrameError::CaptureUnavailable {
-                        window_id,
-                        reason: e.to_string(),
-                    }
-                })?;
+                    })?;
+                let (orig_w, orig_h) = capture.full_size;
                 let scale =
                     super::px_frame::validate_capture_frame(window_id, &bounds, orig_w, orig_h)?;
-                let png = crate::capture::resize_png_if_needed(&raw, max_dim).map_err(|e| {
-                    super::px_frame::PxFrameError::CaptureUnavailable {
-                        window_id,
-                        reason: e.to_string(),
-                    }
-                })?;
+                let png = capture.png;
                 let (w, h) = crate::capture::png_dimensions(&png).map_err(|e| {
                     super::px_frame::PxFrameError::CaptureUnavailable {
                         window_id,

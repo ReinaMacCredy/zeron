@@ -900,8 +900,6 @@ fn render_loop(
             pinned_wid,
             raise_unpinned,
             arrived,
-            win_w,
-            win_h,
             had_msg,
             hover_changed,
             next_frame_tick_needed,
@@ -1016,8 +1014,6 @@ fn render_loop(
                         pinned,
                         raise_unpinned,
                         arrived,
-                        map.win_w,
-                        map.win_h,
                         had_msg,
                         hover_changed,
                         next_frame_tick_needed,
@@ -1065,7 +1061,7 @@ fn render_loop(
             }
         }
 
-        // ── Phase 2: composite every cursor into ONE pixmap ───────────────
+        // ── Phase 2: paint each cursor into its own cursor-sized sprite ───
         // Render only when a command arrived or the previous/next tick can
         // change pixels. A final frame is emitted as animations/fades finish so
         // the layer is left in the completed/cleared state before blocking.
@@ -1075,43 +1071,14 @@ fn render_loop(
             || next_frame_tick_needed
             || compact_hide_tick
         {
-            let pixmap = {
+            let sprites = {
                 let guard = RENDER.lock().unwrap();
-                if let Some(map) = guard.as_ref() {
-                    // Allocate the pixmap at the screen's PHYSICAL pixel
-                    // dimensions so the cursor rasterises at retina resolution.
-                    // The cursor's logical coordinates are scaled into pixmap
-                    // pixels inside `paint_cursor` (it multiplies px/py/sizes
-                    // by `backing_scale`).
-                    let scale = map.backing_scale.max(1.0);
-                    let w = (win_w * scale).max(1.0) as u32;
-                    let h = (win_h * scale).max(1.0) as u32;
-                    let mut pm = tiny_skia::Pixmap::new(w.max(1), h.max(1))
-                        .unwrap_or_else(|| tiny_skia::Pixmap::new(1, 1).unwrap());
-                    let backing_scale_f32 = scale as f32;
-                    let (origin_x, origin_y) = map.origin;
-                    for (_k, rs) in &map.cursors {
-                        let focus = rs.focus_rect.map(|rect| FocusRect {
-                            rect,
-                            t: rs.focus_rect_t,
-                        });
-                        cursor_overlay::paint_cursor(
-                            &mut pm,
-                            &rs.core,
-                            origin_x,
-                            origin_y,
-                            focus,
-                            backing_scale_f32,
-                        );
-                    }
-                    pm
-                } else {
-                    break;
+                match guard.as_ref() {
+                    Some(map) => paint_sprites(map),
+                    None => break,
                 }
             };
-
-            // Convert to CGImage and update layer on the main queue.
-            dispatch_set_layer_contents(layer_ptr, pixmap, &pending_frame);
+            dispatch_set_layer_contents(layer_ptr, sprites, &pending_frame);
         }
 
         frame_tick_needed = next_frame_tick_needed;
@@ -1146,8 +1113,51 @@ fn cursor_is_externally_visible(state: &RenderState) -> bool {
         && state.core.idle_alpha >= 0.004
 }
 
+struct CursorSprite {
+    key: CursorKey,
+    frame: [f64; 4],
+    scale: f64,
+    pixmap: tiny_skia::Pixmap,
+}
+
+fn paint_sprites(map: &RenderMap) -> Vec<CursorSprite> {
+    let scale = map.backing_scale.max(1.0);
+    let (origin_x, origin_y) = map.origin;
+    map.cursors
+        .iter()
+        .filter_map(|(key, rs)| {
+            let focus = rs.focus_rect.map(|rect| FocusRect {
+                rect,
+                t: rs.focus_rect_t,
+            });
+            let [x0, y0, x1, y1] =
+                cursor_overlay::paint_extent(&rs.core, origin_x, origin_y, focus, scale as f32)?;
+            let left = (x0 as f64 / scale).floor();
+            let top = (y0 as f64 / scale).floor();
+            let w = ((x1 as f64 / scale).ceil() - left).max(1.0);
+            let h = ((y1 as f64 / scale).ceil() - top).max(1.0);
+            let mut pixmap =
+                tiny_skia::Pixmap::new((w * scale).round() as u32, (h * scale).round() as u32)?;
+            cursor_overlay::paint_cursor(
+                &mut pixmap,
+                &rs.core,
+                origin_x + left,
+                origin_y + top,
+                focus,
+                scale as f32,
+            );
+            Some(CursorSprite {
+                key: key.clone(),
+                frame: [left, top, w, h],
+                scale,
+                pixmap,
+            })
+        })
+        .collect()
+}
+
 /// One replaceable frame and at most one queued main-thread callback. A busy
-/// AppKit thread must not retain a fullscreen bitmap for every render tick.
+/// AppKit thread must not retain a stale frame for every render tick.
 struct FrameMailbox<T> {
     pending: Option<T>,
     scheduled: bool,
@@ -1176,10 +1186,10 @@ impl<T> FrameMailbox<T> {
 /// in that callback, so superseded frames never allocate a second pixel copy.
 fn dispatch_set_layer_contents(
     layer_ptr: usize,
-    pixmap: tiny_skia::Pixmap,
-    pending: &Arc<Mutex<FrameMailbox<tiny_skia::Pixmap>>>,
+    sprites: Vec<CursorSprite>,
+    pending: &Arc<Mutex<FrameMailbox<Vec<CursorSprite>>>>,
 ) {
-    if !pending.lock().unwrap().submit(pixmap) {
+    if !pending.lock().unwrap().submit(sprites) {
         return;
     }
 
@@ -1203,25 +1213,12 @@ fn dispatch_set_layer_contents(
     }
 
     unsafe extern "C" fn set_contents_cb(ctx: *mut c_void) {
-        let (layer_ptr, pending): (usize, Arc<Mutex<FrameMailbox<tiny_skia::Pixmap>>>) =
+        let (layer_ptr, pending): (usize, Arc<Mutex<FrameMailbox<Vec<CursorSprite>>>>) =
             *Box::from_raw(ctx as *mut _);
-        let Some(pixmap) = pending.lock().unwrap().take() else {
+        let Some(sprites) = pending.lock().unwrap().take() else {
             return;
         };
-        let Some(cg_image_ptr) = pixmap_to_cgimage(pixmap) else {
-            return;
-        };
-        let layer = layer_ptr as *mut objc2::runtime::AnyObject;
-        // setContents: expects an `id` (type '@'), not a raw void pointer.
-        // CGImageRef is toll-free bridged to NSObject, so we cast it to *mut AnyObject.
-        let cg_id = cg_image_ptr as *mut objc2::runtime::AnyObject;
-        let _: () = objc2::msg_send![layer, setContents: cg_id];
-        // Release the CGImage ref we retained in pixmap_to_cgimage.
-        CGImageRelease(cg_image_ptr as *mut c_void);
-    }
-
-    extern "C" {
-        fn CGImageRelease(image: *mut c_void);
+        present_sprites(layer_ptr as *mut objc2::runtime::AnyObject, sprites);
     }
 
     unsafe {
@@ -1233,6 +1230,60 @@ fn dispatch_set_layer_contents(
             set_contents_cb,
         );
     }
+}
+
+thread_local! {
+    static SPRITE_LAYERS: std::cell::RefCell<HashMap<CursorKey, usize>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+unsafe fn present_sprites(root: *mut objc2::runtime::AnyObject, sprites: Vec<CursorSprite>) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSRect;
+
+    extern "C" {
+        fn CGImageRelease(image: *mut c_void);
+    }
+
+    let root_bounds: NSRect = msg_send![root, bounds];
+    // Standalone layers animate frame and contents changes implicitly.
+    let _: () = msg_send![class!(CATransaction), begin];
+    let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+    SPRITE_LAYERS.with(|layers| {
+        let mut layers = layers.borrow_mut();
+        let live: std::collections::HashSet<&str> =
+            sprites.iter().map(|sprite| sprite.key.as_str()).collect();
+        layers.retain(|key, layer| {
+            if live.contains(key.as_str()) {
+                return true;
+            }
+            let layer = *layer as *mut AnyObject;
+            let _: () = msg_send![layer, removeFromSuperlayer];
+            let _: () = msg_send![layer, release];
+            false
+        });
+        for (z, sprite) in sprites.into_iter().enumerate() {
+            let layer = *layers.entry(sprite.key.clone()).or_insert_with(|| {
+                let layer: *mut AnyObject = msg_send![class!(CALayer), new];
+                let _: () = msg_send![root, addSublayer: layer];
+                layer as usize
+            }) as *mut AnyObject;
+            let [left, top, w, h] = sprite.frame;
+            // The root layer is unflipped: its y axis grows upward.
+            let frame = ns_rect([left, root_bounds.size.height - top - h, w, h]);
+            let _: () = msg_send![layer, setFrame: frame];
+            let _: () = msg_send![layer, setZPosition: z as f64];
+            let _: () = msg_send![layer, setContentsScale: sprite.scale];
+            let image = pixmap_to_cgimage(sprite.pixmap);
+            let contents = image.unwrap_or(0) as *mut AnyObject;
+            let _: () = msg_send![layer, setContents: contents];
+            if let Some(image) = image {
+                CGImageRelease(image as *mut c_void);
+            }
+        }
+    });
+    let _: () = msg_send![class!(CATransaction), commit];
 }
 
 const DISPLAY_RECHECK: Duration = Duration::from_secs(5);

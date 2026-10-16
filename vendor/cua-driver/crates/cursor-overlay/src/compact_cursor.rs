@@ -348,6 +348,47 @@ pub fn paint_pulse(pm: &mut Pixmap, x: f32, y: f32, radius: f32, alpha: f32, sca
     );
 }
 
+pub fn extent(paint: &CompactPaint) -> Option<[i64; 4]> {
+    if paint.alpha <= 0.0 || paint.scale <= 0.0 || !paint.scale.is_finite() {
+        return None;
+    }
+    let device = paint.device_scale.max(0.0);
+    let rim_reach = 2.3 / 2.0 * device * paint.scale * paint.stretch.max(paint.squash).max(1.0);
+    let (ax0, ay0, ax1, ay1) = transformed_arrow_bounds(affine(paint, (0.0, 0.0)))?;
+    let mut box_ = [
+        (ax0 - rim_reach).floor() as i64 - 1,
+        (ay0 - rim_reach).floor() as i64 - 1,
+        (ax1 + rim_reach).ceil() as i64 + 1,
+        (ay1 + rim_reach).ceil() as i64 + 1,
+    ];
+    if device > 0.0 {
+        if let Some((sx0, sy0, sx1, sy1)) =
+            transformed_arrow_bounds(affine(paint, SHADOW_OFFSET_POINTS))
+        {
+            let support = shadow_support_px((SHADOW_BLUR_POINTS * device).round().max(1.0) as i64);
+            box_[0] = box_[0].min(sx0.floor() as i64 - support);
+            box_[1] = box_[1].min(sy0.floor() as i64 - support);
+            box_[2] = box_[2].max(sx1.ceil() as i64 + support + 1);
+            box_[3] = box_[3].max(sy1.ceil() as i64 + support + 1);
+        }
+    }
+    Some(box_)
+}
+
+pub fn pulse_extent(x: f32, y: f32, radius: f32, alpha: f32, scale: f32) -> Option<[i64; 4]> {
+    if alpha <= 0.0 || radius <= 0.0 {
+        return None;
+    }
+    let reach = f64::from(radius) + f64::from(1.6 / 2.0 * scale) + 1.0;
+    let (x, y) = (f64::from(x), f64::from(y));
+    Some([
+        (x - reach).floor() as i64,
+        (y - reach).floor() as i64,
+        (x + reach).ceil() as i64,
+        (y + reach).ceil() as i64,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
