@@ -2974,6 +2974,28 @@ fn provider_switch_context(history: &str) -> String {
     )
 }
 
+/// A seeded chat holds none of its source's conversation, so a re-sent first
+/// turn must resend the recorded packet rather than rebuild one.
+fn unanswered_packet(history: &[SessionMessageEntry]) -> Option<String> {
+    let packet = |entry: &SessionMessageEntry| {
+        entry.parts.iter().find_map(|part| match part {
+            MessagePart::Handoff { text, .. } if entry.role == MessageRole::System => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+    };
+    let ix = history.iter().rposition(|entry| packet(entry).is_some())?;
+    let answered = history[ix + 1..].iter().any(|entry| {
+        entry.role == MessageRole::Assistant
+            && entry.status == Some(MessageStatus::Complete)
+            && entry.parts.iter().any(
+                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
+            )
+    });
+    packet(&history[ix]).filter(|text| !answered && !text.is_empty())
+}
+
 /// What crosses into the harness in place of the typed text, and the
 /// provider-switch packet inside it when this is that first turn.
 struct HarnessPrompt {
@@ -3110,20 +3132,7 @@ impl Inner {
             .into_iter()
             .filter(|entry| entry.id != user_entry_id)
             .collect();
-        // The switch's divider already recorded the packet; send exactly
-        // that while it is still the newest thing said. Anything after it
-        // (a first turn that died and was re-sent) needs a fresh copy, which
-        // then lands on the user entry instead.
-        let recorded = history
-            .last()
-            .filter(|entry| entry.role == MessageRole::System)
-            .and_then(|entry| {
-                entry.parts.iter().find_map(|part| match part {
-                    MessagePart::Handoff { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-            });
-        let (context, handoff) = match recorded {
+        let (context, handoff) = match unanswered_packet(&history) {
             Some(context) => (context, None),
             None => {
                 let history = bounded_source_copy(&history, SIDECHAT_CONTEXT_BUDGET_CHARS);
@@ -4596,6 +4605,7 @@ async fn drive_run(
                     id: format!("{}-handoff", resume_state.user_message_id),
                     harness: harness_id,
                     text,
+                    route: Default::default(),
                 };
                 if let Err(err) = doc.append_part(&resume_state.user_message_id, &part) {
                     tracing::warn!(chat = %chat_id, error = %err, "provider-switch packet not recorded");

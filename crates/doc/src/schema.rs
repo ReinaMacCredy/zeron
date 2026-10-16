@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
-use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
+use crate::parts::{HandoffRoute, MessagePart, MessageStatus, SubagentStatus};
 use zeron_proto::HarnessId;
 
 #[derive(Debug, thiserror::Error)]
@@ -146,6 +146,12 @@ struct DocPartJson {
     /// An `html_render` page reference (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     html_render: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_harness: Option<HarnessId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_model: Option<String>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -184,11 +190,21 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             reasoning: Some(text.clone()),
             ..Default::default()
         },
-        MessagePart::Handoff { id, harness, text } => DocPartJson {
+        MessagePart::Handoff {
+            id,
+            harness,
+            text,
+            route,
+        } => DocPartJson {
             id: id.clone(),
             kind: "handoff".into(),
             handoff: Some(text.clone()),
             harness: Some(*harness),
+            from_harness: route.from_harness,
+            from_model: route.from_model.clone(),
+            to_model: route.to_model.clone(),
+            source_chat_id: route.source_chat_id.clone(),
+            source_title: route.source_title.clone(),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -331,6 +347,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 id: p.id,
                 harness,
                 text: p.handoff.unwrap_or_default(),
+                route: HandoffRoute {
+                    from_harness: p.from_harness,
+                    from_model: p.from_model,
+                    to_model: p.to_model,
+                    source_chat_id: p.source_chat_id,
+                    source_title: p.source_title,
+                },
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1085,11 +1108,13 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(handoff) = &doc_part.handoff {
         map.insert("handoff", handoff.as_str())?;
     }
-    if let Some(harness) = &doc_part.harness {
-        map.insert(
-            "harness",
-            loro_value_from_json(&serde_json::to_value(harness)?),
-        )?;
+    for (key, harness) in [
+        ("harness", &doc_part.harness),
+        ("fromHarness", &doc_part.from_harness),
+    ] {
+        if let Some(harness) = harness {
+            map.insert(key, loro_value_from_json(&serde_json::to_value(harness)?))?;
+        }
     }
     for (key, value) in [
         ("path", &doc_part.path),
@@ -1121,6 +1146,8 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
         ("sourceTitle", &doc_part.source_title),
+        ("fromModel", &doc_part.from_model),
+        ("toModel", &doc_part.to_model),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;

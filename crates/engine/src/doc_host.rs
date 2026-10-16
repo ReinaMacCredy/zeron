@@ -959,7 +959,7 @@ impl ChatDocHandle {
         message_id: &str,
         text: &str,
         hint: Option<&str>,
-        handoff: Option<(zeron_proto::HarnessId, &str)>,
+        handoff: Option<(zeron_proto::HarnessId, &str, zeron_doc::HandoffRoute)>,
         created_at: i64,
     ) -> Result<(), DocError> {
         let mut parts = vec![MessagePart::Text {
@@ -972,11 +972,12 @@ impl ChatDocHandle {
                 text: hint.to_string(),
             });
         }
-        if let Some((harness, packet)) = handoff {
+        if let Some((harness, packet, route)) = handoff {
             parts.push(MessagePart::Handoff {
                 id: format!("{message_id}-handoff"),
                 harness,
                 text: packet.to_string(),
+                route,
             });
         }
         self.doc.push_message(&SessionMessageEntry {

@@ -12,7 +12,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
+    HandoffRoute, MessagePart, MessageRole, MessageStatus, SessionCommandPayload,
+    SessionMessageEntry,
 };
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
@@ -400,8 +401,8 @@ async fn a_second_switch_before_any_message_replaces_the_first_divider() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path()).await;
     rig.turn(CHAT, "first", "m1").await;
-    switch(&rig, "pi", "Old", "New").await;
-    switch(&rig, "codex", "New", "Codex").await;
+    switch(&rig, "pi", "Mock", "Pi").await;
+    switch(&rig, "codex", "Pi", "Codex").await;
     let doc = entries(&rig.core, CHAT);
     // user, reply, one divider
     assert_eq!(doc.len(), 3);
@@ -409,7 +410,7 @@ async fn a_second_switch_before_any_message_replaces_the_first_divider() {
     assert_eq!(divider.role, MessageRole::System);
     assert_eq!(
         entry_text(divider),
-        "Provider changed from Old to Codex.Old session closed. Handed to Codex; Old's files were not carried."
+        "Provider changed from Mock to Codex.Mock session closed. Handed to Codex; Mock's files were not carried."
     );
     assert!(matches!(
         &divider.parts[2],
@@ -517,3 +518,81 @@ async fn old_checkpoints_cannot_be_branched_after_the_switch() {
         last.prompt
     );
 }
+
+async fn set_config(rig: &Rig, harness: &str, model: &str, text: &str) {
+    rig.client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig",
+                "chatId": CHAT,
+                "config": {
+                    "harness": harness, "model": model, "reasoning": null,
+                    "modelOptions": {}, "sandbox": "workspace-write",
+                },
+                "note": { "text": text, "hint": "hint" },
+            }),
+        )
+        .await
+        .expect("setChatConfig");
+}
+
+fn handoff_route(entry: &SessionMessageEntry) -> (HarnessId, String, HandoffRoute) {
+    entry
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            MessagePart::Handoff {
+                harness,
+                text,
+                route,
+                ..
+            } => Some((*harness, text.clone(), route.clone())),
+            _ => None,
+        })
+        .expect("a handoff part")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_change_after_an_unsent_switch_folds_into_its_divider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    set_config(
+        &rig,
+        "mock",
+        "old-1",
+        "Model changed from default to old-1.",
+    )
+    .await;
+    rig.turn(CHAT, "first", "m1").await;
+    set_config(&rig, "pi", "pi-1", "Provider changed from Mock to Pi.").await;
+    set_config(&rig, "pi", "pi-2", "Model changed from pi-1 to pi-2.").await;
+
+    let doc = entries(&rig.core, CHAT);
+    // model note, user, reply, one handoff divider
+    assert_eq!(doc.len(), 4, "{doc:#?}");
+    let divider = doc.last().unwrap();
+    assert_eq!(entry_text(divider), "Provider changed from Mock to Pi.hint");
+    let (to, _, route) = handoff_route(divider);
+    assert_eq!(to, HarnessId::Pi);
+    assert_eq!(route.from_harness, Some(HarnessId::Mock));
+    assert_eq!(route.from_model.as_deref(), Some("old-1"));
+    assert_eq!(route.to_model.as_deref(), Some("pi-2"));
+    assert_eq!(previous_harnesses(&rig), vec![HarnessId::Mock]);
+
+    // The first turn carries the recorded packet once and records no second.
+    rig.turn(CHAT, "second", "m2").await;
+    let seen = rig.new.runs.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].prompt.matches("<provider_switch>").count(), 1);
+    let doc = entries(&rig.core, CHAT);
+    assert!(
+        doc.iter()
+            .filter(|entry| entry.role == MessageRole::User)
+            .all(|entry| !entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Handoff { .. })))
+    );
+}
+

@@ -1946,7 +1946,9 @@ impl EngineRpc {
                 note,
             } => {
                 self.voice.retire_chat(&chat_id);
-                let switching = self.doc_host.harness_for(&chat_id) != config.harness;
+                let left_model = self.workspace.chat_config(&chat_id).and_then(|c| c.model);
+                let left = self.doc_host.harness_for(&chat_id);
+                let switching = left != config.harness;
                 if switching {
                     self.sessions
                         .switch_harness(&chat_id)
@@ -1957,15 +1959,14 @@ impl EngineRpc {
                     .then(|| self.doc_host.open(&chat_id))
                     .transpose()
                     .map_err(failed)?;
-                // A switch on top of a switch nobody has sent to yet replaces
-                // that divider instead of stacking a second one: the chat
-                // still left the harness the first note named, and the one
+                // A change on top of a handoff nobody has sent to yet folds
+                // into that divider instead of stacking a second one: the chat
+                // still left the harness the first divider named, and the one
                 // in between never ran, so it leaves no mark either.
                 let replaced = handle
                     .as_ref()
-                    .filter(|_| switching)
                     .and_then(|handle| unanswered_switch_note(handle));
-                if replaced.is_some() {
+                if replaced.is_some() && switching {
                     self.workspace
                         .set_chat_config_after_unsent_switch(&chat_id, &config)
                 } else {
@@ -1975,30 +1976,47 @@ impl EngineRpc {
                 let (Some(handle), Some(mut note)) = (handle, note) else {
                     return Ok(());
                 };
-                if let Some(previous) = replaced {
-                    handle
-                        .doc()
-                        .truncate_from(&previous.id)
-                        .map_err(|e| failed(e.into()))?;
-                    match fold_switch_note(&previous, &note) {
-                        Some(folded) => note = folded,
-                        // Back where it started: the transcript shows no
-                        // switch, and the closed session hands over on the
-                        // next turn like any re-sent first turn.
-                        None => return Ok(()),
+                let handoff = match replaced {
+                    Some(previous) => {
+                        handle
+                            .doc()
+                            .truncate_from(&previous.id)
+                            .map_err(|e| failed(e.into()))?;
+                        match fold_switch_note(&previous, left, &config, &note) {
+                            Some((folded, route)) => {
+                                note = folded;
+                                Some((previous.packet, route))
+                            }
+                            // Back where it started: the transcript shows no
+                            // switch, and the closed session hands over on the
+                            // next turn like any re-sent first turn.
+                            None => return Ok(()),
+                        }
                     }
-                }
-                // The packet is built now, at the switch, so the divider
-                // shows it at once; the first run sends this same text.
-                let packet = switching
-                    .then(|| self.sessions.provider_switch_packet(&chat_id))
-                    .flatten();
+                    // The packet is built now, at the switch, so the divider
+                    // shows it at once; the first run sends this same text.
+                    None => switching.then(|| {
+                        let packet = self
+                            .sessions
+                            .provider_switch_packet(&chat_id)
+                            .unwrap_or_default();
+                        let route = zeron_doc::HandoffRoute {
+                            from_harness: Some(left),
+                            from_model: left_model,
+                            to_model: config.model.clone(),
+                            ..Default::default()
+                        };
+                        (packet, route)
+                    }),
+                };
                 handle
                     .write_system_note_with(
                         &crate::new_id(),
                         &note.text,
                         note.hint.as_deref(),
-                        packet.as_deref().map(|p| (config.harness, p)),
+                        handoff.as_ref().map(|(packet, route)| {
+                            (config.harness, packet.as_str(), route.clone())
+                        }),
                         crate::now_ms(),
                     )
                     .map_err(|e| failed(e.into()))?;
@@ -2194,20 +2212,14 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
 }
 
-/// A provider-switch divider nothing followed: the chat's newest entry is
-/// the note the picker wrote for the switch. Its id and the harness its
-/// label says the chat left, for the next switch to fold into.
+/// A handoff divider nothing followed: the chat's newest entry is a system
+/// note carrying a packet whose route names the harness the chat left.
 struct SwitchNote {
     id: String,
-    from: String,
-}
-
-/// The harness names on the picker's "Provider changed from X to Y." label.
-fn switch_label_names(label: &str) -> Option<(&str, &str)> {
-    label
-        .strip_prefix("Provider changed from ")?
-        .strip_suffix('.')?
-        .split_once(" to ")
+    text: String,
+    hint: Option<String>,
+    packet: String,
+    route: zeron_doc::HandoffRoute,
 }
 
 fn unanswered_switch_note(handle: &crate::doc_host::ChatDocHandle) -> Option<SwitchNote> {
@@ -2216,39 +2228,63 @@ fn unanswered_switch_note(handle: &crate::doc_host::ChatDocHandle) -> Option<Swi
     if last.role != zeron_doc::MessageRole::System {
         return None;
     }
-    let label = last.parts.iter().find_map(|part| match part {
-        MessagePart::Text { text, .. } => Some(text),
+    let (packet, route) = last.parts.iter().find_map(|part| match part {
+        MessagePart::Handoff { text, route, .. } if route.from_harness.is_some() => {
+            Some((text.clone(), route.clone()))
+        }
         _ => None,
     })?;
-    let (from, _) = switch_label_names(label)?;
+    let mut texts = last.parts.iter().filter_map(|part| match part {
+        MessagePart::Text { text, .. } => Some(text.clone()),
+        _ => None,
+    });
     Some(SwitchNote {
         id: last.id.clone(),
-        from: from.to_string(),
+        text: texts.next().unwrap_or_default(),
+        hint: texts.next(),
+        packet,
+        route,
     })
 }
 
-/// The note of a switch folded onto an unanswered one: the chat still left
-/// the harness the first label named and now reaches the one the new label
-/// names, so the harness in between is written out of the label and the
-/// hint. `None` when that is where the chat already was. A label in any
-/// other shape is kept as the new note wrote it.
-fn fold_switch_note(previous: &SwitchNote, next: &SystemNote) -> Option<SystemNote> {
-    let Some((between, to)) = switch_label_names(&next.text) else {
-        return Some(SystemNote {
-            text: next.text.clone(),
-            hint: next.hint.clone(),
-        });
+/// The divider of a change folded onto an unanswered handoff: it keeps the
+/// origin the first divider recorded and takes the new destination. `None`
+/// when that is where the chat already was. A seeded thread's divider is its
+/// only copy of the source conversation, so it is never dropped.
+fn fold_switch_note(
+    previous: &SwitchNote,
+    between: HarnessId,
+    config: &zeron_proto::ChatConfig,
+    next: &SystemNote,
+) -> Option<(SystemNote, zeron_doc::HandoffRoute)> {
+    let origin = previous.route.from_harness?;
+    let route = zeron_doc::HandoffRoute {
+        to_model: config.model.clone(),
+        ..previous.route.clone()
     };
-    if previous.from == to {
+    let seeded = route.source_chat_id.is_some();
+    if !seeded && config.harness == origin && config.model == route.from_model {
         return None;
     }
-    Some(SystemNote {
-        text: format!("Provider changed from {} to {to}.", previous.from),
-        hint: next
-            .hint
-            .as_ref()
-            .map(|hint| hint.replace(between, &previous.from)),
-    })
+    let note = if seeded || between == config.harness {
+        SystemNote {
+            text: previous.text.clone(),
+            hint: previous.hint.clone(),
+        }
+    } else {
+        SystemNote {
+            text: format!(
+                "Provider changed from {} to {}.",
+                origin.display_name(),
+                config.harness.display_name()
+            ),
+            hint: next
+                .hint
+                .as_ref()
+                .map(|hint| hint.replace(between.display_name(), origin.display_name())),
+        }
+    };
+    Some((note, route))
 }
 /// How long this device forwards a remote login's callback at most — the
 /// running engine reaps an abandoned login after the same 15 minutes.
@@ -5800,48 +5836,77 @@ mod tests {
 
     #[test]
     fn a_folded_switch_note_keeps_the_harness_the_chat_left() {
+        let config = |harness: &str, model: &str| -> zeron_proto::ChatConfig {
+            serde_json::from_value(serde_json::json!({
+                "harness": harness, "model": model, "modelOptions": {},
+                "sandbox": "workspace-write",
+            }))
+            .unwrap()
+        };
         let previous = SwitchNote {
             id: "n1".into(),
-            from: "Mock".into(),
-        };
-        let folded = fold_switch_note(
-            &previous,
-            &SystemNote {
-                text: "Provider changed from Codex to Grok.".into(),
-                hint: Some(
-                    "Codex session closed. Handed to Grok; Codex's files were not carried.".into(),
-                ),
+            text: "Provider changed from Mock to Codex.".into(),
+            hint: Some("Mock session closed. Handed to Codex.".into()),
+            packet: "packet".into(),
+            route: zeron_doc::HandoffRoute {
+                from_harness: Some(HarnessId::Mock),
+                from_model: Some("m1".into()),
+                to_model: Some("gpt".into()),
+                ..Default::default()
             },
-        )
-        .unwrap();
+        };
+        let next = SystemNote {
+            text: "Provider changed from Codex to Grok.".into(),
+            hint: Some(
+                "Codex session closed. Handed to Grok; Codex's files were not carried.".into(),
+            ),
+        };
+        let (folded, route) =
+            fold_switch_note(&previous, HarnessId::Codex, &config("grok", "g"), &next).unwrap();
         assert_eq!(folded.text, "Provider changed from Mock to Grok.");
         assert_eq!(
             folded.hint.as_deref(),
             Some("Mock session closed. Handed to Grok; Mock's files were not carried.")
         );
+        assert_eq!(route.from_harness, Some(HarnessId::Mock));
+        assert_eq!(route.from_model.as_deref(), Some("m1"));
+        assert_eq!(route.to_model.as_deref(), Some("g"));
 
-        // Back where it started: no divider at all.
+        // Back where it started, harness and model: no divider at all.
         assert!(
-            fold_switch_note(
-                &previous,
-                &SystemNote {
-                    text: "Provider changed from Codex to Mock.".into(),
-                    hint: None,
-                },
-            )
-            .is_none()
+            fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m1"), &next).is_none()
+        );
+        // The origin harness on another model is still a handoff.
+        assert!(
+            fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m2"), &next).is_some()
         );
 
-        // Any other label is kept as written.
-        let other = fold_switch_note(
+        // A model change on the harness the handoff reached keeps its divider.
+        let (same, route) = fold_switch_note(
             &previous,
+            HarnessId::Codex,
+            &config("codex", "gpt-2"),
             &SystemNote {
-                text: "Something else.".into(),
+                text: "Model changed from gpt to gpt-2.".into(),
                 hint: None,
             },
         )
         .unwrap();
-        assert_eq!(other.text, "Something else.");
+        assert_eq!(same.text, previous.text);
+        assert_eq!(same.hint, previous.hint);
+        assert_eq!(route.to_model.as_deref(), Some("gpt-2"));
+
+        // A seeded thread's divider survives a return to its source's agent.
+        let seeded = SwitchNote {
+            route: zeron_doc::HandoffRoute {
+                source_chat_id: Some("source".into()),
+                ..previous.route.clone()
+            },
+            ..previous
+        };
+        assert!(
+            fold_switch_note(&seeded, HarnessId::Codex, &config("mock", "m1"), &next).is_some()
+        );
     }
 
     #[test]
