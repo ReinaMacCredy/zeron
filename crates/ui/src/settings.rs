@@ -511,6 +511,14 @@ pub fn set_sidebar_hover_enabled(enabled: bool, cx: &mut App) {
     }
 }
 
+pub fn set_inset_shell(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Debounced, cx, |settings| {
+        settings.inset_shell = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_transcript_width(width: f32, cx: &mut App) {
     if update(SavePolicy::Debounced, cx, |settings| {
         settings.transcript_width = normalize_transcript_width(width);
@@ -1399,6 +1407,8 @@ pub struct UiSettings {
     pub sidebar_collapsed: bool,
     /// Reveal the collapsed sidebar when hovering over the left window edge.
     pub sidebar_hover_enabled: bool,
+    /// Sidebar and content sit in one rounded card inset from the window.
+    pub inset_shell: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
@@ -1626,6 +1636,7 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_hover_enabled: true,
+            inset_shell: true,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
@@ -2318,6 +2329,7 @@ impl UiSettings {
             sidebar_width,
             sidebar_collapsed,
             sidebar_hover_enabled,
+            inset_shell,
             sidebar_grouped,
             sidebar_organization,
             sidebar_sort,
@@ -3751,6 +3763,7 @@ mod tests {
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_hover_enabled: false,
+            inset_shell: false,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
