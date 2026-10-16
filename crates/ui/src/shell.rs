@@ -7010,6 +7010,7 @@ impl Shell {
         match event {
             crate::inbox::InboxEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             crate::inbox::InboxEvent::OpenPullRequests => self.open_pull_requests(cx),
+            crate::inbox::InboxEvent::OpenTasks => self.open_tasks(cx),
             crate::inbox::InboxEvent::CreateTask { title, due_on } => {
                 let Some(engine) = self.state.read(cx).engine().cloned() else {
                     self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);

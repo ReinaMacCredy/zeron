@@ -34,6 +34,7 @@ const DAY_STARTS_AT_HOUR: u32 = 4;
 pub enum InboxEvent {
     OpenChat(String),
     OpenPullRequests,
+    OpenTasks,
     CreateTask { title: String, due_on: String },
     SetTaskCompleted { task_id: String, completed: bool },
 }
@@ -642,10 +643,30 @@ impl InboxPage {
                     .text_color(theme.text_faint),
             )
             .child(div().flex_1().min_w_0().child(self.add_input.clone()));
-        card(theme, "inbox-tasks", "Today's tasks", Some(open), None)
-            .children(rows)
-            .child(add)
-            .into_any_element()
+        let all_tasks = div()
+            .id("inbox-all-tasks")
+            .debug_selector(|| "inbox-all-tasks".into())
+            .role(gpui::Role::Link)
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_muted)
+            .hover(|s| s.text_color(theme.text).bg(theme.glass_hover()))
+            .child("All tasks")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(InboxEvent::OpenTasks)))
+            .into_any_element();
+        card(
+            theme,
+            "inbox-tasks",
+            "Today's tasks",
+            Some(open),
+            Some(all_tasks),
+        )
+        .children(rows)
+        .child(add)
+        .into_any_element()
     }
 
     fn render_runs(&self, theme: &Theme, awaiting: &[Chat], cx: &mut Context<Self>) -> AnyElement {
