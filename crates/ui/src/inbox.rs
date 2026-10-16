@@ -648,7 +648,7 @@ impl InboxPage {
             .into_any_element()
     }
 
-    fn render_runs(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_runs(&self, theme: &Theme, awaiting: &[Chat], cx: &mut Context<Self>) -> AnyElement {
         let runs: &[TodayRun] = match &self.runs {
             Some(Ok(runs)) => &runs.runs,
             _ => &[],
@@ -662,6 +662,11 @@ impl InboxPage {
                     .map(|at| at.with_timezone(&Local).format("%-I:%M %p").to_string())
                     .unwrap_or_default();
                 let outcome = match (run.status, run.duration_ms) {
+                    (TodayRunStatus::Running, _)
+                        if awaiting.iter().any(|chat| chat.id == run.chat_id) =>
+                    {
+                        "Waiting for you".to_owned()
+                    }
                     (TodayRunStatus::Running, _) => "Working…".to_owned(),
                     (TodayRunStatus::Aborted, Some(ms)) => {
                         format!("Stopped after {}", run_duration(ms))
@@ -823,7 +828,7 @@ impl Render for InboxPage {
             );
         let needs_card = self.render_needs_you(&theme, &chats, &prs, cx);
         let tasks_card = self.render_tasks(&theme, now, cx);
-        let runs_card = self.render_runs(&theme, cx);
+        let runs_card = self.render_runs(&theme, &chats, cx);
         let usage_card = self.render_usage(&theme);
         let column = widgets::page_column()
             .max_w(px(PAGE_MAX_WIDTH))
