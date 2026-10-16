@@ -8,12 +8,13 @@
 //! [`Shell::sync_open_tabs`]. New sessions are minted by the titlebar's
 //! control-cluster `+` and the sidebar header `+`.
 //!
-//! Each tab: agent brand icon + title + a trailing slot that shows the status
-//! dot at rest and swaps to a close button on hover; right-click opens the
-//! close/close-others/close-right/close-left menu. Styling and drag-reorder
-//! mirror the right pane's surface strip (`render_right_tab_strip`) — same
-//! fixed-width tabs, drop-index math, 150ms sibling slide, and drag ghost.
-//! Overflow scrolls horizontally with edge fades.
+//! Each tab: agent brand icon (the activity glyph while it runs) + title + a
+//! trailing slot that shows the status dot at rest and a close button on the
+//! selected or hovered tab; right-click opens the
+//! close/close-others/close-right/close-left menu. Tabs shrink evenly from
+//! 216 to 144px, then the strip scrolls horizontally with edge fades. Drag-
+//! reorder mirrors the right pane's surface strip (`render_right_tab_strip`):
+//! drop-index math, 150ms sibling slide, and drag ghost.
 
 use super::terminal_tabs::{is_terminal_tab, keep_terminal_tab};
 use super::*;
@@ -22,9 +23,11 @@ use zeron_proto::ChatIndicator;
 
 const RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH: f32 = 8.0 + 4.0 + 4.0 + 28.0;
 
-/// Fixed tab width (the right pane's surface chips use 112; session titles
-/// get a bit more).
-pub(super) const SESSION_TAB_WIDTH: f32 = 140.0;
+/// Synara's tab sizes (d122): tabs start at the max width and shrink evenly
+/// to the min before the strip scrolls.
+const TAB_MAX_WIDTH: f32 = 216.0;
+const TAB_MIN_WIDTH: f32 = 144.0;
+const TAB_HEIGHT: f32 = 32.0;
 /// Flex gap between tabs — part of the drop-index slot width.
 const TAB_GAP: f32 = 4.0;
 /// Width of the overflow edge fades. Wide enough that per-glyph fade steps
@@ -58,12 +61,12 @@ impl Render for TabGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         div()
-            .w(px(SESSION_TAB_WIDTH))
-            .h(px(28.0))
-            .px(px(Theme::SPACE_SM))
+            .w(px(TAB_MAX_WIDTH))
+            .h(px(TAB_HEIGHT))
+            .px(px(10.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .rounded(px(Theme::CONTROL_RADIUS))
             .bg(theme.surface_raised)
             .border_1()
@@ -97,6 +100,12 @@ pub(super) fn next_after_close(order: &[String], closed: &str) -> Option<String>
     })
 }
 
+/// The strip hugs its tabs until they shrink, then fills the row.
+fn tab_width(strip_width: f32, slots: usize) -> f32 {
+    let slots = slots.max(1) as f32;
+    ((strip_width - TAB_GAP * (slots - 1.0)) / slots).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+}
+
 /// Sliding transform while a sibling is dragged over: animate 150ms between
 /// committed offsets. `slots` is how many tab slots the element spans.
 fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
@@ -104,11 +113,12 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
     ix: usize,
     id: String,
     slots: usize,
+    width: f32,
     drag: Option<(usize, usize, usize, usize)>,
 ) -> AnyElement {
     match drag {
         Some((from, over, epoch, prev_over)) if ix != from => {
-            let slot = SESSION_TAB_WIDTH + TAB_GAP;
+            let slot = width + TAB_GAP;
             let target = slide_offset(ix, from, over) * slot;
             let start = slide_offset(ix, from, prev_over) * slot;
             div()
@@ -125,18 +135,16 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
         // whatever sibling slid into the vacated slot (slide_offset moves one
         // tab exactly there — user-reported double-exposure).
         Some((from, ..)) if ix == from => div()
-            .w(px(
-                SESSION_TAB_WIDTH * slots as f32 + TAB_GAP * (slots - 1) as f32
-            ))
-            .h(px(28.0))
+            .w(px(width * slots as f32 + TAB_GAP * (slots - 1) as f32))
+            .h(px(TAB_HEIGHT))
             .flex_none()
             .into_any_element(),
         _ => tab_el.into_any_element(),
     }
 }
 
-/// A tab's trailing slot: the status at rest, the close button under the
-/// pointer. Fixed at 20px so the title never reflows on hover.
+/// A tab's trailing slot: the close button on the selected or hovered tab,
+/// else the status dot. Fixed at 24px so the title never reflows on hover.
 ///
 /// NB: no `.occlude()` on the close button — the TAB already occludes (for
 /// the titlebar drag region), and an occluding child would block the tab's
@@ -145,15 +153,15 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
 fn tab_trailing(
     id: &str,
     status: ChatIndicator,
-    hovered: bool,
+    show_close: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
-    if hovered {
+    if show_close {
         let close_id = id.to_string();
         return div()
             .id(SharedString::from(format!("session-tab-close-{id}")))
-            .size(px(20.0))
+            .size(px(24.0))
             .flex_none()
             .flex()
             .items_center()
@@ -173,33 +181,39 @@ fn tab_trailing(
             }))
             .child(
                 icon(icons::CLOSE)
-                    .size(px(12.0))
+                    .size(px(16.0))
                     .text_color(theme.text_muted),
             )
             .into_any_element();
     }
-    // Working animates (the sidebar's miniaturized glyph spinner) instead
-    // of a static dot; every other non-idle status stays a dot.
     let dot = spaces::status_dot_color(status, theme);
     div()
-        .size(px(20.0))
+        .size(px(24.0))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .when(status == ChatIndicator::Working, |el| {
-            el.child(loaders::mini_glyph_spinner(
-                format!("tab-working-{id}"),
-                2.0,
-                theme.glyph,
-                cx.entity_id(),
-                cx,
-            ))
-        })
         .when(
             !matches!(status, ChatIndicator::Idle | ChatIndicator::Working),
             |el| el.child(div().size(px(6.0)).rounded_full().bg(dot)),
         )
+        .into_any_element()
+}
+
+fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+    div()
+        .size(px(14.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(loaders::mini_glyph_spinner(
+            format!("tab-working-{id}"),
+            2.0,
+            theme.glyph,
+            cx.entity_id(),
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -225,9 +239,9 @@ fn split_tab_chip(
     let active = halves.iter().any(|(id, ..)| selected == Some(id.as_str()));
     let mut chip = div()
         .id("session-tab-split")
-        .w(px(SESSION_TAB_WIDTH * 2.0 + TAB_GAP))
-        .h(px(28.0))
-        .flex_none()
+        .flex_basis(px(TAB_MAX_WIDTH * 2.0 + TAB_GAP))
+        .min_w(px(TAB_MIN_WIDTH * 2.0 + TAB_GAP))
+        .h(px(TAB_HEIGHT))
         .flex()
         .flex_row()
         .items_center()
@@ -252,7 +266,13 @@ fn split_tab_chip(
         }
         let is_primary = selected == Some(id.as_str());
         let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
-        let trailing = tab_trailing(&id, status, hovered == Some(id.as_str()), theme, cx);
+        let trailing = tab_trailing(
+            &id,
+            status,
+            is_primary || hovered == Some(id.as_str()),
+            theme,
+            cx,
+        );
         let select_id = id.clone();
         let middle_id = id.clone();
         let menu_id = id.clone();
@@ -267,8 +287,8 @@ fn split_tab_chip(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
-                .pl(px(8.0))
+                .gap(px(8.0))
+                .pl(px(10.0))
                 .pr(px(4.0))
                 .rounded(px(8.0))
                 .text_color(if is_primary {
@@ -332,6 +352,9 @@ fn split_tab_chip(
                         cx,
                     ) {
                         Some(glyph) => el.child(glyph),
+                        None if status == ChatIndicator::Working => {
+                            el.child(tab_spinner(&id, theme, cx))
+                        }
                         None => el.when(!harness.is_empty(), |el| {
                             let selector = format!("session-tab-harness-{id}");
                             el.child(
@@ -1233,6 +1256,7 @@ impl Shell {
         }
         let hovered = self.tab_hover.clone();
         let count = tabs.len();
+        let width = tab_width(f32::from(self.tabs_scroll.bounds().size.width), count);
         let drag = self
             .tab_drag
             .as_ref()
@@ -1266,7 +1290,7 @@ impl Shell {
                                 &theme,
                                 cx,
                             );
-                            return Some(slide_tab(chip, ix, id.clone(), 2, drag));
+                            return Some(slide_tab(chip, ix, id.clone(), 2, width, drag));
                         }
                     }
                     // The split's secondary wears the selected look too: it
@@ -1308,18 +1332,18 @@ impl Shell {
                     let middle_id = id.clone();
                     let menu_id = id.clone();
                     let hover_id = id.clone();
-                    let trailing = tab_trailing(&id, status, is_hovered, &theme, cx);
+                    let trailing = tab_trailing(&id, status, is_selected || is_hovered, &theme, cx);
                     let tab_el = div()
                         .id(SharedString::from(format!("session-tab-{id}")))
                         .debug_selector(|| format!("session-tab-{id}"))
-                        .w(px(SESSION_TAB_WIDTH))
-                        .h(px(28.0))
-                        .flex_none()
+                        .flex_basis(px(TAB_MAX_WIDTH))
+                        .min_w(px(TAB_MIN_WIDTH))
+                        .h(px(TAB_HEIGHT))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
-                        .pl(px(8.0))
+                        .gap(px(8.0))
+                        .pl(px(10.0))
                         .pr(px(4.0))
                         .rounded(px(8.0))
                         .text_size(px(12.0))
@@ -1401,6 +1425,9 @@ impl Shell {
                                     cx,
                                 ) {
                                     Some(glyph) => el.child(glyph),
+                                    None if status == ChatIndicator::Working => {
+                                        el.child(tab_spinner(&id, &theme, cx))
+                                    }
                                     None => el.when(!harness.is_empty(), |el| {
                                         let selector = format!("session-tab-harness-{id}");
                                         el.child(
@@ -1434,7 +1461,7 @@ impl Shell {
                         .child(div().flex_1().min_w_0().truncate().child(title))
                         .child(trailing);
 
-                    Some(slide_tab(tab_el, ix, id, 1, drag))
+                    Some(slide_tab(tab_el, ix, id, 1, width, drag))
                 })
                 .collect();
 
@@ -1475,7 +1502,7 @@ impl Shell {
                             let rel_x = f32::from(event.event.position.x)
                                 - f32::from(event.bounds.left())
                                 - f32::from(scroll_for_drag.offset().x);
-                            let over = drop_index(rel_x, SESSION_TAB_WIDTH + TAB_GAP, count);
+                            let over = drop_index(rel_x, width + TAB_GAP, count);
                             this.update_tab_drag_over(from, over, cx);
                         },
                     ))
