@@ -141,6 +141,30 @@ async fn a_started_task_opens_a_linked_chat_whose_first_turn_is_the_task() {
         "a retried start sends nothing"
     );
 
+    let second = json!({ "op": "startTask", "taskId": "t1", "chatId": "chat-t1b" });
+    assert!(
+        mutate(second.clone()).await.is_err(),
+        "a task whose chat still exists cannot start a second one"
+    );
+    assert!(core.workspace.chat("chat-t1b").unwrap().is_none());
+    assert_eq!(
+        core.workspace.task("t1").unwrap().chat_id.as_deref(),
+        Some("chat-t1")
+    );
+
+    core.workspace.delete_chat("chat-t1").unwrap();
+    mutate(second).await.unwrap();
+    wait_for(
+        || prompts.lock().unwrap().len() == 2,
+        "the restarted task's first turn",
+    )
+    .await;
+    assert_eq!(
+        core.workspace.task("t1").unwrap().chat_id.as_deref(),
+        Some("chat-t1b"),
+        "a deleted chat may be replaced"
+    );
+
     mutate(json!({ "op": "updateTask", "taskId": "t1", "patch": { "completed": true } }))
         .await
         .unwrap();

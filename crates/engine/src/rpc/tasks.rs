@@ -61,6 +61,11 @@ impl EngineRpc {
         if task.chat_id.as_deref() == Some(chat_id) {
             return Ok(());
         }
+        if let Some(linked) = task.chat_id.as_deref()
+            && self.workspace.chat(linked).map_err(failed)?.is_some()
+        {
+            return Err(refused("This task already has a chat"));
+        }
         let space = match space_id {
             Some(id) => Some(
                 self.workspace
