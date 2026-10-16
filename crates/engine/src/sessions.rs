@@ -557,6 +557,8 @@ struct Inner {
     /// harness may still be compacting behind the timeout.
     compaction_timed_out: Mutex<std::collections::HashSet<String>>,
     agent_compacts: Mutex<HashMap<String, AgentCompact>>,
+    /// Skips one reminder so a summary still over the floor cannot re-compact on its own continuation.
+    agent_compacted: Mutex<std::collections::HashSet<String>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -762,6 +764,7 @@ impl SessionsEngine {
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 agent_compacts: Mutex::new(HashMap::new()),
+                agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
@@ -1950,6 +1953,7 @@ impl SessionsEngine {
                 if lock(&self.inner.agent_compacts).remove(chat_id).is_some() {
                     self.inner.set_compact_plan(chat_id, None);
                 }
+                lock(&self.inner.agent_compacted).insert(chat_id.to_string());
                 Ok(Some((outcome, request.continue_with)))
             }
             Err(_) if busy(self) => Ok(None),
@@ -3014,6 +3018,9 @@ impl Inner {
     fn context_nudge(&self, chat_id: &str, typed: &str) -> Option<String> {
         let first = self.registry.compaction_settings().nudge_percent;
         if first == 0 || zeron_proto::invocation::leading_command(typed).is_some() {
+            return None;
+        }
+        if lock(&self.agent_compacted).remove(chat_id) {
             return None;
         }
         let config = self
