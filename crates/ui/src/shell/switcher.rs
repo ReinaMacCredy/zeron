@@ -300,7 +300,7 @@ impl Shell {
         }
         if matches!(
             self.route,
-            Route::PullRequests | Route::Inbox | Route::Tasks
+            Route::PullRequests | Route::Inbox | Route::Tasks | Route::Usage
         ) {
             self.open_home(cx);
         }
