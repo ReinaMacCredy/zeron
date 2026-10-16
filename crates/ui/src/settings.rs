@@ -1407,9 +1407,6 @@ pub struct UiSettings {
     /// Timestamp used to order active sessions (newest first).
     pub sidebar_sort: SidebarSort,
     pub sidebar_active_first: bool,
-    pub sidebar_settle_after_days: u32,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sidebar_unsettled_at: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub sidebar_working_shelf: bool,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
@@ -1633,8 +1630,6 @@ impl Default for UiSettings {
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_active_first: false,
-            sidebar_settle_after_days: 3,
-            sidebar_unsettled_at: HashMap::new(),
             sidebar_working_shelf: false,
             sidebar_show_project_label: true,
             // Upstream boots compact; this fork keeps its detailed rows.
@@ -2327,8 +2322,6 @@ impl UiSettings {
             sidebar_organization,
             sidebar_sort,
             sidebar_active_first,
-            sidebar_settle_after_days,
-            sidebar_unsettled_at,
             sidebar_working_shelf,
             sidebar_show_project_label,
             sidebar_compact,
@@ -3762,11 +3755,6 @@ mod tests {
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_active_first: true,
-            sidebar_settle_after_days: 7,
-            sidebar_unsettled_at: HashMap::from([(
-                "chat-2".to_string(),
-                chrono::DateTime::from_timestamp(1_700_000_100, 0).unwrap(),
-            )]),
             sidebar_working_shelf: true,
             sidebar_compact: true,
             sidebar_show_project_icon: false,

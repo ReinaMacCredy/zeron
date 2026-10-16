@@ -463,6 +463,7 @@ pub(crate) fn seed(
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {

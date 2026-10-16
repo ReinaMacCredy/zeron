@@ -266,6 +266,7 @@ mod tests {
                 user_id: "user".into(),
                 edge: None,
                 local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();
@@ -319,6 +320,7 @@ mod tests {
                 user_id: "user".into(),
                 edge: None,
                 local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();

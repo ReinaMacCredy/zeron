@@ -13746,7 +13746,7 @@ impl Shell {
                         zeron_proto::ChatIndicator::Working
                             | zeron_proto::ChatIndicator::AwaitingInput
                     ))
-                    .then(|| self.sidebar_settled_at(status, chat, now).is_some())
+                    .then(|| spaces::sidebar_settled_at(state, status, chat, now).is_some())
                 })
                 .flatten();
             let rename_id = chat_id.clone();
@@ -18230,6 +18230,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         }
     }
 
@@ -21216,6 +21217,7 @@ mod exit_regressions {
                         previous_harnesses: Vec::new(),
                         delegation: None,
                         settle: None,
+                        unsettled_at: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
@@ -22278,6 +22280,7 @@ mod right_tab_mouse_regressions {
                     previous_harnesses: Vec::new(),
                     delegation: None,
                     settle: None,
+                    unsettled_at: None,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

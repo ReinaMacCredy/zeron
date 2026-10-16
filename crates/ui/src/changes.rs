@@ -6346,6 +6346,7 @@ rename to new_name.rs
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         }
     }
 

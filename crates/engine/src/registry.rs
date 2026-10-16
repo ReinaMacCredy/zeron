@@ -101,6 +101,7 @@ struct HarnessPrefsFile {
     compaction: CompactionSettings,
     tools: zeron_proto::tools::ToolSettings,
     review: Option<crate::review::ReviewSettings>,
+    sidebar: zeron_proto::SidebarSettings,
     system_prompt: String,
     seen_models: Vec<SeenModels>,
     /// The allow-list written back when enablement was a fixed default set.
@@ -654,6 +655,10 @@ impl HarnessRegistry {
         self.prefs().compaction = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    pub fn sidebar_settings(&self) -> zeron_proto::SidebarSettings {
+        self.prefs().sidebar
     }
 
     pub fn system_prompt(&self) -> String {

@@ -821,30 +821,15 @@ mod tests {
                         .unwrap();
                     let status = state.display_status_for(chat, now);
                     assert_eq!(
-                        shell.sidebar_settled_at(status, chat, now).is_some(),
+                        super::spaces::sidebar_settled_at(state, status, chat, now).is_some(),
                         settled
                     );
                     settled
                 })
             })
         };
-        let unsettled = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| {
-                window.refresh();
-                window.draw(cx).clear();
-            });
-            cx.update(|_, cx| {
-                shell
-                    .read(cx)
-                    .settings
-                    .sidebar_unsettled_at
-                    .contains_key("regular")
-            })
-        };
         assert!(toggle(&mut cx));
-        assert!(!unsettled(&mut cx));
         assert!(!toggle(&mut cx));
-        assert!(unsettled(&mut cx));
     }
 
     #[gpui::test]

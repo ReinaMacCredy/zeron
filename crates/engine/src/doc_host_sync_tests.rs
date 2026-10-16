@@ -269,6 +269,7 @@ fn workspace(store: Arc<DocsStore>) -> WorkspaceHost {
             user_id: "test-user".into(),
             edge: None,
             local_only: false,
+            settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
         },
     )
     .unwrap()

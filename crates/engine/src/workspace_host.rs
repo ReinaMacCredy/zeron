@@ -172,6 +172,7 @@ pub struct WorkspaceHostConfig {
     /// later must keep its writes as ops — re-seeding folded rows as full
     /// upserts would revive rows another device deleted meanwhile.
     pub local_only: bool,
+    pub settle_after_days: u32,
 }
 
 struct WorkspaceHostInner {
@@ -877,7 +878,14 @@ impl WorkspaceHost {
     pub fn note_message(&self, chat_id: &str, text: &str) {
         let preview: String = text.chars().take(120).collect();
         let result = self.claim_chat(chat_id, None).and_then(|_| {
-            self.mutate(|doc| doc.set_chat_last_message(chat_id, &preview, Utc::now()))
+            self.mutate(|doc| {
+                doc.set_chat_last_message(
+                    chat_id,
+                    &preview,
+                    Utc::now(),
+                    self.inner.config.settle_after_days,
+                )
+            })
                 .map_err(EngineError::from)
         });
         if let Err(err) = result {
@@ -1068,6 +1076,7 @@ impl WorkspaceHost {
                 previous_harnesses: Vec::new(),
                 delegation,
                 settle: None,
+                unsettled_at: None,
             })
         })?;
         Ok(())
@@ -1123,6 +1132,7 @@ impl WorkspaceHost {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1179,6 +1189,7 @@ impl WorkspaceHost {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -2013,6 +2024,7 @@ mod tests {
                 user_id: "test-user".into(),
                 edge: None,
                 local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();
@@ -2071,6 +2083,7 @@ mod tests {
                 user_id: "test-user".into(),
                 edge: None,
                 local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();
@@ -2104,6 +2117,7 @@ mod tests {
                 user_id: "test-user".into(),
                 edge: None,
                 local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();
@@ -2216,6 +2230,7 @@ mod tests {
                 user_id: "test-user".into(),
                 edge: None,
                 local_only: true,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();
@@ -2256,6 +2271,7 @@ mod tests {
                 // Unreachable edge: writes queue (and retry) without acks.
                 edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
                 local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();
@@ -2323,6 +2339,7 @@ mod tests {
                 user_id: "test-user".into(),
                 edge: None,
                 local_only: true,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
             },
         )
         .unwrap();

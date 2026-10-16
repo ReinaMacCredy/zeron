@@ -281,6 +281,7 @@ impl EngineCore {
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
                 local_only: matches!(profile.scope(), WorkspaceScope::Local),
+                settle_after_days: registry.sidebar_settings().settle_after_days,
             },
         )?;
         doc_host.set_workspace(workspace.clone());

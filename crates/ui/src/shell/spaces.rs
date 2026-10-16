@@ -2429,7 +2429,6 @@ pub(super) fn compare_sidebar_rows(
 pub(super) struct InboxMark {
     working: bool,
     since: Option<DateTime<Utc>>,
-    settled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2459,7 +2458,6 @@ impl InboxShelf {
     }
 }
 
-/// A chat with no messages never settles, as in T3.
 pub(super) fn inbox_settled_at(
     status: ChatIndicator,
     chat: &zeron_proto::Chat,
@@ -2472,14 +2470,16 @@ pub(super) fn inbox_settled_at(
     ) {
         return None;
     }
-    let activity = chat.last_message_at;
-    match chat
-        .settle
-        .filter(|settle| activity.is_none_or(|at| at <= settle.at))
-    {
-        Some(settle) => settle.settled.then_some(settle.at),
-        None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
-    }
+    chat.settled_at(after_days, now)
+}
+
+pub(super) fn sidebar_settled_at(
+    state: &AppState,
+    status: ChatIndicator,
+    chat: &zeron_proto::Chat,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    inbox_settled_at(status, chat, state.sidebar_settings.settle_after_days, now)
 }
 
 pub(super) fn inbox_rank(
@@ -2488,14 +2488,15 @@ pub(super) fn inbox_rank(
     started_at: Option<DateTime<Utc>>,
     mark: Option<InboxMark>,
     settled_at: Option<DateTime<Utc>>,
-    unsettled_at: Option<DateTime<Utc>>,
     working_shelf: bool,
 ) -> (InboxShelf, std::cmp::Reverse<DateTime<Utc>>) {
     let shelf = InboxShelf::of(status, settled_at, working_shelf);
     if let Some(at) = settled_at {
         return (shelf, std::cmp::Reverse(at));
     }
-    let anchor = unsettled_at.map_or(chat.created_at, |at| at.max(chat.created_at));
+    let anchor = chat
+        .unsettled_at
+        .map_or(chat.created_at, |at| at.max(chat.created_at));
     if !working_shelf {
         return (shelf, std::cmp::Reverse(anchor));
     }
@@ -5633,7 +5634,7 @@ impl Shell {
             }
             SidebarOrganization::Inbox => {
                 let now = Utc::now();
-                self.inbox_shelf(state.display_status_for(chat, now), chat, now)
+                self.inbox_shelf(state, state.display_status_for(chat, now), chat, now)
                     .group()
                     .map(|(key, _)| key.to_string())
             }
@@ -5641,24 +5642,16 @@ impl Shell {
         }
     }
 
-    pub(super) fn sidebar_settled_at(
-        &self,
-        status: ChatIndicator,
-        chat: &zeron_proto::Chat,
-        now: DateTime<Utc>,
-    ) -> Option<DateTime<Utc>> {
-        inbox_settled_at(status, chat, self.settings.sidebar_settle_after_days, now)
-    }
-
     fn inbox_shelf(
         &self,
+        state: &AppState,
         status: ChatIndicator,
         chat: &zeron_proto::Chat,
         now: DateTime<Utc>,
     ) -> InboxShelf {
         InboxShelf::of(
             status,
-            self.sidebar_settled_at(status, chat, now),
+            sidebar_settled_at(state, status, chat, now),
             self.settings.sidebar_working_shelf,
         )
     }
@@ -5679,8 +5672,7 @@ impl Shell {
                         .session_for(&chat.id)
                         .and_then(|session| session.started_at),
                     self.sidebar_inbox_marks.get(&chat.id).copied(),
-                    self.sidebar_settled_at(*status, chat, now),
-                    self.settings.sidebar_unsettled_at.get(&chat.id).copied(),
+                    sidebar_settled_at(state, *status, chat, now),
                     self.settings.sidebar_working_shelf,
                 )
             });
@@ -5701,53 +5693,27 @@ impl Shell {
         if self.settings.sidebar_organization != SidebarOrganization::Inbox {
             return;
         }
-        let mut unsettled = Vec::new();
         let state = self.state.read(cx);
         for (status, chat) in state.overview_chats(now) {
             let working = status == ChatIndicator::Working;
-            let settled = self.sidebar_settled_at(status, chat, now).is_some();
-            let woke = match self.sidebar_inbox_marks.entry(chat.id.clone()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(InboxMark {
-                        working,
-                        since: None,
-                        settled,
-                    });
-                    false
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let mark = entry.get_mut();
-                    if mark.working != working {
-                        mark.working = working;
-                        mark.since = Some(if working {
-                            now
-                        } else {
-                            state
-                                .session_for(&chat.id)
-                                .map_or(now, |session| session.updated_at.min(now))
-                        });
-                    }
-                    let woke = mark.settled && !settled;
-                    mark.settled = settled;
-                    woke
-                }
-            };
-            if woke {
-                unsettled.push((chat.id.clone(), Some(now)));
-            } else if settled && self.settings.sidebar_unsettled_at.contains_key(&chat.id) {
-                unsettled.push((chat.id.clone(), None));
+            let mark = self
+                .sidebar_inbox_marks
+                .entry(chat.id.clone())
+                .or_insert(InboxMark {
+                    working,
+                    since: None,
+                });
+            if mark.working != working {
+                mark.working = working;
+                mark.since = Some(if working {
+                    now
+                } else {
+                    state
+                        .session_for(&chat.id)
+                        .map_or(now, |session| session.updated_at.min(now))
+                });
             }
         }
-        if unsettled.is_empty() {
-            return;
-        }
-        for (id, at) in unsettled {
-            match at {
-                Some(at) => self.settings.sidebar_unsettled_at.insert(id, at),
-                None => self.settings.sidebar_unsettled_at.remove(&id),
-            };
-        }
-        self.schedule_save(cx);
     }
 
     /// A device/project group's key in `sidebar_collapsed_groups`.
@@ -5909,7 +5875,7 @@ impl Shell {
                 Some(sidebar_project_group(state, &chat))
             }
             SidebarOrganization::Inbox => self
-                .inbox_shelf(status, &chat, now)
+                .inbox_shelf(state, status, &chat, now)
                 .group()
                 .map(|(key, label)| (key.to_string(), label.to_string())),
             SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
@@ -8683,6 +8649,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         }
     }
 
@@ -8824,7 +8791,6 @@ mod tests {
         zeron_proto::Chat,
         Option<chrono::DateTime<Utc>>,
         Option<InboxMark>,
-        Option<chrono::DateTime<Utc>>,
     );
 
     const DAY: i64 = 86_400;
@@ -8835,17 +8801,9 @@ mod tests {
 
     fn inbox_ids(rows: &mut [InboxRow], working_shelf: bool) -> Vec<String> {
         let now = inbox_at(1_000);
-        rows.sort_by_key(|(status, chat, started, mark, unsettled)| {
+        rows.sort_by_key(|(status, chat, started, mark)| {
             let settled = inbox_settled_at(*status, chat, 3, now);
-            inbox_rank(
-                *status,
-                chat,
-                *started,
-                *mark,
-                settled,
-                *unsettled,
-                working_shelf,
-            )
+            inbox_rank(*status, chat, *started, *mark, settled, working_shelf)
         });
         rows.iter().map(|row| row.1.id.clone()).collect()
     }
@@ -8864,6 +8822,9 @@ mod tests {
                 settled,
                 at: at(secs),
             });
+            if !settled {
+                chat.unsettled_at = Some(at(secs));
+            }
             chat
         };
         let mut silent = chat("f");
@@ -8871,30 +8832,22 @@ mod tests {
         let returned = InboxMark {
             working: false,
             since: Some(at(450)),
-            settled: false,
         };
         use ChatIndicator::{Completed, Errored, Idle, Working};
         let mut rows: Vec<InboxRow> = vec![
-            (Working, replied("a", 500), Some(at(100)), None, None),
-            (Working, replied("b", 300), Some(at(200)), None, None),
-            (Idle, replied("c", 400), None, None, None),
-            (Errored, replied("d", 50), None, Some(returned), None),
-            (Idle, replied("e", -4 * DAY), None, None, None),
-            (Idle, silent, None, None, None),
-            (Idle, settle(replied("g", 600), true, 700), None, None, None),
-            (
-                Idle,
-                settle(replied("h", -5 * DAY), false, 800),
-                None,
-                None,
-                Some(at(800)),
-            ),
-            (Completed, replied("i", -6 * DAY), None, None, None),
+            (Working, replied("a", 500), Some(at(100)), None),
+            (Working, replied("b", 300), Some(at(200)), None),
+            (Idle, replied("c", 400), None, None),
+            (Errored, replied("d", 50), None, Some(returned)),
+            (Idle, replied("e", -4 * DAY), None, None),
+            (Idle, silent, None, None),
+            (Idle, settle(replied("g", 600), true, 700), None, None),
+            (Idle, settle(replied("h", -5 * DAY), false, 800), None, None),
+            (Completed, replied("i", -6 * DAY), None, None),
             (
                 Working,
                 settle(replied("j", -6 * DAY), true, 900),
                 Some(at(150)),
-                None,
                 None,
             ),
         ];
@@ -8922,7 +8875,8 @@ mod tests {
             let mut chat = chat(id);
             chat.created_at = at(created);
             chat.last_message_at = Some(at(last));
-            (status, chat, None, None, unsettled.map(at))
+            chat.unsettled_at = unsettled.map(at);
+            (status, chat, None, None)
         };
         use ChatIndicator::{Completed, Idle, Working};
         let mut rows = vec![

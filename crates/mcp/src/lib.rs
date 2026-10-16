@@ -132,7 +132,7 @@ fn thread_tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. An awaiting_input row carries the question it is blocked on as `pendingInput` (answer it with respond_to_input); status is a snapshot, so a thread that keeps asking permission can read idle a moment later. `createdByChatId` names the chat whose agent opened it with create_thread; `delegatedByChatId` and `delegationStatus` name the chat that owns it as a delegate_task child and how that task stands. `parentId` keeps only threads opened or delegated by that thread (\"self\" for this chat), `spaceId` only one project's threads. Results are newest first by updatedAt, default 50 and max 200 per page; pass nextCursor as cursor for the next page. A thread that gets a new message while you page moves ahead of the cursor and is not repeated; list again from the start to see it. Archived threads are left out unless `includeArchived` is true. Every row is a real sidebar chat the human can open.",
+            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. An awaiting_input row carries the question it is blocked on as `pendingInput` (answer it with respond_to_input); status is a snapshot, so a thread that keeps asking permission can read idle a moment later. `createdByChatId` names the chat whose agent opened it with create_thread; `delegatedByChatId` and `delegationStatus` name the chat that owns it as a delegate_task child and how that task stands. `parentId` keeps only threads opened or delegated by that thread (\"self\" for this chat), `spaceId` only one project's threads. Results are newest first by updatedAt, default 50 and max 200 per page; pass nextCursor as cursor for the next page. A thread that gets a new message while you page moves ahead of the cursor and is not repeated; list again from the start to see it. Archived threads are left out unless `includeArchived` is true. `settled` is true when the thread sits on the sidebar Inbox's Settled shelf (see set_thread_settled). Every row is a real sidebar chat the human can open.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -843,9 +843,17 @@ impl ThreadTools {
                 last.id
             )
         });
+        let settings: zeron_proto::SidebarSettings = self
+            .client
+            .call_as(methods::GET_SIDEBAR_SETTINGS, json!({}))
+            .await
+            .map_err(|e| format!("GetSidebarSettings: {e}"))?;
         let mut threads = Vec::new();
         for chat in page.into_iter().take(limit) {
-            threads.push(self.row_of(chat, &sessions, now).await?);
+            threads.push(
+                self.row_of(chat, &sessions, now, settings.settle_after_days)
+                    .await?,
+            );
         }
         Ok(json!({ "threads": threads, "nextCursor": next_cursor }))
     }
@@ -856,6 +864,7 @@ impl ThreadTools {
         chat: &Chat,
         sessions: &[Session],
         now: DateTime<Utc>,
+        settle_after_days: u32,
     ) -> Result<Value, String> {
         let summary = self
             .call_engine(methods::GET_THREAD_SUMMARY, json!({"chatId": chat.id}))
@@ -871,6 +880,8 @@ impl ThreadTools {
             "spaceId": chat.space_id,
             "status": status,
             "archived": chat.archived,
+            "settled": matches!(status, "idle" | "errored")
+                && chat.settled_at(settle_after_days, now).is_some(),
             "harness": chat.config.as_ref().map(|c| c.harness),
             "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
             "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
@@ -1048,7 +1059,14 @@ impl ThreadTools {
             .ok_or("engine returned no chatId")?;
         let chat = self.peer(thread_id).await?;
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
-        let mut row = self.row_of(&chat, &sessions, Utc::now()).await?;
+        let mut row = self
+            .row_of(
+                &chat,
+                &sessions,
+                Utc::now(),
+                zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
+            )
+            .await?;
         row["threadId"] = json!(thread_id);
         if args["wait"].as_bool() == Some(true) {
             row["turn"] = self.await_turn(thread_id, None, wait_timeout(args)).await?;
@@ -3088,6 +3106,9 @@ mod tests {
                         }),
                     }))
                 }
+                methods::GET_SIDEBAR_SETTINGS => {
+                    Ok(RpcReply::Value(json!({ "settleAfterDays": 3 })))
+                }
                 methods::LIST_TERMINALS => {
                     self.calls
                         .lock()
@@ -3451,7 +3472,17 @@ mod tests {
 
     #[tokio::test]
     async fn list_threads_scopes_to_the_callers_device_and_checks_staleness() {
-        let out = rig(fixture()).tools.list_threads(&json!({})).await.unwrap();
+        let mut fake = fixture();
+        for chat in &mut fake.chats {
+            match chat["id"].as_str() {
+                Some("a") => {
+                    chat["settle"] = json!({ "settled": true, "at": "2026-09-18T10:00:00Z" })
+                }
+                Some("b" | "c") => chat["lastMessageAt"] = json!(chat["createdAt"]),
+                _ => {}
+            }
+        }
+        let out = rig(fake).tools.list_threads(&json!({})).await.unwrap();
         let rows: Vec<(String, String, bool)> = out["threads"]
             .as_array()
             .unwrap()
@@ -3493,6 +3524,15 @@ mod tests {
         assert_eq!(out["threads"][1]["entryCount"], 5);
         assert_eq!(out["threads"][1]["lastRole"], "user");
         assert_eq!(out["threads"][1]["lastText"], "line 5");
+        // a is settled by hand, c by a quiet spell; b is just as quiet but
+        // working, and e has no messages to go quiet on.
+        let settled: Vec<bool> = out["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["settled"].as_bool().unwrap())
+            .collect();
+        assert_eq!(settled, [true, false, true, false, false]);
     }
 
     #[tokio::test]

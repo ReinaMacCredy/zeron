@@ -738,6 +738,8 @@ pub(crate) struct RawChat {
     delegation: Option<zeron_proto::Delegation>,
     #[serde(default, deserialize_with = "lenient")]
     settle: Option<zeron_proto::SidebarSettle>,
+    #[serde(default)]
+    unsettled_at: Option<i64>,
 }
 
 fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -804,6 +806,7 @@ impl From<RawChat> for Chat {
             previous_harnesses: raw.previous_harnesses,
             delegation: raw.delegation,
             settle: raw.settle,
+            unsettled_at: raw.unsettled_at.map(dt),
         }
     }
 }
@@ -932,6 +935,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         }
     }
 

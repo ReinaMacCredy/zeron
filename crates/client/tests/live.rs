@@ -101,6 +101,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         previous_harnesses: Vec::new(),
         delegation: None,
         settle: None,
+        unsettled_at: None,
     };
     (device, space, chat)
 }

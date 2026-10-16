@@ -577,6 +577,7 @@ impl DemoHost {
                     chat_id,
                     &zeron_proto::view::single_line(&preview),
                     Utc::now(),
+                    zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
                 )?;
                 if untitled {
                     let title: String = zeron_proto::view::single_line(&preview)
@@ -738,7 +739,12 @@ impl DemoHost {
         let viewing = core.snapshot().revision > 0 && self.is_viewing(&core);
         let _ = client.registry_write(|doc| {
             if !preview.is_empty() {
-                doc.set_chat_last_message(chat_id, &preview, Utc::now())?;
+                doc.set_chat_last_message(
+                    chat_id,
+                    &preview,
+                    Utc::now(),
+                    zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
+                )?;
             }
             if viewing {
                 doc.set_chat_seen(chat_id, Utc::now() + chrono::Duration::milliseconds(1))?;

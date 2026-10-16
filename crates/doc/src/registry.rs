@@ -1286,6 +1286,7 @@ impl RegistryDoc {
                     .transpose()?
                     .unwrap_or(Value::Null),
             ),
+            ("unsettledAt", opt_ms(chat.unsettled_at)),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1405,12 +1406,11 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([("settle", serde_json::to_value(settle)?)]),
-        );
+        let mut set = fields([("settle", serde_json::to_value(settle)?)]);
+        if !settle.settled {
+            set.insert("unsettledAt".into(), json!(settle.at.timestamp_millis()));
+        }
+        self.write(KIND_CHATS, chat_id, OpKind::Update, set);
         Ok(true)
     }
 
@@ -1568,24 +1568,28 @@ impl RegistryDoc {
     }
 
     /// Host-side sidebar freshness: preview + timestamp of the latest message.
+    /// A message that brings the chat out of Settled also stamps `unsettledAt`.
     pub fn set_chat_last_message(
         &mut self,
         chat_id: &str,
         preview: &str,
         at: DateTime<Utc>,
+        settle_after_days: u32,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([
-                ("lastMessagePreview", json!(preview)),
-                ("lastMessageAt", json!(at.timestamp_millis())),
-            ]),
-        );
+        let mut set = fields([
+            ("lastMessagePreview", json!(preview)),
+            ("lastMessageAt", json!(at.timestamp_millis())),
+        ]);
+        if self
+            .chat(chat_id)?
+            .is_some_and(|chat| chat.settled_at(settle_after_days, at).is_some())
+        {
+            set.insert("unsettledAt".into(), json!(at.timestamp_millis()));
+        }
+        self.write(KIND_CHATS, chat_id, OpKind::Update, set);
         Ok(true)
     }
 

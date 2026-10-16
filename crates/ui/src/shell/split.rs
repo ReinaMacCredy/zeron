@@ -948,6 +948,7 @@ mod drag_regressions {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         }
     }
 

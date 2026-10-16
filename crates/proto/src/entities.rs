@@ -265,6 +265,26 @@ pub struct Chat {
     pub delegation: Option<Delegation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settle: Option<SidebarSettle>,
+    /// When the chat last left Settled; anchors it in the Inbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsettled_at: Option<DateTime<Utc>>,
+}
+
+pub const SETTLE_AFTER_DAYS_DEFAULT: u32 = 3;
+
+/// Per-device; edited by hand in `harness-prefs.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SidebarSettings {
+    pub settle_after_days: u32,
+}
+
+impl Default for SidebarSettings {
+    fn default() -> Self {
+        Self {
+            settle_after_days: SETTLE_AFTER_DAYS_DEFAULT,
+        }
+    }
 }
 
 /// Holds until the chat's next message after `at`, as T3's `settledOverride` resets on activity.
@@ -380,6 +400,19 @@ impl Chat {
 }
 
 impl Chat {
+    /// Ignores the live status; Working and AwaitingInput chats never settle.
+    /// A chat with no messages never settles on its own, as in T3.
+    pub fn settled_at(&self, after_days: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let activity = self.last_message_at;
+        match self
+            .settle
+            .filter(|settle| activity.is_none_or(|at| at <= settle.at))
+        {
+            Some(settle) => settle.settled.then_some(settle.at),
+            None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
+        }
+    }
+
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
         match (self.last_message_at, self.last_seen_at) {

@@ -848,6 +848,7 @@ pub struct AppState {
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
     pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,
+    pub sidebar_settings: zeron_proto::SidebarSettings,
     pub device_hub: Option<zeron_proto::device_hub::DeviceHubState>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
@@ -1003,6 +1004,7 @@ impl AppState {
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
             computer_settings: None,
+            sidebar_settings: Default::default(),
             device_hub: None,
             harness_branching: HashMap::new(),
             transcript_replayed: false,
@@ -3062,6 +3064,7 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
             spawn_computer_settings_load(cx, handle.clone()),
+            spawn_sidebar_settings_load(cx, handle.clone()),
         ]);
         #[cfg(target_os = "macos")]
         watch_tasks.extend(crate::computer::registration::spawn_host_registration(
@@ -3924,6 +3927,26 @@ fn spawn_computer_settings_load(cx: &mut Context<AppState>, handle: EngineHandle
             #[cfg(target_os = "macos")]
             crate::computer::registration::apply_cursor_colors(settings.agent_cursor_colors(), cx);
             state.computer_settings = Some(settings);
+            cx.notify();
+        })
+        .ok();
+    })
+}
+
+fn spawn_sidebar_settings_load(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let Ok(settings) = handle
+            .client()
+            .call_as::<zeron_proto::SidebarSettings>(
+                methods::GET_SIDEBAR_SETTINGS,
+                serde_json::json!({}),
+            )
+            .await
+        else {
+            return;
+        };
+        this.update(cx, |state, cx| {
+            state.sidebar_settings = settings;
             cx.notify();
         })
         .ok();
@@ -4795,6 +4818,7 @@ mod tests {
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
+            unsettled_at: None,
         }
     }
 

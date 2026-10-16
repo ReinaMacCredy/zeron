@@ -284,6 +284,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         previous_harnesses: Vec::new(),
         delegation: None,
         settle: None,
+        unsettled_at: None,
     }
 }
 
@@ -614,7 +615,7 @@ fn field_mutators_round_trip() {
     assert!(ws.rename_chat("chat-1", "Renamed").unwrap());
     assert!(ws.set_chat_archived("chat-1", true).unwrap());
     assert!(
-        ws.set_chat_last_message("chat-1", "preview text", ts(5_000))
+        ws.set_chat_last_message("chat-1", "preview text", ts(5_000), 3)
             .unwrap()
     );
     assert!(ws.rename_device("dev-a", "workstation").unwrap());
@@ -632,6 +633,32 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.cursor_sdk_version.as_deref(), Some("1.0.31"));
     assert_eq!(dev.name, "workstation");
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
+}
+
+#[test]
+fn leaving_settled_stamps_unsettled_at() {
+    const DAY: i64 = 86_400_000;
+    let mut ws = RegistryDoc::new("dev-a");
+    for id in ["manual", "quiet", "active", "unsettled"] {
+        ws.upsert_chat(&chat(id, "dev-a")).unwrap();
+        ws.set_chat_last_message(id, "hi", ts(DAY), 3).unwrap();
+    }
+    let settle = |settled, ms| zeron_proto::SidebarSettle {
+        settled,
+        at: ts(ms),
+    };
+    ws.set_chat_settle("manual", settle(true, 2 * DAY)).unwrap();
+    ws.set_chat_settle("unsettled", settle(false, 2 * DAY))
+        .unwrap();
+    for id in ["manual", "quiet", "active"] {
+        let at = if id == "active" { 2 * DAY } else { 5 * DAY };
+        ws.set_chat_last_message(id, "back", ts(at), 3).unwrap();
+    }
+    let unsettled_at = |id| ws.chat(id).unwrap().unwrap().unsettled_at;
+    assert_eq!(unsettled_at("manual"), Some(ts(5 * DAY)));
+    assert_eq!(unsettled_at("quiet"), Some(ts(5 * DAY)));
+    assert_eq!(unsettled_at("active"), None);
+    assert_eq!(unsettled_at("unsettled"), Some(ts(2 * DAY)));
 }
 
 #[test]
@@ -1844,7 +1871,7 @@ fn steady_state_writers_coalesce_to_a_bounded_queue() {
         let mut touch = session("chat-1", "dev-a", SessionStatus::Working);
         touch.updated_at = ts(10_000 + i * 10_000);
         doc.upsert_session(&touch).unwrap();
-        doc.set_chat_last_message("chat-1", &format!("msg {i}"), ts(10_000 + i))
+        doc.set_chat_last_message("chat-1", &format!("msg {i}"), ts(10_000 + i), 3)
             .unwrap();
     }
     doc.rename_chat("chat-1", "Renamed").unwrap();
@@ -2082,7 +2109,7 @@ fn a_session_op_never_moves_past_a_notification_gating_chat_op() {
     // Freshness writes gate nothing and still fold across session touches.
     let before = doc.pending_ops_len();
     for i in 0..20 {
-        doc.set_chat_last_message("chat-1", &format!("m{i}"), ts(40_000 + i))
+        doc.set_chat_last_message("chat-1", &format!("m{i}"), ts(40_000 + i), 3)
             .unwrap();
         touch(&mut doc, 40_000 + i * 1_000);
     }

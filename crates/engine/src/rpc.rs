@@ -2277,6 +2277,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
             | methods::SET_REVIEW_SETTINGS
+            | methods::GET_SIDEBAR_SETTINGS
             | methods::START_REVIEW
             | methods::GET_TOOL_SETTINGS
             | methods::SET_TOOL_SETTINGS
@@ -2759,6 +2760,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.delegation_settings())
             }
             methods::GET_REVIEW_SETTINGS => RpcReply::value(&self.registry.review_settings()),
+            methods::GET_SIDEBAR_SETTINGS => RpcReply::value(&self.registry.sidebar_settings()),
             methods::SET_REVIEW_SETTINGS => {
                 let p: crate::review::ReviewSettings = parse_params(params)?;
                 self.registry
