@@ -634,6 +634,19 @@ async fn a_continued_thread_resends_its_source_packet_after_a_failed_first_turn(
     assert_eq!(chat.created_by_chat_id, None);
     assert_eq!(chat.previous_harnesses, vec![HarnessId::Mock]);
     assert_eq!(chat.config.as_ref().map(|c| c.harness), Some(HarnessId::Pi));
+    let same: zeron_proto::Chat = serde_json::from_value(
+        rig.client
+            .call(
+                zeron_rpc::methods::CONTINUE_IN_NEW_THREAD,
+                serde_json::json!({
+                    "sourceChatId": CHAT, "chatId": "chat-same", "harness": "mock",
+                }),
+            )
+            .await
+            .expect("ContinueInNewThread on the same agent"),
+    )
+    .unwrap();
+    assert!(same.previous_harnesses.is_empty(), "one agent, one mark");
     let doc = entries(&rig.core, CONT);
     assert_eq!(doc.len(), 1, "no source message is copied");
     let (to, packet, route) = handoff_route(&doc[0]);

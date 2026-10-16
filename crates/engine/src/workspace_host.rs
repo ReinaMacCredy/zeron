@@ -1214,6 +1214,11 @@ impl WorkspaceHost {
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .unwrap_or("chat");
+        let previous_harnesses = config
+            .as_ref()
+            .filter(|config| config.harness != from)
+            .map(|_| vec![from])
+            .unwrap_or_default();
         let chat = Chat {
             id: new_chat_id.to_string(),
             device_id: source.device_id.clone(),
@@ -1234,7 +1239,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
-            previous_harnesses: vec![from],
+            previous_harnesses,
             delegation: None,
             settle: None,
             unsettled_at: None,

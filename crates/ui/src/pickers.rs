@@ -8415,15 +8415,17 @@ pub(crate) fn harness_mark_stack(
 ) -> gpui::Div {
     // Explicit width + absolute children: a negative margin shrank the
     // container to one mark and the rest spilled under the title.
+    let mut icons: Vec<_> = marks.iter().map(|h| harness_brand_icon(*h)).collect();
+    // Agents sharing a brand (Mock wears Claude's mark) would stack two identical marks.
+    icons.dedup_by_key(|(path, _)| *path);
     let step = size * 0.65;
-    let width = size + step * marks.len().saturating_sub(1) as f32;
+    let width = size + step * icons.len().saturating_sub(1) as f32;
     div()
         .flex_none()
         .relative()
         .w(px(width))
         .h(px(size))
-        .children(marks.iter().enumerate().map(|(ix, harness)| {
-            let (path, tint) = harness_brand_icon(*harness);
+        .children(icons.into_iter().enumerate().map(|(ix, (path, tint))| {
             div()
                 .absolute()
                 .top_0()
