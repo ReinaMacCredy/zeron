@@ -30,7 +30,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
@@ -39,9 +39,10 @@ pub(crate) enum InlineEvent {
     Height(f32),
     OpenLink(String),
     Crashed,
-    Frame(Arc<RenderImage>, f32),
+    Frame(Arc<RenderImage>, f32, Instant),
     Active,
     Pointer,
+    ScrolledInside,
 }
 
 pub(crate) type InlineSender = tokio::sync::mpsc::UnboundedSender<(SharedString, InlineEvent)>;
@@ -55,6 +56,8 @@ struct PolicyState {
     tx: InlineSender,
     loaded: Cell<bool>,
     clicked: Arc<AtomicU64>,
+    finished: Arc<AtomicBool>,
+    stale: Arc<AtomicBool>,
 }
 
 /// A page opens links only right after the reader clicks inside its card,
@@ -112,7 +115,12 @@ define_class!(
             },));
         }
         #[unsafe(method(webView:didFinishNavigation:))]
-        fn finish(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>) {}
+        fn finish(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>) {
+            let state = self.ivars();
+            state.finished.store(true, Ordering::Release);
+            state.stale.store(true, Ordering::Release);
+            let _ = state.tx.send((state.key.clone(), InlineEvent::Active));
+        }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn terminated(&self, _view: &WKWebView) {
             let _ = self
@@ -187,6 +195,26 @@ fn set_armed(input: &PageInput, key: &str, armed: bool, why: &'static str) {
     }
 }
 
+const AT_TOP: u8 = 1;
+const AT_BOTTOM: u8 = 2;
+
+struct Motion {
+    stale: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    settled: Cell<bool>,
+    edges: Arc<AtomicU8>,
+    scrolled: Cell<Option<Instant>>,
+    band: Cell<bool>,
+}
+
+impl Motion {
+    fn scrolling(&self) -> bool {
+        self.scrolled
+            .get()
+            .is_some_and(|at| at.elapsed() < WHEEL_SETTLE)
+    }
+}
+
 struct Host {
     web: WebView,
     view: Retained<WKWebView>,
@@ -201,7 +229,7 @@ struct Host {
     stamp: Cell<u64>,
     concealed: Cell<bool>,
     covered: Cell<bool>,
-    stale: Arc<AtomicBool>,
+    motion: Rc<Motion>,
     snapshotting: Arc<AtomicBool>,
     last_snapshot: Cell<Option<Instant>>,
     missed: Arc<AtomicBool>,
@@ -284,8 +312,16 @@ impl InlineWebView {
         let link_key = key.clone();
         let clicked = Arc::new(AtomicU64::new(0));
         let link_clicked = clicked.clone();
-        let stale = Arc::new(AtomicBool::new(true));
-        let ipc_stale = stale.clone();
+        let motion = Rc::new(Motion {
+            stale: Arc::new(AtomicBool::new(true)),
+            finished: Arc::new(AtomicBool::new(false)),
+            settled: Cell::new(false),
+            edges: Arc::new(AtomicU8::new(AT_TOP | AT_BOTTOM)),
+            scrolled: Cell::new(None),
+            band: Cell::new(true),
+        });
+        let ipc_stale = motion.stale.clone();
+        let ipc_edges = motion.edges.clone();
         let configuration = unsafe {
             let configuration = objc2_web_kit::WKWebViewConfiguration::new(mtm);
             configuration
@@ -301,7 +337,9 @@ impl InlineWebView {
             .with_transparent(true)
             .with_accept_first_mouse(true)
             .with_ipc_handler(move |request| {
-                if let Some(event) = page_signal(request.body()) {
+                if let Some(edges) = page_edges(request.body()) {
+                    ipc_edges.store(edges, Ordering::Relaxed);
+                } else if let Some(event) = page_signal(request.body()) {
                     ipc_stale.store(true, Ordering::Release);
                     let _ = ipc_tx.send((ipc_key.clone(), event));
                 }
@@ -340,6 +378,8 @@ impl InlineWebView {
                 tx: tx.clone(),
                 loaded: Cell::new(false),
                 clicked: clicked.clone(),
+                finished: motion.finished.clone(),
+                stale: motion.stale.clone(),
             });
             unsafe { msg_send![super(object), init] }
         };
@@ -349,7 +389,7 @@ impl InlineWebView {
             parent.clone(),
             view.clone(),
             clicked,
-            stale.clone(),
+            motion.clone(),
             key.clone(),
             tx.clone(),
         );
@@ -369,7 +409,7 @@ impl InlineWebView {
             stamp: Cell::new(u64::MAX),
             concealed: Cell::new(true),
             covered: Cell::new(false),
-            stale,
+            motion,
             snapshotting: Arc::new(AtomicBool::new(false)),
             last_snapshot: Cell::new(None),
             missed,
@@ -423,34 +463,46 @@ impl InlineWebView {
         }
     }
 
-    pub(crate) fn painted(&self) -> bool {
-        self.0.borrow().painted()
+    // Not while the page scrolls inside: a late frame there tears from the live page.
+    pub(crate) fn band(&self) -> bool {
+        self.0.borrow().motion.band.get()
+    }
+
+    pub(crate) fn frame_arrived(&self, taken: Instant) {
+        let motion = &self.0.borrow().motion;
+        if motion.scrolled.get().is_none_or(|at| at < taken) {
+            motion.band.set(true);
+        }
     }
 
     /// Whether a frame is still owed once the transcript stops scrolling.
     pub(crate) fn snapshot(&self) -> bool {
         let host = self.0.borrow();
-        let first = host.last_snapshot.get().is_none();
+        let first = !host.motion.settled.get();
         if !host.painted()
             || host.snapshotting.load(Ordering::Acquire)
             || host
                 .last_snapshot
                 .get()
                 .is_some_and(|at| at.elapsed() < FRAME_INTERVAL)
-            // Only chrome-covered parts show frames; the first is kept for a card scrolled under it later.
+            // Only covered parts show frames; one of the loaded page waits for a card scrolled under.
             || !(first || host.covered.get())
         {
             return false;
         }
-        if !first && wheeling() {
-            return host.stale.load(Ordering::Acquire);
+        if !first && (wheeling() || host.motion.scrolling()) {
+            return host.motion.stale.load(Ordering::Acquire);
         }
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
         host.snapshotting.store(true, Ordering::Release);
-        host.stale.store(false, Ordering::Release);
-        host.last_snapshot.set(Some(Instant::now()));
+        host.motion.stale.store(false, Ordering::Release);
+        if host.motion.finished.load(Ordering::Acquire) {
+            host.motion.settled.set(true);
+        }
+        let taken = Instant::now();
+        host.last_snapshot.set(Some(taken));
         if debug() {
             tracing::info!(page = %host.key, "inline page snapshot");
         }
@@ -462,6 +514,7 @@ impl InlineWebView {
                 Some((image, points_width)) => convert(FrameJob {
                     image,
                     points_width,
+                    taken,
                     key: key.clone(),
                     tx: tx.clone(),
                     busy: busy.clone(),
@@ -476,6 +529,12 @@ impl InlineWebView {
         }
         false
     }
+}
+
+fn page_edges(body: &str) -> Option<u8> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let edges = value.get("edges")?.as_u64()?;
+    Some((edges as u8) & (AT_TOP | AT_BOTTOM))
 }
 
 fn page_signal(body: &str) -> Option<InlineEvent> {
@@ -525,7 +584,7 @@ impl Host {
         if self.concealed.replace(false) {
             self.view.setAlphaValue(1.0);
             let _ = self.tx.send((self.key.clone(), InlineEvent::Active));
-        } else if newly_covered && self.stale.load(Ordering::Acquire) {
+        } else if newly_covered && self.motion.stale.load(Ordering::Acquire) {
             let _ = self.tx.send((self.key.clone(), InlineEvent::Active));
         }
     }
@@ -627,11 +686,12 @@ fn input_monitor(
     parent: Retained<NSView>,
     view: Retained<WKWebView>,
     clicked: Arc<AtomicU64>,
-    stale: Arc<AtomicBool>,
+    motion: Rc<Motion>,
     key: SharedString,
     tx: InlineSender,
 ) -> Option<Retained<AnyObject>> {
     let last_pointer: Cell<Option<Instant>> = Cell::new(None);
+    let wheel_to_page = Cell::new(false);
     let callback = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
         let e = unsafe { event.as_ref() };
         let kind = e.r#type();
@@ -653,7 +713,7 @@ fn input_monitor(
                 .is_none_or(|at| at.elapsed() >= POINTER_INTERVAL)
             {
                 last_pointer.set(Some(Instant::now()));
-                stale.store(true, Ordering::Release);
+                motion.stale.store(true, Ordering::Release);
                 let _ = tx.send((key.clone(), InlineEvent::Pointer));
             }
         };
@@ -661,7 +721,23 @@ fn input_monitor(
             NSEventType::MouseMoved if inside => pointer(),
             NSEventType::MouseMoved => set_armed(&input, &key, false, "left"),
             NSEventType::ScrollWheel => {
-                if state.armed.get() && inside && state.scrolls.get() && same_window {
+                let dy = e.scrollingDeltaY();
+                let edges = motion.edges.load(Ordering::Relaxed);
+                // At the page's own edge the wheel scrolls the transcript, so a page never traps it.
+                let to_page = if dy > 0.0 {
+                    edges & AT_TOP == 0
+                } else if dy < 0.0 {
+                    edges & AT_BOTTOM == 0
+                } else {
+                    e.scrollingDeltaX() != 0.0 || wheel_to_page.get()
+                };
+                wheel_to_page.set(to_page);
+                if state.armed.get() && inside && state.scrolls.get() && same_window && to_page {
+                    motion.scrolled.set(Some(Instant::now()));
+                    motion.stale.store(true, Ordering::Release);
+                    if motion.band.replace(false) {
+                        let _ = tx.send((key.clone(), InlineEvent::ScrolledInside));
+                    }
                     pointer();
                 } else {
                     WHEELED.set(Some(Instant::now()));
@@ -786,6 +862,7 @@ impl Drop for Host {
 struct FrameJob {
     image: core_graphics::image::CGImage,
     points_width: f32,
+    taken: Instant,
     key: SharedString,
     tx: InlineSender,
     busy: Arc<AtomicBool>,
@@ -827,7 +904,9 @@ fn convert(job: FrameJob) {
             .spawn(move || {
                 for job in queue {
                     if let Some((image, scale)) = bgra_frame(&job.image, job.points_width) {
-                        let _ = job.tx.send((job.key, InlineEvent::Frame(image, scale)));
+                        let _ = job
+                            .tx
+                            .send((job.key, InlineEvent::Frame(image, scale, job.taken)));
                     }
                     job.busy.store(false, Ordering::Release);
                 }
@@ -970,6 +1049,9 @@ mod tests {
             page_signal(r#"{"active":1}"#),
             Some(InlineEvent::Active)
         ));
+        assert_eq!(page_edges(r#"{"edges":2}"#), Some(AT_BOTTOM));
+        assert_eq!(page_edges(r#"{"edges":255}"#), Some(AT_TOP | AT_BOTTOM));
+        assert_eq!(page_edges(r#"{"height":9}"#), None);
     }
 
     #[test]

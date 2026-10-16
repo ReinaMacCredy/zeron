@@ -211,11 +211,12 @@ impl Transcript {
                 }
                 cx.notify();
             }
-            InlineEvent::Frame(image, scale) => {
+            InlineEvent::Frame(image, scale, taken) => {
                 let pages = &mut self.html_pages;
-                if pages.page(&key).is_none() {
+                let Some(page) = pages.page(&key) else {
                     return;
-                }
+                };
+                page.frame_arrived(taken);
                 if let Some((previous, _)) = pages.snapshots.insert(key, (image, scale)) {
                     pages.retired.push(previous);
                 }
@@ -223,6 +224,7 @@ impl Transcript {
             }
             InlineEvent::Active => self.keep_html_page_live(key, ACTIVE_LIVE, cx),
             InlineEvent::Pointer => self.keep_html_page_live(key, POINTER_LIVE, cx),
+            InlineEvent::ScrolledInside => cx.notify(),
         }
     }
 
@@ -263,11 +265,7 @@ impl Transcript {
             .live_until
             .get(key)
             .is_some_and(|until| *until > std::time::Instant::now());
-        match pages
-            .page(key)
-            .filter(|page| live && page.painted())
-            .cloned()
-        {
+        match pages.page(key).filter(|_| live).cloned() {
             Some(page) => {
                 if page.snapshot() {
                     let until =
@@ -620,7 +618,9 @@ fn page_surface(
                     page.sync_on_present(bounds, mask, window);
                     shown = Some(bounds.intersect(&mask));
                 }
-                if let Some((image, scale)) = &frame {
+                if let Some((image, scale)) = &frame
+                    && page.as_ref().is_none_or(|page| page.band())
+                {
                     // At the frame's own scale, so a reflowing page is clipped, never stretched.
                     let pixels = image.size(0);
                     let painted = Bounds::new(

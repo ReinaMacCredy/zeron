@@ -201,7 +201,7 @@ pub fn theme_css(theme: &Theme, font_size: f32, inline: bool) -> String {
     }
     css.push('}');
     css.push_str(if inline {
-        "html{background:transparent;"
+        "html{background:transparent;overscroll-behavior:none;"
     } else {
         "html{background:var(--background);"
     });
@@ -212,6 +212,9 @@ pub fn theme_css(theme: &Theme, font_size: f32, inline: bool) -> String {
 /// Reports the page's content height to the host as it changes (t3's
 /// measure: the document's scroll height when it overflows, else its box).
 const SIZE_SCRIPT: &str = r#"(function(){var h,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h||!window.ipc)return;h=v;window.ipc.postMessage(JSON.stringify({height:v}));};if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);})();"#;
+
+// The host hands the wheel back to the transcript once the page is scrolled to that edge.
+const EDGE_SCRIPT: &str = r#"(function(){var l=-1,e=function(){var s=document.scrollingElement||document.documentElement,y=s.scrollTop,v=(y<=0?1:0)|(y+s.clientHeight>=s.scrollHeight-1?2:0);if(v===l||!window.ipc)return;l=v;window.ipc.postMessage(JSON.stringify({edges:v}));};window.addEventListener("scroll",e,{passive:true});window.addEventListener("resize",e);window.addEventListener("load",e);document.addEventListener("DOMContentLoaded",e);})();"#;
 
 // Snapshots are taken only while the page reports a change, at most every 250ms.
 const ACTIVITY_SCRIPT: &str = r#"(function(){var t=0;function a(){var n=Date.now();if(n-t<250||!window.ipc)return;t=n;window.ipc.postMessage(JSON.stringify({active:1}));}function w(f){return typeof f==="function"?function(){a();return f.apply(this,arguments);}:f;}var r=window.requestAnimationFrame;window.requestAnimationFrame=function(f){a();return r.call(window,f);};var st=window.setTimeout,si=window.setInterval;window.setTimeout=function(f){var g=[].slice.call(arguments);g[0]=w(f);return st.apply(window,g);};window.setInterval=function(f){var g=[].slice.call(arguments);g[0]=w(f);return si.apply(window,g);};new MutationObserver(a).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});["transitionrun","transitionend","animationstart","animationiteration","animationend","input","change","scroll","load"].forEach(function(e){window.addEventListener(e,a,true);});})();"#;
@@ -249,6 +252,7 @@ fn bootstrap_markup(scan: &str, theme: &Theme, font_size: f32, inline: bool) -> 
     markup.push_str(&attributes_script(theme));
     if inline {
         markup.push_str(SIZE_SCRIPT);
+        markup.push_str(EDGE_SCRIPT);
         markup.push_str(ACTIVITY_SCRIPT);
     }
     markup.push_str("</script>");
@@ -492,7 +496,7 @@ mod tests {
         let inline = inject_bootstrap("<p>x</p>", &theme(), 16.0, true);
         let preview = inject_bootstrap("<p>x</p>", &theme(), 16.0, false);
         assert!(inline.contains("window.ipc.postMessage"));
-        assert!(inline.contains("{active:1}"));
+        assert!(inline.contains("{active:1}") && inline.contains("{edges:v}"));
         assert!(inline.contains("html{background:transparent"));
         assert!(!preview.contains("window.ipc"));
         assert!(preview.contains("html{background:var(--background)"));
