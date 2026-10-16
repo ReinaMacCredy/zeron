@@ -88,6 +88,7 @@ mod command_palette;
 mod device_tabs;
 mod file_mutations;
 mod files_panel;
+mod handoff;
 mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
@@ -2346,6 +2347,7 @@ pub struct Shell {
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     new_tab_menu: popover::Popup<()>,
+    handoff_menu: popover::Popup<()>,
     sidecar_collapsed_now: Option<bool>,
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
@@ -3060,6 +3062,7 @@ impl Shell {
             canvas_browser_drafts: std::collections::HashMap::new(),
             right_plus: popover::Popup::default(),
             new_tab_menu: popover::Popup::default(),
+            handoff_menu: popover::Popup::default(),
             sidecar_collapsed_now: None,
             sidecar_flip: None,
             sidecar_popover: None,
@@ -8908,9 +8911,9 @@ impl Shell {
 
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
-    fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !matches!(self.route, Route::PullRequests) {
-            return self.render_session_title_bar(cx);
+            return self.render_session_title_bar(window, cx);
         }
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
@@ -17575,6 +17578,12 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
+                // `=handoff` opens the titlebar handoff menu once the selected
+                // chat can hand off.
+                if self.debug_dialog.as_deref() == Some("handoff") && !self.handoff_disabled(cx) {
+                    self.debug_dialog = None;
+                    self.open_handoff_menu(cx);
+                }
                 // `=summary` / `=sidecar-popover` / `=sidecar-terminal` (capture
                 // knobs): one browser tab, then the sidecar expanded, railed with
                 // its popover up, or expanded over an open terminal dock.
@@ -18017,7 +18026,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(cx);
+                let title_bar = self.render_title_bar(window, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.

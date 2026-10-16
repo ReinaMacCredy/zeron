@@ -1613,7 +1613,11 @@ impl Shell {
     /// `[new-session +] [session tabs] … [toggle-changes]`.
     /// Carries the titlebar duties (drag region, animated left inset, the
     /// right-pane controls on git projects).
-    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_session_title_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // The canvas shows no tabs-adjacent chrome beyond the strip itself;
         // the bar keeps its height, drag region, and buttons.
@@ -1653,6 +1657,22 @@ impl Shell {
                 // the tab strip); a wheel over the tabs must scroll the
                 // strip, never the surface behind it.
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+            if matches!(self.route, Route::Chat) && !on_canvas && !takeover {
+                let review_chip = self.composer.update(cx, |composer, cx| {
+                    composer.render_review_chip(&theme, window, cx)
+                });
+                let handoff = self.render_handoff_button(&theme, cx);
+                controls = controls.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .mr(px(PANEL_TOGGLE_GAP))
+                        .children(review_chip)
+                        .child(handoff),
+                );
+            }
             if right_pane_visible {
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
