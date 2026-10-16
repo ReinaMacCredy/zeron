@@ -11915,14 +11915,6 @@ impl Shell {
                     .is_none_or(|drag| drag.preview.as_ref().is_none_or(|gap| gap.pinned))
             })
             .map(|drag| (drag.from, drag.over, drag.prev_over, drag.epoch));
-        let inbox = self.settings.sidebar_organization == SidebarOrganization::Inbox;
-        let shelf_anchor = inbox
-            .then(|| {
-                keyed
-                    .iter()
-                    .position(|(key, _, _)| key == "g:inbox:working" || key == "g:inbox:settled")
-            })
-            .flatten();
         let mut list_items: Vec<AnyElement> = keyed
             .into_iter()
             .enumerate()
@@ -11986,11 +11978,6 @@ impl Shell {
                 }
             })
             .collect();
-        // t3code's `mt-auto`: a short inbox leaves its shelves at the bottom edge.
-        if let Some(ix) = shelf_anchor {
-            let shelf = std::mem::replace(&mut list_items[ix], div().into_any_element());
-            list_items[ix] = div().mt_auto().child(shelf).into_any_element();
-        }
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
@@ -12010,7 +11997,6 @@ impl Shell {
                 .id("sidebar-active-sessions")
                 .flex()
                 .flex_col()
-                .when(inbox, |el| el.flex_grow(1.0))
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
                 .when_some(pinned_group, |el, group| el.child(group))
@@ -12071,7 +12057,6 @@ impl Shell {
                                     ))
                                     .flex()
                                     .flex_col()
-                                    .when(inbox, |el| el.flex_grow(1.0))
                                     .gap(px(SIDEBAR_LIST_GAP))
                                     .when(regular_items.is_empty(), |el| {
                                         el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))

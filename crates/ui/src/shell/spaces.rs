@@ -2451,7 +2451,7 @@ impl InboxShelf {
 
     fn group(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::Inbox => None,
+            Self::Inbox => Some(("inbox", "Inbox")),
             Self::Working => Some(("working", "Working")),
             Self::Settled => Some(("settled", "Settled")),
         }
@@ -6182,7 +6182,7 @@ impl Shell {
             let header_icon_chat = (project_group && self.settings.sidebar_show_project_icon)
                 .then(|| rows.first().map(|row| row.chat.id.clone()))
                 .flatten();
-            let shelf = [InboxShelf::Working, InboxShelf::Settled]
+            let shelf = [InboxShelf::Inbox, InboxShelf::Working, InboxShelf::Settled]
                 .into_iter()
                 .find(|shelf| {
                     self.settings.sidebar_organization == SidebarOrganization::Inbox
