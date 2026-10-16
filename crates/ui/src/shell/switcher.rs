@@ -289,12 +289,6 @@ impl Shell {
         if matches!(self.route, Route::Settings(_)) {
             self.close_settings(cx);
         }
-        if matches!(self.route, Route::PullRequests | Route::Tasks) {
-            self.set_route(Route::Chat, cx);
-        }
-        if !matches!(self.route, Route::Chat | Route::Terminal) {
-            return;
-        }
         if let Some(sw) = self.switcher.as_mut() {
             sw.hi = step_index(sw.hi, sw.order.len(), forward);
             sw.scroll.scroll_to_item(sw.hi);
@@ -302,6 +296,15 @@ impl Shell {
             return;
         }
         if self.overlay_owns_keyboard(cx) {
+            return;
+        }
+        if matches!(
+            self.route,
+            Route::PullRequests | Route::Inbox | Route::Tasks
+        ) {
+            self.open_home(cx);
+        }
+        if !matches!(self.route, Route::Chat | Route::Terminal) {
             return;
         }
         if self.settings.switcher_cycles_tabs {
