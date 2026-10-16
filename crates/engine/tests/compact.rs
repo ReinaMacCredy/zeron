@@ -425,7 +425,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         wait_for(|| !core.sessions.turn_in_flight(CHAT), "run settles").await;
     }
     let prompts: Vec<String> = requests.lock().unwrap().iter().map(|r| r.prompt.clone()).collect();
-    let nudged = "hello\n\n<system-reminder>\nContext 22.8k. Compact at a boundary, not mid-task: if this message starts a new phase, call compact first with the request as continueWith; if this turn finishes a piece of work and what comes next needs only its conclusions, call compact last. A follow-up question about the current work is not a boundary. It runs after the turn ends; name what to keep.\n</system-reminder>";
+    let nudged = "hello\n\n<system-reminder>\nContext 22.8k. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>";
     assert_eq!(prompts[1], nudged);
     assert_eq!(prompts[2], nudged, "the reminder repeats until the chat compacts");
     assert_eq!(prompts[3], "hello", "no reminder when the harness cannot compact");
