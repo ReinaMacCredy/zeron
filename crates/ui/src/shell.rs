@@ -17579,10 +17579,16 @@ impl Render for Shell {
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
                 // `=handoff` opens the titlebar handoff menu once the selected
-                // chat can hand off.
+                // chat can hand off; `=review` opens the Review chip's menu.
                 if self.debug_dialog.as_deref() == Some("handoff") && !self.handoff_disabled(cx) {
                     self.debug_dialog = None;
                     self.open_handoff_menu(cx);
+                }
+                if self.debug_dialog.as_deref() == Some("review")
+                    && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    self.composer.update(cx, |c, cx| c.open_review_menu(cx));
                 }
                 // `=summary` / `=sidecar-popover` / `=sidecar-terminal` (capture
                 // knobs): one browser tab, then the sidecar expanded, railed with

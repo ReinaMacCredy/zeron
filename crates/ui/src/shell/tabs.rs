@@ -201,7 +201,9 @@ fn tab_trailing(
 }
 
 fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+    let selector = format!("session-tab-working-{id}");
     div()
+        .debug_selector(move || selector)
         .size(px(14.0))
         .flex_none()
         .flex()
@@ -209,7 +211,7 @@ fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
         .justify_center()
         .child(loaders::mini_glyph_spinner(
             format!("tab-working-{id}"),
-            2.0,
+            3.0,
             theme.glyph,
             cx.entity_id(),
             cx,
@@ -1637,6 +1639,19 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(cx);
 
+        let show_chat_actions = matches!(self.route, Route::Chat) && !on_canvas && !takeover;
+        let chat_actions = show_chat_actions.then(|| {
+            let review_chip = self.composer.update(cx, |composer, cx| {
+                composer.render_review_chip(&theme, window, cx)
+            });
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .children(review_chip)
+                .child(self.render_handoff_button(&theme, cx))
+        });
         let running_subagents = {
             let state = self.state.read(cx);
             state
@@ -1657,22 +1672,6 @@ impl Shell {
                 // the tab strip); a wheel over the tabs must scroll the
                 // strip, never the surface behind it.
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
-            if matches!(self.route, Route::Chat) && !on_canvas && !takeover {
-                let review_chip = self.composer.update(cx, |composer, cx| {
-                    composer.render_review_chip(&theme, window, cx)
-                });
-                let handoff = self.render_handoff_button(&theme, cx);
-                controls = controls.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .mr(px(PANEL_TOGGLE_GAP))
-                        .children(review_chip)
-                        .child(handoff),
-                );
-            }
             if right_pane_visible {
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
@@ -1824,6 +1823,7 @@ impl Shell {
             .pr(px(right_pad))
             .children(session_tabs)
             .child(div().flex_1())
+            .children(chat_actions)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
@@ -2001,12 +2001,12 @@ mod strip_regressions {
     }
 
     impl Render for StripHost {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.shell.update(cx, |shell, cx| {
                 div()
                     .w(px(900.))
                     .h(px(60.))
-                    .child(shell.render_session_title_bar(cx))
+                    .child(shell.render_session_title_bar(window, cx))
             })
         }
     }
@@ -2303,7 +2303,7 @@ mod strip_regressions {
     }
 
     #[gpui::test]
-    fn a_driving_chat_wears_the_cursor_glyph_and_gets_its_harness_mark_back_after(
+    fn a_driving_chat_wears_the_cursor_glyph_and_gets_its_activity_glyph_back_after(
         cx: &mut TestAppContext,
     ) {
         use crate::computer::preview::{self, tests::thread_state};
@@ -2329,7 +2329,7 @@ mod strip_regressions {
             shell.on_state_changed(&shell.state.clone(), cx);
         });
         cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("session-tab-harness-a").is_some());
+        assert!(cx.debug_bounds("session-tab-working-a").is_some());
         let store = cx.update(|_, cx| preview::store(cx).unwrap());
         let mut apply = |state: zeron_proto::computer::ThreadComputerState| {
             cx.update(|window, cx| {
@@ -2342,7 +2342,7 @@ mod strip_regressions {
             });
             (
                 cx.debug_bounds("session-tab-computer-a").is_some(),
-                cx.debug_bounds("session-tab-harness-a").is_some(),
+                cx.debug_bounds("session-tab-working-a").is_some(),
                 cx.debug_bounds("session-tab-computer-b").is_some(),
             )
         };
@@ -2364,7 +2364,7 @@ mod strip_regressions {
         assert_eq!(
             apply(revoked),
             (false, true, false),
-            "revoked wears the harness mark"
+            "revoked wears the activity glyph again"
         );
         assert_eq!(apply(thread_state("a", false)), (false, true, false));
     }

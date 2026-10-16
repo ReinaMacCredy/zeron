@@ -582,7 +582,7 @@ impl Composer {
         }
     }
 
-    fn open_review_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_review_menu(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.review_target(cx) else {
             return;
         };
