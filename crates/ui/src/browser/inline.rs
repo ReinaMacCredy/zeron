@@ -575,7 +575,7 @@ impl Host {
         }
         if !(f32::from(visible.size.width) > 0. && f32::from(visible.size.height) > 0.) {
             set_armed(&self.input, &self.key, false, "covered");
-        } else if self.pointer_rests_inside() {
+        } else if !wheeling() && self.pointer_rests_inside() {
             set_armed(&self.input, &self.key, true, "rest");
         }
         let covered = visible.size.width < bounds.size.width - px(0.5)
@@ -749,7 +749,10 @@ fn input_monitor(
             | NSEventType::OtherMouseDown => {
                 // GPUI's view never takes first responder on click, so the page
                 // would keep eating Space and arrows typed into the composer.
-                if !(state.armed.get() && inside) {
+                if same_window && inside {
+                    // A page scrolled under a still pointer arms here, never mid-scroll.
+                    set_armed(&input, &key, true, "press");
+                } else {
                     set_armed(&input, &key, false, "press");
                     if same_window && has_focus(&view) {
                         window.makeFirstResponder(Some(&parent));
