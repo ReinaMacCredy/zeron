@@ -202,7 +202,7 @@ pub struct CompactionSettings {
     pub enabled: bool,
     pub min_tokens: u64,
     /// 0 turns the nudge off.
-    pub nudge_percent: u8,
+    pub nudge_tokens: u64,
 }
 
 impl Default for CompactionSettings {
@@ -210,7 +210,7 @@ impl Default for CompactionSettings {
         Self {
             enabled: true,
             min_tokens: 100_000,
-            nudge_percent: 70,
+            nudge_tokens: 150_000,
         }
     }
 }
@@ -649,7 +649,7 @@ impl HarnessRegistry {
     }
 
     pub fn set_compaction_settings(&self, settings: CompactionSettings) -> Result<(), String> {
-        if settings.min_tokens == 0 || settings.nudge_percent > 100 {
+        if settings.min_tokens == 0 {
             return Err("Compaction thresholds are out of range".into());
         }
         self.prefs().compaction = settings;

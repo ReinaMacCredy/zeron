@@ -409,7 +409,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
     core.registry
         .set_compaction_settings(zeron_engine::registry::CompactionSettings {
-            nudge_percent: 10,
+            nudge_tokens: 20_000,
             ..Default::default()
         })
         .unwrap();
