@@ -452,7 +452,7 @@ async fn a_running_turn_is_reminded_once_per_step_of_growth() {
         })
         .unwrap();
     let first = core.sessions.mid_turn_nudge(CHAT).expect("past the floor");
-    assert!(first.starts_with("<system-reminder>\nContext 22.8k, and this turn is still running."));
+    assert!(first.starts_with("Context 22.8k, and this turn is still running."));
     assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "no growth since the last reminder");
 }
 

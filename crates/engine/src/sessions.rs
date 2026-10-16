@@ -3071,6 +3071,7 @@ impl Inner {
     }
 
     /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
+    /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.
     fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
         let harness_id = self.doc_host()?.harness_for(chat_id);
         let tokens = self.nudge_tokens(chat_id, harness_id)?;
@@ -3086,7 +3087,7 @@ impl Inner {
         }
         *last = tokens;
         Some(format!(
-            "<system-reminder>\nContext {}, and this turn is still running. Keep going unless the step you just finished closes a piece of work and the rest needs only its conclusions. Then call compact with continueWith naming the remaining steps and end your turn: the chat compacts and resumes from continueWith.\n</system-reminder>",
+            "Context {}, and this turn is still running. Keep going unless the step you just finished closes a piece of work and the rest needs only its conclusions. Then call compact with continueWith naming the remaining steps and end your turn: the chat compacts and resumes from continueWith.",
             format_tokens(tokens),
         ))
     }
