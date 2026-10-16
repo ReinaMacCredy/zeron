@@ -91,6 +91,8 @@ impl DeviceAccounts {
             accounts::mark_switched(snapshot, account);
         }
         self.error = None;
+        // A probe started before the switch lands is stale and would undo it.
+        self.load_task = None;
         let params = serde_json::json!({
             "id": account.id,
             "accountId": account.id,
@@ -105,6 +107,7 @@ impl DeviceAccounts {
                 accounts.action_task = None;
                 match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
                     Ok(Ok(snapshot)) => {
+                        accounts.load_task = None;
                         cx.default_global::<AccountsSnapshotCache>()
                             .0
                             .insert(None, snapshot);
@@ -237,5 +240,68 @@ mod tests {
             Some("Codex-true")
         );
         assert!(active_account(&snapshot, HarnessId::Cursor).is_none());
+    }
+
+    #[gpui::test]
+    fn a_switch_outlives_a_usage_probe_that_began_before_it(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use gpui::AppContext;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let before = AgentAccountsSnapshot {
+            accounts: vec![
+                account(HarnessId::Codex, true, &[0.1]),
+                account(HarnessId::Codex, false, &[0.2]),
+            ],
+            warnings: Vec::new(),
+        };
+        let target = before.accounts[1].clone();
+        let mut after = before.clone();
+        accounts::mark_switched(&mut after, &target);
+        let probing = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let rpc = ScriptedRpc::new({
+            let (before, probing, release) = (before.clone(), probing.clone(), release.clone());
+            move |method, _| {
+                let (before, after) = (before.clone(), after.clone());
+                let (probing, release) = (probing.clone(), release.clone());
+                async move {
+                    match method.as_str() {
+                        methods::LIST_AGENT_ACCOUNTS => {
+                            probing.store(true, Ordering::SeqCst);
+                            release.notified().await;
+                            zeron_rpc::RpcReply::value(&before)
+                        }
+                        methods::ACTIVATE_AGENT_ACCOUNT => zeron_rpc::RpcReply::value(&after),
+                        other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                    }
+                }
+            }
+        });
+        let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
+        cx.update(|cx| {
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .insert(None, before.clone());
+        });
+        let accounts = cx.new(|cx| DeviceAccounts::new(state, cx));
+        accounts.update(cx, |accounts, cx| accounts.load(cx));
+        rpc.settle(cx, &runtime, |_| probing.load(Ordering::SeqCst));
+        accounts.update(cx, |accounts, cx| accounts.switch(&target, cx));
+        rpc.settle(cx, &runtime, |cx| {
+            accounts.read_with(cx, |accounts, _| accounts.action_task.is_none())
+        });
+        release.notify_one();
+        rpc.settle(cx, &runtime, |_| rpc.completed() >= 2);
+        cx.run_until_parked();
+        let active = cx.update(|cx| {
+            local_snapshot(cx)
+                .and_then(|snapshot| active_account(snapshot, HarnessId::Codex))
+                .map(|account| account.id.clone())
+        });
+        assert_eq!(active.as_deref(), Some(target.id.as_str()));
     }
 }
