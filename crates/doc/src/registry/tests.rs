@@ -2517,4 +2517,20 @@ fn tasks_refuse_invalid_fields() {
         before,
         "a refused patch writes nothing"
     );
+    let mut wide = task("t2", "Wide");
+    wide.notes = "語".repeat(9_000);
+    assert!(
+        doc.create_task(&wide).is_err(),
+        "multibyte notes past the room's op budget never reach the queue"
+    );
+    let wide_notes = zeron_proto::TaskPatch {
+        notes: Some("語".repeat(9_000)),
+        ..Default::default()
+    };
+    assert!(doc.update_task("t1", &wide_notes, ts(3_001)).is_err());
+    assert!(
+        doc.take_pushable()
+            .iter()
+            .all(|b| b.ops.iter().all(fits_op_budget))
+    );
 }

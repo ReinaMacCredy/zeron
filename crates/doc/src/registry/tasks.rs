@@ -157,15 +157,31 @@ impl RegistryDoc {
             ("updatedAt", json!(task.updated_at.timestamp_millis())),
             ("deleted", json!(false)),
         ]);
-        self.enqueue_ops(vec![RowOp {
+        self.enqueue_task_op(&task.id, OpKind::Upsert, set, hlc)?;
+        Ok(true)
+    }
+
+    /// The room rejects an oversized op together with its whole batch.
+    fn enqueue_task_op(
+        &mut self,
+        id: &str,
+        op: OpKind,
+        set: BTreeMap<String, Value>,
+        hlc: String,
+    ) -> Result<(), DocError> {
+        let op = RowOp {
             kind: KIND_TASKS.into(),
-            id: task.id.clone(),
-            op: OpKind::Upsert,
+            id: id.into(),
+            op,
             set: Some(set),
             hlc,
             clocks: None,
-        }]);
-        Ok(true)
+        };
+        if !fits_op_budget(&op) {
+            return Err(invalid("This task is too large to sync; shorten its notes"));
+        }
+        self.enqueue_ops(vec![op]);
+        Ok(())
     }
 
     pub fn update_task(
@@ -204,7 +220,8 @@ impl RegistryDoc {
             set.insert("orderKey".into(), json!(order_key));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
-        self.write(KIND_TASKS, task_id, OpKind::Update, set);
+        let hlc = self.next_hlc();
+        self.enqueue_task_op(task_id, OpKind::Update, set, hlc)?;
         Ok(true)
     }
 
