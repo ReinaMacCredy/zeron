@@ -6998,9 +6998,8 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
-    /// The footer's rings: plan usage of the session harness's live
-    /// account, and context occupancy — each opening a popover.
-    account_usage: Entity<crate::account_usage::AccountUsage>,
+    /// The footer's context ring and its popover.
+    context_ring: Entity<crate::context_usage::FooterContext>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     pr_chat: bool,
@@ -7277,8 +7276,8 @@ impl Composer {
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         let composer = cx.entity().downgrade();
-        let account_usage =
-            cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), composer, cx));
+        let context_ring =
+            cx.new(|cx| crate::context_usage::FooterContext::new(state.clone(), composer, cx));
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -7484,7 +7483,7 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
-            account_usage,
+            context_ring,
             side_chat: false,
             pr_chat: false,
             pr_context: None,
@@ -14479,16 +14478,8 @@ impl Render for Composer {
             });
             let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
             if session_chrome_opacity > 0.0 {
-                let harness = full_footer
-                    .then(|| self.pickers.read(cx).resolved(cx).harness)
-                    .flatten();
-                let target = self
-                    .bound_chat_row(cx)
-                    .map(|chat| chat.device_id.clone())
-                    .filter(|device| self.state.read(cx).local_device_id.as_ref() != Some(device));
                 let chat = self.bound_chat_id(cx);
-                self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, target, chat, cx));
+                self.context_ring.update(cx, |ring, _| ring.track(chat));
             }
             Some(
                 div()
@@ -14534,7 +14525,7 @@ impl Render for Composer {
                                         .items_center()
                                         .gap(px(4.0))
                                         .children(permission_chip)
-                                        .child(self.account_usage.clone())
+                                        .child(self.context_ring.clone())
                                         .children(terminal_button),
                                 ),
                         )
