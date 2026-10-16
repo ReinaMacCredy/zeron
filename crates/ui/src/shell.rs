@@ -400,9 +400,9 @@ pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
 pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
 /// Breathing room between the navigation cluster and transcript identity.
 pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
-/// A 28px action centered in the 38px titlebar with its 2px downward optical
-/// shift lands 6px from the top; use the same inset at the trailing edge.
-pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
+/// A 28px action centred in the titlebar sits this far from the top; use the
+/// same inset at the trailing edge.
+pub const TITLEBAR_ACTION_EDGE_INSET: f32 = Theme::TITLEBAR_HEIGHT / 2.0 - 14.0;
 /// Width of the persistent top-left button cluster itself: a 24px sidebar
 /// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
 pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
@@ -1650,10 +1650,9 @@ impl WidthTween {
 }
 
 fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
-    // Match the padded flex row's center, not the raw titlebar center.
     // Keep the native 24px controls untouched and give them 4px of air.
     let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
-    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    let center = Theme::TITLEBAR_HEIGHT * 0.5;
     (center - height * 0.5, height)
 }
 
@@ -8918,7 +8917,6 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .pl(px((self.sidebar_now() + Theme::SPACE_LG)
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
@@ -9039,7 +9037,6 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .px(px(TITLEBAR_CLUSTER_PAD))
             .child(
                 div()
@@ -9093,7 +9090,7 @@ impl Shell {
                     div()
                         .absolute()
                         .left(px(brand_left))
-                        .top(px(Theme::TITLEBAR_TOP_PAD))
+                        .top_0()
                         .bottom_0()
                         .flex()
                         .items_center()
@@ -9158,7 +9155,6 @@ impl Shell {
                 .top_0()
                 .left(px(left))
                 .h(px(Theme::TITLEBAR_HEIGHT))
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
                 .flex()
                 .items_center()
                 .opacity(reveal)
@@ -9326,7 +9322,6 @@ impl Shell {
                 .flex()
                 .flex_row()
                 .items_center()
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
                 .gap(px(2.0))
                 .px(px(10.0))
                 .children(buttons.iter().flatten().map(|button| {
@@ -18486,14 +18481,14 @@ mod tests {
 
     #[test]
     fn island_stays_centered_on_controls_while_expanding() {
-        let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+        let center = Theme::TITLEBAR_HEIGHT * 0.5;
         for step in 0..=20 {
             let (top, height) = titlebar_island_vertical_geometry(step as f32 / 20.0);
             assert_eq!(top + height * 0.5, center);
             assert!((28.0..=32.0).contains(&height));
         }
         let (top, height) = titlebar_island_vertical_geometry(1.0);
-        assert_eq!(center, 21.0);
+        assert_eq!(center, 22.0);
         assert_eq!(center - 12.0 - top, 4.0);
         assert_eq!(top + height - (center + 12.0), 4.0);
     }
@@ -19245,7 +19240,7 @@ mod tests {
         assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
         assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
         assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
-        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
+        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 8.0);
     }
 
     #[test]

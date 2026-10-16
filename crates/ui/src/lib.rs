@@ -485,9 +485,9 @@ fn open_main_window(
                 titlebar: Some(TitlebarOptions {
                     title: (!cfg!(target_os = "linux")).then(|| window_title().into()),
                     appears_transparent: true,
-                    // Native lights are 14px tall: top 14 → center 21, matching
-                    // the 38px titlebar row with 4px top-only content padding.
-                    traffic_light_position: Some(gpui::point(px(14.), px(14.))),
+                    // Native lights are 14px tall: top 15 → centre 22, the
+                    // middle of the 44px titlebar.
+                    traffic_light_position: Some(gpui::point(px(14.), px(15.))),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
                 // Drag + start_window_move) — mark the content view app-owned

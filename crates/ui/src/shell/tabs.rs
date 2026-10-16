@@ -1772,7 +1772,6 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
