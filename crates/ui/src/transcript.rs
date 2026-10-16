@@ -10090,10 +10090,9 @@ impl Transcript {
                 this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
             }))
             .child(
-                crate::icons::icon(crate::icons::LUCIDE_ARROW_DOWN_UP)
+                crate::icons::icon(crate::icons::LUCIDE_ARROW_LEFT_RIGHT)
                     .size(px(12.0))
-                    .text_color(muted)
-                    .with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25))),
+                    .text_color(muted),
             )
             .child(div().min_w_0().truncate().child(SharedString::from(label)))
             .children(from.as_ref().map(|side| side.chip(theme)))
