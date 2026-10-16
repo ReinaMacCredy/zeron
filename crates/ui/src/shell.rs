@@ -8927,9 +8927,31 @@ impl Shell {
                     bar.child(detail.update(cx, |page, cx| page.titlebar(closable, cx)))
                 },
             );
-        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+        let bar = div()
+            .relative()
+            .h(px(Theme::TITLEBAR_HEIGHT))
+            .flex_none()
+            .children(self.titlebar_seam_divider(cx))
+            .child(inner);
         self.titlebar_drag_region("pull-requests-titlebar", bar, cx)
             .into_any_element()
+    }
+
+    /// Synara's 1x20 hairline at the sidebar seam; it fades out with the
+    /// sidebar.
+    pub(super) fn titlebar_seam_divider(&self, cx: &App) -> Option<AnyElement> {
+        let reveal = self.sidebar_reveal();
+        (reveal > 0.01).then(|| {
+            div()
+                .absolute()
+                .left(px(self.sidebar_now()))
+                .top(px((Theme::TITLEBAR_HEIGHT - 20.0) / 2.0))
+                .w(px(1.0))
+                .h(px(20.0))
+                .bg(Theme::of(cx).border)
+                .opacity(reveal)
+                .into_any_element()
+        })
     }
 
     /// Make a titlebar strip drag the window — zed's platform-titlebar

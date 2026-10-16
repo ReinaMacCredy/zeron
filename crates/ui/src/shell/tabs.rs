@@ -1809,7 +1809,13 @@ impl Shell {
         // The unified window titlebar: full-width on the glass shell, ABOVE
         // the inset card. No bottom border — the card's own hairline is the
         // separation; the glass gutter shows between.
-        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+        let seam = (!takeover).then(|| self.titlebar_seam_divider(cx));
+        let bar = div()
+            .relative()
+            .h(px(Theme::TITLEBAR_HEIGHT))
+            .flex_none()
+            .children(seam.flatten())
+            .child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
     }
