@@ -1,8 +1,10 @@
 use super::*;
 use zeron_proto::{Task, TaskPatch, pin_order_key_between, valid_pin_order_key};
 
-const MAX_TITLE_CHARS: usize = 500;
-const MAX_NOTES_CHARS: usize = 10_000;
+pub const TASK_TITLE_MAX_CHARS: usize = 500;
+pub const TASK_NOTES_MAX_CHARS: usize = 10_000;
+/// As long as the uuid a device mints, for clocks a row has not been written with yet.
+const CLOCK_DEVICE: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,14 +60,14 @@ fn invalid(message: &str) -> DocError {
 
 fn checked_title(title: &str) -> Result<String, DocError> {
     let title = title.trim();
-    if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+    if title.is_empty() || title.chars().count() > TASK_TITLE_MAX_CHARS {
         return Err(invalid("A task needs a title of up to 500 characters"));
     }
     Ok(title.to_string())
 }
 
 fn check_notes(notes: &str) -> Result<(), DocError> {
-    if notes.chars().count() > MAX_NOTES_CHARS {
+    if notes.chars().count() > TASK_NOTES_MAX_CHARS {
         return Err(invalid("Task notes are limited to 10,000 characters"));
     }
     Ok(())
@@ -87,6 +89,52 @@ fn check_order_key(key: &str) -> Result<(), DocError> {
         return Err(invalid("Invalid task order key"));
     }
     Ok(())
+}
+
+fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String, Value> {
+    fields([
+        ("id", json!(task.id)),
+        ("spaceId", opt_str(task.space_id.as_deref())),
+        ("title", json!(title)),
+        ("notes", json!(task.notes)),
+        ("dueOn", opt_str(task.due_on.as_deref())),
+        ("chatId", opt_str(task.chat_id.as_deref())),
+        ("completedAt", opt_ms(task.completed_at)),
+        ("orderKey", json!(order_key)),
+        ("createdAt", json!(task.created_at.timestamp_millis())),
+        ("updatedAt", json!(task.updated_at.timestamp_millis())),
+        ("deleted", json!(false)),
+    ])
+}
+
+/// A re-seed sends the whole row with every field's clock in one op, and the
+/// room rejects an oversized op together with its whole batch.
+fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
+    if !fits_op_budget(&row_to_seed_op(row)) {
+        return Err(invalid("This task is too large to sync; shorten its notes"));
+    }
+    Ok(())
+}
+
+/// The registry's own checks on `task` as a whole row, for a client to run
+/// before it sends an edit.
+pub fn check_task_syncs(task: &Task) -> Result<(), DocError> {
+    let title = checked_title(&task.title)?;
+    check_notes(&task.notes)?;
+    let fields = task_fields(task, title, task.order_key.clone());
+    let clock = encode_hlc(9_999_999_999_999, 999_999, CLOCK_DEVICE);
+    check_row_fits(&RegistryRow {
+        kind: KIND_TASKS.into(),
+        id: task.id.clone(),
+        seq: 0,
+        deleted: false,
+        del_hlc: None,
+        clocks: fields
+            .keys()
+            .map(|key| (key.clone(), clock.clone()))
+            .collect(),
+        fields,
+    })
 }
 
 impl RegistryDoc {
@@ -117,7 +165,7 @@ impl RegistryDoc {
 
     /// A taken id, deleted rows included, is never overwritten: retries must not revive.
     pub fn create_task(&mut self, task: &Task) -> Result<bool, DocError> {
-        if task.id.is_empty() || task.id.len() > 256 {
+        if !valid_row_id(&task.id) {
             return Err(invalid("Invalid task ID"));
         }
         let title = checked_title(&task.title)?;
@@ -144,24 +192,11 @@ impl RegistryDoc {
             check_order_key(&task.order_key)?;
             task.order_key.clone()
         };
-        let set = fields([
-            ("id", json!(task.id)),
-            ("spaceId", opt_str(task.space_id.as_deref())),
-            ("title", json!(title)),
-            ("notes", json!(task.notes)),
-            ("dueOn", opt_str(task.due_on.as_deref())),
-            ("chatId", opt_str(task.chat_id.as_deref())),
-            ("completedAt", opt_ms(task.completed_at)),
-            ("orderKey", json!(order_key)),
-            ("createdAt", json!(task.created_at.timestamp_millis())),
-            ("updatedAt", json!(task.updated_at.timestamp_millis())),
-            ("deleted", json!(false)),
-        ]);
+        let set = task_fields(task, title, order_key);
         self.enqueue_task_op(&task.id, OpKind::Upsert, set, hlc)?;
         Ok(true)
     }
 
-    /// The room rejects an oversized op together with its whole batch.
     fn enqueue_task_op(
         &mut self,
         id: &str,
@@ -177,9 +212,9 @@ impl RegistryDoc {
             hlc,
             clocks: None,
         };
-        if !fits_op_budget(&op) {
-            return Err(invalid("This task is too large to sync; shorten its notes"));
-        }
+        let row = overlay(self.overlay_row(KIND_TASKS, id).as_ref(), [&op])
+            .ok_or_else(|| invalid("Task no longer exists"))?;
+        check_row_fits(&row)?;
         self.enqueue_ops(vec![op]);
         Ok(())
     }

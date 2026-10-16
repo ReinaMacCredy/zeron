@@ -40,12 +40,7 @@ impl RegistryDoc {
             return self.change_sidebar_section(change);
         }
         let id = change.session_id();
-        if id.is_empty()
-            || id.len() > 256
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.:@/-".contains(&b))
-        {
+        if !valid_row_id(id) {
             return Err(DocError::Schema("Invalid pinned session ID".into()));
         }
         let current = self

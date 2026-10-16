@@ -213,14 +213,7 @@ impl RegistryDoc {
         change: &SidebarSectionChange,
     ) -> Result<(), DocError> {
         use SidebarSectionChange::*;
-        let valid_id = |id: &str| {
-            !id.is_empty()
-                && id.len() <= 256
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_.:@/-".contains(&b))
-        };
-        let valid_section_id = |id: &str| valid_id(id) && id != "pinned";
+        let valid_section_id = |id: &str| valid_row_id(id) && id != "pinned";
         let valid_name = |name: &str| !name.trim().is_empty() && name.chars().count() <= 120;
         match change {
             Create { id, name } | Rename { id, name }
@@ -236,12 +229,12 @@ impl RegistryDoc {
                 section_id,
                 after,
                 before,
-            } if !valid_id(session_id)
+            } if !valid_row_id(session_id)
                 || section_id.as_ref().is_some_and(|id| !valid_section_id(id))
                 || [after, before]
                     .into_iter()
                     .flatten()
-                    .any(|anchor| !valid_id(anchor)) =>
+                    .any(|anchor| !valid_row_id(anchor)) =>
             {
                 return Err(DocError::Schema("Invalid section membership".into()));
             }
@@ -249,7 +242,7 @@ impl RegistryDoc {
                 if sections.iter().any(|s| {
                     !valid_section_id(&s.id)
                         || !valid_name(&s.name)
-                        || s.session_ids.iter().any(|id| !valid_id(id))
+                        || s.session_ids.iter().any(|id| !valid_row_id(id))
                 }) =>
             {
                 return Err(DocError::Schema("Invalid section import".into()));

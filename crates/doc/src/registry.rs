@@ -48,6 +48,8 @@ mod sidebar_pins;
 mod sidebar_sections;
 mod tasks;
 
+pub use tasks::{TASK_NOTES_MAX_CHARS, TASK_TITLE_MAX_CHARS, check_task_syncs};
+
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
 
@@ -1841,6 +1843,15 @@ fn overlay<'a>(
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
+
+/// The room's `ID_RE` (`edge/src/registry-core.ts`): any other id fails its batch.
+fn valid_row_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:@/-".contains(&b))
+}
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
     entries

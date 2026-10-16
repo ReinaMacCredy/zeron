@@ -2501,6 +2501,10 @@ fn tasks_append_in_creation_order_and_move_by_order_key() {
 fn tasks_refuse_invalid_fields() {
     let mut doc = RegistryDoc::new("a");
     assert!(doc.create_task(&task("t1", "   ")).is_err());
+    for id in ["has space", "tâche", ""] {
+        assert!(doc.create_task(&task(id, "Title")).is_err(), "{id:?}");
+    }
+    assert!(doc.create_task(&task("a/b:c@d.e_f-9", "Title")).unwrap());
     let mut bad_day = task("t1", "Title");
     bad_day.due_on = Some("2026-02-30".into());
     assert!(doc.create_task(&bad_day).is_err());
@@ -2528,6 +2532,34 @@ fn tasks_refuse_invalid_fields() {
         ..Default::default()
     };
     assert!(doc.update_task("t1", &wide_notes, ts(3_001)).is_err());
+    assert!(
+        doc.take_pushable()
+            .iter()
+            .all(|b| b.ops.iter().all(fits_op_budget))
+    );
+}
+
+#[test]
+fn a_task_row_always_reseeds_within_the_op_budget() {
+    let mut doc = RegistryDoc::new("6f1c2a4e-8b3d-4c9a-a0e1-5d7f9b2c3e8a");
+    doc.create_task(&task("t1", &"T".repeat(500))).unwrap();
+    let quoted = zeron_proto::TaskPatch {
+        notes: Some(format!("{}{}", "\"".repeat(5_000), "a".repeat(5_000))),
+        ..Default::default()
+    };
+    assert!(
+        doc.update_task("t1", &quoted, ts(3_000)).is_err(),
+        "the update alone fits, but the full row it leaves does not"
+    );
+    let seed = row_to_seed_op(&doc.overlay_row(KIND_TASKS, "t1").unwrap());
+    assert!(fits_op_budget(&seed));
+    let mut edited = doc.task("t1").unwrap();
+    assert!(check_task_syncs(&edited).is_ok());
+    edited.notes = quoted.notes.unwrap();
+    assert!(
+        check_task_syncs(&edited).is_err(),
+        "a client refuses the same edit before sending it"
+    );
     assert!(
         doc.take_pushable()
             .iter()
