@@ -3676,21 +3676,55 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
 }
 
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
-/// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
+/// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`, then the
+/// per-model weekly limits (`limits[]` rows of kind `weekly_scoped`, named by
+/// model), falling back to the older `seven_day_<model>` buckets.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let mut windows = Vec::new();
-    for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
-        if let Some(w) = body.get(key)
-            && let Some(utilization) = w.get("utilization").and_then(|v| v.as_f64())
-        {
-            windows.push(AgentUsageWindow {
-                label: label.to_string(),
-                used_fraction: (utilization / 100.0) as f32,
-                resets_at: parse_when(w.get("resets_at")),
-            });
-        }
+    let bucket = |key: &str, label: &str| {
+        let w = body.get(key)?;
+        Some(AgentUsageWindow {
+            label: label.to_string(),
+            used_fraction: (w.get("utilization")?.as_f64()? / 100.0) as f32,
+            resets_at: parse_when(w.get("resets_at")),
+        })
+    };
+    let mut windows: Vec<AgentUsageWindow> = [("five_hour", "Session"), ("seven_day", "Week")]
+        .into_iter()
+        .filter_map(|(key, label)| bucket(key, label))
+        .collect();
+    if windows.is_empty() {
+        return None;
     }
-    (!windows.is_empty()).then_some(UsageSnapshot {
+    let scoped: Vec<AgentUsageWindow> = body
+        .get("limits")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|row| row.get("kind").and_then(|v| v.as_str()) == Some("weekly_scoped"))
+        .filter_map(|row| {
+            let model = row.pointer("/scope/model")?;
+            let label = str_field(model, "display_name").or_else(|| str_field(model, "id"))?;
+            Some(AgentUsageWindow {
+                label,
+                used_fraction: (row.get("percent")?.as_f64()? / 100.0) as f32,
+                resets_at: parse_when(row.get("resets_at")),
+            })
+        })
+        .collect();
+    if scoped.is_empty() {
+        windows.extend(
+            [
+                ("seven_day_fable", "Fable"),
+                ("seven_day_opus", "Opus"),
+                ("seven_day_sonnet", "Sonnet"),
+            ]
+            .into_iter()
+            .filter_map(|(key, label)| bucket(key, label)),
+        );
+    } else {
+        windows.extend(scoped);
+    }
+    Some(UsageSnapshot {
         windows,
         plan_label: None,
     })
@@ -4280,6 +4314,58 @@ mod tests {
                     .parse::<chrono::DateTime<Utc>>()
                     .unwrap()
             )
+        );
+    }
+
+    #[test]
+    fn claude_usage_windows_add_the_per_model_weekly_limits() {
+        let body = serde_json::json!({
+            "five_hour": { "utilization": 10.0, "resets_at": "2026-10-17T02:09:59.544322+00:00" },
+            "seven_day": { "utilization": 35.0, "resets_at": "2026-10-21T21:59:59.544343+00:00" },
+            "seven_day_opus": null,
+            "limits": [
+                { "kind": "session", "percent": 10, "scope": null },
+                { "kind": "weekly_all", "percent": 35, "scope": null },
+                {
+                    "kind": "weekly_scoped",
+                    "percent": 4,
+                    "resets_at": "2026-10-21T22:00:00+00:00",
+                    "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+                },
+            ],
+        });
+        let snapshot = claude_usage_windows(&body).expect("windows");
+        let labels: Vec<_> = snapshot.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Week", "Fable"]);
+        assert!((snapshot.windows[2].used_fraction - 0.04).abs() < 1e-6);
+        assert_eq!(
+            snapshot.windows[2].resets_at,
+            Some(
+                "2026-10-21T22:00:00Z"
+                    .parse::<chrono::DateTime<Utc>>()
+                    .unwrap()
+            )
+        );
+
+        let legacy = serde_json::json!({
+            "five_hour": { "utilization": 1.0 },
+            "seven_day": { "utilization": 2.0 },
+            "seven_day_opus": { "utilization": 50.0, "resets_at": "2026-10-21T22:00:00Z" },
+            "seven_day_sonnet": null,
+        });
+        let labels: Vec<_> = claude_usage_windows(&legacy)
+            .expect("windows")
+            .windows
+            .into_iter()
+            .map(|w| (w.label, w.used_fraction))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("Session".to_string(), 0.01),
+                ("Week".to_string(), 0.02),
+                ("Opus".to_string(), 0.5)
+            ]
         );
     }
 
