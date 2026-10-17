@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use zeron_proto::HarnessId;
 
+#[cfg(target_os = "macos")]
 use crate::agent_accounts::keychain;
 use crate::registry::{CustomPredictionApi, HarnessRegistry, PredictionSettings};
 use crate::titles::{OneShot, one_shot_target, run_one_shot};
@@ -399,6 +400,25 @@ impl Predictions {
             }
         }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod keychain {
+    const UNSUPPORTED: &str = "Saving a prediction API key needs the macOS Keychain";
+
+    pub(super) async fn read_secret(_service: &str, _account: &str) -> Option<String> {
+        None
+    }
+
+    pub(super) async fn write_secret(
+        _service: &str,
+        _account: &str,
+        _secret: &str,
+    ) -> Result<(), &'static str> {
+        Err(UNSUPPORTED)
+    }
+
+    pub(super) async fn delete_secret(_service: &str, _account: &str) {}
 }
 
 #[cfg(test)]
