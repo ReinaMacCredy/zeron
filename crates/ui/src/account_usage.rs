@@ -216,7 +216,15 @@ impl DeviceAccounts {
                 .await;
             this.update(cx, |accounts, cx| {
                 accounts.scheduled = None;
-                accounts.load(cx);
+                // A click probed moments ago, maybe before this turn's usage posted.
+                match accounts
+                    .last_forced
+                    .map(|forced| forced + FORCE_MIN_INTERVAL)
+                    .filter(|ready| *ready > Instant::now())
+                {
+                    Some(ready) => accounts.schedule(ready, cx),
+                    None => accounts.load(cx),
+                }
             })
             .ok();
         });
