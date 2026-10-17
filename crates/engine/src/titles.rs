@@ -341,16 +341,26 @@ pub(crate) fn cheapest_model(models: &[Model]) -> Option<String> {
     small.or(models.last()).map(|m| m.id.clone())
 }
 
-/// A Sonnet-class model when the harness offers one; else its default model.
+/// The newest Sonnet the harness offers, as the CLI's `sonnet` alias resolves; else its default model.
 pub(crate) fn mid_tier_model(models: &[Model]) -> Option<String> {
     models
         .iter()
-        .find(|m| {
+        .filter(|m| {
             format!("{} {}", m.id, m.label)
                 .to_lowercase()
                 .contains("sonnet")
         })
+        .max_by_key(|m| model_version(&m.id))
         .map(|m| m.id.clone())
+}
+
+fn model_version(id: &str) -> Vec<u32> {
+    id.split('[')
+        .next()
+        .unwrap_or(id)
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|part| part.parse().ok())
+        .collect()
 }
 
 /// First line, stripped of quote/heading dressing, capped at 60 chars.
@@ -465,6 +475,22 @@ mod tests {
         let no_small = vec![model("opus-4", "Opus"), model("sonnet-4", "Sonnet")];
         assert_eq!(cheapest_model(&no_small).as_deref(), Some("sonnet-4"));
         assert_eq!(cheapest_model(&[]), None);
+    }
+
+    #[test]
+    fn mid_tier_picks_the_newest_sonnet() {
+        let models = vec![
+            model("claude-opus-5-5", "Opus 5.5"),
+            model("claude-sonnet-5", "Sonnet 5"),
+            model("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
+            model("claude-sonnet-5-5", "Sonnet 5.5"),
+            model("claude-haiku-5-5", "Haiku 5.5"),
+        ];
+        assert_eq!(
+            mid_tier_model(&models).as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(mid_tier_model(&[model("gpt-6-luna", "GPT-6 Luna")]), None);
     }
 
     #[tokio::test]
