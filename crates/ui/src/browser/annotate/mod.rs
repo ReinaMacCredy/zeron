@@ -2,6 +2,10 @@ use crate::appshots::CapturedAppshot;
 use serde::Deserialize;
 use std::fmt::Write;
 
+// react-grab only resolves components through a devtools hook that exists before React loads.
+#[cfg(target_os = "macos")]
+pub(crate) const REACT_DEVTOOLS_HOOK: &str = include_str!("hook.generated.js");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum AnnotationState {
     #[default]
@@ -260,9 +264,7 @@ mod host {
             "fontSans": "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
             "fontMono": "ui-monospace, \"SF Mono\", Menlo, monospace",
         });
-        format!(
-            "(() => {{ if (!globalThis.__zeronAnnotate) {{ {BUNDLE} }} return globalThis.__zeronAnnotate.start({theme}); }})()"
-        )
+        format!("globalThis.__zeronAnnotate.start({theme})")
     }
 
     #[derive(Debug, Deserialize)]
@@ -308,6 +310,8 @@ mod host {
             let Some(native) = &self.native else {
                 return;
             };
+            // callAsyncJavaScript frames carry no location in JSC, which hides React component sources.
+            native.evaluate(&format!("if (!globalThis.__zeronAnnotate) {{ {BUNDLE} }}"));
             let picked = native.automation_eval(&start_script(crate::theme::Theme::of(cx)), true);
             native.focus_page();
             let was_paused = self.control.paused;

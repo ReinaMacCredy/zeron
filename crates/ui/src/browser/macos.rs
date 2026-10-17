@@ -476,6 +476,7 @@ impl NativePage {
         let new_tab = tx.clone();
         let web = wry::WebViewBuilder::new()
             .with_webview_configuration(data.configuration(mtm))
+            .with_initialization_script(super::annotate::REACT_DEVTOOLS_HOOK)
             .with_visible(false)
             .with_focused(false)
             .with_new_window_req_handler(move |url, _| {
@@ -966,12 +967,7 @@ impl NativePage {
     }
 
     pub fn fixture_eval(&self, script: &str) {
-        unsafe {
-            self.0
-                .borrow()
-                .view
-                .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
-        }
+        self.evaluate(script);
     }
 }
 
@@ -1076,6 +1072,15 @@ impl NativePage {
                 .takeSnapshotWithConfiguration_completionHandler(None, &completion);
         }
         rx
+    }
+
+    pub(super) fn evaluate(&self, script: &str) {
+        unsafe {
+            self.0
+                .borrow()
+                .view
+                .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
+        }
     }
 
     pub(super) fn focus_page(&self) {

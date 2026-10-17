@@ -314,7 +314,7 @@ async function captureElement(element: Element): Promise<PickedElement> {
         selector: context.selector,
         htmlPreview: (context.htmlPreview ?? "").slice(0, CONTEXT_TEXT_LIMIT),
         componentName: context.componentName,
-        source: stack[0] ?? null,
+        source: stack.find((frame) => frame.fileName) ?? null,
         stack,
         styles: (context.styles ?? "").slice(0, CONTEXT_TEXT_LIMIT),
       };

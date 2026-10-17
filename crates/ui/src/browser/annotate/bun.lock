@@ -5,6 +5,7 @@
     "": {
       "name": "zeron-browser-annotate",
       "dependencies": {
+        "bippy": "0.5.43",
         "react-grab": "0.1.32",
       },
     },
