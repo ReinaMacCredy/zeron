@@ -11,7 +11,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
+    ClassifierVerdict, MessagePart, MessageRole, MessageStatus, SessionCommandPayload,
+    SessionMessageEntry,
 };
 use zeron_engine::registry::{CompactionMode, CompactionSettings};
 use zeron_engine::{EngineCore, HarnessRegistry};
@@ -512,7 +513,7 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
     let entries = entries(&core);
     let boundary = entries
         .iter()
-        .find(|e| e.role == MessageRole::System)
+        .find(|e| e.role == MessageRole::System && verdict_of(e).is_none())
         .expect("boundary entry");
     assert_eq!(entry_text(boundary), "Agent compacted · 22.8k → 2.3k tokens");
     let follow_up = entries
@@ -769,8 +770,16 @@ async fn the_classifier_compacts_before_a_new_task_only() {
     )
     .await;
     wait_for(|| !core.sessions.turn_in_flight(CHAT), "it settles").await;
-    assert!(
-        entries(&core).iter().all(|e| e.role != MessageRole::System),
+    assert_eq!(
+        entries(&core)
+            .iter()
+            .filter(|e| e.role == MessageRole::System)
+            .map(verdict_of)
+            .collect::<Vec<_>>(),
+        [
+            Some(ClassifierVerdict::Continue),
+            Some(ClassifierVerdict::Failed)
+        ],
         "a follow-up or a failed check never compacts"
     );
 
@@ -795,14 +804,22 @@ async fn the_classifier_compacts_before_a_new_task_only() {
         prompts[3]
     );
     assert_eq!(prompts[4], "hello");
-    let system = entries(&core)
+    let system: Vec<_> = entries(&core)
         .into_iter()
-        .find(|e| e.role == MessageRole::System)
-        .expect("boundary entry");
+        .filter(|e| e.role == MessageRole::System)
+        .collect();
+    assert_eq!(verdict_of(&system[2]), Some(ClassifierVerdict::New));
     assert_eq!(
-        entry_text(&system),
+        entry_text(&system[3]),
         "Compacted before a new task · 22.8k → 2.3k tokens"
     );
+}
+
+fn verdict_of(entry: &SessionMessageEntry) -> Option<ClassifierVerdict> {
+    entry.parts.iter().find_map(|part| match part {
+        MessagePart::Classifier { record, .. } => Some(record.verdict),
+        _ => None,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -827,6 +844,49 @@ async fn the_classifier_compacts_a_parked_run_in_place() {
     assert!(mailbox()[0].starts_with("/compact The next message starts a new task."));
     assert_eq!(mailbox()[1], "hello");
     assert_eq!(requests.lock().unwrap().len(), 1, "no second process");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_classifier_starts_fresh_on_a_harness_that_cannot_compact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    harness.can_compact.store(false, Ordering::SeqCst);
+    core.registry
+        .set_compaction_settings(CompactionSettings {
+            nudge_tokens: 20_000,
+            ..Default::default()
+        })
+        .unwrap();
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "the new task runs").await;
+    let next = requests.lock().unwrap()[1].clone();
+    assert_eq!(next.resume, None, "a new session");
+    assert!(
+        next.prompt.starts_with("<fresh_session>"),
+        "{}",
+        next.prompt
+    );
+    assert!(
+        next.prompt
+            .ends_with("<latest_user_message>\nhello\n</latest_user_message>"),
+        "{}",
+        next.prompt
+    );
+    let system: Vec<_> = entries(&core)
+        .into_iter()
+        .filter(|e| e.role == MessageRole::System)
+        .collect();
+    assert_eq!(verdict_of(&system[0]), Some(ClassifierVerdict::New));
+    assert!(entry_text(&system[1]).starts_with("Fresh session before a new task"));
+    assert!(
+        system[1]
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::Handoff { .. }))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

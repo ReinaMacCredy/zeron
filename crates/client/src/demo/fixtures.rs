@@ -471,6 +471,7 @@ pub(crate) fn seed(
                 last_completed_turn: None,
                 running_subagents: 0,
                 compact_plan: None,
+                classifying: None,
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,

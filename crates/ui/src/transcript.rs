@@ -1224,6 +1224,9 @@ pub enum RowKind {
         text: SharedString,
         route: zeron_doc::HandoffRoute,
     },
+    Classifier {
+        record: Arc<zeron_doc::ClassifierRecord>,
+    },
     /// The fork seam: a labeled divider between copied history and the
     /// chat's own turns.
     ForkMarker {
@@ -1584,6 +1587,23 @@ pub fn rows_for_entry(
     }
 
     if entry.role == MessageRole::System {
+        if let Some(record) = entry.parts.iter().find_map(|p| match p {
+            MessagePart::Classifier { record, .. } => Some(record),
+            _ => None,
+        }) {
+            return vec![Row {
+                id: entry.id.clone().into(),
+                version: fnv1a(record.input.as_bytes()) ^ record.duration_ms,
+                turn_start: true,
+                kind: RowKind::Classifier {
+                    record: Arc::new(record.clone()),
+                },
+                entry_id,
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            }];
+        }
         // The note's label and hint text are only the fallback for readers without this row.
         if let Some(row) = handoff_row(entry) {
             return vec![Row {
@@ -2162,7 +2182,8 @@ pub fn rows_for_entry(
                     // nothing reaches here. A handoff lives on user entries.
                     MessagePart::Tool { .. }
                     | MessagePart::Reasoning { .. }
-                    | MessagePart::Handoff { .. } => {}
+                    | MessagePart::Handoff { .. }
+                    | MessagePart::Classifier { .. } => {}
                 }
             }
         }
@@ -2786,6 +2807,21 @@ impl HandoffSide {
             None => self.harness.to_string(),
         }
     }
+}
+
+fn new_task_tokens(transcript: &[SessionMessageEntry]) -> Option<u64> {
+    let entry = transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role != MessageRole::User)?;
+    entry.parts.iter().find_map(|part| match part {
+        MessagePart::Classifier { record, .. }
+            if record.verdict == zeron_doc::ClassifierVerdict::New =>
+        {
+            Some(record.context_tokens)
+        }
+        _ => None,
+    })
 }
 
 /// Capture knob (`ZERON_OPEN_HANDOFF=1`): synthetic clicks never reach a Dev bundle.
@@ -8990,16 +9026,41 @@ impl Transcript {
                 .chat_id
                 .as_deref()
                 .is_some_and(|id| self.state.read(cx).chat_compacting(id));
-        let word = if queued {
-            "Queued — will send automatically"
+        let (classifying, boundary) = match (self.doc_override.is_none(), self.chat_id.as_deref()) {
+            (true, Some(id)) => {
+                let state = self.state.read(cx);
+                let classifying = state.session_for(id).and_then(|session| {
+                    let run = session.classifying.as_ref()?;
+                    Some(match &run.model {
+                        Some(model) => crate::pickers::model_display_label(run.harness, model, cx),
+                        None => crate::composer::harness_display_name(run.harness).to_string(),
+                    })
+                });
+                let boundary = compacting
+                    .then(|| new_task_tokens(&state.transcript))
+                    .flatten();
+                (classifying, boundary)
+            }
+            _ => (None, None),
+        };
+        let word: std::borrow::Cow<'static, str> = if queued {
+            "Queued — will send automatically".into()
+        } else if let Some(model) = classifying {
+            format!("Classifier · {model} · checking if this is a new task").into()
         } else if sending {
-            "Sending"
+            "Sending".into()
+        } else if let Some(tokens) = boundary {
+            format!(
+                "Compacting {} before the new task",
+                crate::composer::background::compact_count(tokens)
+            )
+            .into()
         } else if compacting {
-            "Compacting context"
+            "Compacting context".into()
         } else if consulting {
-            "Consulting advisor"
+            "Consulting advisor".into()
         } else {
-            flavour_word(seed, elapsed_secs)
+            flavour_word(seed, elapsed_secs).into()
         };
         let token_rate = if sending || subagent_doc.is_some() {
             None
@@ -9573,6 +9634,9 @@ impl Transcript {
                 text,
                 route,
             } => self.render_handoff(&row.id, *harness, text.clone(), route, &theme, cx),
+            RowKind::Classifier { record } => {
+                self.render_classifier(&row.id, record.clone(), &theme, cx)
+            }
             RowKind::ForkMarker {
                 source_chat_id,
                 source_title,
@@ -10205,6 +10269,183 @@ impl Transcript {
                                 }),
                         )
                 })
+        });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .py(px(4.0))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(rule())
+                    .child(header)
+                    .child(rule()),
+            )
+            .children(details)
+            .into_any_element()
+    }
+
+    fn render_classifier(
+        &mut self,
+        row_id: &SharedString,
+        record: Arc<zeron_doc::ClassifierRecord>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_doc::ClassifierVerdict;
+        let open = self
+            .folds
+            .get(row_id)
+            .and_then(|fold| fold.open)
+            .unwrap_or(false);
+        let muted = theme.text_muted.opacity(0.7);
+        let bright = theme.text_muted;
+        let model = record
+            .harness
+            .map(|harness| HandoffSide::new(harness, record.model.as_deref(), cx));
+        let (verdict, verdict_color) = match record.verdict {
+            ClassifierVerdict::New => ("New task", theme.accent),
+            ClassifierVerdict::Continue => ("Same task", muted),
+            ClassifierVerdict::Failed => ("No answer", theme.warning),
+        };
+        let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
+        let toggle_id = row_id.clone();
+        let rule = || {
+            div()
+                .flex_1()
+                .min_w(px(12.0))
+                .h(px(1.0))
+                .bg(crate::theme::hairline(0.08))
+        };
+        let header = div()
+            .id(SharedString::from(format!("{row_id}-toggle")))
+            .flex_none()
+            .max_w(gpui::relative(0.9))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(muted)
+            .hover(move |s| s.text_color(bright))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.folds.entry(toggle_id.clone()).or_default().open = Some(!open);
+                this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
+            }))
+            .child(
+                crate::icons::icon(crate::icons::LUCIDE_LIST_FILTER)
+                    .size(px(12.0))
+                    .text_color(muted),
+            )
+            .child("Classifier")
+            .children(model.as_ref().map(|side| side.chip(theme)))
+            .child(SharedString::from(format!("· {secs} ·")))
+            .child(
+                div()
+                    .text_color(verdict_color)
+                    .child(SharedString::from(verdict)),
+            )
+            .child(
+                crate::icons::icon(if open {
+                    crate::icons::LUCIDE_CHEVRON_DOWN
+                } else {
+                    crate::icons::LUCIDE_CHEVRON_RIGHT
+                })
+                .size(px(11.0))
+                .text_color(muted.opacity(0.7)),
+            );
+        let details = open.then(|| {
+            let field = |key: &'static str, value: String| {
+                div()
+                    .flex()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .flex_none()
+                            .text_color(theme.text_muted.opacity(0.56))
+                            .child(key),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_color(theme.text)
+                            .child(SharedString::from(value)),
+                    )
+            };
+            let tokens = match (record.input_tokens, record.output_tokens) {
+                (Some(input), Some(output)) => Some(format!(
+                    "{} in · {} out",
+                    crate::composer::background::compact_count(input),
+                    crate::composer::background::compact_count(output)
+                )),
+                _ => None,
+            };
+            let mono_box = |id: &'static str, text: &str| {
+                div()
+                    .id(SharedString::from(format!("{row_id}-{id}")))
+                    .max_h(px(224.0))
+                    .overflow_y_scroll()
+                    .p(px(10.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(theme.text_faint)
+                    .children(text.lines().map(|line| {
+                        div()
+                            .w_full()
+                            .min_h(px(18.0))
+                            .child(SharedString::from(line.to_string()))
+                    }))
+            };
+            div()
+                .w_full()
+                .max_w(px(560.0))
+                .mx_auto()
+                .pt(px(6.0))
+                .pb(px(4.0))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .text_size(crate::typography::ui_rems(12.5))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .p(px(10.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface.opacity(0.6))
+                        .children(model.as_ref().map(|side| field("Model", side.detail())))
+                        .child(field("Verdict", verdict.to_string()))
+                        .child(field("Time", secs.clone()))
+                        .child(field(
+                            "Context",
+                            format!(
+                                "{} tokens",
+                                crate::composer::background::compact_count(record.context_tokens)
+                            ),
+                        ))
+                        .children(tokens.map(|tokens| field("Tokens", tokens))),
+                )
+                .child(
+                    div()
+                        .text_color(theme.text_muted)
+                        .child("Sent to the classifier"),
+                )
+                .child(mono_box("input", &record.input))
+                .child(div().text_color(theme.text_muted).child("Reply"))
+                .child(mono_box("reply", &record.reply))
         });
         div()
             .w_full()
@@ -18205,6 +18446,7 @@ mod tests {
                             compacting: false,
                             running_subagents: 0,
                             compact_plan: None,
+                            classifying: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,

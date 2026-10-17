@@ -2055,6 +2055,7 @@ mod strip_regressions {
             updated_at: Utc::now(),
             running_subagents: 0,
             compact_plan: None,
+            classifying: None,
         }
     }
 

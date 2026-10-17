@@ -68,6 +68,44 @@ async fn collect(prompt: &str) -> Vec<AgentEvent> {
         .unwrap()
 }
 #[tokio::test]
+async fn one_shot_runs_ephemeral_with_its_system_prompt_and_no_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let (c, tx, _) = controls();
+    drop(tx);
+    let stream = harness()
+        .with_session_store(dir.path().join("index"))
+        .run_one_shot(request(dir.path(), "hello"), c, "Reply in one word.")
+        .await
+        .unwrap();
+    let events: Vec<_> =
+        tokio::time::timeout(Duration::from_secs(5), stream.map(Result::unwrap).collect())
+            .await
+            .unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    let args: Vec<String> =
+        serde_json::from_slice(&std::fs::read(dir.path().join("pi-args.json")).unwrap()).unwrap();
+    let after = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].as_str())
+    };
+    assert_eq!(after("--system-prompt"), Some("Reply in one word."));
+    for flag in ["--no-session", "--no-tools", "--no-mcp", "--no-extensions"] {
+        assert!(args.iter().any(|a| a == flag), "{flag} missing: {args:?}");
+    }
+    assert!(!dir.path().join("fixture-session.jsonl").exists());
+}
+
+#[tokio::test]
 async fn terminal_contract_handles_normal_errors_retries_compaction_and_consumed_prompts() {
     for (prompt, status) in [
         ("hello", DoneStatus::Completed),
@@ -377,6 +415,18 @@ async fn rpc_control_commands_finish_without_waiting_for_agent_settled() {
             1,
             "{command}: {events:?}"
         );
+        if command == "/compact" {
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AgentEvent::Compacted {
+                        pre_tokens: Some(120000),
+                        post_tokens: Some(9000)
+                    }
+                )),
+                "{events:?}"
+            );
+        }
     }
 }
 

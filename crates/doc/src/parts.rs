@@ -148,6 +148,33 @@ impl HandoffRoute {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum ClassifierVerdict {
+    New,
+    Continue,
+    #[default]
+    #[serde(other)]
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClassifierRecord {
+    pub harness: Option<HarnessId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub verdict: ClassifierVerdict,
+    pub duration_ms: u64,
+    pub context_tokens: u64,
+    pub input: String,
+    pub reply: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum HandoffKind {
     #[default]
     Text,
@@ -204,6 +231,11 @@ pub enum MessagePart {
         text: String,
         #[serde(default, skip_serializing_if = "HandoffRoute::is_empty")]
         route: HandoffRoute,
+    },
+    /// Rides a system entry whose text part is the label older readers show.
+    Classifier {
+        id: String,
+        record: ClassifierRecord,
     },
     #[serde(rename_all = "camelCase")]
     Tool {
@@ -296,6 +328,7 @@ impl MessagePart {
             | MessagePart::Visual { id, .. }
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Handoff { id, .. }
+            | MessagePart::Classifier { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
@@ -308,6 +341,9 @@ impl MessagePart {
             MessagePart::Text { text, .. }
             | MessagePart::Reasoning { text, .. }
             | MessagePart::Handoff { text, .. } => text.len(),
+            MessagePart::Classifier { record, .. } => {
+                serde_json::to_vec(record).map_or(0, |v| v.len())
+            }
             MessagePart::Tool {
                 call,
                 output,

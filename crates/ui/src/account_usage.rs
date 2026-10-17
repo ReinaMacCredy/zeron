@@ -567,6 +567,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             running_subagents: 0,
             compact_plan: None,
+            classifying: None,
         };
         let set = |sessions: Vec<zeron_proto::Session>, cx: &mut gpui::TestAppContext| {
             state.update(cx, |state, cx| {

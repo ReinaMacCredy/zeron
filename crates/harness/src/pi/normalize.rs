@@ -156,6 +156,12 @@ impl Normalizer {
                 });
             }
             "compaction_end" => {
+                if frame["result"].is_object() {
+                    events.push(AgentEvent::Compacted {
+                        pre_tokens: frame["result"]["tokensBefore"].as_u64(),
+                        post_tokens: frame["result"]["estimatedTokensAfter"].as_u64(),
+                    });
+                }
                 if let Some(tokens) = frame["result"]["estimatedTokensAfter"].as_u64() {
                     events.push(AgentEvent::ContextUsage {
                         tokens: Some(tokens),

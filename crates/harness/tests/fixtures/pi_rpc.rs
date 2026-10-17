@@ -63,6 +63,9 @@ fn main() {
     if !args.iter().any(|a| a == "--no-session") {
         std::fs::write("pi.pid", std::process::id().to_string()).unwrap();
     }
+    if args.iter().any(|a| a == "--system-prompt") {
+        std::fs::write("pi-args.json", serde_json::to_vec(&args[1..]).unwrap()).unwrap();
+    }
     let queue = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
     let active = Arc::new(AtomicBool::new(false));
     let abort = Arc::new(AtomicBool::new(false));
@@ -271,6 +274,13 @@ fn main() {
                     );
                     response(&prompt, json!({}));
                 }
+            }
+            "compact" => {
+                emit(json!({"type":"compaction_start","reason":"manual"}));
+                emit(
+                    json!({"type":"compaction_end","reason":"manual","result":{"tokensBefore":120000,"estimatedTokensAfter":9000}}),
+                );
+                response(&v, json!({"tokensBefore":120000}));
             }
             _ => response(&v, json!({})),
         }

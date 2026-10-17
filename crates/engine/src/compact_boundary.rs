@@ -1,11 +1,13 @@
 //! Prompt and input shape are benched in .maestro/topic/compact-nudge-bench (dataset/tune: 0 of 96 holdout follow-up runs NEW); change them only with a rerun.
 
-use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use zeron_doc::{
+    ClassifierRecord, ClassifierVerdict, MessagePart, MessageRole, SessionMessageEntry,
+};
 use zeron_proto::HarnessId;
 
 use crate::predictions::{entry_text, is_person_prompt, tail};
 use crate::registry::{HarnessRegistry, TitleSettings};
-use crate::titles::{OneShot, mid_tier_model, one_shot_target, run_one_shot};
+use crate::titles::{OneShot, OneShotTarget, mid_tier_model, one_shot_target, run_one_shot};
 
 const INSTRUCTIONS: &str = "You decide whether a chat should be compacted before its next message is answered. Compacting replaces the conversation so far with a short summary of its conclusions; the specific details (numbers, steps, file contents, exact wording) are lost.
 
@@ -73,14 +75,12 @@ fn verdict(raw: &str) -> String {
     raw.trim().to_ascii_uppercase()
 }
 
-/// Any failure reads as a follow-up: a missed compaction is retried later.
-pub(crate) async fn starts_new_task(
+pub(crate) async fn classifier_target(
     registry: &HarnessRegistry,
     settings: TitleSettings,
     session: HarnessId,
-    input: String,
-) -> bool {
-    let Some(target) = one_shot_target(
+) -> Option<OneShotTarget> {
+    one_shot_target(
         registry,
         settings.harness,
         settings.model,
@@ -88,8 +88,16 @@ pub(crate) async fn starts_new_task(
         mid_tier_model,
     )
     .await
-    else {
-        return false;
+}
+
+/// Any failure reads as a follow-up: a missed compaction is retried later.
+pub(crate) async fn classify(target: OneShotTarget, input: String) -> ClassifierRecord {
+    let started = std::time::Instant::now();
+    let mut record = ClassifierRecord {
+        harness: Some(target.harness_id),
+        model: target.model.clone(),
+        input: input.clone(),
+        ..Default::default()
     };
     match run_one_shot(
         target.harness.as_ref(),
@@ -106,12 +114,23 @@ pub(crate) async fn starts_new_task(
     )
     .await
     {
-        Ok(answer) => answer.starts_with("NEW"),
+        Ok(reply) => {
+            record.verdict = if reply.text.starts_with("NEW") {
+                ClassifierVerdict::New
+            } else {
+                ClassifierVerdict::Continue
+            };
+            record.reply = reply.text;
+            record.input_tokens = reply.usage.map(|(input, _)| input);
+            record.output_tokens = reply.usage.map(|(_, output)| output);
+        }
         Err(err) => {
             tracing::debug!(error = %err, "boundary classifier skipped");
-            false
+            record.reply = err.to_string();
         }
     }
+    record.duration_ms = started.elapsed().as_millis() as u64;
+    record
 }
 
 #[cfg(test)]
