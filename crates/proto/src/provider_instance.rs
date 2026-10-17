@@ -99,6 +99,24 @@ pub enum AcpDistribution {
     Binary,
 }
 
+/// ACP's `type`: only "agent" (the default) signs in through `authenticate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAuthMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl AcpAuthMethod {
+    pub fn signs_in_app(&self) -> bool {
+        self.kind == "agent"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderInstancesSnapshot {

@@ -850,11 +850,7 @@ impl HarnessRegistry {
             return Ok(harness.clone());
         }
         let harness: Arc<dyn Harness> = match instance.driver {
-            HarnessId::Acp
-            | HarnessId::Devin
-            | HarnessId::Grok
-            | HarnessId::Hermes
-            | HarnessId::Antigravity => {
+            driver if crate::provider_instances::runs_over_acp(driver) => {
                 Arc::new(crate::provider_instances::acp_harness(instance, data_dir)?)
             }
             driver => {

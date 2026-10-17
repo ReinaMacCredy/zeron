@@ -298,6 +298,7 @@ pub mod methods {
     pub const LIST_PROVIDER_INSTANCES: &str = "ListProviderInstances";
     pub const UPSERT_PROVIDER_INSTANCE: &str = "UpsertProviderInstance";
     pub const DELETE_PROVIDER_INSTANCE: &str = "DeleteProviderInstance";
+    pub const LIST_ACP_AUTH_METHODS: &str = "ListAcpAuthMethods";
     pub const GET_SYSTEM_PROMPT: &str = "GetSystemPrompt";
     pub const SET_SYSTEM_PROMPT: &str = "SetSystemPrompt";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).

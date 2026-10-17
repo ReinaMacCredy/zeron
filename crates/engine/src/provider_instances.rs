@@ -68,17 +68,21 @@ impl ProviderInstancesStore {
             .cloned()
     }
 
+    pub(crate) fn require(&self, id: &str) -> Result<ProviderInstance, EngineError> {
+        self.instance(id).ok_or_else(|| {
+            EngineError::Other(format!(
+                "Provider instance '{id}' is not set up on this device"
+            ))
+        })
+    }
+
     pub(crate) fn resolve(
         &self,
         registry: &HarnessRegistry,
         driver: HarnessId,
         id: &str,
     ) -> Result<Arc<dyn Harness>, EngineError> {
-        let instance = self.instance(id).ok_or_else(|| {
-            EngineError::Other(format!(
-                "Provider instance '{id}' is not set up on this device"
-            ))
-        })?;
+        let instance = self.require(id)?;
         if instance.driver != driver {
             return Err(EngineError::Other(format!(
                 "Provider instance '{id}' runs on {}, not {}",
@@ -90,12 +94,11 @@ impl ProviderInstancesStore {
     }
 
     pub(crate) fn launch_overrides(&self, id: &str) -> Result<LaunchOverrides, EngineError> {
-        let instance = self.instance(id).ok_or_else(|| {
-            EngineError::Other(format!(
-                "Provider instance '{id}' is not set up on this device"
-            ))
-        })?;
-        launch_overrides(&instance, self.data_dir())
+        launch_overrides(&self.require(id)?, self.data_dir())
+    }
+
+    pub(crate) fn acp_harness(&self, id: &str) -> Result<AcpHarness, EngineError> {
+        acp_harness(&self.require(id)?, self.data_dir())
     }
 
     fn data_dir(&self) -> &Path {
@@ -238,6 +241,17 @@ pub(crate) fn acp_launch(
         args,
         env: env.clone(),
     })
+}
+
+pub(crate) fn runs_over_acp(driver: HarnessId) -> bool {
+    matches!(
+        driver,
+        HarnessId::Acp
+            | HarnessId::Devin
+            | HarnessId::Grok
+            | HarnessId::Hermes
+            | HarnessId::Antigravity
+    )
 }
 
 pub(crate) fn acp_harness(
@@ -593,6 +607,76 @@ done
             .err()
             .unwrap();
         assert!(error.to_string().contains("not prepared"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_acp_instance_lists_its_auth_methods_and_signs_in_only_in_app() {
+        use crate::agent_accounts::{AgentAccounts, AgentAccountsConfig};
+        use zeron_proto::AgentLoginStatus;
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderInstancesStore::open(temp.path()).unwrap();
+        let record = temp.path().join("record");
+        let agent = fake_acp_agent(temp.path());
+        store
+            .upsert(local_acp_instance("acp_local", &agent, &record))
+            .unwrap();
+        let methods = store
+            .acp_harness("acp_local")
+            .unwrap()
+            .auth_methods()
+            .await
+            .unwrap();
+        assert_eq!(
+            methods
+                .iter()
+                .map(|m| (m.id.as_str(), m.kind.as_str()))
+                .collect::<Vec<_>>(),
+            [("browser", "agent"), ("setup", "terminal")]
+        );
+
+        let accounts = AgentAccounts::new(AgentAccountsConfig::isolated(temp.path()));
+        let settle = |method: &str| {
+            let start = accounts.start_acp_instance_login(
+                HarnessId::Acp,
+                store.acp_harness("acp_local").unwrap(),
+                Some(method.into()),
+                None,
+            );
+            let accounts = accounts.clone();
+            async move {
+                for _ in 0..200 {
+                    let poll = accounts.poll_login(&start.login_id).await.unwrap();
+                    if poll.status != AgentLoginStatus::Pending {
+                        return poll;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                panic!("login never settled");
+            }
+        };
+        let refused = settle("setup").await;
+        assert_eq!(refused.status, AgentLoginStatus::Error);
+        assert!(
+            refused
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("runs in a terminal"),
+            "{refused:?}"
+        );
+        assert!(
+            !std::fs::read_to_string(&record)
+                .unwrap()
+                .contains("authenticate=")
+        );
+        assert_eq!(settle("browser").await.status, AgentLoginStatus::Done);
+        let authenticated = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(authenticated.matches("authenticate=").count(), 1);
+        assert!(
+            authenticated.contains(r#""methodId":"browser""#),
+            "{authenticated}"
+        );
     }
 
     #[test]

@@ -541,6 +541,12 @@ struct DeleteProviderInstanceParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ListAcpAuthMethodsParams {
+    instance_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetSystemPromptParams {
     prompt: String,
 }
@@ -742,6 +748,9 @@ struct StartAgentLoginParams {
     provider: Option<String>,
     #[serde(default)]
     instance_id: Option<String>,
+    /// An ACP instance's `authMethods` id; `None` = the agent's default.
+    #[serde(default)]
+    method_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1468,6 +1477,28 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("provider instances are not available".into()))
     }
 
+    /// ACP instances have no accounts of their own; their sign-ins are flows of the default ones.
+    fn acp_instance(
+        &self,
+        instance_id: Option<&str>,
+    ) -> Result<Option<zeron_proto::ProviderInstance>, RpcError> {
+        let Some(id) = instance_id else {
+            return Ok(None);
+        };
+        let instance = self
+            .provider_instances_store()?
+            .require(id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        Ok(crate::provider_instances::runs_over_acp(instance.driver).then_some(instance))
+    }
+
+    fn login_accounts_for(&self, instance_id: Option<&str>) -> Result<AgentAccounts, RpcError> {
+        if self.acp_instance(instance_id)?.is_some() {
+            return Ok(self.agent_accounts.clone());
+        }
+        Ok(self.agent_accounts_for(instance_id, None)?.0)
+    }
+
     fn agent_accounts_for(
         &self,
         instance_id: Option<&str>,
@@ -1478,12 +1509,8 @@ impl EngineRpc {
         };
         let instance = self
             .provider_instances_store()?
-            .instance(id)
-            .ok_or_else(|| {
-                RpcError::Failed(format!(
-                    "Provider instance '{id}' is not set up on this device"
-                ))
-            })?;
+            .require(id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
         if let Some(harness) = harness.filter(|harness| *harness != instance.driver) {
             return Err(RpcError::Failed(format!(
                 "Provider instance '{id}' runs on {}, not {}",
@@ -2573,6 +2600,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_PROVIDER_INSTANCES
             | methods::UPSERT_PROVIDER_INSTANCE
             | methods::DELETE_PROVIDER_INSTANCE
+            | methods::LIST_ACP_AUTH_METHODS
             | methods::GET_SYSTEM_PROMPT
             | methods::SET_SYSTEM_PROMPT
             // Checkout diffs are produced on the device holding the checkout.
@@ -5306,6 +5334,18 @@ impl RpcService for EngineRpc {
                 }
                 RpcReply::value(&snapshot)
             }
+            methods::LIST_ACP_AUTH_METHODS => {
+                let p: ListAcpAuthMethodsParams = parse_params(params)?;
+                let acp = self
+                    .provider_instances_store()?
+                    .acp_harness(&p.instance_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let auth_methods = acp
+                    .auth_methods()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&auth_methods)
+            }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
@@ -5572,6 +5612,27 @@ impl RpcService for EngineRpc {
                     .requester_device_id
                     .as_deref()
                     .filter(|requester| !requester.is_empty() && *requester != own_id);
+                if let Some(instance) = self.acp_instance(p.instance_id.as_deref())? {
+                    if instance.driver != p.harness {
+                        return Err(RpcError::Failed(format!(
+                            "Provider instance '{}' runs on {}, not {}",
+                            instance.id,
+                            instance.driver.display_name(),
+                            p.harness.display_name()
+                        )));
+                    }
+                    let acp = self
+                        .provider_instances_store()?
+                        .acp_harness(&instance.id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let start = self.agent_accounts.start_acp_instance_login(
+                        p.harness,
+                        acp,
+                        p.method_id,
+                        requester,
+                    );
+                    return RpcReply::value(&start);
+                }
                 let (accounts, _) =
                     self.agent_accounts_for(p.instance_id.as_deref(), Some(p.harness))?;
                 let start = accounts
@@ -5591,7 +5652,7 @@ impl RpcService for EngineRpc {
             }
             methods::POLL_AGENT_LOGIN => {
                 let p: LoginIdParams = parse_params(params)?;
-                let (accounts, _) = self.agent_accounts_for(p.instance_id.as_deref(), None)?;
+                let accounts = self.login_accounts_for(p.instance_id.as_deref())?;
                 let poll = accounts
                     .poll_login(&p.login_id)
                     .await
@@ -5600,7 +5661,7 @@ impl RpcService for EngineRpc {
             }
             methods::CANCEL_AGENT_LOGIN => {
                 let p: LoginIdParams = parse_params(params)?;
-                let (accounts, _) = self.agent_accounts_for(p.instance_id.as_deref(), None)?;
+                let accounts = self.login_accounts_for(p.instance_id.as_deref())?;
                 accounts.cancel_login(&p.login_id);
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }

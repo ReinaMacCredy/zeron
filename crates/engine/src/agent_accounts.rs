@@ -1977,6 +1977,66 @@ impl AgentAccounts {
         }
     }
 
+    /// No slot snapshot and no reap: the login is the instance agent's own.
+    pub fn start_acp_instance_login(
+        &self,
+        harness: HarnessId,
+        acp: zeron_harness::AcpHarness,
+        method: Option<String>,
+        requester: Option<&str>,
+    ) -> AgentLoginStart {
+        self.sweep_flows();
+        let login_id = new_id();
+        let state = Arc::new(Mutex::new(TaskLoginState {
+            requester: requester.map(str::to_string),
+            ..Default::default()
+        }));
+        #[cfg(unix)]
+        let browser = (harness == HarnessId::Antigravity)
+            .then(|| self.inner.config.private_root().ok())
+            .flatten()
+            .and_then(|root| ensure_noop_browser(&root));
+        #[cfg(not(unix))]
+        let browser = None;
+        let task_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let progress_state = task_state.clone();
+            let outcome = acp
+                .sign_in_with(
+                    zeron_harness::acp::SignInOptions {
+                        browser,
+                        method,
+                        ..Default::default()
+                    },
+                    move |progress| match progress {
+                        zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
+                            lock(&progress_state).url = Some(url);
+                        }
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string());
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness,
+                started_at: Instant::now(),
+                state,
+                handle,
+                home: None,
+                port: None,
+            },
+        );
+        AgentLoginStart {
+            login_id,
+            url: String::new(),
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        }
+    }
+
     /// Cursor: the SDK's own PKCE browser flow, driven through the zeron shim
     /// in login mode. The minted key lands in a throwaway store file (never
     /// the live `~/.cursor/sdk/auth.json`), then snapshots into a slot on

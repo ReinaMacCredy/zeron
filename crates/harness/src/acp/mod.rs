@@ -50,9 +50,9 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode, UserInputAnswer,
-    UserInputQuestion,
+    AcpAuthMethod, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption,
+    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -982,30 +982,52 @@ pub fn antigravity_saved_auth_method(home: &Path) -> Option<String> {
         .map(|method| method.canonical)
 }
 
-fn sign_in_auth_method(
-    initialized: &Value,
-    default_method: &str,
-    configured_method: Option<&ConfiguredAuthMethod>,
-) -> Result<String, HarnessError> {
-    let available: Vec<&str> = initialized
+fn auth_methods(initialized: &Value) -> Vec<AcpAuthMethod> {
+    initialized
         .get("authMethods")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
-        .filter_map(|method| method.get("id").and_then(Value::as_str))
-        .collect();
+        .filter_map(|method| {
+            let id = method.get("id").and_then(Value::as_str)?;
+            let text = |key| method.get(key).and_then(Value::as_str).map(str::to_owned);
+            Some(AcpAuthMethod {
+                id: id.to_owned(),
+                name: text("name").unwrap_or_else(|| id.to_owned()),
+                description: text("description"),
+                kind: text("type").unwrap_or_else(|| "agent".to_owned()),
+            })
+        })
+        .collect()
+}
+
+fn sign_in_auth_method(
+    display_name: &str,
+    initialized: &Value,
+    default_method: &str,
+    configured_method: Option<&ConfiguredAuthMethod>,
+) -> Result<String, HarnessError> {
+    let available = auth_methods(initialized);
     let selected = configured_method.map_or(default_method, |method| method.canonical.as_str());
-    if available.contains(&selected) {
-        return Ok(selected.to_owned());
+    match available.iter().find(|method| method.id == selected) {
+        Some(method) if method.signs_in_app() => return Ok(selected.to_owned()),
+        Some(method) => {
+            return Err(HarnessError::Protocol(format!(
+                "{display_name}'s sign-in method {} runs in a {} and cannot run in Zeron",
+                method.name, method.kind
+            )));
+        }
+        None => {}
     }
     let (source, named) = match configured_method {
         Some(method) => ("configured", method.configured.as_str()),
         None => ("default", default_method),
     };
+    let ids: Vec<&str> = available.iter().map(|method| method.id.as_str()).collect();
     Err(HarnessError::Protocol(format!(
-        "Antigravity's {source} auth method {named} is not advertised by the server; available methods: {}",
-        available.join(", ")
+        "{display_name}'s {source} auth method {named} is not advertised by the server; available methods: {}",
+        ids.join(", ")
     )))
 }
 
@@ -1441,6 +1463,40 @@ impl AcpHarness {
         }
     }
 
+    pub async fn auth_methods(&self) -> Result<Vec<AcpAuthMethod>, HarnessError> {
+        let home = std::env::var("HOME").ok();
+        let (_scratch, mut child, stderr_tail, _sign_in_prompted) =
+            self.spawn_agent(home.as_deref(), false, None).await?;
+        let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            _ => {
+                child.shutdown(self.kill_grace).await;
+                return Err(HarnessError::Protocol("agent child has no stdio".into()));
+            }
+        };
+        let initialized = tokio::time::timeout(
+            self.model_discovery_timeout,
+            client.request("initialize", initialize_params(self.spec.id)),
+        )
+        .await;
+        child.shutdown(self.kill_grace).await;
+        match initialized {
+            Ok(initialized) => Ok(auth_methods(&initialized?)),
+            Err(_) => {
+                let mut error = format!(
+                    "{} did not answer initialize within {}s",
+                    self.spec.display_name,
+                    self.model_discovery_timeout.as_secs()
+                );
+                if let Some(stderr) = stderr_tail.snapshot() {
+                    error.push_str("; stderr: ");
+                    error.push_str(&stderr);
+                }
+                Err(HarnessError::Protocol(error))
+            }
+        }
+    }
+
     /// run the agent's own sign-in outside any chat: install the server if
     /// needed, then `authenticate` with the spec's method. The server opens
     /// the sign-in page through `browser` (`$BROWSER`), so a caller that opens
@@ -1567,8 +1623,12 @@ impl AcpHarness {
             let initialized = client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
-            let method =
-                sign_in_auth_method(&initialized, default_method, configured_method.as_ref())?;
+            let method = sign_in_auth_method(
+                display_name,
+                &initialized,
+                default_method,
+                configured_method.as_ref(),
+            )?;
             request_draining(
                 &client,
                 &mut incoming,
@@ -5498,10 +5558,43 @@ mod tests {
     }
 
     #[test]
+    fn auth_methods_default_to_agent_and_a_terminal_method_never_signs_in() {
+        let initialized = json!({ "authMethods": [
+            { "id": "browser", "name": "Log in", "description": "Opens a browser" },
+            { "id": "setup", "name": "Run setup", "type": "terminal", "args": ["--setup"] },
+            { "name": "no id" },
+        ]});
+        assert_eq!(
+            auth_methods(&initialized),
+            [
+                AcpAuthMethod {
+                    id: "browser".into(),
+                    name: "Log in".into(),
+                    description: Some("Opens a browser".into()),
+                    kind: "agent".into(),
+                },
+                AcpAuthMethod {
+                    id: "setup".into(),
+                    name: "Run setup".into(),
+                    description: None,
+                    kind: "terminal".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            sign_in_auth_method("Agent", &initialized, "browser", None).unwrap(),
+            "browser"
+        );
+        let error = sign_in_auth_method("Agent", &initialized, "setup", None).unwrap_err();
+        assert!(error.to_string().contains("runs in a terminal"), "{error}");
+    }
+
+    #[test]
     fn antigravity_sign_in_preserves_an_advertised_configured_method() {
         let initialized = all_antigravity_auth_methods();
         assert_eq!(
             sign_in_auth_method(
+                "Antigravity",
                 &initialized,
                 "oauth-personal",
                 Some(&ConfiguredAuthMethod::new("oauth-business".into()))
@@ -5510,7 +5603,7 @@ mod tests {
             "oauth-business"
         );
         assert_eq!(
-            sign_in_auth_method(&initialized, "oauth-personal", None).unwrap(),
+            sign_in_auth_method("Antigravity", &initialized, "oauth-personal", None).unwrap(),
             "oauth-personal"
         );
     }
@@ -5521,6 +5614,7 @@ mod tests {
             "authMethods": [{"id": "oauth-personal"}]
         });
         let error = sign_in_auth_method(
+            "Antigravity",
             &initialized,
             "oauth-personal",
             Some(&ConfiguredAuthMethod::new("oauth-business".into())),
@@ -5537,6 +5631,7 @@ mod tests {
     fn antigravity_sign_in_resolves_the_vertex_ai_alias() {
         assert_eq!(
             sign_in_auth_method(
+                "Antigravity",
                 &all_antigravity_auth_methods(),
                 "oauth-personal",
                 Some(&ConfiguredAuthMethod::new("vertex-ai".into()))
@@ -5549,6 +5644,7 @@ mod tests {
     #[test]
     fn antigravity_sign_in_still_refuses_an_unknown_configured_method() {
         let error = sign_in_auth_method(
+            "Antigravity",
             &all_antigravity_auth_methods(),
             "oauth-personal",
             Some(&ConfiguredAuthMethod::new("totally-made-up".into())),
@@ -5647,6 +5743,7 @@ mod tests {
             configured_auth_method_in(&gemini_home.join("antigravity-acp").join("settings.json"))
                 .unwrap();
         sign_in_auth_method(
+            "Antigravity",
             &all_antigravity_auth_methods(),
             "oauth-personal",
             configured.as_ref(),
