@@ -867,4 +867,84 @@ mod tests {
             "a record of another distribution: {error}"
         );
     }
+
+    #[tokio::test]
+    #[ignore = "live: fetches the real ACP Registry and installs two agents"]
+    async fn live_registry_smoke() {
+        let data_dir = PathBuf::from(std::env::var("ZERON_SMOKE_DATA_DIR").unwrap());
+        assert!(std::env::var_os("ZERON_ADAPTERS_DIR").is_some());
+        let all = search(&data_dir, None).await.unwrap();
+        let first: Vec<_> = all
+            .iter()
+            .take(6)
+            .map(|row| (&row.id, &row.distributions))
+            .collect();
+        println!("search all: {} rows, first {first:?}", all.len());
+        let index_path = registry_dir(&data_dir).join("index.json");
+        let cached: CachedIndex =
+            serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+        let revalidated = fetch_index(INDEX_URL, cached.etag.as_deref())
+            .await
+            .unwrap();
+        println!(
+            "cached etag {:?}; If-None-Match answer: {}",
+            cached.etag,
+            match revalidated {
+                Fetched::NotModified => "304 Not Modified".to_owned(),
+                Fetched::Body { .. } => "200 with a new body".to_owned(),
+            }
+        );
+        let stale = CachedIndex {
+            fetched_at: 0,
+            ..cached
+        };
+        persist_json(&index_path, &stale).unwrap();
+        let offline = load_index(&data_dir, "http://127.0.0.1:9/registry.json")
+            .await
+            .unwrap();
+        println!(
+            "offline with a stale cache: {} agents served",
+            offline.len()
+        );
+
+        for (agent_id, distribution) in [("pi-acp", None), ("kimchi", None)] {
+            let prepared = prepare(&data_dir, agent_id, distribution).await.unwrap();
+            println!("prepared: {prepared:?}");
+            let record = record_path(
+                &data_dir,
+                &prepared.agent_id,
+                &prepared.version,
+                prepared.distribution,
+            );
+            println!(
+                "record {}:\n{}",
+                record.display(),
+                std::fs::read_to_string(&record).unwrap()
+            );
+            let instance = ProviderInstance {
+                id: format!("acp_{}", agent_id.replace('-', "_")),
+                driver: HarnessId::Acp,
+                label: prepared.display_name.clone(),
+                accent: None,
+                config: InstanceConfig::Acp {
+                    source: AcpSource::Registry {
+                        agent_id: prepared.agent_id.clone(),
+                        version: prepared.version.clone(),
+                        distribution: prepared.distribution,
+                    },
+                    env: BTreeMap::new(),
+                    icon_path: prepared.icon_path.clone(),
+                },
+            };
+            let launch = crate::provider_instances::acp_launch(&instance, &data_dir).unwrap();
+            println!("launch: {launch:?}");
+            let methods = zeron_harness::AcpHarness::generic(launch)
+                .unwrap()
+                .auth_methods()
+                .await;
+            println!("initialize -> authMethods: {methods:?}");
+        }
+        let kimchi = search(&data_dir, Some("kimchi")).await.unwrap();
+        println!("search kimchi: {kimchi:?}");
+    }
 }
