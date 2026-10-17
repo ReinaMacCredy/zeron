@@ -902,7 +902,6 @@ impl TaskCard {
             .role(gpui::Role::Button)
             .aria_label("Delete task")
             .rounded_full()
-            .hover(|s| s.text_color(theme.danger))
             .child(icon(icons::TRASH_BIN_MINIMALISTIC).size(px(14.0)))
             .child("Delete")
             .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
@@ -981,5 +980,56 @@ impl Render for TaskCard {
             notes: open.notes.clone(),
         };
         self.render_card(fields, row.as_ref(), &theme, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(id: &str, completed: bool) -> zeron_proto::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "title": id,
+            "orderKey": id,
+            "completedAt": completed.then(|| "2026-10-17T00:00:00Z"),
+        }))
+        .unwrap()
+    }
+
+    #[gpui::test]
+    fn every_card_state_renders_its_controls(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![task("plain", false), task("finished", true)];
+        });
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        card.update(cx, |card, cx| {
+            card.open("plain".into(), None, CardFocus::Title, None, cx);
+            card.toggle_more(cx);
+        });
+        cx.run_until_parked();
+        for selector in [
+            "task-card-hand-off",
+            "task-card-start",
+            "task-card-folder",
+            "task-card-due",
+            "task-card-project",
+            "task-card-delete",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+        }
+        card.update(cx, |card, cx| {
+            card.open("finished".into(), None, CardFocus::Title, None, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-card-hand-off").is_none());
+        assert!(cx.debug_bounds("task-card-toggle-done").is_some());
     }
 }
