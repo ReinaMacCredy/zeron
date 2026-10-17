@@ -18,21 +18,28 @@
 //! enforces the same gates where the state lives, so a raced or stale toggle
 //! self-corrects from the RPC reply.
 
+use std::collections::HashMap;
+
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 
 use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
 
-use zeron_proto::{HarnessId, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateStatus};
+use zeron_proto::{
+    HarnessId, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateStatus, InstanceConfig,
+    ProviderInstance,
+};
 
 use zeron_rpc::methods;
 
 use crate::motion;
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
+use crate::provider_instances::{self, ProviderInstanceWrite};
 use crate::settings::accounts::{self, AccountsPage};
+use crate::settings::add_provider::{self, AddProviderDialog, AddProviderEvent};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -191,6 +198,12 @@ pub struct HarnessesPage {
     /// "Check now" is running: the button says so, since rows no longer
     /// show "Checking…" while a check is in flight.
     checking_updates: bool,
+    instances: Loadable<Vec<ProviderInstance>>,
+    instances_task: Option<Task<()>>,
+    instance_write_task: Option<Task<()>>,
+    instance_accounts: HashMap<String, Entity<AccountsPage>>,
+    confirm_delete: Option<String>,
+    wizard: Option<(Entity<AddProviderDialog>, Subscription)>,
 }
 
 impl HarnessesPage {
@@ -215,9 +228,288 @@ impl HarnessesPage {
             update_task: None,
             update_action_task: None,
             checking_updates: false,
+            instances: Loadable::Idle,
+            instances_task: None,
+            instance_write_task: None,
+            instance_accounts: HashMap::new(),
+            confirm_delete: None,
+            wizard: None,
         };
         page.load(cx);
+        if std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("add-provider") {
+            page.open_wizard(None, cx);
+            let driver = std::env::var("ZERON_ADD_PROVIDER_DRIVER")
+                .ok()
+                .and_then(|driver| serde_json::from_value(serde_json::Value::String(driver)).ok());
+            let step = std::env::var("ZERON_ADD_PROVIDER_STEP")
+                .ok()
+                .and_then(|step| add_provider::Step::from_knob(&step));
+            if let Some((wizard, _)) = &page.wizard {
+                wizard.update(cx, |wizard, cx| {
+                    if let Some(driver) = driver {
+                        wizard.select_driver(driver, cx);
+                    }
+                    if let Some((step, taken)) = step {
+                        wizard.open_at(step, taken, cx);
+                    }
+                });
+            }
+        }
         page
+    }
+
+    fn device_name(&self, cx: &Context<Self>) -> SharedString {
+        let state = self.state.read(cx);
+        match &self.target_device {
+            Some(id) if state.local_device_id.as_deref() != Some(id.as_str()) => state
+                .devices
+                .iter()
+                .find(|device| &device.id == id)
+                .map_or_else(|| "this device".into(), |device| device.name.clone().into()),
+            _ => "This Mac".into(),
+        }
+    }
+
+    fn open_wizard(&mut self, editing: Option<ProviderInstance>, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        let target = self.target_device.clone();
+        let device = self.device_name(cx);
+        let harnesses = self.harnesses.ready().cloned().unwrap_or_default();
+        let instances = self.instances.ready().cloned().unwrap_or_default();
+        let wizard = cx.new(|cx| {
+            AddProviderDialog::new(state, target, device, harnesses, instances, editing, cx)
+        });
+        let events = cx.subscribe(&wizard, |page: &mut Self, _, event, cx| match event {
+            AddProviderEvent::Close => {
+                page.wizard = None;
+                cx.notify();
+            }
+            AddProviderEvent::Saved {
+                instances,
+                instance,
+                sign_in,
+            } => {
+                page.wizard = None;
+                page.instance_accounts.remove(&instance.id);
+                page.set_instances(Ok(instances.clone()), cx);
+                provider_instances::bump_provider_instances(cx);
+                if *sign_in && let Some(accounts) = page.instance_accounts.get(&instance.id) {
+                    accounts.update(cx, |accounts, cx| accounts.sign_in(cx));
+                }
+            }
+        });
+        self.confirm_delete = None;
+        self.wizard = Some((wizard, events));
+        cx.notify();
+    }
+
+    fn set_instances(
+        &mut self,
+        result: Result<Vec<ProviderInstance>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.instances = match result {
+            Ok(instances) => Loadable::Ready(instances),
+            Err(error) => Loadable::Error(error),
+        };
+        let own_login: Vec<ProviderInstance> = self
+            .instances
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|instance| provider_instances::has_own_login(instance))
+            .cloned()
+            .collect();
+        self.instance_accounts
+            .retain(|id, _| own_login.iter().any(|instance| &instance.id == id));
+        for instance in own_login {
+            if self.instance_accounts.contains_key(&instance.id) {
+                continue;
+            }
+            let state = self.state.clone();
+            let target = self.target_device.clone();
+            let accounts = cx.new(|cx| {
+                AccountsPage::new_instance(
+                    state,
+                    target,
+                    instance.driver,
+                    instance.id.clone(),
+                    instance.label.clone(),
+                    cx,
+                )
+            });
+            cx.observe(&accounts, |_, _, cx| cx.notify()).detach();
+            self.instance_accounts.insert(instance.id, accounts);
+        }
+        if let (Some((wizard, _)), Some(instances)) = (&self.wizard, self.instances.ready()) {
+            let instances = instances.clone();
+            wizard.update(cx, |wizard, cx| wizard.set_instances(instances, cx));
+        }
+        cx.notify();
+    }
+
+    fn delete_instance(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.confirm_delete.as_deref() != Some(id.as_str()) {
+            self.confirm_delete = Some(id);
+            cx.notify();
+            return;
+        }
+        self.confirm_delete = None;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = self.target_device.clone().map(serde_json::Value::String);
+        self.instance_write_task = Some(cx.spawn(async move |this, cx| {
+            let result = provider_instances::write(
+                &engine,
+                ProviderInstanceWrite::Delete { instance_id: id },
+                target,
+            )
+            .await;
+            this.update(cx, |page, cx| match result {
+                Ok(instances) => {
+                    page.set_instances(Ok(instances), cx);
+                    provider_instances::bump_provider_instances(cx);
+                }
+                Err(error) => {
+                    page.error = Some(error);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn instance_row(
+        &self,
+        instance: &ProviderInstance,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (mark, tint) = crate::pickers::harness_brand_icon(instance.driver);
+        let id = instance.id.clone();
+        let confirming = self.confirm_delete.as_deref() == Some(id.as_str());
+        let accounts = self.instance_accounts.get(&id).cloned();
+        let busy = accounts
+            .as_ref()
+            .is_some_and(|accounts| accounts.read(cx).signing_in());
+        let native = matches!(instance.config, InstanceConfig::Native { .. });
+        let status = match accounts {
+            Some(accounts) => Some(div().min_w_0().max_w(px(240.0)).child(accounts)),
+            None if native && accounts::signs_in(instance.driver) => Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "Uses the default {} login",
+                        add_provider::driver_name(instance.driver)
+                    ))),
+            ),
+            None => None,
+        };
+        let accent = provider_instances::instance_accent(instance);
+        let editing = instance.clone();
+        let tile = div()
+            .flex_none()
+            .size(px(28.0))
+            .rounded(px(8.0))
+            .bg(theme.wash(0.06))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                crate::icons::icon(mark)
+                    .size(px(14.0))
+                    .text_color(tint.unwrap_or(theme.text_muted)),
+            );
+        widgets::card_row(theme, false)
+            .id(SharedString::from(format!("provider-instance-{id}")))
+            .ml(px(16.0 + DETAILS_INSET))
+            .min_h(px(52.0))
+            .flex_nowrap()
+            .gap(px(12.0))
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(widgets::row_title(theme, instance.label.clone()).truncate())
+                            .when_some(accent, |el, accent| {
+                                el.child(div().flex_none().size(px(8.0)).rounded_full().bg(accent))
+                            }),
+                    )
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .font_family(theme.font_mono.clone())
+                                .child(SharedString::from(id.clone()))
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .children(status)
+            .child(
+                widgets::ghost_action(theme)
+                    .id(SharedString::from(format!("provider-instance-edit-{id}")))
+                    .flex_none()
+                    .px(px(8.0))
+                    .role(gpui::Role::Button)
+                    .aria_label("Edit")
+                    .tooltip(widgets::text_tooltip("Edit"))
+                    .when(busy || !native, |el| el.opacity(0.4))
+                    .when(!busy && native, |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            page.open_wizard(Some(editing.clone()), cx)
+                        }))
+                    })
+                    .child(
+                        crate::icons::icon(crate::icons::PEN)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                widgets::ghost_action(theme)
+                    .id(SharedString::from(format!("provider-instance-delete-{id}")))
+                    .flex_none()
+                    .px(px(8.0))
+                    .role(gpui::Role::Button)
+                    .aria_label(if confirming {
+                        "Confirm delete"
+                    } else {
+                        "Delete"
+                    })
+                    .when(busy, |el| el.opacity(0.4))
+                    .when(!busy, |el| {
+                        el.on_click(
+                            cx.listener(move |page, _, _, cx| page.delete_instance(id.clone(), cx)),
+                        )
+                    })
+                    .map(|el| {
+                        if confirming {
+                            el.text_color(theme.danger).child("Delete?")
+                        } else {
+                            el.tooltip(widgets::text_tooltip("Delete")).child(
+                                crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            )
+                        }
+                    }),
+            )
+            .into_any_element()
     }
 
     fn toggle_agent_details(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
@@ -352,6 +644,17 @@ impl HarnessesPage {
     /// Escape that reached Settings unclaimed goes to the expanded provider's
     /// accounts (an open login) first. Returns whether it was consumed.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.wizard.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        let accounts: Vec<_> = self.instance_accounts.values().cloned().collect();
+        if accounts
+            .into_iter()
+            .any(|accounts| accounts.update(cx, |page, cx| page.dismiss_on_escape(cx)))
+        {
+            return true;
+        }
         self.expanded_harness.is_some()
             && self
                 .accounts_page
@@ -404,6 +707,10 @@ impl HarnessesPage {
             });
         }
         self.error = None;
+        self.wizard = None;
+        self.confirm_delete = None;
+        self.instance_accounts.clear();
+        self.instances = Loadable::Idle;
         self.harnesses = Loadable::Idle;
         self.updates = Loadable::Idle;
         self.update_task = None;
@@ -486,6 +793,13 @@ impl HarnessesPage {
                 }
             })
         });
+        let instance_engine = engine.clone();
+        let target = self.target_device.clone().map(serde_json::Value::String);
+        self.instances_task = Some(cx.spawn(async move |this, cx| {
+            let result = provider_instances::list(&instance_engine, target).await;
+            this.update(cx, |page, cx| page.set_instances(result, cx))
+                .ok();
+        }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {
@@ -496,6 +810,10 @@ impl HarnessesPage {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                if let (Some((wizard, _)), Some(list)) = (&page.wizard, page.harnesses.ready()) {
+                    let list = list.clone();
+                    wizard.update(cx, |wizard, cx| wizard.set_harnesses(list, cx));
+                }
                 cx.notify();
             })
             .ok();
@@ -880,7 +1198,18 @@ impl HarnessesPage {
         };
         let descriptors = visible_harnesses(list);
         let enabled_count = descriptors.iter().filter(|d| descriptor_enabled(d)).count();
-        descriptors
+        let instances = self.instances.ready().cloned().unwrap_or_default();
+        let listed = |instance: &ProviderInstance| {
+            matches!(instance.config, InstanceConfig::Native { .. })
+                && descriptors.iter().any(|d| d.id == instance.driver)
+        };
+        let orphans: Vec<AnyElement> = instances
+            .iter()
+            .filter(|instance| !listed(instance))
+            .map(|instance| self.instance_row(instance, &theme, cx))
+            .collect();
+        let mut rows: Vec<AnyElement> = descriptors
+            .clone()
             .into_iter()
             .enumerate()
             .map(|(ix, descriptor)| {
@@ -1197,6 +1526,11 @@ impl HarnessesPage {
                                 ))
                         }),
                     );
+                let instance_rows: Vec<AnyElement> = instances
+                    .iter()
+                    .filter(|instance| instance.driver == harness && listed(instance))
+                    .map(|instance| self.instance_row(instance, &theme, cx))
+                    .collect();
                 div()
                     .flex()
                     .flex_col()
@@ -1204,9 +1538,12 @@ impl HarnessesPage {
                     .when(expanded, |row| {
                         row.child(self.render_agent_details(harness, &theme, cx))
                     })
+                    .children(instance_rows)
                     .into_any_element()
             })
-            .collect()
+            .collect();
+        rows.extend(orphans);
+        rows
     }
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if self.scroll.set_list_hovered(*hovered) {
@@ -1229,6 +1566,27 @@ impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let supports_updates = self.supports_updates(cx);
+        let add_provider = widgets::action_button(&theme, widgets::ActionTone::Outlined)
+            .id("add-provider")
+            .flex_none()
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .on_click(cx.listener(|page, _, _, cx| page.open_wizard(None, cx)))
+            .child(
+                crate::icons::icon(crate::icons::PLUS)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .child("Add provider");
+        let instances_error = match &self.instances {
+            Loadable::Error(message) => Some(widgets::error_strip(
+                &theme,
+                format!("Provider instances: {message}"),
+            )),
+            _ => None,
+        };
+        let wizard = self.wizard.as_ref().map(|(wizard, _)| wizard.clone());
 
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
@@ -1345,10 +1703,12 @@ impl Render for HarnessesPage {
                                                 .items_center()
                                                 .gap(px(6.0))
                                                 .when(supports_updates, |el| el.child(check))
+                                                .child(add_provider)
                                                 .child(switcher),
                                         ),
                                 )
                                 .children(update_error)
+                                .children(instances_error)
                                 .child(body)
                                 .children(limits),
                         ),
@@ -1356,6 +1716,7 @@ impl Render for HarnessesPage {
                 .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
+            .children(wizard)
     }
 }
 

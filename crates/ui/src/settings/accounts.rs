@@ -644,10 +644,41 @@ pub(crate) struct AccountsSnapshotCache(
 
 impl gpui::Global for AccountsSnapshotCache {}
 
+fn cache_snapshot(
+    key: Option<Option<String>>,
+    snapshot: &AgentAccountsSnapshot,
+    cx: &mut gpui::App,
+) {
+    if let Some(key) = key {
+        cx.default_global::<AccountsSnapshotCache>()
+            .0
+            .insert(key, snapshot.clone());
+    }
+}
+
+fn instance_login_copy(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::ClaudeCode => {
+            "Finish signing in to Claude in your browser. The login is saved to this \
+             instance only."
+        }
+        _ => {
+            "Finish signing in to ChatGPT in your browser. The login is saved to this \
+             instance only."
+        }
+    }
+}
+
+struct InstanceAccount {
+    id: String,
+    label: String,
+}
+
 pub struct AccountsPage {
     state: Entity<AppState>,
     embedded: bool,
     embedded_harness: Option<HarnessId>,
+    instance: Option<InstanceAccount>,
     scroll: widgets::PageScroll,
     /// Which device's logins are shown; `None` = this device (no passthrough).
     /// Retargeted by the page-header device switcher (zeron parity: the
@@ -674,7 +705,7 @@ pub struct AccountsPage {
 
 impl AccountsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::new_with_layout(state, false, None, None, cx)
+        Self::new_with_layout(state, false, None, None, None, cx)
     }
 
     pub fn new_embedded(
@@ -683,7 +714,29 @@ impl AccountsPage {
         harness: HarnessId,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_layout(state, true, target_device, Some(harness), cx)
+        Self::new_with_layout(state, true, target_device, Some(harness), None, cx)
+    }
+
+    pub fn new_instance(
+        state: Entity<AppState>,
+        target_device: Option<String>,
+        harness: HarnessId,
+        instance_id: String,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let instance = InstanceAccount {
+            id: instance_id,
+            label,
+        };
+        Self::new_with_layout(
+            state,
+            true,
+            target_device,
+            Some(harness),
+            Some(instance),
+            cx,
+        )
     }
 
     fn new_with_layout(
@@ -691,6 +744,7 @@ impl AccountsPage {
         embedded: bool,
         target_device: Option<String>,
         embedded_harness: Option<HarnessId>,
+        instance: Option<InstanceAccount>,
         cx: &mut Context<Self>,
     ) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
@@ -704,6 +758,7 @@ impl AccountsPage {
             state,
             embedded,
             embedded_harness,
+            instance,
             scroll: widgets::PageScroll::default(),
             target_device,
             device_select: widgets::SelectState::default(),
@@ -767,7 +822,28 @@ impl AccountsPage {
         if let (Some(target), Some(object)) = (&self.target_device, value.as_object_mut()) {
             object.insert("targetDeviceId".into(), serde_json::json!(target));
         }
+        if let (Some(instance), Some(object)) = (&self.instance, value.as_object_mut()) {
+            object.insert("instanceId".into(), serde_json::json!(instance.id));
+        }
         value
+    }
+
+    fn cache_key(&self) -> Option<Option<String>> {
+        self.instance.is_none().then(|| self.target_device.clone())
+    }
+
+    pub(crate) fn sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(harness) = self.embedded_harness else {
+            return;
+        };
+        let provider = login_options(harness)
+            .first()
+            .and_then(|option| option.provider);
+        self.start_login(harness, provider, cx);
+    }
+
+    pub(crate) fn signing_in(&self) -> bool {
+        self.login.is_some()
     }
 
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
@@ -865,11 +941,12 @@ impl AccountsPage {
             self.snapshot = Loadable::Error("Engine not connected".into());
             return;
         };
-        let key = self.target_device.clone();
+        let key = self.cache_key();
         if !matches!(self.snapshot, Loadable::Ready(_)) {
             self.snapshot = match cx
                 .try_global::<AccountsSnapshotCache>()
-                .and_then(|cache| cache.0.get(&key))
+                .zip(key.as_ref())
+                .and_then(|(cache, key)| cache.0.get(key))
             {
                 Some(cached) => Loadable::Ready(cached.clone()),
                 None => Loadable::Loading,
@@ -897,9 +974,7 @@ impl AccountsPage {
             if paint_first && let Ok(snapshot) = fetch(plain).await {
                 let key = key.clone();
                 this.update(cx, |page, cx| {
-                    cx.default_global::<AccountsSnapshotCache>()
-                        .0
-                        .insert(key, snapshot.clone());
+                    cache_snapshot(key, &snapshot, cx);
                     page.snapshot = Loadable::Ready(snapshot);
                     cx.notify();
                 })
@@ -910,9 +985,7 @@ impl AccountsPage {
                 page.refreshing = false;
                 match result {
                     Ok(snapshot) => {
-                        cx.default_global::<AccountsSnapshotCache>()
-                            .0
-                            .insert(key, snapshot.clone());
+                        cache_snapshot(key, &snapshot, cx);
                         page.snapshot = Loadable::Ready(snapshot);
                     }
                     // A failed revalidation keeps the painted rows.
@@ -956,16 +1029,14 @@ impl AccountsPage {
             "accountId": account.id,
             "harness": account.harness,
         }));
-        let key = self.target_device.clone();
+        let key = self.cache_key();
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(method, params).await;
             this.update(cx, |page, cx| {
                 page.busy_account = None;
                 match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
                     Ok(Ok(snapshot)) => {
-                        cx.default_global::<AccountsSnapshotCache>()
-                            .0
-                            .insert(key, snapshot.clone());
+                        cache_snapshot(key, &snapshot, cx);
                         page.snapshot = Loadable::Ready(snapshot);
                     }
                     // An older engine's reply without the list: fetch it.
@@ -987,7 +1058,7 @@ impl AccountsPage {
     // ---- add-account flows ----
 
     /// Start (or Retry) a sign-in: the same dialog for every provider.
-    fn start_login(
+    pub(crate) fn start_login(
         &mut self,
         harness: HarnessId,
         provider: Option<&'static str>,
@@ -1633,7 +1704,10 @@ impl AccountsPage {
         let theme = Theme::of(cx).for_popup();
         let red_text = theme.danger_muted.opacity(0.9); // red-300
         let login = self.login.as_ref()?;
-        let title = login.title();
+        let title = match &self.instance {
+            Some(instance) => format!("Sign in to {}", instance.label),
+            None => login.title(),
+        };
         let failed = matches!(login.step, LoginStep::Failed { .. });
         let action = |id: &'static str, tone: widgets::ActionTone, label: &'static str| {
             widgets::text_action(&theme, tone, label)
@@ -1642,13 +1716,18 @@ impl AccountsPage {
                 .role(gpui::Role::Button)
                 .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
         };
-        let copy = match login.step {
-            LoginStep::PasteCode { .. } => {
+        let copy = match (&login.step, &self.instance) {
+            (LoginStep::PasteCode { .. }, Some(_)) => {
+                "Your browser opened Claude's sign-in page. Approve access, then paste the \
+                 code Anthropic shows you below."
+            }
+            (LoginStep::PasteCode { .. }, None) => {
                 "Your browser opened Claude's sign-in page. Approve access, then paste the \
                  code Anthropic shows you below. Your current login is untouched until you \
                  switch."
             }
-            _ => login_copy(login.harness, login.provider),
+            (_, Some(_)) => instance_login_copy(login.harness),
+            (_, None) => login_copy(login.harness, login.provider),
         };
         // "Reopen the sign-in page" (zeron: `text-[12px]
         // text-muted-foreground/60 hover:underline`), once there is a page.
@@ -1868,6 +1947,63 @@ impl popover::ScrollRailHost for AccountsPage {
 }
 
 impl AccountsPage {
+    fn render_instance(
+        &self,
+        harness: HarnessId,
+        theme: &Theme,
+        dialog: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let account = self
+            .snapshot
+            .ready()
+            .and_then(|snapshot| provider_accounts(snapshot, harness).into_iter().next());
+        let status: SharedString = match (&self.snapshot, account) {
+            (_, Some(account)) => account
+                .email
+                .clone()
+                .or_else(|| account.display_name.clone())
+                .unwrap_or_else(|| "Signed in".to_string())
+                .into(),
+            (Loadable::Error(message), None) => message.clone().into(),
+            (Loadable::Ready(_), None) => "Not signed in".into(),
+            _ => "Checking sign-in…".into(),
+        };
+        let signing_in = self.login.is_some();
+        let sign_in =
+            (matches!(self.snapshot, Loadable::Ready(_)) && account.is_none()).then(|| {
+                widgets::text_action(theme, widgets::ActionTone::Outlined, "Sign in")
+                    .id("instance-sign-in")
+                    .flex_none()
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .when(signing_in, |el| el.opacity(0.5))
+                    .on_click(cx.listener(|page, _, _, cx| {
+                        if page.login.is_none() {
+                            page.sign_in(cx);
+                        }
+                    }))
+            });
+        div()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(status),
+            )
+            .children(sign_in)
+            .children(dialog)
+            .into_any_element()
+    }
+
     fn render_embedded_provider(
         &self,
         harness: HarnessId,
@@ -2026,6 +2162,9 @@ impl Render for AccountsPage {
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
+        if let (Some(_), Some(harness)) = (&self.instance, self.embedded_harness) {
+            return self.render_instance(harness, &theme, dialog, cx);
+        }
         if let Some(harness) = self.embedded_harness {
             return self.render_embedded_provider(harness, &theme, now, dialog, cx);
         }
