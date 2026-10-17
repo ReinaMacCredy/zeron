@@ -747,18 +747,17 @@ impl Harness for CodexHarness {
 
     async fn run_one_shot(
         &self,
-        mut request: RunRequest,
+        request: RunRequest,
         controls: RunControls,
         instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        request.resume = None;
-        request.worktree = None;
-        request.attachments.clear();
-        request.mcp = None;
-        request.model_options.clear();
-        request.auto_approve = false;
-        self.run_with_mode(request, controls, Some(instructions), false)
-            .await
+        self.run_with_mode(
+            crate::one_shot_request(request),
+            controls,
+            Some(instructions),
+            false,
+        )
+        .await
     }
 }
 
