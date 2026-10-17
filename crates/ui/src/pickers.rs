@@ -1848,8 +1848,6 @@ impl Pickers {
             })
     }
 
-    /// The descriptor an instance's rows and tab hang off: its driver's, or for
-    /// a generic ACP agent (no driver tab, D3) one named after the instance.
     fn instance_descriptor(
         instance: &ProviderInstance,
         descriptors: &[HarnessDescriptor],
