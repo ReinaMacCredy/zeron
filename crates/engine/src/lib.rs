@@ -15,6 +15,7 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use zeron_sync::DocsStore;
 
+mod acp_registry;
 pub mod agent_accounts;
 pub mod agent_profiles;
 pub mod auth;

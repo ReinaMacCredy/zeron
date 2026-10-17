@@ -547,6 +547,21 @@ struct ListAcpAuthMethodsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchAcpRegistryParams {
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareAcpAgentParams {
+    agent_id: String,
+    #[serde(default)]
+    distribution: Option<zeron_proto::AcpDistribution>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetSystemPromptParams {
     prompt: String,
 }
@@ -2601,6 +2616,8 @@ fn forwardable(method: &str) -> bool {
             | methods::UPSERT_PROVIDER_INSTANCE
             | methods::DELETE_PROVIDER_INSTANCE
             | methods::LIST_ACP_AUTH_METHODS
+            | methods::SEARCH_ACP_REGISTRY
+            | methods::PREPARE_ACP_AGENT
             | methods::GET_SYSTEM_PROMPT
             | methods::SET_SYSTEM_PROMPT
             // Checkout diffs are produced on the device holding the checkout.
@@ -5345,6 +5362,23 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&auth_methods)
+            }
+            methods::SEARCH_ACP_REGISTRY => {
+                let p: SearchAcpRegistryParams = parse_params(params)?;
+                let store = self.provider_instances_store()?;
+                let agents = crate::acp_registry::search(store.data_dir(), p.query.as_deref())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&agents)
+            }
+            methods::PREPARE_ACP_AGENT => {
+                let p: PrepareAcpAgentParams = parse_params(params)?;
+                let store = self.provider_instances_store()?;
+                let prepared =
+                    crate::acp_registry::prepare(store.data_dir(), &p.agent_id, p.distribution)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&prepared)
             }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;

@@ -541,7 +541,8 @@ fn antigravity_entry() -> &'static str {
     }
 }
 
-fn antigravity_registry_platform() -> Option<&'static str> {
+/// this build's key in an ACP Registry `distribution.binary` map.
+pub fn registry_platform() -> Option<&'static str> {
     Some(if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "darwin-aarch64"
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
@@ -621,7 +622,7 @@ pub fn antigravity_release(manifest: &Value) -> Option<AntigravityRelease> {
     }
     let version = manifest.get("version")?.as_str()?;
     semver::Version::parse(version).ok()?;
-    let archive_url = antigravity_registry_platform()
+    let archive_url = registry_platform()
         .and_then(|platform| manifest.get("distribution")?.get("binary")?.get(platform))
         .filter(|binary| {
             binary
@@ -883,6 +884,12 @@ pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
         })?;
     crate::archive_install::ensure_installed(pin, "Antigravity").await?;
     Ok(())
+}
+
+/// `uvx`, which runs the ACP Registry's `uvx` agents, on PATH or the login
+/// shell's PATH.
+pub fn find_uvx() -> Option<PathBuf> {
+    crate::executable::find_on_paths("uvx", Vec::new())
 }
 
 /// User-global skill folders the server loads (`resolve_skills_paths`).
@@ -5983,7 +5990,7 @@ mod tests {
 
     #[test]
     fn antigravity_registry_release_accepts_only_google_hosted_archives() {
-        let Some(platform) = antigravity_registry_platform() else {
+        let Some(platform) = registry_platform() else {
             return;
         };
         let manifest = |version: &str, archive: &str, cmd: &str| {

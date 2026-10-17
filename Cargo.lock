@@ -13738,6 +13738,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "usvg",
  "uuid",
  "windows-sys 0.61.2",
  "zeron-doc",

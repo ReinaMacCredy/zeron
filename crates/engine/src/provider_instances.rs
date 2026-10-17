@@ -101,7 +101,7 @@ impl ProviderInstancesStore {
         acp_harness(&self.require(id)?, self.data_dir())
     }
 
-    fn data_dir(&self) -> &Path {
+    pub(crate) fn data_dir(&self) -> &Path {
         self.inner.path.parent().unwrap_or(Path::new("."))
     }
 
@@ -214,7 +214,7 @@ pub(crate) fn launch_overrides(
 
 pub(crate) fn acp_launch(
     instance: &ProviderInstance,
-    _data_dir: &Path,
+    data_dir: &Path,
 ) -> Result<AcpLaunch, EngineError> {
     let id = &instance.id;
     let InstanceConfig::Acp { source, env, .. } = &instance.config else {
@@ -222,24 +222,35 @@ pub(crate) fn acp_launch(
             "Provider instance '{id}' has no ACP agent settings"
         )));
     };
-    let (program, args) = match source {
+    let (program, args, env) = match source {
         AcpSource::Local { command, .. } if command.trim().is_empty() => {
             return Err(EngineError::Other(format!(
                 "Provider instance '{id}' has no command to run"
             )));
         }
-        AcpSource::Local { command, args } => (expand(command)?, args.clone()),
-        AcpSource::Registry { agent_id, .. } => {
-            return Err(EngineError::Other(format!(
-                "Provider instance '{id}': the ACP Registry agent '{agent_id}' is not prepared on this device yet"
-            )));
+        AcpSource::Local { command, args } => (expand(command)?, args.clone(), env.clone()),
+        AcpSource::Registry {
+            agent_id,
+            version,
+            distribution,
+        } => {
+            let prepared =
+                crate::acp_registry::prepared_launch(data_dir, agent_id, version, *distribution)?
+                    .ok_or_else(|| {
+                        EngineError::Other(format!(
+                            "Provider instance '{id}': the ACP Registry agent '{agent_id}' is not prepared on this device yet"
+                        ))
+                    })?;
+            let mut merged = prepared.env;
+            merged.extend(env.clone());
+            (prepared.program, prepared.args, merged)
         }
     };
     Ok(AcpLaunch {
         display_name: instance.label.clone(),
         program,
         args,
-        env: env.clone(),
+        env,
     })
 }
 
