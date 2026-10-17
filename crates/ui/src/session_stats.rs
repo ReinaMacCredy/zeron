@@ -139,7 +139,8 @@ fn chip(stats: SessionStats, working: bool, theme: &Theme) -> Option<gpui::State
     Some(
         div()
             .id("session-stats")
-            .flex_none()
+            .min_w_0()
+            .overflow_hidden()
             .h(px(20.0))
             .flex()
             .flex_row()
@@ -154,12 +155,14 @@ fn chip(stats: SessionStats, working: bool, theme: &Theme) -> Option<gpui::State
             .child(
                 crate::icons::icon(crate::icons::SPEEDOMETER)
                     .size(px(12.0))
+                    .flex_none()
                     .text_color(theme.text_muted.opacity(0.6)),
             )
-            .child(SharedString::from(label))
+            .child(div().min_w_0().truncate().child(SharedString::from(label)))
             .when_some(cache, |el, cache| {
                 el.child(
                     div()
+                        .flex_none()
                         .flex()
                         .flex_row()
                         .items_center()
@@ -494,96 +497,12 @@ impl Render for StatsCard {
 pub struct CompactView {
     pub plan: Option<zeron_proto::CompactPlan>,
     pub compacting: bool,
-    pub tokens: Option<u64>,
     pub stats: Option<SessionStats>,
 }
 
 impl CompactView {
-    fn shown(&self) -> bool {
+    pub fn shown(&self) -> bool {
         self.compacting || self.plan.is_some()
-    }
-
-    fn label(&self, now_ms: i64) -> String {
-        match (self.compacting, self.plan) {
-            (true, _) => match self.tokens {
-                Some(count) => format!("Compacting {}…", tokens(count)),
-                None => "Compacting…".into(),
-            },
-            (false, Some(zeron_proto::CompactPlan::Idle { at })) => {
-                let left = (at - now_ms).max(0);
-                if left >= 60_000 {
-                    format!("compact in {}m", (left + 59_999) / 60_000)
-                } else {
-                    "compact in <1m".into()
-                }
-            }
-            (false, Some(zeron_proto::CompactPlan::Agent)) => "compact after this turn".into(),
-            (false, None) => String::new(),
-        }
-    }
-}
-
-pub struct CompactChip {
-    view: Option<CompactView>,
-    _tick: Task<()>,
-}
-
-impl CompactChip {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let tick = tick(10, cx, |chip, cx| {
-            if chip.view.is_some_and(|view| view.shown()) {
-                cx.notify();
-            }
-        });
-        Self {
-            view: None,
-            _tick: tick,
-        }
-    }
-
-    pub fn set(&mut self, view: Option<CompactView>, cx: &mut Context<Self>) {
-        if self.view != view {
-            self.view = view;
-            cx.notify();
-        }
-    }
-}
-
-impl Render for CompactChip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(view) = self.view.filter(CompactView::shown) else {
-            return div().into_any_element();
-        };
-        let theme = Theme::of(cx).clone();
-        let color = match view.plan {
-            _ if view.compacting => theme.busy,
-            Some(zeron_proto::CompactPlan::Agent) => theme.accent,
-            _ => theme.text_muted,
-        };
-        div()
-            .id("compact-plan")
-            .flex_none()
-            .h(px(20.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(5.0))
-            .px(px(8.0))
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(color.opacity(0.45))
-            .bg(color.opacity(0.10))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(color)
-            .child(
-                crate::icons::icon(crate::icons::COLLAPSE_ARROWS)
-                    .size(px(11.0))
-                    .text_color(color),
-            )
-            .child(SharedString::from(view.label(now_ms())))
-            .tooltip(move |_, cx| cx.new(|cx| CompactCard::new(view, cx)).into())
-            .into_any_element()
     }
 }
 
@@ -599,9 +518,6 @@ fn clock(ms: i64) -> String {
 
 fn compact_rows(view: &CompactView, now_ms: i64) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
-    if let Some(count) = view.tokens {
-        rows.push(("Context", tokens(count)));
-    }
     if let Some(cache) = view
         .stats
         .and_then(|stats| Cache::of(&stats, false, now_ms))
@@ -620,56 +536,47 @@ fn compact_rows(view: &CompactView, now_ms: i64) -> Vec<(&'static str, String)> 
     rows
 }
 
-struct CompactCard {
-    view: CompactView,
-    _tick: Task<()>,
-}
-
-impl CompactCard {
-    fn new(view: CompactView, cx: &mut Context<Self>) -> Self {
-        let tick = tick(1, cx, |_, cx| cx.notify());
-        Self { view, _tick: tick }
-    }
-}
-
-impl Render for CompactCard {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).for_popup();
-        let (heading, note) = match self.view.plan {
-            Some(zeron_proto::CompactPlan::Agent) => (
-                "Agent compaction",
-                "The agent asked to compact. It runs once the turn and any background work end.",
-            ),
-            _ => ("Idle compaction", "Sending a message first cancels it."),
-        };
-        let card = crate::popover::popover_card(&theme)
-            .w(px(300.0))
-            .flex()
-            .flex_col()
-            .child(crate::popover::menu_heading(&theme, heading))
-            .children(
-                compact_rows(&self.view, now_ms())
-                    .into_iter()
-                    .map(|(label, value)| {
-                        div()
-                            .px(px(8.0))
-                            .h(px(24.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(12.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(label)
-                            .child(
-                                div()
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(value)),
-                            )
-                    }),
-            )
-            .child(
+pub fn compact_section(view: &CompactView, theme: &Theme) -> gpui::Div {
+    let (heading, note) = match view.plan {
+        _ if view.compacting => ("Compacting", None),
+        Some(zeron_proto::CompactPlan::Agent) => (
+            "Agent compaction",
+            Some("The agent asked to compact. It runs once the turn and any background work end."),
+        ),
+        _ => (
+            "Idle compaction",
+            Some("Sending a message first cancels it."),
+        ),
+    };
+    div()
+        .w(px(280.0))
+        .flex()
+        .flex_col()
+        .child(crate::popover::menu_heading(theme, heading))
+        .children(
+            compact_rows(view, now_ms())
+                .into_iter()
+                .map(|(label, value)| {
+                    div()
+                        .px(px(8.0))
+                        .h(px(24.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(label)
+                        .child(
+                            div()
+                                .text_color(theme.text)
+                                .child(SharedString::from(value)),
+                        )
+                }),
+        )
+        .when_some(note, |el, note| {
+            el.child(
                 div()
                     .px(px(8.0))
                     .pt(px(4.0))
@@ -677,9 +584,8 @@ impl Render for CompactCard {
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
                     .child(note),
-            );
-        crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
-    }
+            )
+        })
 }
 
 #[cfg(test)]

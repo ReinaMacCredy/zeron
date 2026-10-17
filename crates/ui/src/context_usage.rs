@@ -1,5 +1,6 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::popover;
+use crate::session_stats::CompactView;
 use crate::state::AppState;
 use crate::theme::Theme;
 use gpui::{
@@ -54,9 +55,28 @@ impl FooterContext {
         cx.notify();
     }
 
-    fn context_card(&self, context: Option<ContextUsage>, cx: &mut Context<Self>) -> gpui::Div {
+    fn compact(&self, cx: &Context<Self>) -> Option<CompactView> {
+        let state = self.state.read(cx);
+        let chat = self.chat.as_deref().or(state.selected_chat.as_deref())?;
+        let session = state.session_for(chat)?;
+        Some(CompactView {
+            plan: session.compact_plan,
+            compacting: state.chat_compacting(chat),
+            stats: state.session_stats_for(self.chat.as_deref()),
+        })
+        .filter(CompactView::shown)
+    }
+
+    fn context_card(
+        &self,
+        context: Option<ContextUsage>,
+        compact: Option<CompactView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
-        let card = card(context, &theme);
+        let card = card(context, &theme).when_some(compact, |card, compact| {
+            card.child(crate::session_stats::compact_section(&compact, &theme))
+        });
         let Some(composer) = self.composer.upgrade() else {
             return card;
         };
@@ -123,8 +143,9 @@ impl Render for FooterContext {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let context = self.state.read(cx).context_usage_for(self.chat.as_deref());
+        let compact = self.compact(cx);
         let ring = has_window(context).then(|| {
-            let chip = chip(context, self.popup.get().is_some(), &theme)
+            let chip = chip(context, compact, self.popup.get().is_some(), &theme)
                 .relative()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -135,7 +156,7 @@ impl Render for FooterContext {
                 return chip.into_any_element();
             }
             let content = self
-                .context_card(context, cx)
+                .context_card(context, compact, cx)
                 .on_mouse_down_out(cx.listener(|ring, _, _, cx| ring.dismiss(cx)))
                 .into_any_element();
             chip.child(popover::anchored_menu_above_end(
@@ -151,9 +172,16 @@ impl Render for FooterContext {
 
 /// The context ring's trigger chip; [`FooterContext`] opens [`card`] from it
 /// on click.
-pub fn chip(usage: Option<ContextUsage>, open: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn chip(
+    usage: Option<ContextUsage>,
+    compact: Option<CompactView>,
+    open: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
     let color = match fraction {
+        _ if compact.is_some_and(|c| c.compacting) => theme.busy,
+        _ if compact.is_some() => theme.accent,
         Some(f) if f >= 0.9 => theme.danger,
         Some(f) if f >= 0.75 => theme.warning,
         Some(_) => theme.text_muted,
@@ -171,6 +199,17 @@ pub fn chip(usage: Option<ContextUsage>, open: bool, theme: &Theme) -> gpui::Sta
         open,
         theme,
     )
+    .when(compact.is_some(), |chip| {
+        chip.relative().child(
+            div()
+                .absolute()
+                .left(px(19.0))
+                .top(px(1.0))
+                .size(px(5.0))
+                .rounded_full()
+                .bg(color),
+        )
+    })
 }
 
 /// One footer ring indicator: ring + percent. `arc` colours the ring's fill,
