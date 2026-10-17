@@ -3,8 +3,9 @@
 //! Chromium-family apps (Arc, VS Code, Electron shells) ship their web-content
 //! AX tree OFF and only build it once an assistive client asks for it. The
 //! walker flips `AXManualAccessibility` (falling back to
-//! `AXEnhancedUserInterface` only when the modern attribute is unsupported —
-//! see [`super::bindings::enable_chromium_accessibility`]) and pays a one-time
+//! `AXEnhancedUserInterface` only for Chromium processes that do not support
+//! the modern attribute — see
+//! [`super::bindings::enable_chromium_accessibility`]) and pays a one-time
 //! settle so the asynchronously-built tree exists before it is read.
 //!
 //! The "already enabled" cache is keyed by the observed process lifetime
@@ -68,7 +69,7 @@ fn cached_lifetime_is_current(
 
 /// Flip Chromium/Electron accessibility on for `pid`'s application element and
 /// wait for the web-content tree to settle — once per observed process
-/// lifetime. Native Cocoa apps reject the attribute and pay no settle cost.
+/// lifetime. Native Cocoa apps are left untouched and pay no settle cost.
 ///
 /// # Safety
 ///
@@ -82,15 +83,20 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
     if already_enabled {
         return;
     }
-    if enable_chromium_accessibility(app_element) {
+    let Some(enabled) = enable_chromium_accessibility(app_element, || {
+        crate::browser::platform::is_chromium_process(pid)
+    }) else {
+        return;
+    };
+    if enabled {
         let mut waited = 0.0;
         while waited < CHROMIUM_SETTLE_SECONDS && !focused_page_controls_ready(app_element) {
             crate::permissions::panel::pump_run_loop_briefly(CHROMIUM_SETTLE_STEP_SECONDS);
             waited += CHROMIUM_SETTLE_STEP_SECONDS;
         }
-        if let Ok(mut cache) = enabled_processes().lock() {
-            cache.insert(pid, stamp);
-        }
+    }
+    if let Ok(mut cache) = enabled_processes().lock() {
+        cache.insert(pid, stamp);
     }
 }
 

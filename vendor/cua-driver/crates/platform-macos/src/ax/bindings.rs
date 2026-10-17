@@ -933,35 +933,45 @@ pub unsafe fn set_bool_attr(element: AXUIElementRef, attr_name: &str, value: boo
 /// Signal to a Chromium/Electron application root that a real assistive client
 /// is present so it materializes its full web-content accessibility tree.
 ///
-/// Returns `true` when an attribute write was accepted — meaning the app was
-/// flipped from "tree off" to "tree building" and the caller should let the
-/// tree settle before walking. Returns `false` when the app does not support
-/// either attribute (native Cocoa apps such as Finder / Calculator / TextEdit),
-/// in which case no settle delay is warranted.
+/// Returns `Some(true)` when an attribute write was accepted — meaning the app
+/// was flipped from "tree off" to "tree building" and the caller should let the
+/// tree settle before walking. Returns `Some(false)` for apps that are not
+/// Chromium (native Cocoa apps such as Finder / Calculator / TextEdit), which
+/// are left untouched and need no settle. Returns `None` when the outcome is
+/// not final (the app was busy or refused the write) and enablement should be
+/// retried on a later read.
 ///
 /// `AXManualAccessibility` is the modern opt-in with no screen-reader side
-/// effects; `AXEnhancedUserInterface` is the legacy fallback some Electron
-/// builds expose instead (the modern attribute returns
-/// `kAXErrorAttributeUnsupported` on those builds).
+/// effects; `AXEnhancedUserInterface` is the legacy fallback Chromium builds
+/// that answer `kAXErrorAttributeUnsupported` for the modern one need instead.
+/// `is_chromium` is only consulted for that fallback.
 ///
 /// # Safety
 ///
 /// `app_element` must be a valid, live application `AXUIElementRef`.
-pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool {
+pub unsafe fn enable_chromium_accessibility(
+    app_element: AXUIElementRef,
+    is_chromium: impl FnOnce() -> bool,
+) -> Option<bool> {
     let manual = set_bool_attr_true(app_element, "AXManualAccessibility");
     if manual == kAXErrorSuccess {
-        return true;
+        return Some(true);
     }
     if manual != kAXErrorAttributeUnsupported {
         // A transient error (e.g. timeout / app busy) rather than a hard
         // "this app has no such attribute" — don't bother with the legacy
         // fallback, and don't claim enablement happened.
-        return false;
+        return None;
+    }
+    // Every AppKit app accepts AXEnhancedUserInterface and stays in VoiceOver's enhanced mode.
+    if !is_chromium() {
+        return Some(false);
     }
     let written = set_bool_attr_true(app_element, "AXEnhancedUserInterface");
     // Chromium 154 applies the write but answers kAXErrorNotImplemented.
-    written == kAXErrorSuccess
-        || copy_bool_attr(app_element, "AXEnhancedUserInterface") == Some(true)
+    let enabled = written == kAXErrorSuccess
+        || copy_bool_attr(app_element, "AXEnhancedUserInterface") == Some(true);
+    enabled.then_some(true)
 }
 
 /// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.
