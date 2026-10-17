@@ -132,6 +132,8 @@ pub struct AcpRegistryAgent {
     pub distributions: Vec<AcpDistribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<String>,
     #[serde(default)]
     pub installed: bool,
 }

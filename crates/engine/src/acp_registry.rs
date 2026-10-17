@@ -246,9 +246,61 @@ pub(crate) async fn search(
     query: Option<&str>,
 ) -> Result<Vec<AcpRegistryAgent>, EngineError> {
     let agents = load_index(data_dir, INDEX_URL).await?;
-    Ok(rank(&agents, query.unwrap_or_default(), |agent| {
+    let mut rows = rank(&agents, query.unwrap_or_default(), |agent| {
         installed(data_dir, agent)
-    }))
+    });
+    let missing = attach_icons(data_dir, &mut rows);
+    warm_icons(data_dir.to_path_buf(), missing);
+    Ok(rows)
+}
+
+fn icon_file(data_dir: &Path, agent_id: &str) -> PathBuf {
+    data_dir
+        .join("registry-icons")
+        .join(format!("{agent_id}.svg"))
+}
+
+fn attach_icons(data_dir: &Path, rows: &mut [AcpRegistryAgent]) -> Vec<(String, String)> {
+    let mut missing = Vec::new();
+    for row in rows {
+        let path = icon_file(data_dir, &row.id);
+        if path.is_file() {
+            row.icon_path = Some(path.display().to_string());
+        } else if let Some(url) = &row.icon_url {
+            missing.push((row.id.clone(), url.clone()));
+        }
+    }
+    missing
+}
+
+fn warm_icons(data_dir: PathBuf, missing: Vec<(String, String)>) {
+    static WARMING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let missing: Vec<(String, String)> = {
+        let mut warming = WARMING.lock().unwrap_or_else(|poison| poison.into_inner());
+        missing
+            .into_iter()
+            .filter(|(id, _)| warming.insert(id.clone()))
+            .collect()
+    };
+    if missing.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        futures::future::join_all(missing.into_iter().map(|(id, url)| {
+            let data_dir = data_dir.clone();
+            async move {
+                if let Err(error) = fetch_icon(&data_dir, &id, &url).await {
+                    tracing::debug!(agent = id, error, "ACP Registry icon not cached");
+                }
+                WARMING
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&id);
+            }
+        }))
+        .await;
+    });
 }
 
 /// T3's `searchRank`, matching on id, name and description.
@@ -324,6 +376,7 @@ fn rank(
             repository: agent.repository.clone(),
             distributions,
             icon_url: agent.icon.as_deref().and_then(official_icon_url),
+            icon_path: None,
             installed: installed(agent),
         })
         .collect()
@@ -644,9 +697,9 @@ fn save_icon(data_dir: &Path, agent_id: &str, bytes: &[u8]) -> Result<PathBuf, S
         ..Default::default()
     };
     usvg::Tree::from_data(bytes, &options).map_err(|error| error.to_string())?;
-    let dir = data_dir.join("registry-icons");
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let path = dir.join(format!("{agent_id}.svg"));
+    let path = icon_file(data_dir, agent_id);
+    let dir = path.parent().ok_or("the icon has no directory")?;
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let temp = dir.join(format!(".{agent_id}.svg.tmp-{}", uuid::Uuid::new_v4()));
     std::fs::write(&temp, bytes)
         .and_then(|()| std::fs::rename(&temp, &path))
@@ -732,6 +785,23 @@ mod tests {
             all[1].icon_url.as_deref(),
             Some("https://cdn.agentclientprotocol.com/registry/v1/latest/gamma-code.svg")
         );
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut rows = all.clone();
+        assert_eq!(
+            attach_icons(temp.path(), &mut rows),
+            [("gamma-code".to_owned(), all[1].icon_url.clone().unwrap())],
+            "only rows with an official icon and no cached file are warmed"
+        );
+        assert!(rows.iter().all(|row| row.icon_path.is_none()));
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M0 0h16v16z" fill="currentColor"/></svg>"#;
+        let cached = save_icon(temp.path(), "gamma-code", svg.as_bytes()).unwrap();
+        assert!(attach_icons(temp.path(), &mut rows).is_empty());
+        assert_eq!(
+            rows[1].icon_path.as_deref(),
+            Some(cached.display().to_string().as_str())
+        );
+        assert_eq!(rows[0].icon_path, None);
 
         let gamma: Vec<String> = rank(&agents, "GAMMA", |_| false)
             .into_iter()

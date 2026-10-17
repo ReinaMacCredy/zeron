@@ -2398,7 +2398,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE | methods::SYNC_BRANCH => {
             Duration::from_secs(15 * 60)
         }
-        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
+        methods::INSTALL_HARNESS | methods::PREPARE_ACP_AGENT => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
