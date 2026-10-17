@@ -1,7 +1,7 @@
 //! How many subagents are running, drawn the same way wherever it turns up:
 //! the "● 3" pill on the sidebar's chat rows (beside the row's own activity
-//! indicator) and the Subagents header, and the pulsing button with a count
-//! badge on the titlebar's explorer toggle.
+//! indicator) and the Subagents header, and the count badge on the
+//! titlebar's explorer toggle.
 
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, Hsla, IntoElement, Render,
@@ -9,7 +9,6 @@ use gpui::{
     prelude::*, px, size,
 };
 
-use crate::loaders;
 use crate::motion;
 use crate::theme::Theme;
 
@@ -30,8 +29,6 @@ const PLUS_TRIM: f32 = 1.0;
 const DIGIT_MID: f32 = 0.355;
 /// Height of the count badge on the titlebar button.
 const BADGE: f32 = 13.0;
-/// Corner radius of the titlebar's icon buttons.
-const BUTTON_RADIUS: f32 = 6.0;
 /// Past this the count would outgrow the pill; it reads "99+".
 const COUNT_CAP: u32 = 99;
 
@@ -253,35 +250,25 @@ fn paint_pill(
 }
 
 /// Marks the titlebar's explorer button while subagents run, so they can be
-/// found with the panel closed: the button's face breathes in the activity
-/// tone, and a small count badge sits on its corner. Both are drawn over the
-/// button, so it keeps its size and position among the titlebar controls.
+/// found with the panel closed: a small count badge sits on its corner, drawn
+/// over the button, so it keeps its size and position among the titlebar
+/// controls.
 pub fn mark_files_button(
     button: gpui::Stateful<gpui::Div>,
     count: u32,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let tone = theme.busy;
-    button
-        .relative()
-        .child(div().absolute().inset_0().child(loaders::pulse_glow(
-            "files-button-glow",
-            BUTTON_RADIUS,
-            tone,
-            0.10,
-            0.30,
-        )))
-        .child(
-            div()
-                .absolute()
-                .top(px(-3.0))
-                .right(px(-3.0))
-                .child(CountBadge {
-                    count,
-                    tone,
-                    family: theme.font_mono.clone(),
-                }),
-        )
+    button.relative().child(
+        div()
+            .absolute()
+            .top(px(-3.0))
+            .right(px(-3.0))
+            .child(CountBadge {
+                count,
+                tone: theme.busy,
+                family: theme.font_mono.clone(),
+            }),
+    )
 }
 
 /// The count badge on the titlebar button, painted rather than laid out so

@@ -224,30 +224,6 @@ fn activity_grid(
     .h(px(extent(rows)))
 }
 
-/// A rounded fill that breathes on the zeron pulse clock between `floor` and
-/// `peak` opacity, filling whatever positioned box it is placed in. The window
-/// animates it, so the surrounding chrome stays still.
-pub fn pulse_glow(
-    _key: impl Into<SharedString>,
-    radius: f32,
-    tint: gpui::Hsla,
-    floor: f32,
-    peak: f32,
-) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, cx| {
-            let fill = gpui::fill(bounds, tint).corner_radii(px(radius));
-            match motion::breathing(floor, peak, cx) {
-                Some(animation) => window.paint_animated_quad(fill, animation),
-                None => window
-                    .paint_quad(gpui::fill(bounds, tint.opacity(floor)).corner_radii(px(radius))),
-            }
-        },
-    )
-    .size_full()
-}
-
 /// Stroke width of [`upload_progress_ring`].
 const RING_STROKE: f32 = 2.5;
 /// Polyline segments for a full circle — plenty for a ≤40px ring.

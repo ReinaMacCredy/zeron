@@ -1552,9 +1552,6 @@ mod tests {
                         cx.entity_id(),
                         cx,
                     ))
-                    .child(crate::loaders::pulse_glow(
-                        "glow", 4.0, theme.busy, 0.1, 0.3,
-                    ))
             }
         }
 
