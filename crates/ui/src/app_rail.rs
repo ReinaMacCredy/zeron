@@ -2,11 +2,11 @@ use chrono::{DateTime, Utc};
 use gpui::{AnyElement, Div, Hsla, SharedString, Stateful, div, prelude::*, px};
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentUsageWindow, HarnessId};
 
-use crate::account_usage::used_fraction;
+use crate::account_usage::{PaceStatus, UsagePace, usage_pace, used_fraction};
 use crate::icons::{self, icon};
 use crate::motion;
 use crate::popover;
-use crate::settings::accounts::{self, usage_color, usage_level};
+use crate::settings::accounts::{self, UsageLevel, usage_color, usage_level};
 use crate::theme::Theme;
 
 pub(crate) const WIDTH: f32 = 46.0;
@@ -23,6 +23,7 @@ const DOUBLE_RING_SPACING: f32 = 4.5;
 const DOUBLE_RING_GLYPH: f32 = 12.0;
 const MAX_RINGS: usize = 2;
 const CARD_WIDTH: f32 = 400.0;
+const HOVER_CARD_WIDTH: f32 = 272.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RailItem {
@@ -233,6 +234,287 @@ pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
                 .text_color(tint.unwrap_or(theme.text))
                 .when(fraction.is_none(), |glyph| glyph.opacity(0.5)),
         )
+}
+
+/// The pointer can sit on the ring or on its card; the card stays while
+/// either holds it, so the Details fold is reachable.
+#[derive(Default)]
+pub(crate) struct RingHover {
+    pub harness: Option<HarnessId>,
+    pub trigger: bool,
+    pub card: bool,
+    pub details: bool,
+}
+
+impl RingHover {
+    pub fn shown(&self) -> Option<HarnessId> {
+        self.harness.filter(|_| self.trigger || self.card)
+    }
+}
+
+fn window_label(label: &str) -> &str {
+    match label {
+        "Session" => "5h",
+        "Week" => "Weekly",
+        "Day" => "Daily",
+        other => other,
+    }
+}
+
+fn window_color(window: &AgentUsageWindow, theme: &Theme) -> Hsla {
+    usage_color(usage_level(window.used_fraction.clamp(0.0, 1.0)), theme)
+}
+
+fn pace_bar(remaining: f32, pace: Option<&UsagePace>, fill: Hsla, theme: &Theme) -> Div {
+    let segment = |left: f32, width: f32| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(gpui::relative(left))
+            .w(gpui::relative(width))
+    };
+    let fill_bar = || div().size_full().bg(fill);
+    let track = div()
+        .relative()
+        .w_full()
+        .h(px(6.0))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(theme.wash(0.08));
+    let marker = pace
+        .map(|pace| (pace.expected_remaining as f32 / 100.0).clamp(0.0, 1.0))
+        .filter(|_| remaining > 0.0 && remaining < 1.0);
+    let Some(marker) = marker else {
+        return track.child(segment(0.0, remaining).child(fill_bar()));
+    };
+    let marker_color = usage_color(
+        match pace.map(|pace| pace.status) {
+            Some(PaceStatus::Behind) => UsageLevel::Critical,
+            Some(PaceStatus::OnTrack) => UsageLevel::Warn,
+            _ => UsageLevel::Normal,
+        },
+        theme,
+    );
+    track
+        .child(
+            segment(0.0, remaining.min(marker))
+                .when(remaining > marker, |el| el.pr(px(3.0)))
+                .child(fill_bar()),
+        )
+        .when(remaining > marker, |el| {
+            el.child(
+                segment(marker, remaining - marker)
+                    .pl(px(3.0))
+                    .child(fill_bar()),
+            )
+        })
+        .child(
+            segment(marker, 0.0)
+                .ml(px(-1.0))
+                .w(px(2.0))
+                .rounded_full()
+                .bg(marker_color),
+        )
+}
+
+fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) -> Div {
+    let used = window.used_fraction.clamp(0.0, 1.0);
+    let remaining = 1.0 - used;
+    let pace = usage_pace(window, now);
+    let split = |left: Option<String>, right: Option<String>| {
+        div()
+            .flex()
+            .items_baseline()
+            .justify_between()
+            .gap(px(12.0))
+            .text_color(theme.text_muted)
+            .child(div().min_w_0().truncate().children(left))
+            .children(right.map(|text| div().flex_none().text_color(theme.text_faint).child(text)))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(window_label(&window.label).to_owned())),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_color(theme.text)
+                                .child(format!("{}% left", (remaining * 100.0).round() as u32)),
+                        ),
+                )
+                .children(
+                    window
+                        .resets_at
+                        .and_then(|at| crate::inbox::resets_in(at, now))
+                        .map(|left| {
+                            div()
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .child(format!("Resets in {left}"))
+                        }),
+                ),
+        )
+        .child(pace_bar(
+            remaining,
+            pace.as_ref(),
+            window_color(window, theme),
+            theme,
+        ))
+        .when_some(
+            pace.filter(|pace| pace.amount.is_some() || pace.eta.is_some()),
+            |el, pace| el.child(split(pace.amount, pace.eta)),
+        )
+}
+
+/// Synara's rail usage hover card: plan header, which window each ring draws,
+/// then one pace block per window and a Details fold.
+pub(crate) fn ring_hover_card(
+    account: &AgentAccount,
+    details_open: bool,
+    on_details: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    now: DateTime<Utc>,
+    theme: &Theme,
+) -> Div {
+    let legend = ring_windows(account).map(|windows| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .text_color(theme.text_muted)
+            .children(
+                windows
+                    .iter()
+                    .zip(["outer", "inner"])
+                    .map(|(window, ring)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .size(px(6.0))
+                                    .rounded_full()
+                                    .bg(window_color(window, theme)),
+                            )
+                            .child(format!("{} · {ring}", window_label(&window.label)))
+                    }),
+            )
+    });
+    let identity = account
+        .email
+        .clone()
+        .or_else(|| account.display_name.clone());
+    let fetched = account
+        .usage_fetched_at
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .map(|at| format!("Updated {}", crate::pull_requests::relative_time(at, now)));
+    let details = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .text_color(theme.text_muted)
+        .child(
+            div()
+                .id("rail-usage-hover-details")
+                .debug_selector(|| "rail-usage-hover-details".into())
+                .role(gpui::Role::Button)
+                .aria_label("Details")
+                .aria_expanded(details_open)
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.text))
+                .on_click(on_details)
+                .child(
+                    icon(if details_open {
+                        icons::LUCIDE_CHEVRON_DOWN
+                    } else {
+                        icons::LUCIDE_CHEVRON_RIGHT
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+                )
+                .child("Details"),
+        )
+        .when(details_open, |el| {
+            el.children(identity.into_iter().chain(fetched).map(|line| {
+                div()
+                    .pl(px(16.0))
+                    .truncate()
+                    .child(SharedString::from(line))
+            }))
+        });
+    div()
+        .debug_selector(|| "rail-usage-hover-card".into())
+        .w(px(HOVER_CARD_WIDTH))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.text.opacity(0.1))
+        .bg(popover::surface_bg(theme))
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .line_height(px(16.0))
+        .text_color(theme.text)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(accounts::provider_name(account.harness)),
+                )
+                .children(account.plan_label.clone().map(|plan| {
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(plan))
+                })),
+        )
+        .children(legend)
+        .children(account.usage_error.clone().map(|error| {
+            div()
+                .text_color(theme.warning)
+                .child(SharedString::from(error))
+        }))
+        .children(
+            account
+                .usage_windows
+                .iter()
+                .map(|window| window_block(window, now, theme)),
+        )
+        .child(details)
 }
 
 pub(crate) fn ring_card(

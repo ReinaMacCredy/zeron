@@ -2506,6 +2506,7 @@ pub struct Shell {
     _device_accounts: Subscription,
     _accounts_cache: Subscription,
     rail_usage_menu: popover::Popup<HarnessId>,
+    rail_usage_hover: app_rail::RingHover,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -3185,6 +3186,7 @@ impl Shell {
             _device_accounts: device_accounts_observation,
             _accounts_cache: accounts_cache_observation,
             rail_usage_menu: popover::Popup::default(),
+            rail_usage_hover: app_rail::RingHover::default(),
             harnesses_page: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -12864,6 +12866,8 @@ impl Shell {
             return;
         }
         self.rail_usage_menu.open(harness);
+        self.rail_usage_hover.harness = None;
+        self.rail_usage_hover.card = false;
         self.refresh_device_accounts(cx);
         cx.notify();
     }
@@ -12871,6 +12875,69 @@ impl Shell {
     fn close_rail_usage(&mut self, cx: &mut Context<Self>) {
         if self.rail_usage_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.rail_usage_menu);
+            cx.notify();
+        }
+    }
+
+    fn render_rail_usage_hover(
+        &self,
+        account: &zeron_proto::AgentAccount,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let card = app_rail::ring_hover_card(
+            account,
+            self.rail_usage_hover.details,
+            cx.listener(|this, _, _, cx| {
+                this.rail_usage_hover.details = !this.rail_usage_hover.details;
+                cx.notify();
+            }),
+            Utc::now(),
+            theme,
+        );
+        // The transparent left pad bridges the rail gutter so the pointer
+        // reaches the card without leaving both hover targets.
+        let host = div()
+            .id("rail-usage-hover")
+            .occlude()
+            .pl(px(8.0))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.rail_usage_hover.card = *hovered;
+                cx.notify();
+            }))
+            .child(crate::frost::frosted(8.0, crate::frost::MENU_BLUR, card));
+        div()
+            .absolute()
+            .bottom_0()
+            .right(px(2.0))
+            .size_0()
+            .child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomLeft)
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(motion::fade_quick("rail-usage-hover-card", host)),
+                )
+                .priority(1),
+            )
+            .into_any_element()
+    }
+
+    fn hover_rail_ring(
+        harness: Option<HarnessId>,
+    ) -> impl Fn(&mut Self, &bool, &mut Window, &mut Context<Self>) + 'static {
+        move |this, hovered, _, cx| {
+            if *hovered {
+                this.refresh_device_accounts(cx);
+            }
+            let Some(harness) = harness else { return };
+            let ring = &mut this.rail_usage_hover;
+            if *hovered {
+                ring.harness = Some(harness);
+                ring.trigger = true;
+            } else if ring.harness == Some(harness) {
+                ring.trigger = false;
+            }
             cx.notify();
         }
     }
@@ -12887,18 +12954,13 @@ impl Shell {
                         .collect()
                 })
                 .unwrap_or_default();
-        let hover = cx.listener(|this, hovered: &bool, _, cx| {
-            if *hovered {
-                this.refresh_device_accounts(cx);
-            }
-        });
         if ring_accounts.is_empty() {
             return vec![
                 div()
                     .id("rail-usage-empty")
                     .debug_selector(|| "rail-usage-empty".into())
                     .child(app_rail::ring(None, theme))
-                    .on_hover(hover)
+                    .on_hover(cx.listener(Self::hover_rail_ring(None)))
                     .tooltip(crate::settings::widgets::text_tooltip(
                         app_rail::ring_tooltip(None, loading),
                     ))
@@ -12907,7 +12969,7 @@ impl Shell {
         }
         let popup_theme = theme.for_popup();
         let wash = self.rail_wash(theme);
-        let hover = std::rc::Rc::new(hover);
+        let shown = self.rail_usage_hover.shown();
         ring_accounts
             .into_iter()
             .enumerate()
@@ -12915,12 +12977,11 @@ impl Shell {
                 let harness = account.harness;
                 let open = self.rail_usage_menu.as_open() == Some(&harness);
                 let tooltip = app_rail::ring_tooltip(Some(&account), false);
-                let hover = hover.clone();
                 let mut trigger = div()
                     .id(("rail-usage", ix))
                     .debug_selector(move || format!("rail-usage-{ix}"))
                     .role(gpui::Role::Button)
-                    .aria_label(tooltip.clone())
+                    .aria_label(tooltip)
                     .aria_expanded(open)
                     .tab_index(0)
                     .focus_visible(|style| style.border_2().border_color(theme.accent))
@@ -12930,7 +12991,7 @@ impl Shell {
                     .when(open, |el| el.bg(wash))
                     .hover(move |style| style.bg(wash))
                     .child(app_rail::ring(Some(&account), theme))
-                    .on_hover(move |hovered, window, cx| hover(hovered, window, cx))
+                    .on_hover(cx.listener(Self::hover_rail_ring(Some(harness))))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| this.rail_usage_menu.note_trigger_press()),
@@ -12938,8 +12999,9 @@ impl Shell {
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_rail_usage(harness, cx)),
                     );
-                if !open {
-                    trigger = trigger.tooltip(crate::settings::widgets::text_tooltip(tooltip));
+                if shown == Some(harness) && self.rail_usage_menu.get() != Some(&harness) {
+                    trigger =
+                        trigger.child(self.render_rail_usage_hover(&account, &popup_theme, cx));
                 }
                 if self.rail_usage_menu.get() == Some(&harness) {
                     let footer = popover::menu_row(&popup_theme, false, "rail-usage-open-usage")
@@ -17933,6 +17995,24 @@ impl Render for Shell {
                 {
                     self.debug_dialog = None;
                     self.rail_usage_menu.open(harness);
+                }
+                // `=rail-usage-hover` pins the first ring's hover card open;
+                // `=rail-usage-hover-details` also unfolds its Details.
+                if matches!(
+                    self.debug_dialog.as_deref(),
+                    Some("rail-usage-hover" | "rail-usage-hover-details")
+                ) && let Some(harness) =
+                    crate::account_usage::local_snapshot(cx).and_then(|snapshot| {
+                        app_rail::ring_accounts(snapshot)
+                            .first()
+                            .map(|account| account.harness)
+                    })
+                {
+                    self.rail_usage_hover.details =
+                        self.debug_dialog.as_deref() == Some("rail-usage-hover-details");
+                    self.debug_dialog = None;
+                    self.rail_usage_hover.harness = Some(harness);
+                    self.rail_usage_hover.trigger = true;
                 }
                 if self.debug_dialog.as_deref() == Some("user-menu")
                     && crate::account_usage::local_snapshot(cx).is_some()
