@@ -17,6 +17,10 @@ pub(crate) const PAD_Y: f32 = 8.0;
 const RING_RADIUS: f32 = 13.0;
 const RING_STROKE: f32 = 2.5;
 const RING_GLYPH: f32 = 14.0;
+const DOUBLE_RING_STROKE: f32 = 2.25;
+const DOUBLE_RING_RADIUS: f32 = (BUTTON - DOUBLE_RING_STROKE) / 2.0;
+const DOUBLE_RING_SPACING: f32 = 4.5;
+const DOUBLE_RING_GLYPH: f32 = 12.0;
 const MAX_RINGS: usize = 2;
 const CARD_WIDTH: f32 = 400.0;
 
@@ -165,34 +169,64 @@ pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> Sha
     }
 }
 
+/// Outermost first: the week ring around the session ring, like Synara's
+/// weekly-outside, 5h-inside pair.
+fn ring_windows(account: &AgentAccount) -> Option<[&AgentUsageWindow; 2]> {
+    match account.usage_windows.as_slice() {
+        [first, second] if first.label == "Week" => Some([first, second]),
+        [first, second] => Some([second, first]),
+        _ => None,
+    }
+}
+
 pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
     let fraction = account.and_then(used_fraction);
-    let color = usage_color(usage_level(fraction.unwrap_or(0.0)), theme);
     let (mark, tint) = account.map_or((icons::USAGE_CHART, None), |account| {
         crate::pickers::harness_brand_icon(account.harness)
     });
+    let track = theme.text_faint.opacity(0.25);
+    let arc = |radius: f32, stroke: f32, fraction: f32| {
+        div()
+            .absolute()
+            .inset_0()
+            .child(crate::context_usage::progress_ring(
+                BUTTON,
+                radius,
+                stroke,
+                fraction,
+                usage_color(usage_level(fraction), theme),
+                track,
+            ))
+    };
+    let pair = account.and_then(ring_windows);
+    let rings: Vec<Div> = match pair {
+        Some(windows) => windows
+            .iter()
+            .enumerate()
+            .map(|(ix, window)| {
+                arc(
+                    DOUBLE_RING_RADIUS - ix as f32 * DOUBLE_RING_SPACING,
+                    DOUBLE_RING_STROKE,
+                    window.used_fraction.clamp(0.0, 1.0),
+                )
+            })
+            .collect(),
+        None => vec![arc(RING_RADIUS, RING_STROKE, fraction.unwrap_or(0.0))],
+    };
     div()
         .size(px(BUTTON))
         .relative()
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .child(crate::context_usage::progress_ring(
-                    BUTTON,
-                    RING_RADIUS,
-                    RING_STROKE,
-                    fraction.unwrap_or(0.0),
-                    color,
-                    theme.text_faint.opacity(0.25),
-                )),
-        )
+        .children(rings)
         .child(
             icon(mark)
-                .size(px(RING_GLYPH))
+                .size(px(if pair.is_some() {
+                    DOUBLE_RING_GLYPH
+                } else {
+                    RING_GLYPH
+                }))
                 .text_color(tint.unwrap_or(theme.text))
                 .when(fraction.is_none(), |glyph| glyph.opacity(0.5)),
         )
@@ -305,7 +339,6 @@ pub(crate) fn account_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::AgentUsageWindow;
 
     fn account(harness: HarnessId, active: bool, used: &[f32]) -> AgentAccount {
         serde_json::from_value(serde_json::json!({
@@ -325,6 +358,16 @@ mod tests {
                 .collect::<Vec<_>>(),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn two_windows_draw_the_week_ring_outside_the_session_ring() {
+        let mut claude = account(HarnessId::ClaudeCode, true, &[0.3, 0.8]);
+        claude.usage_windows[0].label = "Session".into();
+        claude.usage_windows[1].label = "Week".into();
+        let labels = ring_windows(&claude).map(|rings| rings.map(|window| window.label.clone()));
+        assert_eq!(labels, Some(["Week".to_string(), "Session".to_string()]));
+        assert!(ring_windows(&account(HarnessId::Cursor, true, &[0.4])).is_none());
     }
 
     #[test]
