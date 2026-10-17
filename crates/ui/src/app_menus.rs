@@ -184,6 +184,7 @@ pub fn app_menus() -> Vec<Menu> {
         // Sparkle's placement: directly under About. Other platforms reach
         // the same check from the account menu.
         MenuItem::action("Check for Updates…", CheckForUpdates),
+        MenuItem::action("What’s New…", shell::OpenWhatsNew),
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),
@@ -303,6 +304,16 @@ mod tests {
         assert_eq!(name.as_ref(), "Check for Updates…");
         assert_eq!(action.name(), CheckForUpdates.name());
         assert!(!disabled);
+    }
+
+    #[test]
+    fn whats_new_follows_check_for_updates() {
+        let menus = app_menus();
+        let Some(MenuItem::Action { name, action, .. }) = menus[0].items.get(2) else {
+            panic!("third app-menu item must be an action");
+        };
+        assert_eq!(name.as_ref(), "What’s New…");
+        assert_eq!(action.name(), shell::OpenWhatsNew.name());
     }
 
     #[test]

@@ -1,0 +1,67 @@
+# What's New entries, one per release. Images live in assets/whats_new/ and
+# must be listed in whats_new.rs IMAGES. Order does not matter.
+
+[[entry]]
+version = "0.2.113"
+date = "Oct 17"
+hero = "inbox.jpg"
+
+[[entry.features]]
+id = "inbox-page"
+title = "An Inbox that starts your day"
+description = "The rail opens an Inbox with what needs you, today's tasks, how your day is going, and how much plan is left."
+image = "inbox.jpg"
+details = "The sidebar Inbox gets Working and Settled shelves under a collapsible header, and a row hover card shows a session at a glance."
+
+[[entry.features]]
+id = "tasks-page"
+title = "Tasks, as a list or a Kanban board"
+description = "Plan work on the new Tasks page, then press Start to run a task with the canvas harness and model."
+image = "kanban.jpg"
+details = "Toggle List and Kanban from the titlebar. The rail shows a Needs you badge when a task is waiting on you."
+
+[[entry.features]]
+id = "btw-sidechat"
+title = "Ask on the side with /btw"
+description = "Side questions open inline in the main composer, so the thread keeps working while you ask. Toggle it with Cmd+;."
+
+[[entry.features]]
+id = "continue-in-new-thread"
+title = "Continue in a new thread with any agent"
+description = "The handoff menu lists every agent. The new thread starts from the source's handoff packet, and one divider names both sides."
+
+[[entry.features]]
+id = "idle-compaction"
+title = "Long idle chats compact before the cache expires"
+description = "Zeron compacts a long idle Claude chat before its one-hour prompt cache runs out, so the next turn starts cheap. Switch it off in Settings > General."
+
+[[entry.features]]
+id = "upstream-0-2-113"
+title = "From upstream Zeron"
+description = "Agents can show interactive native visuals, embedded browser sessions survive restarts, the file tree selects several entries, and worktree locations can be set per device."
+
+[[entry]]
+version = "0.2.112"
+date = "Oct 14"
+
+[[entry.features]]
+id = "usage-page"
+title = "Usage page"
+description = "Plan limits from every agent account, plus token spend from the chats on this device, priced at API rates."
+image = "usage.jpg"
+
+[[entry.features]]
+id = "review-chip"
+title = "Review your changes from the composer"
+description = "The Review chip runs a fresh reviewer and shows its findings as inline cards with Fix and Dismiss."
+details = "Pick the reviewer per chat or in Settings > Code review, with its own thinking level and review instructions."
+
+[[entry.features]]
+id = "git-commit-panel"
+title = "A faster Git commit panel"
+description = "Commit details and file diffs scroll smoothly on large commits, and the panel resizes from its edge."
+
+[[entry.features]]
+id = "upstream-0-2-112"
+title = "From upstream Zeron"
+description = "Mouse back and forward buttons walk the route history, and files dropped from any folder attach on macOS."

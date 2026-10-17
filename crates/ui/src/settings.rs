@@ -1440,6 +1440,8 @@ pub struct UiSettings {
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
+    #[serde(default = "whats_new_seen_before_tracking")]
+    pub whats_new_seen_version: Option<String>,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1635,6 +1637,11 @@ pub struct UiSettings {
     legacy_accent_color: Option<crate::theme::AccentColor>,
 }
 
+// A file written before the field existed is an upgrade, not a fresh install.
+fn whats_new_seen_before_tracking() -> Option<String> {
+    Some("0.0.0".into())
+}
+
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
@@ -1660,6 +1667,7 @@ impl Default for UiSettings {
             sidebar_show_project_filter: true,
             sidebar_show_archived: true,
             github_star_banner_dismissed: false,
+            whats_new_seen_version: None,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
@@ -2361,6 +2369,7 @@ impl UiSettings {
             sidebar_show_project_filter,
             sidebar_show_archived,
             github_star_banner_dismissed,
+            whats_new_seen_version,
             last_space_id,
             last_project_action_by_space_id,
             open_tabs,
@@ -2852,7 +2861,13 @@ mod tests {
         assert_eq!(legacy.pr_chat_history, PrChatHistory::KeepPerPr);
         assert_eq!(legacy.pr_chat_idle_expiry, PrChatIdleExpiry::ThirtyMinutes);
         assert_eq!(legacy.git_agent_busy_policy, GitAgentBusyPolicy::SafeOnly);
-        assert_eq!(legacy, UiSettings::default());
+        assert_eq!(
+            legacy,
+            UiSettings {
+                whats_new_seen_version: Some("0.0.0".into()),
+                ..UiSettings::default()
+            }
+        );
         let saved = serde_json::to_string(&legacy).unwrap();
         assert!(!saved.contains("commitMessageModel"));
     }
@@ -3770,6 +3785,21 @@ mod tests {
     }
 
     #[test]
+    fn whats_new_seen_version_tells_an_old_file_from_a_fresh_install() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(UiSettings::load(dir.path()).whats_new_seen_version, None);
+        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth":300}"#).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path())
+                .whats_new_seen_version
+                .as_deref(),
+            Some("0.0.0")
+        );
+        UiSettings::default().save(dir.path()).unwrap();
+        assert_eq!(UiSettings::load(dir.path()).whats_new_seen_version, None);
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
@@ -3796,6 +3826,7 @@ mod tests {
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
             github_star_banner_dismissed: true,
+            whats_new_seen_version: Some("0.2.112".into()),
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
