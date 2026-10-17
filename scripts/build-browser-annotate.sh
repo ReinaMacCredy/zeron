@@ -6,3 +6,4 @@ cd "$DIR"
 bun install --frozen-lockfile 2>/dev/null || bun install
 bun build overlay.ts --minify --format=iife --target=browser --outfile=annotate.generated.js
 bun build hook.ts --minify --format=iife --target=browser --outfile=hook.generated.js
+bun build grab.ts --minify --format=iife --target=browser --outfile=grab.generated.js

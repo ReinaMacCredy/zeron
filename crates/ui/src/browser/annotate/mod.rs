@@ -80,6 +80,7 @@ pub(crate) struct Annotation {
 
 #[derive(Debug, Deserialize)]
 struct ElementTarget {
+    id: String,
     element: PickedElement,
 }
 
@@ -101,6 +102,55 @@ struct StackFrame {
     file_name: Option<String>,
     line_number: Option<u32>,
     column_number: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageElementContext {
+    id: String,
+    component_name: Option<String>,
+    source: Option<StackFrame>,
+    selector: Option<String>,
+    html_preview: Option<String>,
+    styles: Option<String>,
+}
+
+const CONTEXT_TEXT_LIMIT: usize = 4_000;
+
+fn clip(text: String) -> String {
+    text.chars().take(CONTEXT_TEXT_LIMIT).collect()
+}
+
+// Takes only the element targets: the page world must never reach the user-authored fields.
+fn merge_page_context(elements: &mut [ElementTarget], value: serde_json::Value) {
+    let serde_json::Value::Array(entries) = value else {
+        return;
+    };
+    for entry in entries {
+        let Ok(context) = serde_json::from_value::<PageElementContext>(entry) else {
+            continue;
+        };
+        let Some(target) = elements.iter_mut().find(|target| target.id == context.id) else {
+            continue;
+        };
+        let element = &mut target.element;
+        if let Some(name) = context.component_name {
+            element.component_name = Some(clip(name));
+        }
+        if let Some(mut source) = context.source {
+            source.file_name = source.file_name.map(clip);
+            element.source = Some(source);
+        }
+        if let Some(selector) = context.selector {
+            element.selector = Some(clip(selector));
+        }
+        if let Some(html) = context.html_preview {
+            element.html_preview = clip(html);
+        }
+        if let Some(styles) = context.styles {
+            element.styles = clip(styles);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +280,7 @@ mod host {
     use serde::Deserialize;
 
     const BUNDLE: &str = include_str!("annotate.generated.js");
+    const GRAB: &str = include_str!("grab.generated.js");
     const TEARDOWN: &str =
         "(() => { globalThis.__zeronAnnotate?.teardown(); return JSON.stringify(null); })()";
 
@@ -264,7 +315,14 @@ mod host {
             "fontSans": "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
             "fontMono": "ui-monospace, \"SF Mono\", Menlo, monospace",
         });
-        format!("globalThis.__zeronAnnotate.start({theme})")
+        format!("(() => {{ {BUNDLE} return globalThis.__zeronAnnotate.start({theme}); }})()")
+    }
+
+    fn grab_script(ids: &[&str]) -> String {
+        format!(
+            "(async () => {{ const grab = globalThis.__zeronAnnotateGrab; return typeof grab === \"function\" ? await grab({}) : \"[]\"; }})()",
+            serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
+        )
     }
 
     #[derive(Debug, Deserialize)]
@@ -311,8 +369,10 @@ mod host {
                 return;
             };
             // callAsyncJavaScript frames carry no location in JSC, which hides React component sources.
-            native.evaluate(&format!("if (!globalThis.__zeronAnnotate) {{ {BUNDLE} }}"));
-            let picked = native.automation_eval(&start_script(crate::theme::Theme::of(cx)), true);
+            native.evaluate(&format!(
+                "if (!globalThis.__zeronAnnotateGrab) {{ {GRAB} }}"
+            ));
+            let picked = native.automation_eval(&start_script(crate::theme::Theme::of(cx)), false);
             native.focus_page();
             let was_paused = self.control.paused;
             self.take_over(cx);
@@ -324,30 +384,53 @@ mod host {
                     .and_then(Result::ok)
                     .and_then(|value| serde_json::from_value::<Option<Picked>>(value).ok())
                     .flatten();
-                let Some(picked) = picked else {
+                let Some(mut picked) = picked else {
                     let _ = this.update(cx, |this, cx| this.end_annotation(cx));
                     return;
                 };
                 let rect = picked.crop_rect;
-                let Ok(Some(snapshot)) = this.update(cx, |this, cx| {
+                let ids: Vec<&str> = picked
+                    .annotation
+                    .elements
+                    .iter()
+                    .map(|target| target.id.as_str())
+                    .collect();
+                let grab = grab_script(&ids);
+                let Ok(Some((snapshot, context))) = this.update(cx, |this, cx| {
                     this.annotation.capturing();
                     cx.notify();
                     this.native.as_ref().map(|native| {
-                        native.annotation_snapshot([rect.x, rect.y, rect.width, rect.height])
+                        (
+                            native.annotation_snapshot([rect.x, rect.y, rect.width, rect.height]),
+                            native.automation_eval(&grab, true),
+                        )
                     })
                 }) else {
                     return;
                 };
-                let timeout = cx
-                    .background_executor()
-                    .timer(std::time::Duration::from_secs(5));
-                let png = match futures::future::select(snapshot, std::pin::pin!(timeout)).await {
-                    futures::future::Either::Left((Ok(Ok(png)), _)) => Some(png),
-                    _ => None,
-                };
+                let executor = cx.background_executor().clone();
+                let within = |secs| executor.timer(std::time::Duration::from_secs(secs));
+                let (png, context) = futures::future::join(
+                    async {
+                        match futures::future::select(snapshot, std::pin::pin!(within(5))).await {
+                            futures::future::Either::Left((Ok(Ok(png)), _)) => Some(png),
+                            _ => None,
+                        }
+                    },
+                    async {
+                        match futures::future::select(context, std::pin::pin!(within(3))).await {
+                            futures::future::Either::Left((Ok(Ok(context)), _)) => Some(context),
+                            _ => None,
+                        }
+                    },
+                )
+                .await;
+                if let Some(context) = context {
+                    super::merge_page_context(&mut picked.annotation.elements, context);
+                }
                 let _ = this.update(cx, |this, cx| {
                     if let Some(native) = &this.native {
-                        drop(native.automation_eval(TEARDOWN, true));
+                        drop(native.automation_eval(TEARDOWN, false));
                     }
                     let capture = this.annotation_capture(picked, png);
                     this.end_annotation(cx);
@@ -362,7 +445,7 @@ mod host {
                 return;
             }
             if let Some(native) = &self.native {
-                drop(native.automation_eval(TEARDOWN, true));
+                drop(native.automation_eval(TEARDOWN, false));
             }
             self.annotation_task = None;
             self.end_annotation(cx);
@@ -404,7 +487,7 @@ mod host {
             }
         }
 
-        // Synthetic input never reaches a Dev bundle; drive the overlay through page events.
+        // Synthetic input never reaches a Dev bundle, and the overlay ignores untrusted events.
         pub(crate) fn run_annotate_demo(&mut self, send: bool, cx: &mut Context<Self>) {
             cx.spawn(async move |this, cx| {
                 let executor = cx.background_executor().clone();
@@ -428,7 +511,7 @@ mod host {
                     wait(1500).await;
                     let _ = this.update(cx, |this, _| {
                         if let Some(native) = &this.native {
-                            drop(native.automation_eval(script, true));
+                            drop(native.automation_eval(script, false));
                         }
                     });
                     tracing::info!("annotate-demo: {label}");
@@ -443,48 +526,24 @@ mod host {
         (
             "overlay",
             r##"(() => {
-  const target = document.querySelector("[data-annotate-demo]");
-  const r = target.getBoundingClientRect();
-  const at = { bubbles: true, composed: true, button: 0, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
-  target.dispatchEvent(new PointerEvent("pointermove", at));
-  target.dispatchEvent(new PointerEvent("pointerdown", at));
-  target.dispatchEvent(new PointerEvent("pointerup", at));
-  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
-  const comment = ui.querySelector("textarea");
-  comment.value = "Make this the primary call to action";
-  comment.dispatchEvent(new Event("input", { bubbles: true }));
-  const next = document.querySelector("#share").getBoundingClientRect();
-  document.querySelector("#share").dispatchEvent(new PointerEvent("pointermove", { ...at, clientX: next.left + 10, clientY: next.top + 10 }));
+  const demo = globalThis.__zeronAnnotate.demo();
+  demo.select(document.querySelector("[data-annotate-demo]"));
+  demo.comment("Make this the primary call to action");
   return JSON.stringify(null);
 })()"##,
         ),
         (
             "styled",
-            r##"(() => {
-  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
-  ui.querySelector('[aria-label="Expand annotation editor"]').click();
-  const size = [...ui.querySelectorAll("label")].find((label) => label.textContent.startsWith("Font size")).querySelector("input");
-  size.value = "20";
-  size.dispatchEvent(new Event("input", { bubbles: true }));
-  return JSON.stringify(null);
-})()"##,
+            r##"(() => { globalThis.__zeronAnnotate.demo().fontSize(20); return JSON.stringify(null); })()"##,
         ),
     ];
     const DEMO_ATTACH: (&str, &str) = (
         "attached",
-        r##"(() => {
-  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
-  [...ui.querySelectorAll("button")].find((button) => button.textContent === "Attach").click();
-  return JSON.stringify(null);
-})()"##,
+        r##"(() => { globalThis.__zeronAnnotate.demo().submit("attach"); return JSON.stringify(null); })()"##,
     );
     const DEMO_SEND: (&str, &str) = (
         "sent",
-        r##"(() => {
-  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
-  ui.querySelector("textarea").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, composed: true }));
-  return JSON.stringify(null);
-})()"##,
+        r##"(() => { globalThis.__zeronAnnotate.demo().submit("send"); return JSON.stringify(null); })()"##,
     );
 }
 
@@ -513,6 +572,61 @@ mod tests {
         state.took_over();
         assert!(!state.end());
         assert_eq!(state, AnnotationState::Idle);
+    }
+
+    #[test]
+    fn page_world_context_merges_by_id_and_falls_back_to_the_tag() {
+        let element = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "element": {
+                    "pageUrl": "http://localhost/",
+                    "tagName": "button",
+                    "selector": null,
+                    "htmlPreview": "<button>Buy</button>",
+                    "componentName": null,
+                    "source": null,
+                    "styles": ""
+                }
+            })
+        };
+        let mut annotation: Annotation = serde_json::from_value(serde_json::json!({
+            "pageUrl": "http://localhost/",
+            "pageTitle": "Shop",
+            "comment": "Bigger",
+            "elements": [element("element_1"), element("element_2"), element("element_3")],
+            "regions": [],
+            "strokes": [],
+            "styleChanges": []
+        }))
+        .unwrap();
+        merge_page_context(
+            &mut annotation.elements,
+            serde_json::json!([
+                {"id": "element_1", "componentName": "BuyButton", "source": {"fileName": "/src/app.jsx", "lineNumber": 5, "columnNumber": 37}, "selector": "button#buy"},
+                {"id": "element_3", "componentName": 42},
+                {"id": "element_9", "componentName": "Forged"},
+                "garbage"
+            ]),
+        );
+        let context = annotation.page_context();
+        let labels: Vec<&str> = context
+            .lines()
+            .filter(|line| line.starts_with("- <"))
+            .collect();
+        assert_eq!(
+            labels,
+            ["- <BuyButton> (app.jsx:5):", "- <button>:", "- <button>:"]
+        );
+        assert!(context.contains("  selector: button#buy\n  source: /src/app.jsx:5:37"));
+        assert!(!context.contains("Forged"));
+        assert_eq!(annotation.user_text(), "Bigger");
+
+        merge_page_context(
+            &mut annotation.elements,
+            serde_json::json!({"forged": true}),
+        );
+        assert_eq!(annotation.page_context(), context);
     }
 
     #[test]

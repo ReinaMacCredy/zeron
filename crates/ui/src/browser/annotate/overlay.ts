@@ -1,6 +1,4 @@
 // Ported from T3 Code apps/desktop/src/preview/PickPreload.ts (MIT, T3 Tools Inc.).
-import { getElementContext } from "react-grab/primitives";
-
 import { previewAnnotationStyles } from "./styles.generated.ts";
 
 interface AnnotationTheme {
@@ -84,13 +82,12 @@ const resolveAnnotationSubmission = (event: KeyboardEvent): Submission | null =>
 };
 
 const OVERLAY_ATTRIBUTE = "data-zeron-annotation-ui";
+const ELEMENT_ATTRIBUTE = "data-zeron-annotate";
 const TOOL_ATTRIBUTE = "data-zeron-annotation-tool";
 const Z_INDEX_OVERLAY = 2147483646;
 const PRIMARY = "var(--t3-primary)";
 const PRIMARY_FILL = "color-mix(in srgb, var(--t3-primary) 10%, transparent)";
 const MAX_MARQUEE_ELEMENTS = 20;
-const ELEMENT_CONTEXT_TIMEOUT_MS = 5_000;
-const CONTEXT_TEXT_LIMIT = 4_000;
 const CONTENT_LAYER_Z_INDEX = 1;
 const CHROME_LAYER_Z_INDEX = 10;
 
@@ -106,6 +103,14 @@ interface SelectedElement {
 
 interface AnnotationSession {
   teardown: () => void;
+  demo: AnnotationDemo;
+}
+
+interface AnnotationDemo {
+  select: (element: Element) => void;
+  comment: (text: string) => void;
+  fontSize: (px: number) => void;
+  submit: (submission: Submission) => void;
 }
 
 let activeSession: AnnotationSession | null = null;
@@ -269,59 +274,14 @@ function updateSelectedVisual(target: SelectedElement): void {
   target.label.style.transform = `translate(${Math.max(4, rect.left)}px, ${Math.max(4, rect.top - 22)}px)`;
 }
 
-function toStackFrame(frame: {
-  functionName?: string;
-  fileName?: string;
-  lineNumber?: number;
-  columnNumber?: number;
-}): StackFrame {
-  return {
-    functionName: frame.functionName ?? null,
-    fileName: frame.fileName ?? null,
-    lineNumber: frame.lineNumber ?? null,
-    columnNumber: frame.columnNumber ?? null,
-  };
-}
-
-function withCaptureTimeout<A>(promise: Promise<A>, millis: number): Promise<A | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    promise,
-    new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), millis);
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
-
 const HTML_PREVIEW_MAX_CHARS = 500;
 
-async function captureElement(element: Element): Promise<PickedElement> {
-  const base = {
+function captureElement(element: Element): PickedElement {
+  return {
     pageUrl: location.href,
     pageTitle: document.title?.trim() || null,
     tagName: element.tagName.toLowerCase(),
     pickedAt: new Date().toISOString(),
-  };
-  try {
-    const context = await withCaptureTimeout(
-      Promise.resolve(getElementContext(element)),
-      ELEMENT_CONTEXT_TIMEOUT_MS,
-    );
-    if (context) {
-      const stack = (context.stack ?? []).map(toStackFrame);
-      return {
-        ...base,
-        selector: context.selector,
-        htmlPreview: (context.htmlPreview ?? "").slice(0, CONTEXT_TEXT_LIMIT),
-        componentName: context.componentName,
-        source: stack.find((frame) => frame.fileName) ?? null,
-        stack,
-        styles: (context.styles ?? "").slice(0, CONTEXT_TEXT_LIMIT),
-      };
-    }
-  } catch {}
-  return {
-    ...base,
     selector: null,
     htmlPreview: element.outerHTML.slice(0, HTML_PREVIEW_MAX_CHARS),
     componentName: null,
@@ -431,7 +391,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   host.setAttribute(OVERLAY_ATTRIBUTE, "");
   host.style.cssText = `position:fixed;inset:0;z-index:${Z_INDEX_OVERLAY};pointer-events:none`;
   applyAnnotationTheme(host, annotationTheme);
-  const shadowRoot = host.attachShadow({ mode: "open" });
+  const shadowRoot = host.attachShadow({ mode: "closed" });
   const themeStyle = document.createElement("style");
   themeStyle.textContent = previewAnnotationStyles;
   shadowRoot.appendChild(themeStyle);
@@ -570,6 +530,7 @@ function startAnnotation(resolve: (result: string) => void): void {
       }
     }
     selected.delete(target.element);
+    target.element.removeAttribute(ELEMENT_ATTRIBUTE);
     target.outline.remove();
     target.label.remove();
     for (const [key, change] of styleChanges) {
@@ -1122,7 +1083,8 @@ function startAnnotation(resolve: (result: string) => void): void {
   };
 
   const onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0 || isAnnotationNode(event.target as Element)) return;
+    if (!event.isTrusted || event.button !== 0 || isAnnotationNode(event.target as Element))
+      return;
     event.preventDefault();
     event.stopPropagation();
     if (tool === "select") {
@@ -1202,6 +1164,7 @@ function startAnnotation(resolve: (result: string) => void): void {
 
   const restoreStyles = (): void => {
     for (const target of selected.values()) {
+      target.element.removeAttribute(ELEMENT_ATTRIBUTE);
       if (!(target.element instanceof HTMLElement || target.element instanceof SVGElement))
         continue;
       for (const [property, baseline] of target.baselineStyles) {
@@ -1237,6 +1200,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (!event.isTrusted) return;
     if (isAnnotationNode(event.target as Element) && event.key !== "Escape") return;
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1262,50 +1226,43 @@ function startAnnotation(resolve: (result: string) => void): void {
     const submittedRegions = [...regions];
     const submittedStrokes = [...strokes];
     const submittedStyleChanges = Array.from(styleChanges.values(), (change) => ({ ...change }));
-    void Promise.all(
-      Array.from(selected.values()).map(async (target) => {
-        const element = await captureElement(target.element);
-        for (const change of submittedStyleChanges) {
-          if (change.targetId === target.id && element.selector !== null) {
-            change.selector = element.selector;
-          }
-        }
-        return {
-          id: target.id,
-          element,
-          rect: rectFromDomRect(target.element.getBoundingClientRect()),
-        };
-      }),
-    )
-      .then((elements) => {
-        if (finished) return;
-        const annotation = {
-          id: nextId("annotation"),
-          pageUrl: location.href,
-          pageTitle: document.title?.trim() || null,
-          comment: submittedComment,
-          elements,
-          regions: submittedRegions,
-          strokes: submittedStrokes,
-          styleChanges: submittedStyleChanges,
-          screenshot: null,
-          createdAt: new Date().toISOString(),
-        };
-        editor.style.display = "none";
-        toolbar.style.display = "none";
-        hoverOutline.style.display = "none";
-        const screenshotRect = unionRects([
-          ...elements.map((target) => target.rect),
-          ...submittedRegions.map((region) => region.rect),
-          ...submittedStrokes.map((stroke) => stroke.bounds),
-        ]);
-        window.requestAnimationFrame(() => settle({ annotation, cropRect: screenshotRect, submission }));
-      })
-      .catch(() => teardown());
+    const elements = Array.from(selected.values(), (target) => {
+      const element = captureElement(target.element);
+      target.element.setAttribute(ELEMENT_ATTRIBUTE, target.id);
+      return {
+        id: target.id,
+        element,
+        rect: rectFromDomRect(target.element.getBoundingClientRect()),
+      };
+    });
+    const annotation = {
+      id: nextId("annotation"),
+      pageUrl: location.href,
+      pageTitle: document.title?.trim() || null,
+      comment: submittedComment,
+      elements,
+      regions: submittedRegions,
+      strokes: submittedStrokes,
+      styleChanges: submittedStyleChanges,
+      screenshot: null,
+      createdAt: new Date().toISOString(),
+    };
+    editor.style.display = "none";
+    toolbar.style.display = "none";
+    hoverOutline.style.display = "none";
+    const screenshotRect = unionRects([
+      ...elements.map((target) => target.rect),
+      ...submittedRegions.map((region) => region.rect),
+      ...submittedStrokes.map((stroke) => stroke.bounds),
+    ]);
+    window.requestAnimationFrame(() => settle({ annotation, cropRect: screenshotRect, submission }));
   };
-  submit.addEventListener("click", () => submitAnnotation("attach"));
+  submit.addEventListener("click", (event) => {
+    if (event.isTrusted) submitAnnotation("attach");
+  });
   root.addEventListener("keydown", (event) => {
-    const submission = event.target === comment ? resolveAnnotationSubmission(event) : null;
+    const submission =
+      event.isTrusted && event.target === comment ? resolveAnnotationSubmission(event) : null;
     event.stopImmediatePropagation();
     if (!submission) return;
     event.preventDefault();
@@ -1324,15 +1281,41 @@ function startAnnotation(resolve: (result: string) => void): void {
   document.documentElement.appendChild(host);
   refreshToolButtons();
   updateStatus();
-  activeSession = { teardown };
+  activeSession = {
+    teardown,
+    demo: {
+      select: addSelected,
+      comment: (text) => {
+        comment.value = text;
+        resizeComment();
+      },
+      fontSize: (px) => {
+        if (!editorExpanded) adjust.click();
+        fontSize.value = String(px);
+        setStyleForSelected("font-size", `${px}px`);
+      },
+      submit: submitAnnotation,
+    },
+  };
 }
 
-(globalThis as { __zeronAnnotate?: unknown }).__zeronAnnotate = {
-  start(theme: AnnotationTheme): Promise<string> {
+interface AnnotateApi {
+  start(theme: AnnotationTheme): Promise<string>;
+  teardown(): void;
+  demo(): AnnotationDemo | undefined;
+}
+
+const scope = globalThis as { __zeronAnnotate?: AnnotateApi };
+scope.__zeronAnnotate?.teardown();
+scope.__zeronAnnotate = {
+  start(theme) {
     annotationTheme = theme;
     return new Promise((resolve) => startAnnotation(resolve));
   },
-  teardown(): void {
+  teardown() {
     activeSession?.teardown();
+  },
+  demo() {
+    return activeSession?.demo;
   },
 };
