@@ -200,6 +200,7 @@ impl Suite {
                     permission_mode: zeron_proto::PermissionMode::Full,
                     instructions: String::new(),
                     profile_id: None,
+                    instance_id: None,
                     disabled_tools: Vec::new(),
                 },
             )
@@ -1295,6 +1296,7 @@ async fn restart_durability() {
                 permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
                 profile_id: None,
+                instance_id: None,
                 disabled_tools: Vec::new(),
             },
         )

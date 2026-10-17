@@ -176,6 +176,9 @@ pub struct ChatConfig {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// None runs the harness's default instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     /// Tools this chat runs without, in Claude's spelling (see
     /// [`crate::tools::ZERON_TOOL_PREFIX`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

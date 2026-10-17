@@ -6075,6 +6075,7 @@ impl DocHost {
                         permission_mode: request.permission_mode,
                         instructions: String::new(),
                         profile_id: None,
+                        instance_id: None,
                         disabled_tools: request.disabled_tools.clone(),
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {

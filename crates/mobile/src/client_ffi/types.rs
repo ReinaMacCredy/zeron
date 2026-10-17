@@ -839,6 +839,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
             permission_mode: Default::default(),
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: Vec::new(),
         })
     }
@@ -851,6 +852,9 @@ impl ChatConfig {
             config.permission_mode = existing.permission_mode;
             config.instructions = existing.instructions;
             config.profile_id = existing.profile_id;
+            if existing.harness == config.harness {
+                config.instance_id = existing.instance_id;
+            }
         }
         Ok(config)
     }
@@ -1124,6 +1128,7 @@ mod tests {
             permission_mode: zeron_proto::PermissionMode::Ask,
             instructions: "Plan only.".into(),
             profile_id: Some("planner".into()),
+            instance_id: None,
             disabled_tools: Vec::new(),
         };
         let mut edit = ChatConfig::from(&existing);
@@ -1133,5 +1138,31 @@ mod tests {
         assert_eq!(written.permission_mode, zeron_proto::PermissionMode::Ask);
         assert_eq!(written.instructions, "Plan only.");
         assert_eq!(written.profile_id.as_deref(), Some("planner"));
+    }
+
+    #[test]
+    fn an_acp_instance_survives_a_mobile_edit_until_the_harness_changes() {
+        let existing = zc::ChatConfig {
+            harness: zeron_proto::HarnessId::Acp,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: Default::default(),
+            instructions: String::new(),
+            profile_id: None,
+            instance_id: Some("acp_gemini".into()),
+            disabled_tools: Vec::new(),
+        };
+        let edit = ChatConfig::from(&existing);
+        assert_eq!(edit.harness, "acp");
+        let kept = edit.clone().over(Some(existing.clone())).unwrap();
+        assert_eq!(kept.harness, zeron_proto::HarnessId::Acp);
+        assert_eq!(kept.instance_id.as_deref(), Some("acp_gemini"));
+        let switched = ChatConfig {
+            harness: "codex".into(),
+            ..edit
+        };
+        assert_eq!(switched.over(Some(existing)).unwrap().instance_id, None);
     }
 }

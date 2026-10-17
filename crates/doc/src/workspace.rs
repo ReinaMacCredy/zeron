@@ -923,6 +923,7 @@ mod tests {
                 permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
                 profile_id: None,
+                instance_id: None,
                 disabled_tools: Vec::new(),
             }),
             last_message_preview: None,
@@ -1003,6 +1004,7 @@ mod tests {
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: Vec::new(),
         };
         assert!(ws.set_chat_config("chat-1", &config).unwrap());

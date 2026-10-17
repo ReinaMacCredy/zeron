@@ -79,6 +79,7 @@ use crate::computer::runtime::ComputerRuntime;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::project_actions::ProjectActionsStore;
+use crate::provider_instances::ProviderInstancesStore;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, session_home_dir};
 use crate::sessions::SessionsEngine;
@@ -522,6 +523,18 @@ struct UpsertAgentProfileParams {
 #[serde(rename_all = "camelCase")]
 struct DeleteAgentProfileParams {
     profile_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertProviderInstanceParams {
+    instance: zeron_proto::ProviderInstance,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProviderInstanceParams {
+    instance_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1001,6 +1014,7 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     agent_profiles: Option<AgentProfilesStore>,
+    provider_instances: Option<ProviderInstancesStore>,
     previews: Option<zeron_preview::PreviewService>,
     change_requests: CheckoutChangeRequests,
     github: GitHubCli,
@@ -1055,6 +1069,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             agent_profiles: None,
+            provider_instances: None,
             previews: None,
             change_requests,
             github,
@@ -1087,6 +1102,11 @@ impl EngineRpc {
 
     pub fn with_agent_profiles(mut self, agent_profiles: AgentProfilesStore) -> Self {
         self.agent_profiles = Some(agent_profiles);
+        self
+    }
+
+    pub fn with_provider_instances(mut self, provider_instances: ProviderInstancesStore) -> Self {
+        self.provider_instances = Some(provider_instances);
         self
     }
 
@@ -1413,6 +1433,12 @@ impl EngineRpc {
         self.agent_profiles
             .clone()
             .ok_or_else(|| RpcError::Failed("agent profiles are not available".into()))
+    }
+
+    fn provider_instances_store(&self) -> Result<ProviderInstancesStore, RpcError> {
+        self.provider_instances
+            .clone()
+            .ok_or_else(|| RpcError::Failed("provider instances are not available".into()))
     }
 
     fn local_project_action_space(&self, space_id: &str) -> Result<Space, RpcError> {
@@ -2483,6 +2509,10 @@ fn forwardable(method: &str) -> bool {
             | methods::UPSERT_AGENT_PROFILE
             | methods::DELETE_AGENT_PROFILE
             | methods::REORDER_AGENT_PROFILES
+            // Provider instances name paths on the device that runs them.
+            | methods::LIST_PROVIDER_INSTANCES
+            | methods::UPSERT_PROVIDER_INSTANCE
+            | methods::DELETE_PROVIDER_INSTANCE
             | methods::GET_SYSTEM_PROMPT
             | methods::SET_SYSTEM_PROMPT
             // Checkout diffs are produced on the device holding the checkout.
@@ -5187,6 +5217,21 @@ impl RpcService for EngineRpc {
                 let p: ReorderAgentProfilesParams = parse_params(params)?;
                 let store = self.agent_profiles_store()?;
                 let snapshot = blocking(move || store.reorder(&p.profile_ids)).await?;
+                RpcReply::value(&snapshot)
+            }
+            methods::LIST_PROVIDER_INSTANCES => {
+                RpcReply::value(&self.provider_instances_store()?.snapshot())
+            }
+            methods::UPSERT_PROVIDER_INSTANCE => {
+                let p: UpsertProviderInstanceParams = parse_params(params)?;
+                let store = self.provider_instances_store()?;
+                let snapshot = blocking(move || store.upsert(p.instance)).await?;
+                RpcReply::value(&snapshot)
+            }
+            methods::DELETE_PROVIDER_INSTANCE => {
+                let p: DeleteProviderInstanceParams = parse_params(params)?;
+                let store = self.provider_instances_store()?;
+                let snapshot = blocking(move || store.delete(&p.instance_id)).await?;
                 RpcReply::value(&snapshot)
             }
             methods::LIST_PROJECT_ACTIONS => {

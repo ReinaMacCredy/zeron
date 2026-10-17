@@ -124,6 +124,7 @@ impl EngineRpc {
             permission_mode: Default::default(),
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: Vec::new(),
         });
         let space_id = space.map(|space| space.id);

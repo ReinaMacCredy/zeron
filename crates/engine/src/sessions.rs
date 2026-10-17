@@ -1457,7 +1457,7 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
             return Ok(String::new());
         }
-        let harness = self.inner.registry.resolve(harness_id)?;
+        let harness = self.inner.resolve_for_chat(chat_id, harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
@@ -1947,7 +1947,7 @@ impl SessionsEngine {
         continue_with: Option<String>,
     ) -> Result<CompactQueued, EngineError> {
         let (harness_id, _) = self.compaction_request(chat_id)?;
-        let harness = self.inner.registry.resolve(harness_id)?;
+        let harness = self.inner.resolve_for_chat(chat_id, harness_id)?;
         if harness.compaction() == Compaction::None {
             return Err(EngineError::Other(format!(
                 "{} does not support compaction",
@@ -2118,7 +2118,7 @@ impl SessionsEngine {
         };
 
         let (harness_id, mut request) = self.compaction_request(chat_id)?;
-        let harness = self.inner.registry.resolve(harness_id)?;
+        let harness = self.inner.resolve_for_chat(chat_id, harness_id)?;
         let compaction = harness.compaction();
         let focus = focus
             .map(|focus| focus.trim().to_string())
@@ -2528,7 +2528,9 @@ impl SessionsEngine {
         host: &DocHost,
         chat_id: &str,
     ) -> Result<Arc<dyn Harness>, EngineError> {
-        let harness = self.inner.registry.resolve(host.harness_for(chat_id))?;
+        let harness = self
+            .inner
+            .resolve_for_chat(chat_id, host.harness_for(chat_id))?;
         if !harness.branching() {
             return Err(EngineError::Other(format!(
                 "{} cannot fork or rewind a session.",
@@ -3846,6 +3848,26 @@ impl Inner {
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
+    }
+
+    fn resolve_for_chat(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+    ) -> Result<Arc<dyn Harness>, EngineError> {
+        if harness_id == HarnessId::Acp
+            && self
+                .workspace()
+                .and_then(|ws| ws.chat_config(chat_id))
+                .filter(|config| config.harness == HarnessId::Acp)
+                .and_then(|config| config.instance_id)
+                .is_none()
+        {
+            return Err(EngineError::Other(
+                "An ACP agent runs only as a provider instance; pick one for this chat.".into(),
+            ));
+        }
+        Ok(self.registry.resolve(harness_id)?)
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
@@ -7461,13 +7483,14 @@ mod tests {
     /// Feed-by-hand harness: the test pushes wire events through a channel
     /// and decides when the stream ends.
     struct FeedHarness {
+        id: HarnessId,
         feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
     }
 
     #[async_trait::async_trait]
     impl Harness for FeedHarness {
         fn id(&self) -> HarnessId {
-            HarnessId::Mock
+            self.id
         }
         fn display_name(&self) -> &str {
             "Feed"
@@ -7512,6 +7535,7 @@ mod tests {
         let (feed, rx) = mpsc::unbounded_channel();
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(FeedHarness {
+            id: HarnessId::Mock,
             feed: Mutex::new(Some(rx)),
         }));
         let dir = tempfile::tempdir().unwrap();
@@ -7559,6 +7583,47 @@ mod tests {
             session_id: None,
         })
         .unwrap();
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_acp_chat_dispatches_only_on_a_provider_instance() {
+        let (_feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            id: HarnessId::Acp,
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        for (chat, instance) in [("bare", None), ("on-instance", Some("acp_gemini"))] {
+            client
+                .call(
+                    zeron_rpc::methods::MUTATE,
+                    serde_json::json!({
+                        "op": "createChat", "chatId": chat, "deviceId": core.device_id,
+                        "config": {"harness": "acp", "sandbox": "workspace-write", "instanceId": instance},
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        let refused = core
+            .sessions
+            .dispatch("bare", HarnessId::Acp, request(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("provider instance"),
+            "{refused}"
+        );
+        core.sessions
+            .dispatch("on-instance", HarnessId::Acp, request(), None)
+            .await
+            .unwrap();
         core.sessions.shutdown().await;
     }
 }

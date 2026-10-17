@@ -42,6 +42,7 @@ mod model_prices;
 pub mod predictions;
 pub mod profile;
 pub mod project_actions;
+pub mod provider_instances;
 pub mod registry;
 pub mod repos;
 pub mod resume_schedule;
@@ -80,6 +81,7 @@ pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use project_actions::ProjectActionsStore;
+pub use provider_instances::ProviderInstancesStore;
 pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
@@ -171,6 +173,7 @@ pub struct EngineCore {
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
     pub agent_profiles: AgentProfilesStore,
+    pub provider_instances: ProviderInstancesStore,
     pub previews: zeron_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
@@ -322,6 +325,7 @@ impl EngineCore {
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         doc_host.set_thread_watches(thread_watches::ThreadWatches::open(profile.store_root())?);
         let agent_profiles = AgentProfilesStore::open(profile.store_root())?;
+        let provider_instances = ProviderInstancesStore::open(data_dir)?;
         let previews = zeron_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
             device_id.clone(),
@@ -396,6 +400,7 @@ impl EngineCore {
             terminals,
             project_actions,
             agent_profiles,
+            provider_instances,
             previews,
             change_requests,
             diff_sync,
@@ -545,6 +550,7 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
         .with_agent_profiles(self.agent_profiles.clone())
+        .with_provider_instances(self.provider_instances.clone())
         .with_computer(self.computer.clone())
         .with_device_hub(self.device_hub.clone())
         .with_html_preview(self.html_preview.clone())

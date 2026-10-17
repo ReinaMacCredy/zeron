@@ -363,6 +363,7 @@ impl DocHost {
         }
         if let Some(config) = config.as_mut() {
             config.profile_id = profile.profile_id.clone();
+            config.instance_id = None;
         }
         if !profile.disabled_tools.is_empty() {
             let config = config.get_or_insert_with(|| self.default_chat_config());
@@ -406,6 +407,7 @@ impl DocHost {
             permission_mode: PermissionMode::Ask,
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: Vec::new(),
         }
     }

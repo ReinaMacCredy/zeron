@@ -405,6 +405,7 @@ impl CoreClient {
                     permission_mode: Default::default(),
                     instructions: String::new(),
                     profile_id: None,
+                    instance_id: None,
                     disabled_tools: Vec::new(),
                 };
                 zeron_voice_session::run(

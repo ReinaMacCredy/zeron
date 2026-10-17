@@ -260,6 +260,7 @@ impl ResolvedRunConfig {
             permission_mode: self.permission_mode,
             instructions: self.instructions.clone(),
             profile_id: self.profile_id.clone(),
+            instance_id: None,
             disabled_tools: self.disabled_tools.clone(),
         })
     }
@@ -3349,8 +3350,15 @@ impl Pickers {
             config.instructions = existing.instructions.clone();
             config.profile_id = existing.profile_id.clone();
             config.disabled_tools = existing.disabled_tools.clone();
+            if existing.harness == config.harness {
+                config.instance_id = existing.instance_id.clone();
+            }
         }
+        let harness = config.harness;
         change(&mut config);
+        if config.harness != harness {
+            config.instance_id = None;
+        }
         // Reasoning must stay concrete for whatever model the row now names —
         // same ladder resolution as [`Self::trait_ladder`] (model levels, else
         // the harness's advertised ladder).
@@ -8526,6 +8534,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
+        HarnessId::Acp => (crate::icons::BOT, None),
     }
 }
 
@@ -11756,6 +11765,7 @@ mod tests {
             permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: Vec::new(),
         });
         assert_eq!(
@@ -12637,6 +12647,7 @@ mod tests {
                         permission_mode: Default::default(),
                         instructions: String::new(),
                         profile_id: None,
+                        instance_id: None,
                         disabled_tools: Vec::new(),
                     }),
                     last_message_preview: None,
@@ -12835,6 +12846,7 @@ mod tests {
                         permission_mode: Default::default(),
                         instructions: String::new(),
                         profile_id: None,
+                        instance_id: None,
                         disabled_tools: Vec::new(),
                     }),
                     last_message_preview: None,

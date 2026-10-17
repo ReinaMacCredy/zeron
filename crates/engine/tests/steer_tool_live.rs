@@ -120,6 +120,7 @@ async fn steering_never_aborts_a_running_tool() {
                 permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
+                instance_id: None,
                 disabled_tools: Vec::new(),
             },
         )

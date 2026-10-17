@@ -334,6 +334,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         permission_mode: zeron_proto::PermissionMode::Auto,
         instructions: String::new(),
         profile_id: None,
+        instance_id: None,
         disabled_tools: Vec::new(),
     };
     rig.core
@@ -482,6 +483,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
         permission_mode: zeron_proto::PermissionMode::Auto,
         instructions: "Coordinate only.".into(),
         profile_id: Some("orchestrator".into()),
+        instance_id: None,
         disabled_tools: vec!["mcp__xcode".into()],
     };
     rig.core
@@ -1122,6 +1124,7 @@ async fn a_delegated_child_names_its_own_profile_never_the_owners() {
                 permission_mode: Default::default(),
                 instructions: "Plan only.".into(),
                 profile_id: Some("planner".into()),
+                instance_id: None,
                 disabled_tools: Vec::new(),
             },
         )
@@ -2286,6 +2289,7 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
                 permission_mode: Default::default(),
                 instructions: "Review only.".into(),
                 profile_id: None,
+                instance_id: None,
                 disabled_tools: Vec::new(),
             },
         )

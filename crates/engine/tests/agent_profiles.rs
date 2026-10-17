@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_proto::AgentProfilesSnapshot;
+use zeron_proto::{AgentProfilesSnapshot, ProviderInstancesSnapshot};
 use zeron_rpc::methods;
 
 fn ids(snapshot: &AgentProfilesSnapshot) -> Vec<&str> {
@@ -150,4 +150,59 @@ async fn deleting_a_profile_detaches_it_from_this_hosts_chats() {
     assert_eq!(config("b").profile_id.as_deref(), Some("executor"));
     assert_eq!(config("b").instructions, "Executor");
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn provider_instances_live_in_the_device_data_dir_and_survive_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let assemble = || {
+        EngineCore::assemble(
+            &data,
+            Arc::new(HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .expect("engine assembles")
+    };
+    let core = assemble();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let saved: ProviderInstancesSnapshot = client
+        .call_as(
+            methods::UPSERT_PROVIDER_INSTANCE,
+            json!({"instance": {"id": "codex_work", "driver": "codex", "label": "Work",
+                   "config": {"kind": "native", "homeDir": {"kind": "managed"}}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.instances.len(), 1);
+    assert!(
+        client
+            .call(
+                methods::UPSERT_PROVIDER_INSTANCE,
+                json!({"instance": {"id": "codex", "driver": "codex", "label": "Codex"}}),
+            )
+            .await
+            .is_err()
+    );
+    assert!(data.join("provider-instances.json").is_file());
+    drop(client);
+    drop(core);
+
+    let core = assemble();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let reloaded: ProviderInstancesSnapshot = client
+        .call_as(methods::LIST_PROVIDER_INSTANCES, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(reloaded, saved);
+    let emptied: ProviderInstancesSnapshot = client
+        .call_as(
+            methods::DELETE_PROVIDER_INSTANCE,
+            json!({"instanceId": "codex_work"}),
+        )
+        .await
+        .unwrap();
+    assert!(emptied.instances.is_empty());
 }

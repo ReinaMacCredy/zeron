@@ -295,6 +295,9 @@ pub mod methods {
     pub const UPSERT_AGENT_PROFILE: &str = "UpsertAgentProfile";
     pub const DELETE_AGENT_PROFILE: &str = "DeleteAgentProfile";
     pub const REORDER_AGENT_PROFILES: &str = "ReorderAgentProfiles";
+    pub const LIST_PROVIDER_INSTANCES: &str = "ListProviderInstances";
+    pub const UPSERT_PROVIDER_INSTANCE: &str = "UpsertProviderInstance";
+    pub const DELETE_PROVIDER_INSTANCE: &str = "DeleteProviderInstance";
     pub const GET_SYSTEM_PROMPT: &str = "GetSystemPrompt";
     pub const SET_SYSTEM_PROMPT: &str = "SetSystemPrompt";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).

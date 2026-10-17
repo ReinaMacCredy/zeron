@@ -1654,6 +1654,7 @@ mod tests {
             permission_mode: PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: Vec::new(),
         };
         let mut same = profile("Same", "");
@@ -1730,6 +1731,7 @@ mod tests {
             permission_mode: PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
+            instance_id: None,
             disabled_tools: tools(&["WebFetch"]),
         };
         let mut lean = profile("Lean", "");

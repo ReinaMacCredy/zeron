@@ -23,6 +23,8 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Generic ACP agent driver; the provider instance names the agent.
+    Acp,
     /// Test harness; never shown in production pickers.
     Mock,
 }
@@ -39,6 +41,7 @@ impl HarnessId {
             HarnessId::Pi => "Pi",
             HarnessId::Opencode => "OpenCode",
             HarnessId::Antigravity => "Antigravity",
+            HarnessId::Acp => "ACP agent",
             HarnessId::Mock => "Mock",
         }
     }
