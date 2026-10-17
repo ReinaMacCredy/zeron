@@ -12775,7 +12775,7 @@ impl Shell {
         let needs_you = (item == RailItem::Tasks)
             .then(|| crate::tasks::needs_you_count(self.state.read(cx)))
             .filter(|count| *count > 0);
-        let button = app_rail::button(entry, active, theme)
+        let button = app_rail::button(entry, active, self.rail_wash(theme), theme)
             .relative()
             .when_some(awaiting.or(needs_you), |el, count| {
                 el.child(app_rail::badge(count, theme))
@@ -12804,6 +12804,14 @@ impl Shell {
                 cx.new(|_| SurfaceTabTooltip { text }).into()
             })
             .into_any_element()
+    }
+
+    pub(super) fn rail_wash(&self, theme: &Theme) -> gpui::Hsla {
+        if self.settings.inset_shell {
+            theme.inset_tones().wash
+        } else {
+            theme.glass_hover()
+        }
     }
 
     /// Never deferred: a deferred draw would capture all native browser input.
@@ -12893,6 +12901,7 @@ impl Shell {
             ];
         }
         let popup_theme = theme.for_popup();
+        let wash = self.rail_wash(theme);
         let hover = std::rc::Rc::new(hover);
         ring_accounts
             .into_iter()
@@ -12913,8 +12922,8 @@ impl Shell {
                     .relative()
                     .rounded(px(8.0))
                     .cursor_pointer()
-                    .when(open, |el| el.bg(theme.glass_hover()))
-                    .hover(|style| style.bg(theme.glass_hover()))
+                    .when(open, |el| el.bg(wash))
+                    .hover(move |style| style.bg(wash))
                     .child(app_rail::ring(Some(&account), theme))
                     .on_hover(move |hovered, window, cx| hover(hovered, window, cx))
                     .on_mouse_down(

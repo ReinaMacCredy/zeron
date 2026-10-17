@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use gpui::{AnyElement, Div, SharedString, Stateful, div, prelude::*, px};
-use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
+use gpui::{AnyElement, Div, Hsla, SharedString, Stateful, div, prelude::*, px};
+use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentUsageWindow, HarnessId};
 
 use crate::account_usage::used_fraction;
 use crate::icons::{self, icon};
@@ -77,7 +77,7 @@ pub(crate) const BOTTOM: [RailEntry; 1] = [RailEntry {
     icon: icons::LUCIDE_SETTINGS,
 }];
 
-pub(crate) fn button(entry: &RailEntry, active: bool, theme: &Theme) -> Stateful<Div> {
+pub(crate) fn button(entry: &RailEntry, active: bool, wash: Hsla, theme: &Theme) -> Stateful<Div> {
     let id = entry.id;
     div()
         .id(id)
@@ -94,9 +94,9 @@ pub(crate) fn button(entry: &RailEntry, active: bool, theme: &Theme) -> Stateful
         .rounded(px(8.0))
         .cursor_pointer()
         .bg(if active {
-            theme.glass_hover()
+            wash
         } else {
-            motion::hover_blend(id, theme.glass_hover().opacity(0.0), theme.glass_hover())
+            motion::hover_blend(id, wash.opacity(0.0), wash)
         })
         .on_hover(motion::hover_listener(id))
         .child(icon(entry.icon).size(px(GLYPH)).text_color(if active {
