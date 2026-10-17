@@ -150,10 +150,22 @@ impl HandoffRoute {
 #[serde(rename_all = "camelCase")]
 pub enum ClassifierVerdict {
     New,
+    Carry,
     Continue,
     #[default]
     #[serde(other)]
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DecidedBy {
+    Stage2,
+    Streak,
+    Ceiling,
+    #[default]
+    #[serde(other)]
+    Stage1,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -163,10 +175,13 @@ pub struct ClassifierRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub verdict: ClassifierVerdict,
+    pub decided_by: DecidedBy,
     pub duration_ms: u64,
     pub context_tokens: u64,
     pub input: String,
     pub reply: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage2_reply: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

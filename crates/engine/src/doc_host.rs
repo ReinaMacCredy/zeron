@@ -984,6 +984,7 @@ impl ChatDocHandle {
     ) -> Result<(), DocError> {
         let label = match record.verdict {
             zeron_doc::ClassifierVerdict::New => "Classifier: new task",
+            zeron_doc::ClassifierVerdict::Carry => "Classifier: carry over",
             zeron_doc::ClassifierVerdict::Continue => "Classifier: same task",
             zeron_doc::ClassifierVerdict::Failed => "Classifier: no answer",
         };

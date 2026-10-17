@@ -423,6 +423,9 @@ fn image_part(
     }
 }
 
+const CONTEXT_BASELINE: &str = "contextBaseline";
+const BASELINE_PENDING: i64 = -1;
+
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
@@ -519,6 +522,38 @@ impl SessionDoc {
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
         self.doc.commit();
+        Ok(())
+    }
+
+    /// What a compaction cannot reclaim: the first context reading after a reset.
+    pub fn context_baseline(&self) -> u64 {
+        match self.doc.get_map("meta").get(CONTEXT_BASELINE) {
+            Some(loro::ValueOrContainer::Value(LoroValue::I64(value))) => value.max(0) as u64,
+            _ => 0,
+        }
+    }
+
+    pub fn reset_context_baseline(&self) -> Result<(), DocError> {
+        self.doc
+            .get_map("meta")
+            .insert(CONTEXT_BASELINE, BASELINE_PENDING)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    pub fn settle_context_baseline(&self, tokens: u64) -> Result<(), DocError> {
+        let pending = matches!(
+            self.doc.get_map("meta").get(CONTEXT_BASELINE),
+            Some(loro::ValueOrContainer::Value(LoroValue::I64(
+                BASELINE_PENDING
+            )))
+        );
+        if pending && tokens > 0 {
+            self.doc
+                .get_map("meta")
+                .insert(CONTEXT_BASELINE, tokens as i64)?;
+            self.doc.commit();
+        }
         Ok(())
     }
 
@@ -1755,11 +1790,13 @@ mod tests {
                 record: crate::parts::ClassifierRecord {
                     harness: Some(HarnessId::ClaudeCode),
                     model: Some("sonnet".into()),
-                    verdict: crate::parts::ClassifierVerdict::New,
+                    verdict: crate::parts::ClassifierVerdict::Carry,
+                    decided_by: crate::parts::DecidedBy::Stage2,
                     duration_ms: 3400,
                     context_tokens: 136_000,
                     input: "Recent conversation:".into(),
-                    reply: "NEW".into(),
+                    reply: "CONTINUE".into(),
+                    stage2_reply: Some("CARRY".into()),
                     input_tokens: Some(2100),
                     output_tokens: Some(2),
                 },
@@ -2655,6 +2692,22 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+
+    #[test]
+    fn the_baseline_is_the_first_reading_after_a_reset() {
+        let doc = SessionDoc::init("baseline-chat").unwrap();
+        doc.settle_context_baseline(90_000).unwrap();
+        assert_eq!(doc.context_baseline(), 0, "no reset seen: raw context");
+        doc.reset_context_baseline().unwrap();
+        assert_eq!(doc.context_baseline(), 0);
+        doc.settle_context_baseline(0).unwrap();
+        doc.settle_context_baseline(61_000).unwrap();
+        doc.settle_context_baseline(75_000).unwrap();
+        assert_eq!(doc.context_baseline(), 61_000);
+        doc.reset_context_baseline().unwrap();
+        doc.settle_context_baseline(58_000).unwrap();
+        assert_eq!(doc.context_baseline(), 58_000);
     }
 }
 

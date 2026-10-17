@@ -2809,17 +2809,17 @@ impl HandoffSide {
     }
 }
 
-fn new_task_tokens(transcript: &[SessionMessageEntry]) -> Option<u64> {
+fn boundary_compaction(transcript: &[SessionMessageEntry]) -> Option<(u64, bool)> {
     let entry = transcript
         .iter()
         .rev()
         .find(|entry| entry.role != MessageRole::User)?;
     entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. }
-            if record.verdict == zeron_doc::ClassifierVerdict::New =>
-        {
-            Some(record.context_tokens)
-        }
+        MessagePart::Classifier { record, .. } => match record.verdict {
+            zeron_doc::ClassifierVerdict::New => Some((record.context_tokens, false)),
+            zeron_doc::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
+            _ => None,
+        },
         _ => None,
     })
 }
@@ -9037,7 +9037,7 @@ impl Transcript {
                     })
                 });
                 let boundary = compacting
-                    .then(|| new_task_tokens(&state.transcript))
+                    .then(|| boundary_compaction(&state.transcript))
                     .flatten();
                 (classifying, boundary)
             }
@@ -9049,10 +9049,15 @@ impl Transcript {
             format!("Classifier · {model} · checking if this is a new task").into()
         } else if sending {
             "Sending".into()
-        } else if let Some(tokens) = boundary {
+        } else if let Some((tokens, carry)) = boundary {
             format!(
-                "Compacting {} before the new task",
-                crate::composer::background::compact_count(tokens)
+                "Compacting {} {}",
+                crate::composer::background::compact_count(tokens),
+                if carry {
+                    "and carrying the last turns over"
+                } else {
+                    "before the new task"
+                }
             )
             .into()
         } else if compacting {
@@ -10296,7 +10301,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use zeron_doc::ClassifierVerdict;
+        use zeron_doc::{ClassifierVerdict, DecidedBy};
         let open = self
             .folds
             .get(row_id)
@@ -10309,10 +10314,17 @@ impl Transcript {
             .map(|harness| HandoffSide::new(harness, record.model.as_deref(), cx));
         let (verdict, verdict_color) = match record.verdict {
             ClassifierVerdict::New => ("New task", theme.accent),
+            ClassifierVerdict::Carry => ("Carry over", theme.success),
             ClassifierVerdict::Continue => ("Same task", muted),
             ClassifierVerdict::Failed => ("No answer", theme.warning),
         };
         let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
+        let decided = match record.decided_by {
+            DecidedBy::Stage1 => "First look",
+            DecidedBy::Stage2 => "Second look",
+            DecidedBy::Streak => "Three same-task verdicts in a row",
+            DecidedBy::Ceiling => "Context near the window, not asked",
+        };
         let toggle_id = row_id.clone();
         let rule = || {
             div()
@@ -10428,6 +10440,7 @@ impl Transcript {
                         .bg(theme.surface.opacity(0.6))
                         .children(model.as_ref().map(|side| field("Model", side.detail())))
                         .child(field("Verdict", verdict.to_string()))
+                        .child(field("Decided", decided.to_string()))
                         .child(field("Time", secs.clone()))
                         .child(field(
                             "Context",
@@ -10446,6 +10459,14 @@ impl Transcript {
                 .child(mono_box("input", &record.input))
                 .child(div().text_color(theme.text_muted).child("Reply"))
                 .child(mono_box("reply", &record.reply))
+                .children(record.stage2_reply.as_deref().map(|reply| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(div().text_color(theme.text_muted).child("Second look"))
+                        .child(mono_box("stage2", reply))
+                }))
         });
         div()
             .w_full()

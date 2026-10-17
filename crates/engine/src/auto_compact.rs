@@ -7,7 +7,12 @@ use std::{
 use chrono::{DateTime, Utc};
 use zeron_proto::{CompactPlan, Session, SessionStats, SessionStatus};
 
-use crate::{doc_host::DocHost, now_ms, registry::HarnessRegistry, sessions::SessionsEngine};
+use crate::{
+    doc_host::DocHost,
+    now_ms,
+    registry::HarnessRegistry,
+    sessions::{AgentCompactRun, SessionsEngine},
+};
 
 // Claude Code's own idle defaults (CLI 2.1.299, `tengu_sunny_locket`): only a
 // 1h cache, fire at 90% of its life, at most a minute late.
@@ -72,12 +77,21 @@ fn run_agent_compaction(
     );
     tokio::spawn(async move {
         match sessions.compact_for_agent(&chat_id).await {
-            Ok(Some((outcome, request))) => {
-                tracing::info!(chat = %chat_id, compacted = outcome.compacted, "agent compaction ran");
+            Ok(Some((run, request))) => {
+                let reason = match run {
+                    AgentCompactRun::Compacted(outcome) => {
+                        tracing::info!(chat = %chat_id, compacted = outcome.compacted, "agent compaction ran");
+                        None
+                    }
+                    AgentCompactRun::Declined(reason) => {
+                        tracing::info!(chat = %chat_id, "agent compaction declined by the classifier");
+                        Some(reason)
+                    }
+                };
                 if let Some(text) = request.continue_with {
                     match host
                         .queue_auto_continue(&chat_id, &text, request.after_user.as_deref(), || {
-                            sessions.take_unsent_continue(&chat_id)
+                            sessions.take_unsent_continue(&chat_id, reason)
                         })
                         .await
                     {

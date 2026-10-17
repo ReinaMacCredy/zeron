@@ -2,7 +2,8 @@
 //! appends exactly one `system` boundary entry, resets the context meter, and
 //! refuses a second compaction or one on a busy chat.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,8 +12,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_doc::{
-    ClassifierVerdict, MessagePart, MessageRole, MessageStatus, SessionCommandPayload,
-    SessionMessageEntry,
+    ClassifierRecord, ClassifierVerdict, DecidedBy, MessagePart, MessageRole, MessageStatus,
+    SessionCommandPayload, SessionMessageEntry,
 };
 use zeron_engine::registry::{CompactionMode, CompactionSettings};
 use zeron_engine::{EngineCore, HarnessRegistry};
@@ -42,6 +43,10 @@ struct TestHarness {
     gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// The boundary classifier's answer; None fails the one-shot.
     verdict: Mutex<Option<String>>,
+    replies: Mutex<VecDeque<String>>,
+    one_shots: Mutex<Vec<String>>,
+    first_reading: AtomicU64,
+    tokens: AtomicU64,
 }
 
 impl TestHarness {
@@ -55,6 +60,10 @@ impl TestHarness {
             mailbox: Arc::new(Mutex::new(Vec::new())),
             gate: Mutex::new(None),
             verdict: Mutex::new(None),
+            replies: Mutex::new(VecDeque::new()),
+            one_shots: Mutex::new(Vec::new()),
+            first_reading: AtomicU64::new(1_000),
+            tokens: AtomicU64::new(22_762),
         }
     }
 }
@@ -91,11 +100,13 @@ impl Harness for TestHarness {
     }
     async fn run_one_shot(
         &self,
-        _request: RunRequest,
+        request: RunRequest,
         _controls: RunControls,
         _instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let verdict = self.verdict.lock().unwrap().clone();
+        self.one_shots.lock().unwrap().push(request.prompt);
+        let queued = self.replies.lock().unwrap().pop_front();
+        let verdict = queued.or_else(|| self.verdict.lock().unwrap().clone());
         let Some(text) = verdict else {
             return Err(HarnessError::Protocol("no verdict".into()));
         };
@@ -149,10 +160,12 @@ impl Harness for TestHarness {
                 }));
             }
         } else {
-            events.push(Ok(AgentEvent::ContextUsage {
-                tokens: Some(22_762),
-                window: Some(WINDOW),
-            }));
+            for tokens in [&self.first_reading, &self.tokens] {
+                events.push(Ok(AgentEvent::ContextUsage {
+                    tokens: Some(tokens.load(Ordering::SeqCst)),
+                    window: Some(WINDOW),
+                }));
+            }
             events.push(Ok(AgentEvent::TextDelta {
                 text: format!("ack: {}", request.prompt),
             }));
@@ -476,12 +489,7 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
     // Below the 2.3k the compaction leaves: the follow-up must still go out bare.
-    core.registry
-        .set_compaction_settings(zeron_engine::registry::CompactionSettings {
-            nudge_tokens: 2_000,
-            ..Default::default()
-        })
-        .unwrap();
+    threshold_mode(&core, 2_000);
     let (release, gate) = tokio::sync::oneshot::channel();
     *harness.gate.lock().unwrap() = Some(gate);
     core.doc_host
@@ -571,6 +579,7 @@ async fn a_message_before_the_agent_compaction_cancels_it() {
 async fn a_message_during_the_agent_compaction_drops_its_continue_with() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    threshold_mode(&core, 150_000);
     let (release, gate) = tokio::sync::oneshot::channel();
     *harness.gate.lock().unwrap() = Some(gate);
     zeron_rpc::memory_client(core.rpc_service())
@@ -614,6 +623,7 @@ async fn an_agent_compaction_queues_into_the_parked_run() {
     let harness = Arc::new(TestHarness::new(requests.clone(), true));
     harness.in_place.store(true, Ordering::SeqCst);
     let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    threshold_mode(&core, 150_000);
 
     zeron_rpc::memory_client(core.rpc_service())
         .call(
@@ -816,10 +826,285 @@ async fn the_classifier_compacts_before_a_new_task_only() {
 }
 
 fn verdict_of(entry: &SessionMessageEntry) -> Option<ClassifierVerdict> {
+    record_of(entry).map(|record| record.verdict)
+}
+
+fn record_of(entry: &SessionMessageEntry) -> Option<&ClassifierRecord> {
     entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => Some(record.verdict),
+        MessagePart::Classifier { record, .. } => Some(record),
         _ => None,
     })
+}
+
+fn threshold_mode(core: &EngineCore, nudge_tokens: u64) {
+    core.registry
+        .set_compaction_settings(CompactionSettings {
+            nudge_tokens,
+            mode: CompactionMode::Threshold,
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn classifier_mode(core: &EngineCore) {
+    core.registry
+        .set_compaction_settings(CompactionSettings {
+            nudge_tokens: 20_000,
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn prompts(requests: &Mutex<Vec<RunRequest>>) -> Vec<String> {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.prompt.clone())
+        .collect()
+}
+
+fn system_entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
+    entries(core)
+        .into_iter()
+        .filter(|e| e.role == MessageRole::System)
+        .collect()
+}
+
+const CARRY_HEAD: &str = "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out.\n\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carry_verdict_compacts_and_hands_the_last_turns_to_the_next_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    classifier_mode(&core);
+    harness.replies.lock().unwrap().extend([
+        "CONTINUE".to_string(),
+        "The plan is still open.\nCARRY".to_string(),
+    ]);
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(
+        || requests.lock().unwrap().len() == 3,
+        "compaction, then the message",
+    )
+    .await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "it settles").await;
+    let sent = prompts(&requests);
+    assert!(
+        sent[1].starts_with("/compact The last two turns go along verbatim after this compaction.")
+            && sent[1].ends_with("The message: hello"),
+        "{}",
+        sent[1]
+    );
+    assert_eq!(
+        sent[2],
+        format!("{CARRY_HEAD}person: hello\nagent: ack: hello\n</carried_over>\n\nhello")
+    );
+    let one_shots = harness.one_shots.lock().unwrap().clone();
+    assert_eq!(one_shots.len(), 2);
+    assert!(
+        one_shots[1].starts_with(&format!("{}\n\n", one_shots[0])),
+        "stage 2 shares stage 1's prompt as its prefix"
+    );
+    assert!(one_shots[0].ends_with("New message (from the person):\nuser: hello"));
+    let system = system_entries(&core);
+    let record = record_of(&system[0]).expect("classifier record");
+    assert_eq!(record.verdict, ClassifierVerdict::Carry);
+    assert_eq!(record.decided_by, DecidedBy::Stage2);
+    assert_eq!(record.reply, "CONTINUE");
+    assert_eq!(
+        record.stage2_reply.as_deref(),
+        Some("The plan is still open.\nCARRY")
+    );
+    assert_eq!(
+        entry_text(&system[1]),
+        "Compacted, last turns carried over · 22.8k → 2.3k tokens"
+    );
+
+    *harness.verdict.lock().unwrap() = Some("CONTINUE".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-3", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 4, "the next message").await;
+    assert_eq!(prompts(&requests)[3], "hello", "the carry rides one prompt");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_floor_ignores_context_a_compaction_cannot_free() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), false));
+    harness.first_reading.store(15_000, Ordering::SeqCst);
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    classifier_mode(&core);
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "the message runs").await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "it settles").await;
+    assert!(
+        system_entries(&core).is_empty(),
+        "22.8k with a 15k baseline frees under 20k"
+    );
+    assert!(harness.one_shots.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_same_task_verdicts_on_a_growing_context_carry_the_next_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    classifier_mode(&core);
+    let cwd = tmp.path().to_string_lossy().to_string();
+    *harness.verdict.lock().unwrap() = Some("CONTINUE".into());
+    for (n, id) in ["msg-2", "msg-3", "msg-4"].into_iter().enumerate() {
+        harness
+            .tokens
+            .store(25_000 + 2_000 * n as u64, Ordering::SeqCst);
+        core.doc_host
+            .queue_command(CHAT, run_payload(id, &cwd))
+            .expect("queue run");
+        wait_for(|| requests.lock().unwrap().len() == n + 2, "run starts").await;
+        wait_for(|| !core.sessions.turn_in_flight(CHAT), "run settles").await;
+    }
+    *harness.verdict.lock().unwrap() = None;
+    let asked = harness.one_shots.lock().unwrap().len();
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-5", &cwd))
+        .expect("queue run");
+    wait_for(
+        || requests.lock().unwrap().len() == 6,
+        "compaction, then the message",
+    )
+    .await;
+    assert_eq!(
+        harness.one_shots.lock().unwrap().len(),
+        asked,
+        "no classifier call"
+    );
+    let decided: Vec<_> = system_entries(&core)
+        .iter()
+        .filter_map(record_of)
+        .map(|record| (record.verdict, record.decided_by))
+        .collect();
+    assert_eq!(
+        decided,
+        [
+            (ClassifierVerdict::Continue, DecidedBy::Stage2),
+            (ClassifierVerdict::Continue, DecidedBy::Stage2),
+            (ClassifierVerdict::Continue, DecidedBy::Stage2),
+            (ClassifierVerdict::Carry, DecidedBy::Streak),
+        ]
+    );
+    assert!(prompts(&requests)[5].starts_with(CARRY_HEAD));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_task_agent_note_skips_the_compaction_and_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    *harness.verdict.lock().unwrap() = Some("CONTINUE".into());
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "now run the tests" }),
+        )
+        .await
+        .expect("request compact");
+    wait_for(|| prompts(&requests).len() == 2, "the agent's note").await;
+    assert_eq!(
+        prompts(&requests)[1],
+        "now run the tests\n\n<system-reminder>\nYour compaction did not run: the classifier judged that the next step still needs the recent details. Keep working, and call compact again at the next clean break.\n</system-reminder>"
+    );
+    let input = harness.one_shots.lock().unwrap()[0].clone();
+    assert!(
+        input.ends_with("New message (the agent's own note, written when it asked to compact):\nagent note: now run the tests"),
+        "{input}"
+    );
+    assert_eq!(
+        system_entries(&core)
+            .iter()
+            .map(verdict_of)
+            .collect::<Vec<_>>(),
+        [Some(ClassifierVerdict::Continue)]
+    );
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .and_then(|s| s.compact_plan),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carry_agent_note_compacts_and_resumes_with_the_last_turns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    *harness.verdict.lock().unwrap() = Some("CARRY".into());
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "focus": "keep the plan", "continueWith": "phase 2" }),
+        )
+        .await
+        .expect("request compact");
+    wait_for(
+        || prompts(&requests).len() == 3,
+        "compaction, then the note",
+    )
+    .await;
+    assert_eq!(prompts(&requests)[1], "/compact keep the plan");
+    assert_eq!(
+        prompts(&requests)[2],
+        format!("{CARRY_HEAD}person: hello\nagent: ack: hello\n</carried_over>\n\nphase 2")
+    );
+    let system = system_entries(&core);
+    assert_eq!(verdict_of(&system[0]), Some(ClassifierVerdict::Carry));
+    assert_eq!(
+        entry_text(&system[1]),
+        "Agent compacted, last turns carried over · 22.8k → 2.3k tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nearly_full_window_compacts_an_agent_note_without_asking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), false));
+    harness.tokens.store(WINDOW * 9 / 10, Ordering::SeqCst);
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "phase 2" }),
+        )
+        .await
+        .expect("request compact");
+    wait_for(
+        || prompts(&requests).len() == 3,
+        "compaction, then the note",
+    )
+    .await;
+    assert!(
+        harness.one_shots.lock().unwrap().is_empty(),
+        "no classifier call"
+    );
+    assert_eq!(prompts(&requests)[1], "/compact");
+    assert!(prompts(&requests)[2].starts_with(CARRY_HEAD));
+    let record = system_entries(&core)
+        .iter()
+        .find_map(|e| record_of(e).cloned())
+        .expect("a record");
+    assert_eq!(
+        (record.verdict, record.decided_by, record.context_tokens),
+        (
+            ClassifierVerdict::Carry,
+            DecidedBy::Ceiling,
+            WINDOW * 9 / 10
+        )
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -886,6 +1171,31 @@ async fn the_classifier_starts_fresh_on_a_harness_that_cannot_compact() {
             .parts
             .iter()
             .any(|part| matches!(part, MessagePart::Handoff { .. }))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_session_carries_the_last_turns_ahead_of_its_packet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    harness.can_compact.store(false, Ordering::SeqCst);
+    classifier_mode(&core);
+    *harness.verdict.lock().unwrap() = Some("CARRY".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "the message runs").await;
+    let next = requests.lock().unwrap()[1].clone();
+    assert_eq!(next.resume, None, "a new session");
+    let packet = next
+        .prompt
+        .strip_prefix(&format!(
+            "{CARRY_HEAD}person: hello\nagent: ack: hello\n</carried_over>\n\n"
+        ))
+        .unwrap_or_else(|| panic!("{}", next.prompt));
+    assert!(packet.starts_with("<fresh_session>"), "{packet}");
+    assert!(
+        entry_text(&system_entries(&core)[1]).starts_with("Fresh session, last turns carried over")
     );
 }
 
