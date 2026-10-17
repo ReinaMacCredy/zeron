@@ -490,6 +490,18 @@ unsafe fn fetch_element(element: AXUIElementRef) -> FetchedElement {
     let value_settable = (actions.is_empty() || role == "AXComboBox")
         && role_supports_value_addressing(role)
         && is_attribute_settable(element, "AXValue");
+    let mut actions = actions;
+    if attrs.expanded.is_none()
+        && attrs.disclosing.is_some()
+        && is_attribute_settable(element, "AXDisclosing")
+    {
+        attrs.expanded = attrs.disclosing;
+        actions.extend(
+            attrs
+                .disclosing
+                .map(|open| crate::input::ax_actions::disclosure_action(open).to_owned()),
+        );
+    }
     FetchedElement {
         attrs,
         actions,
@@ -886,7 +898,7 @@ unsafe fn walk_element(
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
         walk_children(
             &children,
-            depth + 1,
+            depth,
             parent_index,
             in_web_content,
             clip,
@@ -1038,14 +1050,24 @@ unsafe fn walk_element(
     }
 }
 
-// AppKit builds a cell view for every row whose cells are read, so off-screen rows are never walked.
+// AppKit builds a cell view for every row whose cells are read, so only short tables walk off-screen rows.
+const SHORT_TABLE_ROWS: usize = 50;
+
 unsafe fn walk_visible_rows(
     table: AXUIElementRef,
     children: &mut Vec<AXUIElementRef>,
 ) -> Option<VisibleRows> {
     attribute_count(table, "AXVisibleRows")?;
-    let total = attribute_count(table, "AXRows").unwrap_or(0);
-    let rows = copy_element_array(table, "AXVisibleRows");
+    let total = attribute_count(table, "AXRows");
+    let rows = copy_element_array(
+        table,
+        if total.is_some_and(|total| total <= SHORT_TABLE_ROWS) {
+            "AXRows"
+        } else {
+            "AXVisibleRows"
+        },
+    );
+    let total = total.unwrap_or(0);
     for child in children.drain(..) {
         CFRelease(child as CFTypeRef);
     }

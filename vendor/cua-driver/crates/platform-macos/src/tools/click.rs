@@ -1447,7 +1447,11 @@ fn perform_ax_click(
 
     // Capture advertised actions BEFORE dispatching so we can detect silent no-ops
     // (AX returns success even when the element doesn't advertise the action).
-    let advertised = unsafe { copy_action_names(element) };
+    let mut advertised = unsafe { copy_action_names(element) };
+    advertised.extend(
+        unsafe { crate::input::ax_actions::advertised_disclosure_action(element) }
+            .map(str::to_owned),
+    );
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
     let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();

@@ -418,7 +418,12 @@ pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()>
             ensure_ax_action_enabled(element_ptr, ax_action)?;
             crate::input::cancellation::gate().ensure_active()
         },
-        || unsafe { perform_action(element, ax_action) },
+        || unsafe {
+            match disclosure_target(element, ax_action) {
+                Some(open) => set_bool_attr(element, "AXDisclosing", open),
+                None => perform_action(element, ax_action),
+            }
+        },
         || unsafe {
             Some(OwnState {
                 role: copy_string_attr(element, "AXRole")?,
@@ -468,6 +473,32 @@ fn dispatch_ax_action_with(
         }
     }
     Err(AxActionFailure::from_ax_error(action, err).into())
+}
+
+const EXPAND: &str = "Expand";
+const COLLAPSE: &str = "Collapse";
+
+// Outline rows expose open/closed only as AXDisclosing, settable exactly on rows that can expand.
+pub(crate) fn disclosure_action(open: bool) -> &'static str {
+    if open {
+        COLLAPSE
+    } else {
+        EXPAND
+    }
+}
+
+pub(crate) unsafe fn advertised_disclosure_action(element: AXUIElementRef) -> Option<&'static str> {
+    let open = copy_bool_attr(element, "AXDisclosing")?;
+    is_attribute_settable(element, "AXDisclosing").then(|| disclosure_action(open))
+}
+
+unsafe fn disclosure_target(element: AXUIElementRef, action: &str) -> Option<bool> {
+    let open = match action {
+        EXPAND => true,
+        COLLAPSE => false,
+        _ => return None,
+    };
+    is_attribute_settable(element, "AXDisclosing").then_some(open)
 }
 
 pub(crate) fn map_action(action: &str) -> &str {

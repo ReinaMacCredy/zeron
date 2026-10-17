@@ -1060,6 +1060,7 @@ const ELEMENT_BATCH_ATTRS: &[&str] = &[
     "AXExpanded",         // 16
     "AXSubrole",          // 17
     "AXRoleDescription",  // 18
+    "AXDisclosing",       // 19
 ];
 
 /// One element's attribute values, decoded from a single
@@ -1097,6 +1098,7 @@ pub struct ElementAttrs {
     pub expanded: Option<bool>,
     pub subrole: Option<String>,
     pub role_description: Option<String>,
+    pub disclosing: Option<bool>,
 }
 
 /// Fetch every attribute the AX tree walker reads for one element in a
@@ -1151,6 +1153,7 @@ pub unsafe fn copy_element_attrs(element: AXUIElementRef) -> ElementAttrs {
         expanded: batch_slot(&slots, 16).and_then(|v| slot_bool(v)),
         subrole: batch_slot(&slots, 17).and_then(|v| slot_string(v)),
         role_description: batch_slot(&slots, 18).and_then(|v| slot_string(v)),
+        disclosing: batch_slot(&slots, 19).and_then(|v| slot_bool(v)),
     }
 }
 
