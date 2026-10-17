@@ -177,15 +177,11 @@ impl AddProviderDialog {
         editing: Option<ProviderInstance>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let single = |placeholder: &str, cx: &mut Context<Self>| {
-            let placeholder = SharedString::from(placeholder.to_string());
-            cx.new(|cx| ComposerInput::new(placeholder, cx).with_single_line())
-        };
-        let label_input = single("e.g. Work", cx);
-        let id_input = single("", cx);
-        let binary_input = single("", cx);
-        let home_input = single("", cx);
-        let args_input = single("--flag value", cx);
+        let label_input = cx.new(|cx| ComposerInput::new("e.g. Work", cx).with_single_line());
+        let id_input = cx.new(|cx| mono_input("", cx));
+        let binary_input = cx.new(|cx| mono_input("", cx));
+        let home_input = cx.new(|cx| mono_input("", cx));
+        let args_input = cx.new(|cx| mono_input("--flag value", cx));
         let subscriptions = vec![
             cx.subscribe(&label_input, |this: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Edited) {
@@ -421,12 +417,12 @@ impl AddProviderDialog {
     fn add_env_row(&mut self, key: &str, value: &str, cx: &mut Context<Self>) {
         let (key, value) = (key.to_string(), value.to_string());
         let key = cx.new(|cx| {
-            let mut input = ComposerInput::new("KEY", cx).with_single_line();
+            let mut input = mono_input("KEY", cx);
             input.set_text(key, cx);
             input
         });
         let value = cx.new(|cx| {
-            let mut input = ComposerInput::new("value", cx).with_single_line();
+            let mut input = mono_input("value", cx);
             input.set_text(value, cx);
             input
         });
@@ -789,7 +785,7 @@ impl AddProviderDialog {
                 .text_color(theme.text_muted)
                 .child(SharedString::from(instance.id.clone()))
                 .into_any_element(),
-            None => field(theme, &self.id_input, true, id_error.is_some()),
+            None => field(theme, &self.id_input, id_error.is_some()),
         };
         let swatch = |id: (&'static str, usize), on: bool| {
             div()
@@ -849,7 +845,7 @@ impl AddProviderDialog {
                 "Label",
                 "Shown in the provider list and model picker.".into(),
                 None,
-                field(theme, &self.label_input, false, false),
+                field(theme, &self.label_input, false),
                 true,
             ))
             .child(setting_row(
@@ -894,7 +890,7 @@ impl AddProviderDialog {
                 "Binary path",
                 format!("Path to the {name} binary used by this instance.").into(),
                 None,
-                field(theme, &self.binary_input, true, false),
+                field(theme, &self.binary_input, false),
                 true,
             ));
             if let Some((label, _)) = home_field(self.driver) {
@@ -903,7 +899,7 @@ impl AddProviderDialog {
                     label,
                     "Separate home so this instance keeps its own login and settings.".into(),
                     None,
-                    field(theme, &self.home_input, true, false),
+                    field(theme, &self.home_input, false),
                     true,
                 ));
             }
@@ -912,7 +908,7 @@ impl AddProviderDialog {
                 "Launch arguments",
                 "Additional CLI arguments passed on session start.".into(),
                 None,
-                field(theme, &self.args_input, true, false),
+                field(theme, &self.args_input, false),
                 true,
             ));
         }
@@ -931,13 +927,13 @@ impl AddProviderDialog {
                         div()
                             .w(px(110.0))
                             .flex_none()
-                            .child(field(theme, &row.key, true, false)),
+                            .child(field(theme, &row.key, false)),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(field(theme, &row.value, true, false)),
+                            .child(field(theme, &row.value, false)),
                     )
                     .child(
                         widgets::ghost_action(theme)
@@ -1176,7 +1172,14 @@ impl Render for AddProviderDialog {
     }
 }
 
-fn field(theme: &Theme, input: &Entity<ComposerInput>, mono: bool, error: bool) -> AnyElement {
+fn mono_input(placeholder: &'static str, cx: &mut Context<ComposerInput>) -> ComposerInput {
+    ComposerInput::new(placeholder, cx)
+        .with_single_line()
+        .with_mono()
+        .with_text_metrics(12.0, 16.0)
+}
+
+fn field(theme: &Theme, input: &Entity<ComposerInput>, error: bool) -> AnyElement {
     div()
         .w_full()
         .h(px(30.0))
@@ -1188,10 +1191,6 @@ fn field(theme: &Theme, input: &Entity<ComposerInput>, mono: bool, error: bool) 
         .flex()
         .items_center()
         .overflow_hidden()
-        .when(mono, |el| {
-            el.font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(12.0))
-        })
         .child(div().w_full().child(input.clone()))
         .into_any_element()
 }

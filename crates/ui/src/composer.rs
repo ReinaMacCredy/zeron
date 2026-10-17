@@ -2246,6 +2246,7 @@ pub struct ComposerInput {
     text_size: f32,
     configured_line_height: f32,
     single_line: bool,
+    mono: bool,
     max_chars: Option<usize>,
     scroll_left: f32,
     // -- measured state (written during layout/paint) --
@@ -2369,6 +2370,7 @@ impl ComposerInput {
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
             single_line: false,
+            mono: false,
             max_chars: None,
             scroll_left: 0.0,
             last_lines: Vec::new(),
@@ -2433,6 +2435,11 @@ impl ComposerInput {
 
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    pub(crate) fn with_mono(mut self) -> Self {
+        self.mono = true;
         self
     }
 
@@ -5769,7 +5776,11 @@ impl Render for ComposerInput {
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
             .text_color(text_color)
-            .font_family(theme.font_sans.clone())
+            .font_family(if self.mono {
+                theme.font_mono.clone()
+            } else {
+                theme.font_sans.clone()
+            })
             .child({
                 let input = cx.entity();
                 let ascent = self.max_ascent;
