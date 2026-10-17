@@ -2,10 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use zeron_proto::{HarnessId, ProviderInstance, ProviderInstancesSnapshot, validate_instance_id};
+use zeron_harness::{Harness, LaunchOverrides};
+use zeron_proto::{
+    HarnessId, HomeDir, InstanceConfig, ProviderInstance, ProviderInstancesSnapshot,
+    validate_instance_id,
+};
 
 use crate::EngineError;
 use crate::project_actions::persist_json;
+use crate::registry::HarnessRegistry;
 
 const STORE_FILE: &str = "provider-instances.json";
 const STORE_VERSION: u32 = 1;
@@ -61,6 +66,28 @@ impl ProviderInstancesStore {
             .iter()
             .find(|instance| instance.id == id)
             .cloned()
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        registry: &HarnessRegistry,
+        driver: HarnessId,
+        id: &str,
+    ) -> Result<Arc<dyn Harness>, EngineError> {
+        let instance = self.instance(id).ok_or_else(|| {
+            EngineError::Other(format!(
+                "Provider instance '{id}' is not set up on this device"
+            ))
+        })?;
+        if instance.driver != driver {
+            return Err(EngineError::Other(format!(
+                "Provider instance '{id}' runs on {}, not {}",
+                instance.driver.display_name(),
+                driver.display_name()
+            )));
+        }
+        let data_dir = self.inner.path.parent().unwrap_or(Path::new("."));
+        registry.resolve_instance(&instance, data_dir)
     }
 
     pub fn upsert(
@@ -136,6 +163,65 @@ fn empty_file() -> ProviderInstancesFile {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub(crate) fn launch_overrides(
+    instance: &ProviderInstance,
+    data_dir: &Path,
+) -> Result<LaunchOverrides, EngineError> {
+    let InstanceConfig::Native {
+        executable,
+        home_dir,
+        launch_args,
+        env,
+    } = &instance.config
+    else {
+        return Err(EngineError::Other(format!(
+            "Provider instance '{}' is an ACP agent, which this engine cannot run yet",
+            instance.id
+        )));
+    };
+    Ok(LaunchOverrides {
+        executable: executable
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(expand)
+            .transpose()?,
+        home: home_dir
+            .as_ref()
+            .map(|home| provider_home(&instance.id, home, data_dir))
+            .transpose()?,
+        args: launch_args.clone(),
+        env: env.clone(),
+    })
+}
+
+pub(crate) fn provider_home(
+    id: &str,
+    home: &HomeDir,
+    data_dir: &Path,
+) -> Result<PathBuf, EngineError> {
+    match home {
+        HomeDir::Custom { path } if path.trim().is_empty() => Err(EngineError::Other(format!(
+            "Provider instance '{id}' has an empty home directory"
+        ))),
+        HomeDir::Custom { path } => expand(path),
+        HomeDir::Managed => {
+            let dir = data_dir.join("provider-homes").join(id);
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder.create(&dir)?;
+            Ok(dir)
+        }
+    }
+}
+
+fn expand(path: &str) -> Result<PathBuf, EngineError> {
+    crate::repos::expand_home(path.trim())
+        .map(PathBuf::from)
+        .map_err(|error| EngineError::Other(error.into()))
 }
 
 fn normalize(instance: ProviderInstance) -> Result<ProviderInstance, EngineError> {
@@ -223,6 +309,90 @@ mod tests {
         );
         assert_eq!(ids(&reopened.delete("codex_work").unwrap()), ["acp_gemini"]);
         assert!(reopened.delete("codex_work").is_err());
+    }
+
+    #[test]
+    fn each_instance_resolves_to_its_own_harness_until_it_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderInstancesStore::open(temp.path()).unwrap();
+        let registry = HarnessRegistry::new();
+        for id in ["codex_work", "codex_home"] {
+            store.upsert(instance(id, HarnessId::Codex)).unwrap();
+        }
+        let resolve = |id: &str| store.resolve(&registry, HarnessId::Codex, id).unwrap();
+        let work = resolve("codex_work");
+        assert!(Arc::ptr_eq(&work, &resolve("codex_work")));
+        assert!(!Arc::ptr_eq(&work, &resolve("codex_home")));
+
+        let home = temp.path().join("provider-homes").join("codex_work");
+        assert!(home.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        assert_eq!(
+            launch_overrides(&store.instance("codex_work").unwrap(), temp.path())
+                .unwrap()
+                .home,
+            Some(home)
+        );
+
+        let mut edited = instance("codex_work", HarnessId::Codex);
+        if let InstanceConfig::Native { launch_args, .. } = &mut edited.config {
+            launch_args.push("--profile=work".into());
+        }
+        store.upsert(edited).unwrap();
+        let rebuilt = resolve("codex_work");
+        assert!(!Arc::ptr_eq(&work, &rebuilt));
+        assert!(Arc::ptr_eq(&rebuilt, &resolve("codex_work")));
+
+        let unknown = store
+            .resolve(&registry, HarnessId::Codex, "codex_gone")
+            .err()
+            .unwrap();
+        assert!(unknown.to_string().contains("'codex_gone'"), "{unknown}");
+        let wrong_driver = store
+            .resolve(&registry, HarnessId::ClaudeCode, "codex_work")
+            .err()
+            .unwrap();
+        assert!(wrong_driver.to_string().contains("Codex"), "{wrong_driver}");
+    }
+
+    #[test]
+    fn drivers_without_native_instances_and_cursor_binaries_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderInstancesStore::open(temp.path()).unwrap();
+        let registry = HarnessRegistry::new();
+        store
+            .upsert(instance("grok_work", HarnessId::Grok))
+            .unwrap();
+        let mut cursor = instance("cursor_work", HarnessId::Cursor);
+        cursor.config = InstanceConfig::Native {
+            executable: Some("/usr/local/bin/cursor-agent".into()),
+            home_dir: None,
+            launch_args: Vec::new(),
+            env: Default::default(),
+        };
+        store.upsert(cursor).unwrap();
+        let mut cursor_env = instance("cursor_env", HarnessId::Cursor);
+        cursor_env.config = InstanceConfig::Native {
+            executable: None,
+            home_dir: None,
+            launch_args: Vec::new(),
+            env: [("CURSOR_API_KEY".into(), "key".into())].into(),
+        };
+        store.upsert(cursor_env).unwrap();
+        for (driver, id) in [
+            (HarnessId::Grok, "grok_work"),
+            (HarnessId::Cursor, "cursor_work"),
+        ] {
+            assert!(store.resolve(&registry, driver, id).is_err(), "{id}");
+        }
+        store
+            .resolve(&registry, HarnessId::Cursor, "cursor_env")
+            .unwrap();
     }
 
     #[test]

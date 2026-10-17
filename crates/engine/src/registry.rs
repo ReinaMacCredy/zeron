@@ -13,9 +13,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use zeron_harness::{Harness, HarnessError, mock::MockHarness};
+use zeron_harness::{Harness, HarnessError, LaunchOverrides, mock::MockHarness};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelCatalog, ReasoningLevel, SteeringMode,
+    AgentEvent, DoneStatus, HarnessId, Model, ModelCatalog, ProviderInstance, ReasoningLevel,
+    SteeringMode,
 };
 
 /// What `ListHarnesses` reports per harness.
@@ -232,6 +233,7 @@ enum Slot {
 pub struct HarnessRegistry {
     pub(crate) installs: crate::rpc::Installations,
     slots: Mutex<HashMap<HarnessId, Slot>>,
+    instances: Mutex<HashMap<String, (ProviderInstance, Arc<dyn Harness>)>>,
     order: Mutex<Vec<HarnessId>>,
     /// This device's enabled set; `None` inner value = the default set.
     prefs: Mutex<HarnessPrefsFile>,
@@ -281,12 +283,11 @@ impl HarnessRegistry {
 
     pub async fn discover_commands(
         &self,
-        id: HarnessId,
+        harness: Arc<dyn Harness>,
         cwd: &Path,
     ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
         let cwd = cwd.to_owned();
-        let lease = self.execution_lease(id).await;
-        let harness = self.resolve(id)?;
+        let lease = self.execution_lease(harness.id()).await;
         tokio::spawn(async move {
             let _lease = lease;
             harness.commands_for(&cwd).await
@@ -315,12 +316,11 @@ impl HarnessRegistry {
 
     pub async fn discover_skills(
         &self,
-        id: HarnessId,
+        harness: Arc<dyn Harness>,
         cwd: &Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
         let cwd = cwd.to_owned();
-        let lease = self.execution_lease(id).await;
-        let harness = self.resolve(id)?;
+        let lease = self.execution_lease(harness.id()).await;
         tokio::spawn(async move {
             // Retain the read lease through the adapter's deadline and cleanup,
             // even when the requesting RPC is dropped.
@@ -336,6 +336,7 @@ impl HarnessRegistry {
         Self {
             installs: Default::default(),
             slots: Mutex::new(HashMap::new()),
+            instances: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
             prefs_path: Mutex::new(None),
@@ -834,6 +835,36 @@ impl HarnessRegistry {
         }
     }
 
+    pub(crate) fn resolve_instance(
+        &self,
+        instance: &ProviderInstance,
+        data_dir: &Path,
+    ) -> Result<Arc<dyn Harness>, crate::EngineError> {
+        let mut instances = self
+            .instances
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((cached, harness)) = instances.get(&instance.id)
+            && cached == instance
+        {
+            return Ok(harness.clone());
+        }
+        let launch = crate::provider_instances::launch_overrides(instance, data_dir)?;
+        let harness = native_instance(instance.driver, launch).map_err(|reason| {
+            crate::EngineError::Other(format!("Provider instance '{}': {reason}", instance.id))
+        })?;
+        instances.insert(instance.id.clone(), (instance.clone(), harness.clone()));
+        Ok(harness)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_instance(&self, instance: ProviderInstance, harness: Arc<dyn Harness>) {
+        self.instances
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(instance.id.clone(), (instance, harness));
+    }
+
     /// Catalog for `ListHarnesses` — never forces a lazy resolve.
     pub fn descriptors(&self) -> Vec<HarnessDescriptor> {
         let enabled = self.enabled_set();
@@ -859,6 +890,28 @@ impl HarnessRegistry {
             })
             .collect()
     }
+}
+
+fn native_instance(driver: HarnessId, launch: LaunchOverrides) -> Result<Arc<dyn Harness>, String> {
+    let name = driver.display_name();
+    Ok(match driver {
+        HarnessId::ClaudeCode => Arc::new(zeron_harness::ClaudeHarness::new().with_launch(launch)),
+        HarnessId::Codex => Arc::new(zeron_harness::CodexHarness::new().with_launch(launch)),
+        HarnessId::Pi => Arc::new(zeron_harness::PiHarness::new().with_launch(launch)),
+        HarnessId::Opencode if launch.home.is_some() => {
+            return Err(format!("{name} instances take no home directory"));
+        }
+        HarnessId::Opencode => Arc::new(zeron_harness::OpencodeHarness::new().with_launch(launch)),
+        HarnessId::Cursor
+            if launch.home.is_some() || launch.executable.is_some() || !launch.args.is_empty() =>
+        {
+            return Err(format!(
+                "{name} instances run on Zeron's managed Cursor SDK and take only environment variables"
+            ));
+        }
+        HarnessId::Cursor => Arc::new(zeron_harness::CursorHarness::new().with_launch(launch)),
+        _ => return Err(format!("{name} does not run as a provider instance yet")),
+    })
 }
 
 /// The production registry: MockHarness (hidden from production pickers) plus a lazy
@@ -1768,7 +1821,10 @@ mod gate_tests {
                 async move {
                     if commands {
                         registry
-                            .discover_commands(HarnessId::Codex, Path::new("/tmp"))
+                            .discover_commands(
+                                registry.resolve(HarnessId::Codex)?,
+                                Path::new("/tmp"),
+                            )
                             .await
                             .map(|_| ())
                     } else {

@@ -326,6 +326,7 @@ impl EngineCore {
         doc_host.set_thread_watches(thread_watches::ThreadWatches::open(profile.store_root())?);
         let agent_profiles = AgentProfilesStore::open(profile.store_root())?;
         let provider_instances = ProviderInstancesStore::open(data_dir)?;
+        sessions.set_provider_instances(provider_instances.clone());
         let previews = zeron_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
             device_id.clone(),

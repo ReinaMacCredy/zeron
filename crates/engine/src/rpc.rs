@@ -106,6 +106,8 @@ struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
     force: bool,
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1433,6 +1435,21 @@ impl EngineRpc {
         self.agent_profiles
             .clone()
             .ok_or_else(|| RpcError::Failed("agent profiles are not available".into()))
+    }
+
+    fn discovery_harness(
+        &self,
+        chat_id: Option<&str>,
+        harness: HarnessId,
+    ) -> Result<std::sync::Arc<dyn zeron_harness::Harness>, RpcError> {
+        match chat_id {
+            Some(chat_id) => self.sessions.harness_for_chat(chat_id, harness),
+            None => self
+                .registry
+                .resolve(harness)
+                .map_err(crate::EngineError::from),
+        }
+        .map_err(|e| RpcError::Failed(e.to_string()))
     }
 
     fn provider_instances_store(&self) -> Result<ProviderInstancesStore, RpcError> {
@@ -2977,11 +2994,17 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
+                let harness = match &p.instance_id {
+                    Some(id) => self
+                        .provider_instances_store()?
+                        .resolve(&self.registry, p.harness, id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?,
+                    None => self
+                        .registry
+                        .resolve(p.harness)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?,
+                };
                 let lease = std::sync::Arc::new(self.registry.execution_lease(p.harness).await);
-                let harness = self
-                    .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let models = crate::model_catalogs::list_with_lease(
                     self.repos.data_dir(),
                     harness,
@@ -3009,6 +3032,7 @@ impl RpcService for EngineRpc {
                     path: Option<String>,
                 }
                 let p: Params = parse_params(params)?;
+                let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
                 let root = self
                     .catalog_root(&FileSearchParams {
                         query: String::new(),
@@ -3019,7 +3043,7 @@ impl RpcService for EngineRpc {
                     .await?;
                 let skills = self
                     .registry
-                    .discover_skills(p.harness, &root)
+                    .discover_skills(harness, &root)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&skills)
@@ -3037,6 +3061,7 @@ impl RpcService for EngineRpc {
                     path: Option<String>,
                 }
                 let p: Params = parse_params(params)?;
+                let harness = self.discovery_harness(p.chat_id.as_deref(), p.harness)?;
                 let root = self
                     .catalog_root(&FileSearchParams {
                         query: String::new(),
@@ -3047,7 +3072,7 @@ impl RpcService for EngineRpc {
                     .await?;
                 let commands = self
                     .registry
-                    .discover_commands(p.harness, &root)
+                    .discover_commands(harness, &root)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
@@ -6623,6 +6648,12 @@ mod tests {
         let forced: ListModelsParams =
             serde_json::from_value(serde_json::json!({"harness":"codex","force":true})).unwrap();
         assert!(forced.force);
+        assert_eq!(old.instance_id, None);
+        let instance: ListModelsParams = serde_json::from_value(
+            serde_json::json!({"harness":"codex","instanceId":"codex_work"}),
+        )
+        .unwrap();
+        assert_eq!(instance.instance_id.as_deref(), Some("codex_work"));
     }
 
     #[test]

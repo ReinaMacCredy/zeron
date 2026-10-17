@@ -118,23 +118,35 @@ struct HarnessSessionRef {
 #[derive(Clone)]
 struct RuntimeConfig {
     harness_id: HarnessId,
+    instance_id: Option<String>,
     request: RunRequest,
     harness: Arc<dyn Harness>,
     instructions: String,
 }
 
 impl RuntimeConfig {
-    fn new(harness_id: HarnessId, request: &RunRequest, harness: Arc<dyn Harness>) -> Self {
+    fn new(
+        harness_id: HarnessId,
+        instance_id: Option<String>,
+        request: &RunRequest,
+        harness: Arc<dyn Harness>,
+    ) -> Self {
         Self {
             harness_id,
+            instance_id,
             request: request.clone(),
             harness,
             instructions: String::new(),
         }
     }
 
-    fn can_route(&self, harness_id: HarnessId, request: &RunRequest) -> bool {
-        self.harness_id == harness_id
+    fn can_route(
+        &self,
+        harness_id: HarnessId,
+        instance_id: Option<&str>,
+        request: &RunRequest,
+    ) -> bool {
+        self.runs_on(harness_id, instance_id)
             && self.same_launch(request)
             && self.harness.same_runtime(&self.request, request)
     }
@@ -145,14 +157,15 @@ impl RuntimeConfig {
     fn route(
         &self,
         harness_id: HarnessId,
+        instance_id: Option<&str>,
         request: &RunRequest,
         instructions: &str,
     ) -> Option<bool> {
         if self.instructions != instructions && self.harness.launch_reads_instructions() {
             None
-        } else if self.can_route(harness_id, request) {
+        } else if self.can_route(harness_id, instance_id, request) {
             Some(false)
-        } else if self.harness_id == harness_id
+        } else if self.runs_on(harness_id, instance_id)
             && self.same_launch(request)
             && self.harness.reconfigures_in_place(&self.request, request)
         {
@@ -160,6 +173,10 @@ impl RuntimeConfig {
         } else {
             None
         }
+    }
+
+    fn runs_on(&self, harness_id: HarnessId, instance_id: Option<&str>) -> bool {
+        self.harness_id == harness_id && self.instance_id.as_deref() == instance_id
     }
 
     fn same_launch(&self, request: &RunRequest) -> bool {
@@ -428,6 +445,7 @@ struct RunSetup {
 impl RunSetup {
     fn new(
         harness_id: HarnessId,
+        instance_id: Option<String>,
         harness: Arc<dyn Harness>,
         request: &RunRequest,
         mode: RunMode,
@@ -494,7 +512,7 @@ impl RunSetup {
                 run_id: new_id(),
                 steerable,
                 stops_turn_in_place: steerable && harness.stops_turn_in_place(),
-                runtime_config: RuntimeConfig::new(harness_id, request, harness),
+                runtime_config: RuntimeConfig::new(harness_id, instance_id, request, harness),
                 steer_tx,
                 interrupt_token,
                 turn,
@@ -598,6 +616,7 @@ struct Inner {
     titles: OnceLock<crate::titles::TitleGenerator>,
     predictions: Arc<crate::predictions::Predictions>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
+    provider_instances: OnceLock<crate::provider_instances::ProviderInstancesStore>,
     /// [`crate::Repos::scratch_root`]; bare tests fall back to
     /// `~/.zeron/scratch`.
     scratch_root: OnceLock<std::path::PathBuf>,
@@ -812,6 +831,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
                 generated_images: OnceLock::new(),
+                provider_instances: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 computer: Mutex::new(None),
@@ -872,6 +892,18 @@ impl SessionsEngine {
     /// Where projectless chats' scratch folders resolve (set once at boot).
     pub(crate) fn set_scratch_root(&self, root: std::path::PathBuf) {
         let _ = self.inner.scratch_root.set(root);
+    }
+
+    pub fn set_provider_instances(&self, store: crate::provider_instances::ProviderInstancesStore) {
+        let _ = self.inner.provider_instances.set(store);
+    }
+
+    pub(crate) fn harness_for_chat(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+    ) -> Result<Arc<dyn Harness>, EngineError> {
+        Ok(self.inner.resolve_for_chat(chat_id, harness_id)?.0)
     }
 
     pub fn set_generated_images(
@@ -1012,13 +1044,16 @@ impl SessionsEngine {
             return false;
         }
         let instructions = request.map(|_| self.inner.instructions_for(chat_id));
+        let instance = request.and_then(|(id, _)| self.inner.chat_instance(chat_id, id));
         let live = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.runtime_config.harness_id,
                 h.steerable
                     && request.is_none_or(|(id, r)| {
                         let instructions = instructions.as_deref().unwrap_or_default();
-                        h.runtime_config.route(id, r, instructions).is_some()
+                        h.runtime_config
+                            .route(id, instance.as_deref(), r, instructions)
+                            .is_some()
                     }),
             )
         });
@@ -1278,13 +1313,8 @@ impl SessionsEngine {
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
         self.label_computer_chat(chat_id);
-        if request.computer_control
-            && self
-                .inner
-                .registry
-                .resolve(harness_id)
-                .is_ok_and(|harness| !harness.computer_tools_reachable())
-        {
+        let (harness, instance_id) = self.inner.resolve_for_chat(chat_id, harness_id)?;
+        if request.computer_control && !harness.computer_tools_reachable() {
             self.note_computer_unreachable(chat_id, harness_id);
             request.computer_control = false;
         }
@@ -1294,11 +1324,7 @@ impl SessionsEngine {
             .map(|h| h.runtime_config.request.computer_control);
         if let Some(live) = live_computer
             && live != request.computer_control
-            && self
-                .inner
-                .registry
-                .resolve(harness_id)
-                .is_ok_and(|harness| harness.resume_supported() == Some(false))
+            && harness.resume_supported() == Some(false)
         {
             if request.computer_control {
                 self.note_computer_unavailable(chat_id, harness_id);
@@ -1311,7 +1337,8 @@ impl SessionsEngine {
             (
                 h.run_id.clone(),
                 h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
-                h.runtime_config.route(harness_id, &request, &instructions),
+                h.runtime_config
+                    .route(harness_id, instance_id.as_deref(), &request, &instructions),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
@@ -1457,7 +1484,6 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
             return Ok(String::new());
         }
-        let harness = self.inner.resolve_for_chat(chat_id, harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
@@ -1486,6 +1512,7 @@ impl SessionsEngine {
             cancel_rx,
         } = RunSetup::new(
             harness_id,
+            instance_id,
             harness.clone(),
             &request,
             RunMode::Turn {
@@ -1947,7 +1974,7 @@ impl SessionsEngine {
         continue_with: Option<String>,
     ) -> Result<CompactQueued, EngineError> {
         let (harness_id, _) = self.compaction_request(chat_id)?;
-        let harness = self.inner.resolve_for_chat(chat_id, harness_id)?;
+        let (harness, _) = self.inner.resolve_for_chat(chat_id, harness_id)?;
         if harness.compaction() == Compaction::None {
             return Err(EngineError::Other(format!(
                 "{} does not support compaction",
@@ -2118,7 +2145,7 @@ impl SessionsEngine {
         };
 
         let (harness_id, mut request) = self.compaction_request(chat_id)?;
-        let harness = self.inner.resolve_for_chat(chat_id, harness_id)?;
+        let (harness, instance_id) = self.inner.resolve_for_chat(chat_id, harness_id)?;
         let compaction = harness.compaction();
         let focus = focus
             .map(|focus| focus.trim().to_string())
@@ -2142,7 +2169,7 @@ impl SessionsEngine {
             .get(chat_id)
             .filter(|h| {
                 h.steerable
-                    && h.runtime_config.harness_id == harness_id
+                    && h.runtime_config.runs_on(harness_id, instance_id.as_deref())
                     && h.started.load(std::sync::atomic::Ordering::Acquire)
                     && !h.retiring.load(std::sync::atomic::Ordering::Acquire)
             })
@@ -2186,7 +2213,13 @@ impl SessionsEngine {
             controls,
             engine_rx: _engine_rx,
             mut cancel_rx,
-        } = RunSetup::new(harness_id, harness.clone(), &request, RunMode::Compaction);
+        } = RunSetup::new(
+            harness_id,
+            instance_id,
+            harness.clone(),
+            &request,
+            RunMode::Compaction,
+        );
         let interrupt_token = run.interrupt_token.clone();
         let _cancel_on_drop = interrupt_token.clone().drop_guard();
         {
@@ -2528,7 +2561,7 @@ impl SessionsEngine {
         host: &DocHost,
         chat_id: &str,
     ) -> Result<Arc<dyn Harness>, EngineError> {
-        let harness = self
+        let (harness, _) = self
             .inner
             .resolve_for_chat(chat_id, host.harness_for(chat_id))?;
         if !harness.branching() {
@@ -3256,7 +3289,14 @@ impl Inner {
     /// Context tokens once past the reminder floor, when the agent can act on a reminder.
     fn nudge_tokens(&self, chat_id: &str, harness_id: HarnessId) -> Option<u64> {
         let floor = self.registry.compaction_settings().nudge_tokens;
-        if floor == 0 || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
+        if floor == 0
+            || self
+                .resolve_for_chat(chat_id, harness_id)
+                .ok()?
+                .0
+                .compaction()
+                == Compaction::None
+        {
             return None;
         }
         let config = self
@@ -3850,24 +3890,33 @@ impl Inner {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 
+    fn chat_instance(&self, chat_id: &str, harness_id: HarnessId) -> Option<String> {
+        self.workspace()
+            .and_then(|ws| ws.chat_config(chat_id))
+            .filter(|config| config.harness == harness_id)
+            .and_then(|config| config.instance_id)
+    }
+
     fn resolve_for_chat(
         &self,
         chat_id: &str,
         harness_id: HarnessId,
-    ) -> Result<Arc<dyn Harness>, EngineError> {
-        if harness_id == HarnessId::Acp
-            && self
-                .workspace()
-                .and_then(|ws| ws.chat_config(chat_id))
-                .filter(|config| config.harness == HarnessId::Acp)
-                .and_then(|config| config.instance_id)
-                .is_none()
-        {
-            return Err(EngineError::Other(
-                "An ACP agent runs only as a provider instance; pick one for this chat.".into(),
-            ));
-        }
-        Ok(self.registry.resolve(harness_id)?)
+    ) -> Result<(Arc<dyn Harness>, Option<String>), EngineError> {
+        let Some(instance_id) = self.chat_instance(chat_id, harness_id) else {
+            if harness_id == HarnessId::Acp {
+                return Err(EngineError::Other(
+                    "An ACP agent runs only as a provider instance; pick one for this chat.".into(),
+                ));
+            }
+            return Ok((self.registry.resolve(harness_id)?, None));
+        };
+        let store = self.provider_instances.get().ok_or_else(|| {
+            EngineError::Other(format!(
+                "Provider instance '{instance_id}' is not set up on this device"
+            ))
+        })?;
+        let harness = store.resolve(&self.registry, harness_id, &instance_id)?;
+        Ok((harness, Some(instance_id)))
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
@@ -7321,6 +7370,7 @@ mod tests {
         let initial = request();
         let config = RuntimeConfig::new(
             HarnessId::Grok,
+            None,
             &initial,
             Arc::new(zeron_harness::AcpHarness::grok()),
         );
@@ -7328,12 +7378,25 @@ mod tests {
         let mut follow_up = initial.clone();
         follow_up.prompt = "second".into();
         follow_up.resume = Some("session-1".into());
-        assert!(config.can_route(HarnessId::Grok, &follow_up));
-        assert!(!config.can_route(HarnessId::Devin, &follow_up));
+        assert!(config.can_route(HarnessId::Grok, None, &follow_up));
+        assert!(!config.can_route(HarnessId::Devin, None, &follow_up));
+        assert!(!config.can_route(HarnessId::Grok, Some("grok_work"), &follow_up));
+        let on_instance = RuntimeConfig::new(
+            HarnessId::Grok,
+            Some("grok_work".into()),
+            &initial,
+            Arc::new(zeron_harness::AcpHarness::grok()),
+        );
+        assert!(on_instance.can_route(HarnessId::Grok, Some("grok_work"), &follow_up));
+        assert!(!on_instance.can_route(HarnessId::Grok, Some("grok_home"), &follow_up));
+        assert_eq!(
+            on_instance.route(HarnessId::Grok, None, &follow_up, ""),
+            None
+        );
 
         // Images ride the mailbox: they never force a replacement runtime.
         follow_up.attachments.push("/tmp/image.png".into());
-        assert!(config.can_route(HarnessId::Grok, &follow_up));
+        assert!(config.can_route(HarnessId::Grok, None, &follow_up));
 
         // Another client's spelling of the same option value is the same runtime.
         let mut spelled = initial.clone();
@@ -7342,35 +7405,37 @@ mod tests {
             .insert("fastMode".into(), serde_json::json!(true));
         let config = RuntimeConfig::new(
             HarnessId::Grok,
+            None,
             &spelled,
             Arc::new(zeron_harness::AcpHarness::grok()),
         );
         follow_up
             .model_options
             .insert("fastMode".into(), serde_json::json!("true"));
-        assert!(config.can_route(HarnessId::Grok, &follow_up));
+        assert!(config.can_route(HarnessId::Grok, None, &follow_up));
 
         let mut launch = follow_up.clone();
         launch.permission_mode = PermissionMode::Ask;
-        assert_eq!(config.route(HarnessId::Grok, &launch, ""), None);
+        assert_eq!(config.route(HarnessId::Grok, None, &launch, ""), None);
         launch.permission_mode = follow_up.permission_mode;
         launch.computer_control = !follow_up.computer_control;
-        assert_eq!(config.route(HarnessId::Grok, &launch, ""), None);
+        assert_eq!(config.route(HarnessId::Grok, None, &launch, ""), None);
 
         follow_up.model = Some("grok-4.5".into());
-        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+        assert!(!config.can_route(HarnessId::Grok, None, &follow_up));
         follow_up.model = initial.model.clone();
 
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
-        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+        assert!(!config.can_route(HarnessId::Grok, None, &follow_up));
 
         let pi = RuntimeConfig::new(
             HarnessId::Pi,
+            None,
             &initial,
             Arc::new(zeron_harness::PiHarness::new()),
         );
         assert_eq!(
-            pi.route(HarnessId::Pi, &initial, "never read"),
+            pi.route(HarnessId::Pi, None, &initial, "never read"),
             Some(false),
             "a driver that never reads the instructions keeps its run"
         );
@@ -7384,7 +7449,7 @@ mod tests {
         initial
             .model_options
             .insert("fastMode".into(), serde_json::json!(false));
-        let config = RuntimeConfig::new(HarnessId::ClaudeCode, &initial, claude());
+        let config = RuntimeConfig::new(HarnessId::ClaudeCode, None, &initial, claude());
 
         // The CLI never reads the sandbox level; an option that launches no
         // flag in either spelling is the same runtime.
@@ -7392,31 +7457,31 @@ mod tests {
         follow_up.sandbox = SandboxLevel::DangerFullAccess;
         follow_up.model_options.clear();
         follow_up.worktree = None;
-        assert!(config.can_route(HarnessId::ClaudeCode, &follow_up));
+        assert!(config.can_route(HarnessId::ClaudeCode, None, &follow_up));
 
         let mut effort = follow_up.clone();
         effort.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert_eq!(
-            config.route(HarnessId::ClaudeCode, &effort, ""),
+            config.route(HarnessId::ClaudeCode, None, &effort, ""),
             Some(true),
             "a harness that changes effort in place keeps its run"
         );
         assert_eq!(
-            config.route(HarnessId::ClaudeCode, &effort, "Lead the room."),
+            config.route(HarnessId::ClaudeCode, None, &effort, "Lead the room."),
             None,
             "a profile's instructions ride --append-system-prompt, read only at launch"
         );
         effort.permission_mode = PermissionMode::Ask;
-        assert_eq!(config.route(HarnessId::ClaudeCode, &effort, ""), None);
+        assert_eq!(config.route(HarnessId::ClaudeCode, None, &effort, ""), None);
 
         follow_up
             .model_options
             .insert("fastMode".into(), serde_json::json!("true"));
-        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
+        assert!(!config.can_route(HarnessId::ClaudeCode, None, &follow_up));
         follow_up.model_options.clear();
 
         follow_up.cwd = "/elsewhere".into();
-        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
+        assert!(!config.can_route(HarnessId::ClaudeCode, None, &follow_up));
     }
 
     #[test]
@@ -7586,31 +7651,101 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn an_acp_chat_dispatches_only_on_a_provider_instance() {
-        let (_feed, rx) = mpsc::unbounded_channel();
-        let registry = HarnessRegistry::new();
-        registry.register(Arc::new(FeedHarness {
-            id: HarnessId::Acp,
-            feed: Mutex::new(Some(rx)),
-        }));
-        let dir = tempfile::tempdir().unwrap();
-        let core =
-            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-                .unwrap();
+    fn instance(id: &str, driver: HarnessId) -> zeron_proto::ProviderInstance {
+        zeron_proto::ProviderInstance {
+            id: id.into(),
+            driver,
+            label: "Work".into(),
+            accent: None,
+            config: zeron_proto::InstanceConfig::default(),
+        }
+    }
+
+    async fn create_chats(core: &crate::EngineCore, harness: &str, chats: &[(&str, Option<&str>)]) {
         let client = zeron_rpc::memory_client(core.rpc_service());
-        for (chat, instance) in [("bare", None), ("on-instance", Some("acp_gemini"))] {
+        for (chat, instance) in chats {
             client
                 .call(
                     zeron_rpc::methods::MUTATE,
                     serde_json::json!({
                         "op": "createChat", "chatId": chat, "deviceId": core.device_id,
-                        "config": {"harness": "acp", "sandbox": "workspace-write", "instanceId": instance},
+                        "config": {"harness": harness, "sandbox": "workspace-write", "instanceId": instance},
                     }),
                 )
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_chat_on_a_provider_instance_runs_on_it_and_never_on_the_default() {
+        let (_feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        let work = instance("codex_work", HarnessId::Codex);
+        registry.register_instance(
+            work.clone(),
+            Arc::new(FeedHarness {
+                id: HarnessId::Codex,
+                feed: Mutex::new(Some(rx)),
+            }),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        core.provider_instances.upsert(work).unwrap();
+        create_chats(
+            &core,
+            "codex",
+            &[
+                ("on-work", Some("codex_work")),
+                ("on-gone", Some("codex_gone")),
+            ],
+        )
+        .await;
+        let refused = core
+            .sessions
+            .dispatch("on-gone", HarnessId::Codex, request(), None)
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("'codex_gone'"), "{refused}");
+        core.sessions
+            .dispatch("on-work", HarnessId::Codex, request(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            lock(&core.sessions.inner.runs)
+                .get("on-work")
+                .and_then(|run| run.runtime_config.instance_id.clone())
+                .as_deref(),
+            Some("codex_work")
+        );
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_acp_chat_dispatches_only_on_a_provider_instance() {
+        let (_feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        let gemini = instance("acp_gemini", HarnessId::Acp);
+        registry.register_instance(
+            gemini.clone(),
+            Arc::new(FeedHarness {
+                id: HarnessId::Acp,
+                feed: Mutex::new(Some(rx)),
+            }),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        core.provider_instances.upsert(gemini).unwrap();
+        create_chats(
+            &core,
+            "acp",
+            &[("bare", None), ("on-instance", Some("acp_gemini"))],
+        )
+        .await;
         let refused = core
             .sessions
             .dispatch("bare", HarnessId::Acp, request(), None)
