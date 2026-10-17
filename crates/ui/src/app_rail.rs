@@ -317,20 +317,21 @@ fn pace_bar(remaining: f32, pace: Option<&UsagePace>, fill: Hsla, theme: &Theme)
         )
 }
 
-fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) -> Div {
-    let used = window.used_fraction.clamp(0.0, 1.0);
-    let remaining = 1.0 - used;
-    let pace = usage_pace(window, now);
-    let split = |left: Option<String>, right: Option<String>| {
-        div()
-            .flex()
-            .items_baseline()
-            .justify_between()
-            .gap(px(12.0))
-            .text_color(theme.text_muted)
-            .child(div().min_w_0().truncate().children(left))
-            .children(right.map(|text| div().flex_none().text_color(theme.text_faint).child(text)))
-    };
+struct BlockFoot {
+    left: Option<String>,
+    right: Option<String>,
+    left_color: Hsla,
+    right_color: Hsla,
+}
+
+fn usage_block(
+    label: SharedString,
+    headline: Option<String>,
+    right: Option<String>,
+    bar: Div,
+    foot: Option<BlockFoot>,
+    theme: &Theme,
+) -> Div {
     div()
         .flex()
         .flex_col()
@@ -353,37 +354,165 @@ fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) ->
                                 .text_size(crate::typography::ui_rems(12.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from(window_label(&window.label).to_owned())),
+                                .child(label),
                         )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_color(theme.text)
-                                .child(format!("{}% left", (remaining * 100.0).round() as u32)),
+                        .children(
+                            headline
+                                .map(|text| div().truncate().text_color(theme.text).child(text)),
                         ),
                 )
                 .children(
-                    window
-                        .resets_at
-                        .and_then(|at| crate::inbox::resets_in(at, now))
-                        .map(|left| {
-                            div()
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .child(format!("Resets in {left}"))
-                        }),
+                    right.map(|text| div().flex_none().text_color(theme.text_muted).child(text)),
                 ),
         )
-        .child(pace_bar(
-            remaining,
-            pace.as_ref(),
-            window_color(window, theme),
-            theme,
-        ))
-        .when_some(
-            pace.filter(|pace| pace.amount.is_some() || pace.eta.is_some()),
-            |el, pace| el.child(split(pace.amount, pace.eta)),
+        .child(bar)
+        .when_some(foot, |el, foot| {
+            el.child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(foot.left_color)
+                            .children(foot.left),
+                    )
+                    .children(
+                        foot.right
+                            .map(|text| div().flex_none().text_color(foot.right_color).child(text)),
+                    ),
+            )
+        })
+}
+
+fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) -> Div {
+    let used = window.used_fraction.clamp(0.0, 1.0);
+    let remaining = 1.0 - used;
+    let pace = usage_pace(window, now);
+    let bar = pace_bar(remaining, pace.as_ref(), window_color(window, theme), theme);
+    let foot = pace
+        .filter(|pace| pace.amount.is_some() || pace.eta.is_some())
+        .map(|pace| {
+            let deficit = f64::from(remaining) * 100.0 < pace.expected_remaining;
+            let behind = pace.status == PaceStatus::Behind;
+            BlockFoot {
+                left: pace.amount,
+                right: pace.eta,
+                left_color: if deficit {
+                    theme.danger
+                } else {
+                    theme.text_muted
+                },
+                right_color: if behind {
+                    theme.danger
+                } else {
+                    theme.text_faint
+                },
+            }
+        });
+    usage_block(
+        SharedString::from(window_label(&window.label).to_owned()),
+        Some(format!("{}% left", (remaining * 100.0).round() as u32)),
+        window
+            .resets_at
+            .and_then(|at| crate::inbox::resets_in(at, now))
+            .map(|left| format!("Resets in {left}")),
+        bar,
+        foot,
+        theme,
+    )
+}
+
+fn extra_usage_block(extra: &zeron_proto::AgentExtraUsage, theme: &Theme) -> Div {
+    let view = crate::account_usage::extra_usage_view(extra);
+    let fill = usage_color(usage_level(view.used_fraction), theme);
+    usage_block(
+        "Extra Usage".into(),
+        None,
+        Some(view.headline),
+        pace_bar(view.used_fraction, None, fill, theme),
+        Some(BlockFoot {
+            left: Some(view.amount),
+            right: view.note,
+            left_color: theme.text_muted,
+            right_color: theme.text_faint,
+        }),
+        theme,
+    )
+}
+
+/// One block per plan window, then Claude's Extra Usage: the hover card and the Usage page.
+pub(crate) fn usage_blocks(account: &AgentAccount, now: DateTime<Utc>, theme: &Theme) -> Vec<Div> {
+    account
+        .usage_windows
+        .iter()
+        .map(|window| window_block(window, now, theme))
+        .chain(
+            account
+                .extra_usage
+                .as_ref()
+                .map(|extra| extra_usage_block(extra, theme)),
         )
+        .collect()
+}
+
+pub(crate) fn details_fold(
+    id: gpui::ElementId,
+    selector: String,
+    account: &AgentAccount,
+    open: bool,
+    on_details: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    now: DateTime<Utc>,
+    theme: &Theme,
+) -> Div {
+    let identity = account
+        .email
+        .clone()
+        .or_else(|| account.display_name.clone());
+    let fetched = account
+        .usage_fetched_at
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .map(|at| format!("Updated {}", crate::pull_requests::relative_time(at, now)));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .text_color(theme.text_muted)
+        .child(
+            div()
+                .id(id)
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label("Details")
+                .aria_expanded(open)
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.text))
+                .on_click(on_details)
+                .child(
+                    icon(if open {
+                        icons::LUCIDE_CHEVRON_DOWN
+                    } else {
+                        icons::LUCIDE_CHEVRON_RIGHT
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+                )
+                .child("Details"),
+        )
+        .when(open, |el| {
+            el.children(identity.into_iter().chain(fetched).map(|line| {
+                div()
+                    .pl(px(16.0))
+                    .truncate()
+                    .child(SharedString::from(line))
+            }))
+        })
 }
 
 pub(crate) fn ring_hover_card(
@@ -418,51 +547,15 @@ pub(crate) fn ring_hover_card(
                     }),
             )
     });
-    let identity = account
-        .email
-        .clone()
-        .or_else(|| account.display_name.clone());
-    let fetched = account
-        .usage_fetched_at
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|at| format!("Updated {}", crate::pull_requests::relative_time(at, now)));
-    let details = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .text_color(theme.text_muted)
-        .child(
-            div()
-                .id("rail-usage-hover-details")
-                .debug_selector(|| "rail-usage-hover-details".into())
-                .role(gpui::Role::Button)
-                .aria_label("Details")
-                .aria_expanded(details_open)
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .cursor_pointer()
-                .hover(|style| style.text_color(theme.text))
-                .on_click(on_details)
-                .child(
-                    icon(if details_open {
-                        icons::LUCIDE_CHEVRON_DOWN
-                    } else {
-                        icons::LUCIDE_CHEVRON_RIGHT
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-                )
-                .child("Details"),
-        )
-        .when(details_open, |el| {
-            el.children(identity.into_iter().chain(fetched).map(|line| {
-                div()
-                    .pl(px(16.0))
-                    .truncate()
-                    .child(SharedString::from(line))
-            }))
-        });
+    let details = details_fold(
+        "rail-usage-hover-details".into(),
+        "rail-usage-hover-details".into(),
+        account,
+        details_open,
+        on_details,
+        now,
+        theme,
+    );
     div()
         .debug_selector(|| "rail-usage-hover-card".into())
         .w(px(HOVER_CARD_WIDTH))
@@ -505,12 +598,7 @@ pub(crate) fn ring_hover_card(
                 .text_color(theme.warning)
                 .child(SharedString::from(error))
         }))
-        .children(
-            account
-                .usage_windows
-                .iter()
-                .map(|window| window_block(window, now, theme)),
-        )
+        .children(usage_blocks(account, now, theme))
         .child(details)
 }
 

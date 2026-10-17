@@ -13411,6 +13411,12 @@ impl Shell {
                         .iter()
                         .map(|window| accounts::compact_usage_meter(window, theme, now)),
                 )
+                .children(
+                    account
+                        .extra_usage
+                        .as_ref()
+                        .map(|extra| accounts::compact_extra_usage(extra, theme)),
+                )
         });
         div()
             .flex()

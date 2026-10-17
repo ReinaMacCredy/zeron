@@ -41,6 +41,55 @@ pub fn active_account(
         .find(|account| account.harness == harness && account.active)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtraUsageView {
+    pub used_fraction: f32,
+    pub headline: String,
+    pub amount: String,
+    pub note: Option<String>,
+}
+
+fn money(amount: f64, currency: Option<&str>) -> String {
+    match currency.unwrap_or("USD") {
+        "USD" => format!("${amount:.2}"),
+        "EUR" => format!("€{amount:.2}"),
+        "GBP" => format!("£{amount:.2}"),
+        other => format!("{amount:.2} {other}"),
+    }
+}
+
+/// Synara's Extra Usage row: spend against the monthly cap, or "No data" when off. Pure.
+pub fn extra_usage_view(extra: &zeron_proto::AgentExtraUsage) -> ExtraUsageView {
+    let currency = extra.currency.as_deref();
+    match (extra.enabled, extra.used) {
+        (true, Some(used)) => {
+            let fraction = extra
+                .limit
+                .map_or(0.0, |limit| (used / limit).clamp(0.0, 1.0) as f32);
+            ExtraUsageView {
+                used_fraction: fraction,
+                headline: match extra.limit {
+                    Some(_) => format!("{}% used", (fraction * 100.0).round() as u32),
+                    None => "No cap".to_owned(),
+                },
+                amount: match extra.limit {
+                    Some(limit) => {
+                        format!("{} of {}", money(used, currency), money(limit, currency))
+                    }
+                    None => format!("{} spent", money(used, currency)),
+                },
+                note: None,
+            }
+        }
+        (enabled, _) => ExtraUsageView {
+            used_fraction: 0.0,
+            headline: "No data".to_owned(),
+            amount: "—".to_owned(),
+            note: (!enabled).then(|| "Off for this account".to_owned()),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaceStatus {
     Ahead,
@@ -446,6 +495,33 @@ mod tests {
         assert_eq!(pace("Session", 0.496, 0.5).unwrap().amount, None);
         assert_eq!(pace("Month", 0.5, 0.5), None);
         assert_eq!(pace("Session", 0.5, 1.0), None);
+    }
+
+    #[test]
+    fn extra_usage_reads_like_synara() {
+        let extra = |enabled, used, limit, currency: Option<&str>| zeron_proto::AgentExtraUsage {
+            enabled,
+            used,
+            limit,
+            currency: currency.map(str::to_owned),
+        };
+        let on = extra_usage_view(&extra(true, Some(5.0), Some(100.0), None));
+        assert_eq!(on.amount, "$5.00 of $100.00");
+        assert_eq!(on.headline, "5% used");
+        assert!((on.used_fraction - 0.05).abs() < 1e-6);
+        let off = extra_usage_view(&extra(false, Some(0.0), Some(40.0), Some("EUR")));
+        assert_eq!(
+            (
+                off.headline.as_str(),
+                off.amount.as_str(),
+                off.note.as_deref()
+            ),
+            ("No data", "—", Some("Off for this account"))
+        );
+        assert_eq!(
+            extra_usage_view(&extra(true, Some(12.5), None, Some("EUR"))).amount,
+            "€12.50 spent"
+        );
     }
 
     #[test]

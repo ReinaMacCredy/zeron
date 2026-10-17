@@ -87,8 +87,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use zeron_proto::{
-    AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode,
-    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
+    AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentExtraUsage,
+    AgentLoginMode, AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
 };
 
 use crate::repos::home_dir;
@@ -481,6 +481,8 @@ struct UsageSnapshot {
     windows: Vec<AgentUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plan_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extra_usage: Option<AgentExtraUsage>,
 }
 
 /// Why a usage probe produced no windows. Drives the backoff and the reason
@@ -1029,6 +1031,7 @@ impl AgentAccounts {
                     switchable: harness != HarnessId::Hermes,
                     saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
                     provider: provider_group(harness, slot.store_key.as_deref()),
+                    extra_usage: snapshot.and_then(|usage| usage.extra_usage.clone()),
                 });
             }
             // A live login whose credentials we couldn't read has no slot — still
@@ -1052,6 +1055,7 @@ impl AgentAccounts {
                     switchable: false,
                     saved_at: None,
                     provider: provider_group(harness, u.store_key.as_deref()),
+                    extra_usage: None,
                 });
             }
         }
@@ -2810,6 +2814,7 @@ impl AgentAccounts {
             .map(|window| UsageSnapshot {
                 windows: vec![window],
                 plan_label: None,
+                extra_usage: None,
             })
             .ok_or_else(|| schema_error("cursor", &body))
     }
@@ -3102,6 +3107,7 @@ impl AntigravityLogin {
             switchable: false,
             saved_at: None,
             provider: None,
+            extra_usage: None,
         }
     }
 }
@@ -3672,6 +3678,7 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
     Some(UsageSnapshot {
         windows,
         plan_label,
+        extra_usage: None,
     })
 }
 
@@ -3727,6 +3734,25 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     Some(UsageSnapshot {
         windows,
         plan_label: None,
+        extra_usage: claude_extra_usage(body),
+    })
+}
+
+/// `extra_usage` counts credits in minor units (`decimal_places`, cents by default).
+fn claude_extra_usage(body: &serde_json::Value) -> Option<AgentExtraUsage> {
+    let extra = body.get("extra_usage").filter(|v| v.is_object())?;
+    let scale = 10f64.powi(
+        extra
+            .get("decimal_places")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(2) as i32,
+    );
+    let amount = |key: &str| extra.get(key).and_then(|v| v.as_f64()).map(|v| v / scale);
+    Some(AgentExtraUsage {
+        enabled: extra.get("is_enabled").and_then(|v| v.as_bool()) != Some(false),
+        used: amount("used_credits"),
+        limit: amount("monthly_limit").filter(|limit| *limit > 0.0),
+        currency: str_field(extra, "currency"),
     })
 }
 
@@ -4370,6 +4396,47 @@ mod tests {
     }
 
     #[test]
+    fn claude_extra_usage_reads_enabled_and_disabled_credits() {
+        let enabled = serde_json::json!({
+            "five_hour": { "utilization": 25, "resets_at": "2026-01-28T15:00:00Z" },
+            "extra_usage": { "is_enabled": true, "used_credits": 500, "monthly_limit": 10_000 },
+        });
+        assert_eq!(
+            claude_usage_windows(&enabled).unwrap().extra_usage,
+            Some(AgentExtraUsage {
+                enabled: true,
+                used: Some(5.0),
+                limit: Some(100.0),
+                currency: None,
+            })
+        );
+        let disabled = serde_json::json!({
+            "five_hour": { "utilization": 10.0 },
+            "extra_usage": {
+                "is_enabled": false,
+                "monthly_limit": 4000,
+                "used_credits": 0.0,
+                "utilization": 0.0,
+                "currency": "EUR",
+                "decimal_places": 2,
+                "disabled_reason": "out_of_credits",
+            },
+        });
+        assert_eq!(
+            claude_usage_windows(&disabled).unwrap().extra_usage,
+            Some(AgentExtraUsage {
+                enabled: false,
+                used: Some(0.0),
+                limit: Some(40.0),
+                currency: Some("EUR".into()),
+            })
+        );
+        let absent =
+            serde_json::json!({ "five_hour": { "utilization": 1.0 }, "extra_usage": null });
+        assert_eq!(claude_usage_windows(&absent).unwrap().extra_usage, None);
+    }
+
+    #[test]
     fn claude_usage_windows_none_without_any_bucket() {
         // A 200 with only `extra_usage` (no rate windows) is not a snapshot —
         // the UI then says "Usage unavailable" instead of showing nothing.
@@ -4624,6 +4691,7 @@ mod probe_tests {
                 resets_at: None,
             }],
             plan_label: None,
+            extra_usage: None,
         }
     }
 

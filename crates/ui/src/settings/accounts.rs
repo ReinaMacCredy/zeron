@@ -447,6 +447,57 @@ pub fn compact_usage_meter(
         .into_any_element()
 }
 
+pub fn compact_extra_usage(extra: &zeron_proto::AgentExtraUsage, theme: &Theme) -> AnyElement {
+    let view = crate::account_usage::extra_usage_view(extra);
+    let on = extra.enabled && extra.used.is_some();
+    let muted = theme.text_muted.opacity(0.7);
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(muted)
+        .child(
+            div()
+                .w(px(40.0))
+                .flex_none()
+                .truncate()
+                .child(SharedString::from("Extra")),
+        )
+        .child(
+            usage_bar(view.used_fraction, theme)
+                .flex_1()
+                .min_w(px(40.0)),
+        )
+        .child(
+            div()
+                .w(px(30.0))
+                .flex_none()
+                .text_right()
+                .child(SharedString::from(if on {
+                    format!("{}%", (view.used_fraction * 100.0).round() as u32)
+                } else {
+                    view.amount.clone()
+                })),
+        )
+        .child(
+            div()
+                .w(px(48.0))
+                .flex_none()
+                .text_right()
+                .truncate()
+                .text_size(crate::typography::ui_rems(10.0))
+                .text_color(theme.text_muted.opacity(0.45))
+                .child(SharedString::from(if on {
+                    view.amount
+                } else {
+                    view.headline
+                })),
+        )
+        .into_any_element()
+}
+
 /// The optimistic half of a switch: `account` becomes the live login of its
 /// group — its agent, or for agents that keep a login per model provider,
 /// that provider — and every other group keeps its own. Pure.
@@ -2497,6 +2548,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: provider.map(str::to_string),
+            extra_usage: None,
         };
         let mut snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2649,6 +2701,7 @@ mod tests {
             switchable,
             saved_at: None,
             provider: Some("openai".into()),
+            extra_usage: None,
         };
         window
             .update(cx, |page, _, cx| {
@@ -2739,6 +2792,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: None,
+            extra_usage: None,
         };
         let snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2781,6 +2835,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: None,
+            extra_usage: None,
         };
         let snapshot = AgentAccountsSnapshot {
             accounts: vec![
