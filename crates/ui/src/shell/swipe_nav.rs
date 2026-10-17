@@ -315,6 +315,14 @@ impl Shell {
                 .find(|chat| &chat.id == id)
                 .map(|chat| transcript::single_line(&crate::home::chat_title(chat)).into())
                 .unwrap_or_else(|| "New session".into()),
+            NavEntry::Draft(id) => self
+                .state
+                .read(cx)
+                .is_draft(id)
+                .then(|| crate::draft_store::entry_prompt(id, cx))
+                .flatten()
+                .map(|prompt| transcript::single_line(&prompt).into())
+                .unwrap_or_else(|| "New session".into()),
             NavEntry::PullRequests => "Pull requests".into(),
             NavEntry::PullRequest { url, .. } => url
                 .rsplit('/')

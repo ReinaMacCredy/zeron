@@ -721,7 +721,6 @@ impl Shell {
                 panel.update(cx, |panel, cx| panel.set_open(false, cx));
             }
         }
-        self.nav.push(NavEntry::Chat(String::new()));
         let target = {
             let state = self.state.read(cx);
             project
@@ -748,6 +747,8 @@ impl Shell {
                 }
             }
         });
+        let entry = self.focus_nav_entry(cx);
+        self.record_nav_focus(entry, cx);
         self.freeze_draft_row(cx);
         // The canvas never restores a drawer: a previously opened canvas
         // terminal must not pop open on a fresh new chat.
@@ -2449,6 +2450,34 @@ mod strip_regressions {
             shell.discard_draft(first.clone(), cx);
             assert!(!shell.state.read(cx).is_draft(&first));
             assert!(!crate::draft_store::has_content(&first, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn walking_back_from_a_chat_lands_on_the_draft_left_for_it(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![chat("a")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let draft = shell.state.read(cx).active_draft.clone().unwrap();
+            invest(&draft, "keep me", cx);
+            shell.select_existing_chat("a".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+
+            shell.navigate_back(cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let state = shell.state.read(cx);
+            assert_eq!(state.selected_chat, None);
+            assert_eq!(state.active_draft.as_deref(), Some(draft.as_str()));
+
+            shell.navigate_forward(cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+            assert!(!shell.nav.can_forward());
         });
     }
 
