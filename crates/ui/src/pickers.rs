@@ -35,6 +35,8 @@ use zeron_proto::{
 };
 use zeron_rpc::methods;
 
+use crate::provider_instances::InstanceIcon;
+
 fn new_model_badge(theme: &Theme) -> AnyElement {
     div()
         .flex_none()
@@ -1762,12 +1764,122 @@ impl Pickers {
         let descriptors = self.rail_descriptors(cx);
         self.instances
             .iter()
-            .filter(|instance| {
-                matches!(instance.config, zeron_proto::InstanceConfig::Native { .. })
-                    && descriptors.iter().any(|d| d.id == instance.driver)
+            .filter(|instance| match instance.config {
+                zeron_proto::InstanceConfig::Native { .. } => {
+                    descriptors.iter().any(|d| d.id == instance.driver)
+                }
+                zeron_proto::InstanceConfig::Acp { .. } => instance.driver == HarnessId::Acp,
             })
             .cloned()
             .collect()
+    }
+
+    fn instance_tab(
+        &self,
+        instance: &ProviderInstance,
+        is_viewed: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let harness = instance.driver;
+        let id = instance.id.clone();
+        let label = SharedString::from(instance.label.clone());
+        let accent = crate::provider_instances::instance_accent(instance);
+        div()
+            .id(SharedString::from(format!("instance-tab-{id}")))
+            .relative()
+            .flex_none()
+            .h(px(32.0))
+            .rounded(px(popover::MENU_ITEM_RADIUS))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .aria_label(label.clone())
+            .map(|el| {
+                if is_viewed {
+                    el.px(px(8.0)).gap(px(6.0))
+                } else {
+                    el.w(px(32.0))
+                        .justify_center()
+                        .tooltip(crate::settings::widgets::text_tooltip(label.clone()))
+                }
+            })
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(if is_viewed {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.setting_menu = None;
+                this.model_rail = ModelRail::Harness;
+                this.search
+                    .update(cx, |input, cx| input.set_placeholder("Search models…", cx));
+                this.pick_instance(harness, Some(id.clone()), cx);
+                cx.notify();
+            }))
+            .child(
+                InstanceIcon::of(instance)
+                    .svg(if is_viewed {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .size(px(if is_viewed { 14.0 } else { 16.0 })),
+            )
+            .when(is_viewed, |el| {
+                el.child(label)
+                    .when_some(accent, |el, accent| {
+                        el.child(div().flex_none().size(px(6.0)).rounded_full().bg(accent))
+                    })
+                    .child(tab_indicator(theme.accent))
+            })
+            .when(!is_viewed, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(6.0))
+                        .right(px(5.0))
+                        .size(px(5.0))
+                        .rounded_full()
+                        .bg(accent.unwrap_or(theme.text_faint)),
+                )
+            })
+    }
+
+    /// The descriptor an instance's rows and tab hang off: its driver's, or for
+    /// a generic ACP agent (no driver tab, D3) one named after the instance.
+    fn instance_descriptor(
+        instance: &ProviderInstance,
+        descriptors: &[HarnessDescriptor],
+    ) -> Option<HarnessDescriptor> {
+        let mut descriptor = match descriptors.iter().find(|d| d.id == instance.driver) {
+            Some(descriptor) => descriptor.clone(),
+            None if instance.driver == HarnessId::Acp => HarnessDescriptor {
+                id: HarnessId::Acp,
+                name: String::new(),
+                supports_steering: true,
+                steering_mode: zeron_proto::SteeringMode::TurnBoundary,
+                reasoning_levels: Vec::new(),
+                installed: true,
+                can_install: false,
+                enabled: Some(true),
+            },
+            None => return None,
+        };
+        descriptor.name = instance.label.clone();
+        Some(descriptor)
+    }
+
+    fn row_icon(&self, harness: HarnessId, instance: Option<&str>) -> InstanceIcon {
+        match instance.and_then(|id| self.instances.iter().find(|i| i.id == id)) {
+            Some(instance) => InstanceIcon::of(instance),
+            None => {
+                let (mark, tint) = harness_brand_icon(harness);
+                InstanceIcon::Brand(mark, tint)
+            }
+        }
     }
 
     fn load_instances(&mut self, cx: &mut Context<Self>) {
@@ -2972,6 +3084,7 @@ impl Pickers {
                 .unwrap_or_default();
             self.update_chat_config(cx, None, move |config| {
                 config.harness = harness;
+                config.instance_id = None;
                 config.model = model;
                 config.reasoning = reasoning;
                 config.model_options = options;
@@ -2985,7 +3098,8 @@ impl Pickers {
         }
         self.config.harness = Some(harness);
         self.config.instance_id = None;
-        if self.title.is_none() {
+        // D3: `acp` names no agent on its own, so it is never the default harness.
+        if self.title.is_none() && harness != HarnessId::Acp {
             self.defaults.harness = Some(harness);
             self.save_defaults();
         }
@@ -3017,6 +3131,10 @@ impl Pickers {
                 self.config.reasoning = None;
             }
             self.config.instance_id = Some(id.clone());
+            if self.state.read(cx).side_chat_unsaved() {
+                let id = id.clone();
+                self.update_chat_config(cx, None, move |config| config.instance_id = Some(id));
+            }
         }
         self.ensure_instance_models(&id, false, cx);
         self.active = self.selected_model_index(cx);
@@ -3727,11 +3845,7 @@ impl Pickers {
                 .instance_models
                 .get(&instance.id)
                 .and_then(Loadable::ready)?;
-            let mut descriptor = descriptors
-                .iter()
-                .find(|d| d.id == instance.driver)?
-                .clone();
-            descriptor.name = instance.label.clone();
+            let descriptor = Self::instance_descriptor(instance, &descriptors)?;
             let mut rows = scoped_model_rows(
                 &query,
                 rail,
@@ -6372,80 +6486,23 @@ impl Pickers {
                     && self.model_rail != ModelRail::Profiles
                     && viewed == Some(harness)
                     && viewed_instance.as_deref() == Some(instance.id.as_str());
-                let id = instance.id.clone();
                 if is_viewed {
-                    selected_tab = Some((format!("instance:{id}"), tab_count));
+                    selected_tab = Some((format!("instance:{}", instance.id), tab_count));
                 }
                 tab_count += 1;
-                let label = SharedString::from(instance.label.clone());
-                let accent = crate::provider_instances::instance_accent(instance);
-                strip = strip.child(
-                    div()
-                        .id(SharedString::from(format!("instance-tab-{id}")))
-                        .relative()
-                        .flex_none()
-                        .h(px(32.0))
-                        .rounded(px(popover::MENU_ITEM_RADIUS))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .aria_label(label.clone())
-                        .map(|el| {
-                            if is_viewed {
-                                el.px(px(8.0)).gap(px(6.0))
-                            } else {
-                                el.w(px(32.0))
-                                    .justify_center()
-                                    .tooltip(crate::settings::widgets::text_tooltip(label.clone()))
-                            }
-                        })
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(if is_viewed {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.setting_menu = None;
-                            this.model_rail = ModelRail::Harness;
-                            this.search.update(cx, |input, cx| {
-                                input.set_placeholder("Search models…", cx)
-                            });
-                            this.pick_instance(harness, Some(id.clone()), cx);
-                            cx.notify();
-                        }))
-                        .child(
-                            crate::icons::icon(icon_path)
-                                .size(px(if is_viewed { 14.0 } else { 16.0 }))
-                                .text_color(tint.unwrap_or(if is_viewed {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                })),
-                        )
-                        .when(is_viewed, |el| {
-                            el.child(label)
-                                .when_some(accent, |el, accent| {
-                                    el.child(
-                                        div().flex_none().size(px(6.0)).rounded_full().bg(accent),
-                                    )
-                                })
-                                .child(tab_indicator(theme.accent))
-                        })
-                        .when(!is_viewed, |el| {
-                            el.child(
-                                div()
-                                    .absolute()
-                                    .top(px(6.0))
-                                    .right(px(5.0))
-                                    .size(px(5.0))
-                                    .rounded_full()
-                                    .bg(accent.unwrap_or(theme.text_faint)),
-                            )
-                        }),
-                );
+                strip = strip.child(self.instance_tab(instance, is_viewed, &theme, cx));
             }
+        }
+        for instance in instances.iter().filter(|i| i.driver == HarnessId::Acp) {
+            let is_viewed = !favorites_view
+                && self.model_rail != ModelRail::Profiles
+                && viewed == Some(HarnessId::Acp)
+                && viewed_instance.as_deref() == Some(instance.id.as_str());
+            if is_viewed {
+                selected_tab = Some((format!("instance:{}", instance.id), tab_count));
+            }
+            tab_count += 1;
+            strip = strip.child(self.instance_tab(instance, is_viewed, &theme, cx));
         }
 
         if let Some((key, ix)) = selected_tab
@@ -6685,7 +6742,7 @@ impl Pickers {
             .new_models
             .get(&row.harness)
             .is_some_and(|ids| ids.contains(&row.model.id));
-        let (icon_path, tint) = harness_brand_icon(row.harness);
+        let row_icon = self.row_icon(row.harness, row.instance.as_deref());
         let label: SharedString = row.model.label.clone().into();
         let harness_name = row.harness_name.clone();
         let harness = row.harness;
@@ -6800,12 +6857,7 @@ impl Pickers {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(
-                            crate::icons::icon(icon_path)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(tint.unwrap_or(theme.text_muted)),
-                        )
+                        .child(row_icon.svg(theme.text_muted).size(px(11.0)))
                         .child(
                             div()
                                 .flex_none()
@@ -14078,6 +14130,58 @@ mod tests {
                 assert_eq!(config.model.as_deref(), Some("gpt"));
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn an_acp_instance_tab_lists_its_models_and_acp_never_runs_without_an_instance(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.defaults.harness = Some(HarnessId::Codex);
+            pickers.instances = vec![ProviderInstance {
+                id: "acp_kimchi".into(),
+                driver: HarnessId::Acp,
+                label: "Kimchi".into(),
+                accent: None,
+                config: zeron_proto::InstanceConfig::Acp {
+                    source: zeron_proto::AcpSource::Registry {
+                        agent_id: "kimchi".into(),
+                        version: "1.16.0".into(),
+                        distribution: zeron_proto::AcpDistribution::Binary,
+                    },
+                    env: Default::default(),
+                    icon_path: None,
+                },
+            }];
+            pickers.instance_models.insert(
+                "acp_kimchi".into(),
+                Loadable::Ready(vec![bare_model("kimchi-1", "Kimchi One")]),
+            );
+            pickers.catalog_rev += 1;
+            pickers.model_rail = ModelRail::Harness;
+
+            pickers.pick_instance(HarnessId::Acp, Some("acp_kimchi".into()), cx);
+            let rows = pickers.model_rows(cx);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].instance.as_deref(), Some("acp_kimchi"));
+            assert_eq!(rows[0].harness_name.as_ref(), "Kimchi");
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Acp));
+            assert_eq!(resolved.instance_id.as_deref(), Some("acp_kimchi"));
+            assert_eq!(
+                pickers.defaults.harness,
+                Some(HarnessId::Codex),
+                "a bare `acp` default would start the next chat with no agent"
+            );
+
+            pickers.pick_harness(HarnessId::Codex, cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Codex));
+            assert_eq!(resolved.instance_id, None);
+        });
     }
 
     #[gpui::test]

@@ -167,7 +167,7 @@ impl Pickers {
                 .is_some_and(|model| model.id == row.model.id);
         let starrable = row.instance.is_none();
         let favorite = starrable && self.defaults.is_favorite(row.harness, &row.model.id);
-        let (icon, tint) = harness_brand_icon(row.harness);
+        let row_icon = self.row_icon(row.harness, row.instance.as_deref());
         let harness = row.harness;
         let model = row.model.id.clone();
         let label: SharedString = row.model.label.clone().into();
@@ -237,12 +237,7 @@ impl Pickers {
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.activate_model_index(ix, cx)))
-            .child(
-                crate::icons::icon(icon)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(tint.unwrap_or(theme.text_muted)),
-            )
+            .child(row_icon.svg(theme.text_muted).size(px(14.0)))
             .child(
                 div()
                     .flex_1()
@@ -542,26 +537,27 @@ impl Pickers {
                         .and_then(|(_, instance)| instance.as_deref())
                         .and_then(|id| self.instances.iter().find(|i| i.id == id))
                         .and_then(crate::provider_instances::instance_accent);
-                    let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
+                    let (icon, name): (crate::provider_instances::InstanceIcon, SharedString) =
                         match group {
-                            None => (crate::icons::STAR_BOLD, None, "Starred".into()),
-                            Some((harness, Some(instance))) => {
-                                let (icon, tint) = harness_brand_icon(harness);
-                                (
-                                    icon,
-                                    tint,
-                                    self.provider_label(harness, Some(&instance)).into(),
-                                )
-                            }
+                            None => (
+                                crate::provider_instances::InstanceIcon::Brand(
+                                    crate::icons::STAR_BOLD,
+                                    None,
+                                ),
+                                "Starred".into(),
+                            ),
+                            Some((harness, Some(instance))) => (
+                                self.row_icon(harness, Some(&instance)),
+                                self.provider_label(harness, Some(&instance)).into(),
+                            ),
                             Some((harness, None)) => {
-                                let (icon, tint) = harness_brand_icon(harness);
                                 let name = self
                                     .rail_descriptors(cx)
                                     .into_iter()
                                     .find(|d| d.id == harness)
                                     .map(|d| d.name)
                                     .unwrap_or_default();
-                                (icon, tint, name.into())
+                                (self.row_icon(harness, None), name.into())
                             }
                         };
                     let hint = name.clone();
@@ -592,9 +588,10 @@ impl Pickers {
                             cx.notify();
                         }))
                         .relative()
-                        .child(crate::icons::icon(icon).size(px(14.0)).text_color(
-                            tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
-                        ))
+                        .child(
+                            icon.svg(if viewed { theme.text } else { theme.text_muted })
+                                .size(px(14.0)),
+                        )
                         .when_some(accent, |el, accent| {
                             el.child(
                                 div()
