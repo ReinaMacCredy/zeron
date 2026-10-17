@@ -5644,10 +5644,21 @@ impl Shell {
             .then_some(source)
     }
 
-    fn active_btw_composer(&self, cx: &App) -> Option<Entity<Composer>> {
+    fn active_btw_tab(&self, cx: &App) -> Option<(String, &BtwTab)> {
         let source = self.open_btw_source(cx)?;
         let active = self.btw.get(&source)?.active.as_deref()?;
-        self.btw_tabs.get(active).map(|tab| tab.composer.clone())
+        let live = self
+            .state
+            .read(cx)
+            .live_sidechats_of(&source, Utc::now())
+            .iter()
+            .any(|chat| chat.id == active);
+        live.then(|| self.btw_tabs.get(active).map(|tab| (source, tab)))
+            .flatten()
+    }
+
+    fn active_btw_composer(&self, cx: &App) -> Option<Entity<Composer>> {
+        self.active_btw_tab(cx).map(|(_, tab)| tab.composer.clone())
     }
 
     fn chat_composer(&self, cx: &App) -> Entity<Composer> {
@@ -6044,10 +6055,9 @@ impl Shell {
     }
 
     fn render_btw(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let source = self.open_btw_source(cx)?;
-        let active = self.btw.get(&source)?.active.clone()?;
-        let tab = self.btw_tabs.get(&active)?;
+        let (source, tab) = self.active_btw_tab(cx)?;
         let (transcript, composer) = (tab.transcript.clone(), tab.composer.clone());
+        let active = self.btw.get(&source)?.active.clone()?;
         let now = Utc::now();
         let tabs: Vec<(String, SharedString)> = {
             let state = self.state.read(cx);
@@ -6057,9 +6067,6 @@ impl Shell {
                 .map(|chat| (chat.id.clone(), btw_tab_title(state, chat, now)))
                 .collect()
         };
-        if !tabs.iter().any(|(id, _)| *id == active) {
-            return None;
-        }
         let theme = Theme::of(cx).clone();
         let draft = self
             .composer
@@ -23350,6 +23357,15 @@ mod right_tab_mouse_regressions {
             assert!(shell.sidechat_tabs.is_empty());
             assert!(!shell.state.read(cx).open_sidechat_tabs.contains("side"));
             assert!(shell.render_btw(cx).is_some());
+            // Archived elsewhere: the main composer is the one shown and typed into.
+            shell
+                .state
+                .update(cx, |state, _| state.chats[1].archived = true);
+            assert!(shell.render_btw(cx).is_none());
+            assert_eq!(shell.chat_composer(cx), shell.composer);
+            shell
+                .state
+                .update(cx, |state, _| state.chats[1].archived = false);
             assert!(shell.close_btw_on_escape(cx));
             assert!(shell.open_btw_source(cx).is_none());
             assert!(shell.render_btw(cx).is_none());
