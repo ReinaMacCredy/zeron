@@ -198,15 +198,12 @@ impl Shell {
                 self.update_card_task(card, task_id, patch, cx)
             }
             TaskCardEvent::Delete(task_id) => self.delete_task(task_id, cx),
-            TaskCardEvent::Start { task_id, patch } => {
-                let (harness, model) = self
-                    .composer
-                    .read(cx)
-                    .pickers()
-                    .read(cx)
-                    .canvas_harness_model();
-                self.start_task(card, task_id, patch.clone(), harness, model, cx)
-            }
+            TaskCardEvent::Start {
+                task_id,
+                patch,
+                harness,
+                model,
+            } => self.start_task(card, task_id, patch.clone(), *harness, model.clone(), cx),
             TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);

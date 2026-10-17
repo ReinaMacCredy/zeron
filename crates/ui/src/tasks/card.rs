@@ -6,12 +6,13 @@ use gpui::{
     AnyElement, ClickEvent, Context, Entity, EntityInputHandler, EventEmitter, Focusable,
     IntoElement, KeyDownEvent, Render, Subscription, Task, Window, div, prelude::*, px,
 };
-use zeron_proto::{ChatIndicator, TaskPatch, TaskStatus};
+use zeron_proto::{ChatIndicator, HarnessId, TaskPatch, TaskStatus};
 
 use super::logic::{self, DuePick};
 use super::{Row, SAVE_DEBOUNCE, START_PENDING, column_tone, linked_chat, patched, row_for};
 use crate::composer::{ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
+use crate::pickers::Pickers;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -27,6 +28,8 @@ pub enum TaskCardEvent {
     Start {
         task_id: String,
         patch: Option<TaskPatch>,
+        harness: Option<HarnessId>,
+        model: Option<String>,
     },
     OpenChat(String),
     Refused(String),
@@ -55,6 +58,7 @@ pub struct TaskCard {
     open: Option<Open>,
     project_select: widgets::SelectState,
     starting: HashMap<String, Instant>,
+    agent: Entity<Pickers>,
     _state_changes: Subscription,
 }
 
@@ -66,7 +70,9 @@ impl TaskCard {
             card.sync(cx);
             cx.notify();
         });
+        let agent = cx.new(|cx| Pickers::new_for_tasks(state.clone(), cx));
         Self {
+            agent,
             state,
             open: None,
             project_select: widgets::SelectState::default(),
@@ -299,7 +305,13 @@ impl TaskCard {
         })
         .detach();
         let patch = self.take_patch(cx).map(|(_, patch)| patch);
-        cx.emit(TaskCardEvent::Start { task_id, patch });
+        let (harness, model) = self.agent.read(cx).task_harness_model();
+        cx.emit(TaskCardEvent::Start {
+            task_id,
+            patch,
+            harness,
+            model,
+        });
         cx.notify();
     }
 

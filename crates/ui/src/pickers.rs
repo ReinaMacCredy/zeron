@@ -1093,6 +1093,7 @@ pub struct Pickers {
     /// `config.harness` then only tracks the tab being browsed.
     title: Option<TitleSettings>,
     commit_binding: bool,
+    task_binding: bool,
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
     defaults: ComposerDefaults,
@@ -1285,6 +1286,40 @@ impl Pickers {
         let mut pickers = Self::build(state, Some(commit_title_settings(choice)), cx);
         pickers.commit_binding = true;
         pickers
+    }
+
+    pub fn new_for_tasks(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut pickers = Self::build(state, Some(TitleSettings::default()), cx);
+        pickers.task_binding = true;
+        pickers
+    }
+
+    pub(crate) fn task_harness_model(&self) -> (Option<HarnessId>, Option<String>) {
+        let Some((harness, picked)) = self.task_pick() else {
+            return (None, None);
+        };
+        let model = picked.map(str::to_owned).or_else(|| {
+            self.models
+                .get(&harness)
+                .and_then(Loadable::ready)
+                .and_then(|models| default_model(models))
+                .map(|model| model.id.clone())
+        });
+        (Some(harness), model)
+    }
+
+    fn task_pick(&self) -> Option<(HarnessId, Option<&str>)> {
+        let title = self.title.as_ref()?;
+        match title.harness {
+            Some(harness) => Some((harness, title.model.as_deref())),
+            None => {
+                let harness = self.canvas_default_harness()?;
+                Some((
+                    harness,
+                    self.defaults.model_for(harness).map(|m| m.id.as_str()),
+                ))
+            }
+        }
     }
 
     pub fn set_commit_model(&mut self, choice: Option<&CommitModelChoice>, cx: &mut Context<Self>) {
@@ -1494,6 +1529,7 @@ impl Pickers {
             config: DraftConfig::default(),
             title,
             commit_binding: false,
+            task_binding: false,
             defaults,
             data_dir,
             draft_owner,
@@ -1669,7 +1705,7 @@ impl Pickers {
     /// narrowed to title-capable agents when bound to thread naming.
     fn offered(&self, list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
         let mut offered = offered_harnesses(list);
-        if self.title.is_some() {
+        if self.title.is_some() && !self.task_binding {
             offered.retain(|d| zeron_harness::supports_titles(d.id) && d.id != HarnessId::Mock);
         }
         offered
@@ -1700,6 +1736,9 @@ impl Pickers {
             return Some(harness);
         }
         if let Some(title) = &self.title {
+            if self.task_binding {
+                return self.task_pick().map(|(harness, _)| harness);
+            }
             // Browsing starts on the saved agent, else the first title-capable one.
             return title.harness.or_else(|| {
                 let offered = self.offered(self.harnesses.ready()?);
@@ -1741,35 +1780,14 @@ impl Pickers {
         fresh.and_then(|list| self.offered(list).first().map(|d| d.id))
     }
 
-    /// What a new chat on the canvas would run, whichever chat is selected.
-    pub(crate) fn canvas_harness_model(&self) -> (Option<HarnessId>, Option<String>) {
-        let Some(harness) = self
-            .config
-            .harness
-            .or_else(|| self.canvas_default_harness())
-        else {
-            return (None, None);
-        };
-        let picked = self
-            .config
-            .model
-            .as_deref()
-            .or_else(|| self.defaults.model_for(harness).map(|m| m.id.as_str()));
-        let model = self
-            .models
-            .get(&harness)
-            .and_then(|models| models.ready())
-            .filter(|_| !self.stale_models.contains(&harness))
-            .and_then(|models| selected_catalog_model(models, picked))
-            .map(|m| m.id.clone())
-            .or_else(|| picked.map(str::to_string));
-        (Some(harness), model)
-    }
-
     /// Effective model id: the draft pick, the selected chat's config, or (on
     /// the new-chat canvas) the remembered last-used model for the harness.
     fn effective_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
         if let Some(title) = &self.title {
+            if self.task_binding {
+                let (harness, model) = self.task_pick()?;
+                return model.filter(|_| self.effective_harness(cx) == Some(harness));
+            }
             // Only the saved agent's tab shows a selected row.
             return title.model.as_deref().filter(|_| {
                 title.harness.is_some() && title.harness == self.effective_harness(cx)
@@ -8853,7 +8871,12 @@ impl Render for Pickers {
         // so instead of wearing a brand mark for an agent that can't run.
         let no_agents = self.no_agents_available() && self.effective_harness(cx).is_none();
         let model_name = self.model_name(cx);
-        let model_label: SharedString = if let Some(title) = &self.title {
+        let model_label: SharedString = if self.task_binding {
+            match self.task_harness_model() {
+                (Some(harness), Some(id)) => self.model_label(harness, &id).unwrap_or(id).into(),
+                _ => "Automatic".into(),
+            }
+        } else if let Some(title) = &self.title {
             // The saved choice, not the tab being browsed.
             match (title.harness, title.model.as_deref()) {
                 (None, _) if self.commit_binding => "Automatic".into(),
@@ -8889,6 +8912,7 @@ impl Render for Pickers {
         // remembered pick): a ghost label instead of a bare icon.
         let chip_label_loading = self.title.is_none() && model_name == ModelName::Loading;
         let chip_harness = match &self.title {
+            Some(_) if self.task_binding => self.task_pick().map(|(harness, _)| harness),
             Some(title) => title.harness,
             None => self.effective_harness(cx),
         };
@@ -9384,6 +9408,46 @@ mod tests {
             assert_eq!(pickers.effective_model_id(cx), Some("claude-haiku-4-5"));
             pickers.set_commit_model(None, cx);
             assert_eq!(pickers.effective_model_id(cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn task_model_picker_offers_every_agent_and_never_touches_the_selected_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "open-chat", "deviceId": "local", "archived": false,
+                    "createdAt": "2026-10-17T00:00:00Z",
+                    "config": { "harness": "codex", "model": "gpt-5.6-luna", "sandbox": "workspace-write" },
+                }))
+                .unwrap(),
+            ];
+            state.selected_chat = Some("open-chat".into());
+        });
+        let pickers = cx.new(|cx| Pickers::new_for_tasks(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::ClaudeCode, "Claude Code"),
+                descriptor(HarnessId::Pi, "Pi"),
+            ]);
+            let offered: Vec<HarnessId> = pickers
+                .offered(pickers.harnesses.ready().unwrap())
+                .iter()
+                .map(|d| d.id)
+                .collect();
+            assert_eq!(offered, [HarnessId::ClaudeCode, HarnessId::Pi]);
+            assert_eq!(pickers.task_harness_model().0, Some(HarnessId::ClaudeCode));
+            pickers.pick_harness(HarnessId::Pi, cx);
+            pickers.pick_model("pi-model".into(), cx);
+            assert_eq!(
+                pickers.task_harness_model(),
+                (Some(HarnessId::Pi), Some("pi-model".into()))
+            );
+            assert_eq!(pickers.config_writes, 0);
         });
     }
 
@@ -12801,66 +12865,6 @@ mod tests {
             let state = pickers.state.read(cx);
             let config = state.chats[0].config.as_ref().unwrap();
             assert_eq!(config.model_options.get(AUTO_COMPACT), None);
-        });
-    }
-
-    #[gpui::test]
-    fn the_canvas_pick_ignores_the_selected_chat(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let pickers = context_card_picker(cx, false, dir.path());
-        pickers.update(cx, |pickers, cx| {
-            pickers.config = DraftConfig::default();
-            pickers.harnesses = Loadable::Ready(vec![
-                descriptor(HarnessId::ClaudeCode, "Claude Code"),
-                descriptor(HarnessId::Codex, "Codex"),
-            ]);
-            assert_eq!(
-                pickers.canvas_harness_model(),
-                (Some(HarnessId::ClaudeCode), Some("fable".into()))
-            );
-            pickers.state.update(cx, |state, _| {
-                state.chats = vec![zeron_proto::Chat {
-                    id: "c1".into(),
-                    device_id: "dev".into(),
-                    title: None,
-                    archived: false,
-                    cwd: None,
-                    branch: None,
-                    checkout_id: None,
-                    source_context: None,
-                    config: Some(ChatConfig {
-                        harness: HarnessId::Codex,
-                        model: Some("gpt-5".into()),
-                        reasoning: None,
-                        model_options: Default::default(),
-                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                        permission_mode: Default::default(),
-                        instructions: String::new(),
-                        profile_id: None,
-                        disabled_tools: Vec::new(),
-                    }),
-                    last_message_preview: None,
-                    last_message_at: None,
-                    created_at: chrono::Utc::now(),
-                    harness_session_id: None,
-                    harness_session_cwd: None,
-                    space_id: None,
-                    last_seen_at: None,
-                    room_gen: None,
-                    sidechat_source_chat_id: None,
-                    created_by_chat_id: None,
-                    previous_harnesses: Vec::new(),
-                    delegation: None,
-                    settle: None,
-                    unsettled_at: None,
-                }];
-                state.selected_chat = Some("c1".into());
-            });
-            assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
-            assert_eq!(
-                pickers.canvas_harness_model(),
-                (Some(HarnessId::ClaudeCode), Some("fable".into()))
-            );
         });
     }
 
