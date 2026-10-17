@@ -1455,15 +1455,12 @@ async fn skills_are_not_advertised_as_commands() {
     );
 }
 
-#[tokio::test]
-async fn compaction_is_native_and_compact_maps_thread_compacted() {
-    let h = harness();
-    assert_eq!(h.compaction(), Compaction::Native);
+async fn compact_events(h: &CodexHarness, resume: &str) -> Vec<AgentEvent> {
     let (controls, _steer, _token) = controls("Yes");
     let mut req = request("");
-    req.resume = Some("compact-ok".into());
+    req.resume = Some(resume.into());
     let mut stream = h.compact(req, controls).await.expect("compaction starts");
-    let events = tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
             let event = event.expect("stream event");
@@ -1476,30 +1473,42 @@ async fn compaction_is_native_and_compact_maps_thread_compacted() {
         events
     })
     .await
-    .expect("compaction finished in time");
-    assert!(
-        matches!(
-            events.first(),
-            Some(AgentEvent::Compacted {
-                pre_tokens: Some(120_000),
-                post_tokens: Some(18_000),
-            })
-        ),
-        "the boundary carries the tokenUsage seen either side of it: {events:?}"
-    );
-    assert!(
-        matches!(
-            events.last(),
-            Some(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                session_id: Some(id),
-                error: None,
-                ..
-            }) if id == "th-compact-ok"
-        ),
-        "Done reports the resumed thread: {events:?}"
-    );
-    assert_eq!(events.len(), 2, "no turn content leaks out: {events:?}");
+    .expect("compaction finished in time")
+}
+
+#[tokio::test]
+async fn compaction_is_native_and_compact_maps_thread_compacted() {
+    let h = harness();
+    assert_eq!(h.compaction(), Compaction::Native);
+    for (resume, pre, post) in [
+        ("compact-ok", 120_000, 18_000),
+        ("compact-live", 30_398, 18_515),
+    ] {
+        let events = compact_events(&h, resume).await;
+        assert!(
+            matches!(
+                events.first(),
+                Some(AgentEvent::Compacted {
+                    pre_tokens: Some(p),
+                    post_tokens: Some(q),
+                }) if *p == pre && *q == post
+            ),
+            "the boundary carries the tokenUsage seen either side of it: {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    session_id: Some(id),
+                    error: None,
+                    ..
+                }) if *id == format!("th-{resume}")
+            ),
+            "Done reports the resumed thread: {events:?}"
+        );
+        assert_eq!(events.len(), 2, "no turn content leaks out: {events:?}");
+    }
 }
 
 #[tokio::test]

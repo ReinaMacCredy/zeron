@@ -255,6 +255,7 @@ pub(crate) struct OneShot {
 pub(crate) struct OneShotReply {
     pub text: String,
     pub usage: Option<(u64, u64)>,
+    pub model: Option<String>,
 }
 
 pub(crate) async fn run_one_shot(
@@ -308,6 +309,7 @@ pub(crate) async fn run_one_shot(
                     return Ok(OneShotReply {
                         text: candidate,
                         usage: raw.usage,
+                        model: raw.model,
                     });
                 }
                 last_error = EngineError::Other("the model returned no text".into());
@@ -398,6 +400,9 @@ pub(crate) async fn collect_text(
     while let Some(event) = stream.next().await {
         match event? {
             AgentEvent::TextDelta { text: delta } => reply.text.push_str(&delta),
+            AgentEvent::SessionStarted { model, .. } if !model.is_empty() => {
+                reply.model = Some(model)
+            }
             AgentEvent::Usage {
                 input_tokens,
                 output_tokens,

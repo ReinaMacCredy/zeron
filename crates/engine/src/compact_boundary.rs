@@ -121,6 +121,7 @@ pub(crate) async fn classify(target: OneShotTarget, input: String) -> Classifier
                 ClassifierVerdict::Continue
             };
             record.reply = reply.text;
+            record.model = record.model.take().or(reply.model);
             record.input_tokens = reply.usage.map(|(input, _)| input);
             record.output_tokens = reply.usage.map(|(_, output)| output);
         }
