@@ -12,7 +12,7 @@
 
 use core_foundation::{
     array::CFArrayRef,
-    base::{CFRelease, CFRetain, CFTypeID, CFTypeRef},
+    base::{CFIndex, CFRelease, CFRetain, CFTypeID, CFTypeRef},
     runloop::CFRunLoopSourceRef,
     string::CFStringRef,
 };
@@ -87,6 +87,11 @@ extern "C" {
         attributes: CFArrayRef,
         options: u32,
         values: *mut CFArrayRef,
+    ) -> AXError;
+    pub fn AXUIElementGetAttributeValueCount(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        count: *mut CFIndex,
     ) -> AXError;
     pub fn AXUIElementCopyAttributeNames(
         element: AXUIElementRef,
@@ -701,7 +706,16 @@ pub(crate) fn focused_window_id_for_restore(
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr = CFStr::new("AXChildren");
+    copy_element_array(element, "AXChildren")
+}
+
+/// Copy an array-of-elements attribute such as `AXChildren` or `AXVisibleRows`.
+///
+/// # Safety
+///
+/// `element` must be valid, and the caller must release every returned element.
+pub unsafe fn copy_element_array(element: AXUIElementRef, attr_name: &str) -> Vec<AXUIElementRef> {
+    let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
     if err != kAXErrorSuccess || value.is_null() {
@@ -726,6 +740,18 @@ pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
             }
         })
         .collect()
+}
+
+/// Number of values in an array attribute, without copying them.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn attribute_count(element: AXUIElementRef, attr_name: &str) -> Option<usize> {
+    let attr = CFStr::new(attr_name);
+    let mut count: CFIndex = 0;
+    let err = AXUIElementGetAttributeValueCount(element, attr.as_concrete_TypeRef(), &mut count);
+    (err == kAXErrorSuccess && count >= 0).then_some(count as usize)
 }
 
 /// Copy an AX element-valued attribute. The returned element is retained and
@@ -933,35 +959,45 @@ pub unsafe fn set_bool_attr(element: AXUIElementRef, attr_name: &str, value: boo
 /// Signal to a Chromium/Electron application root that a real assistive client
 /// is present so it materializes its full web-content accessibility tree.
 ///
-/// Returns `true` when an attribute write was accepted — meaning the app was
-/// flipped from "tree off" to "tree building" and the caller should let the
-/// tree settle before walking. Returns `false` when the app does not support
-/// either attribute (native Cocoa apps such as Finder / Calculator / TextEdit),
-/// in which case no settle delay is warranted.
+/// Returns `Some(true)` when an attribute write was accepted — meaning the app
+/// was flipped from "tree off" to "tree building" and the caller should let the
+/// tree settle before walking. Returns `Some(false)` for apps that are not
+/// Chromium (native Cocoa apps such as Finder / Calculator / TextEdit), which
+/// are left untouched and need no settle. Returns `None` when the outcome is
+/// not final (the app was busy or refused the write) and enablement should be
+/// retried on a later read.
 ///
 /// `AXManualAccessibility` is the modern opt-in with no screen-reader side
-/// effects; `AXEnhancedUserInterface` is the legacy fallback some Electron
-/// builds expose instead (the modern attribute returns
-/// `kAXErrorAttributeUnsupported` on those builds).
+/// effects; `AXEnhancedUserInterface` is the legacy fallback Chromium builds
+/// that answer `kAXErrorAttributeUnsupported` for the modern one need instead.
+/// `is_chromium` is only consulted for that fallback.
 ///
 /// # Safety
 ///
 /// `app_element` must be a valid, live application `AXUIElementRef`.
-pub unsafe fn enable_chromium_accessibility(app_element: AXUIElementRef) -> bool {
+pub unsafe fn enable_chromium_accessibility(
+    app_element: AXUIElementRef,
+    is_chromium: impl FnOnce() -> bool,
+) -> Option<bool> {
     let manual = set_bool_attr_true(app_element, "AXManualAccessibility");
     if manual == kAXErrorSuccess {
-        return true;
+        return Some(true);
     }
     if manual != kAXErrorAttributeUnsupported {
         // A transient error (e.g. timeout / app busy) rather than a hard
         // "this app has no such attribute" — don't bother with the legacy
         // fallback, and don't claim enablement happened.
-        return false;
+        return None;
+    }
+    // Every AppKit app accepts AXEnhancedUserInterface and stays in VoiceOver's enhanced mode.
+    if !is_chromium() {
+        return Some(false);
     }
     let written = set_bool_attr_true(app_element, "AXEnhancedUserInterface");
     // Chromium 154 applies the write but answers kAXErrorNotImplemented.
-    written == kAXErrorSuccess
-        || copy_bool_attr(app_element, "AXEnhancedUserInterface") == Some(true)
+    let enabled = written == kAXErrorSuccess
+        || copy_bool_attr(app_element, "AXEnhancedUserInterface") == Some(true);
+    enabled.then_some(true)
 }
 
 /// Get the CGWindowID of an AX window element via the private `_AXUIElementGetWindow` SPI.
@@ -988,30 +1024,7 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr = CFStr::new("AXWindows");
-    let mut value: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return vec![];
-    }
-    let cf_array_type_id = CFArray::<CFTypeRef>::type_id();
-    if core_foundation::base::CFGetTypeID(value) != cf_array_type_id {
-        CFRelease(value);
-        return vec![];
-    }
-    let arr = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
-    let ax_type_id = AXUIElementGetTypeID();
-    (0..arr.len())
-        .filter_map(|i| {
-            let item = *arr.get(i)?;
-            if core_foundation::base::CFGetTypeID(item) == ax_type_id {
-                CFRetain(item);
-                Some(item as AXUIElementRef)
-            } else {
-                None
-            }
-        })
-        .collect()
+    copy_element_array(element, "AXWindows")
 }
 
 // ── Batched attribute reads ──────────────────────────────────────────────────
@@ -1045,6 +1058,9 @@ const ELEMENT_BATCH_ATTRS: &[&str] = &[
     "AXPosition",         // 14
     "AXSize",             // 15
     "AXExpanded",         // 16
+    "AXSubrole",          // 17
+    "AXRoleDescription",  // 18
+    "AXDisclosing",       // 19
 ];
 
 /// One element's attribute values, decoded from a single
@@ -1080,6 +1096,9 @@ pub struct ElementAttrs {
     pub bounds: Option<[f64; 4]>,
     pub children: Vec<AXUIElementRef>,
     pub expanded: Option<bool>,
+    pub subrole: Option<String>,
+    pub role_description: Option<String>,
+    pub disclosing: Option<bool>,
 }
 
 /// Fetch every attribute the AX tree walker reads for one element in a
@@ -1132,6 +1151,9 @@ pub unsafe fn copy_element_attrs(element: AXUIElementRef) -> ElementAttrs {
         bounds: slot_bounds(batch_slot(&slots, 14), batch_slot(&slots, 15)),
         frame: slot_rect(batch_slot(&slots, 14), batch_slot(&slots, 15)),
         expanded: batch_slot(&slots, 16).and_then(|v| slot_bool(v)),
+        subrole: batch_slot(&slots, 17).and_then(|v| slot_string(v)),
+        role_description: batch_slot(&slots, 18).and_then(|v| slot_string(v)),
+        disclosing: batch_slot(&slots, 19).and_then(|v| slot_bool(v)),
     }
 }
 

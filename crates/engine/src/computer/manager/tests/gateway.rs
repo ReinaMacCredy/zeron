@@ -41,6 +41,10 @@ fn task() -> CuaComputerTask {
 }
 
 async fn observe(f: &Fixture) -> ComputerActionableElements {
+    observe_roles(f, false).await
+}
+
+async fn observe_roles(f: &Fixture, any_role: bool) -> ComputerActionableElements {
     let state = with_computer_task(
         task(),
         with_model_desktop_observation(f.backend.get_state(ComputerStateOptions {
@@ -57,7 +61,7 @@ async fn observe(f: &Fixture) -> ComputerActionableElements {
         &ComputerActionableElementFilter {
             window_id: Some(WINDOW.to_owned()),
             label_contains: None,
-            any_role: false,
+            any_role,
         },
         |node| f.backend.native_element_identity(node),
     )
@@ -398,30 +402,46 @@ async fn refuses_a_native_retained_ref_without_a_semantic_click_instead_of_using
 }
 
 #[tokio::test]
-async fn presses_a_web_button_that_advertises_no_actions_instead_of_refusing_its_ref() {
+async fn presses_a_web_button_or_a_row_that_advertises_no_actions_instead_of_refusing_its_ref() {
     let f = native(37);
-    f.set_elements(vec![json!({
-        "role": "AXButton",
-        "label": "Chọn CPU",
-        "frame": { "x": -290, "y": 30, "width": 120, "height": 20 },
-        "element_token": "web-button",
-        "in_web_content": true,
-    })]);
+    f.set_elements(vec![
+        json!({
+            "role": "AXButton",
+            "label": "Chọn CPU",
+            "frame": { "x": -290, "y": 30, "width": 120, "height": 20 },
+            "element_token": "web-button",
+            "in_web_content": true,
+        }),
+        json!({
+            "role": "AXRow",
+            "label": "All Rules",
+            "frame": { "x": -290, "y": 60, "width": 120, "height": 20 },
+            "element_token": "sidebar-row",
+            "actions": ["AXShowDefaultUI"],
+        }),
+    ]);
     let manager = gateway_manager(&f);
-    let button = bind(&observe(&f).await, 0);
-    drive(&manager, || {
-        manager.click(
-            Some(THREAD),
-            button.clone(),
-            &[],
-            ComputerClickGesture::default(),
-        )
-    })
-    .await
-    .unwrap();
-    let clicks = f.named("click");
-    assert_eq!(clicks.len(), 1);
-    assert_eq!(f.last_args("click")["element_token"], json!("web-button"));
+    for (label, token) in [("Chọn CPU", "web-button"), ("All Rules", "sidebar-row")] {
+        let listing = observe_roles(&f, true).await;
+        let index = listing
+            .ref_index
+            .iter()
+            .position(|entry| entry.label == label)
+            .unwrap();
+        let target = bind(&listing, index);
+        drive(&manager, || {
+            manager.click(
+                Some(THREAD),
+                target.clone(),
+                &[],
+                ComputerClickGesture::default(),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(f.last_args("click")["element_token"], json!(token));
+    }
+    assert_eq!(f.named("click").len(), 2);
     manager.dispose().await;
 }
 

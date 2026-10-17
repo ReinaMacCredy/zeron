@@ -22,9 +22,9 @@ use zeron_proto::computer::{
     ComputerLaunchWindowReason, ComputerLaunchWindowStatus, ComputerPermission,
     ComputerPngMimeType, ComputerPoint, ComputerRect, ComputerScreenSize, ComputerScreenshot,
     ComputerScrollDelta, ComputerSpaceErrorCode, ComputerSpaceInventory, ComputerState,
-    ComputerUiNode, ComputerVerifyStateResult, ComputerVerifyStatus, ComputerWindow,
-    ComputerZoomResult, CuaActuator, CuaComputerTask, CuaEffect, CuaReply, CuaToolResult,
-    CuaTransportError, computer_permission_setup_message, cua_computer_task_key,
+    ComputerUiNode, ComputerVerifyStateResult, ComputerVerifyStatus, ComputerVisibleRows,
+    ComputerWindow, ComputerZoomResult, CuaActuator, CuaComputerTask, CuaEffect, CuaReply,
+    CuaToolResult, CuaTransportError, computer_permission_setup_message, cua_computer_task_key,
     list_computer_permissions, parse_cua_action_diagnostics,
 };
 use zeron_rpc::ComputerHost;
@@ -58,6 +58,7 @@ use super::still_frame_publisher::{
     StillFramePublisher, StillFramePublisherOptions, resolve_still_interval_ms,
 };
 use super::task_context::{current_computer_task, with_computer_task};
+use super::tools::action_words;
 use super::ui_tree_targeting::{ComputerTargetError, activation_point_for_node};
 use super::utf8_truncation::utf16_len;
 
@@ -89,23 +90,39 @@ const GUI_HOST_REQUIRED: &str =
 const MONITOR_MESSAGE: &str = "Computer control is paused because the Escape and human-input listener could not start. Reopen Zeron, then check Computer settings again.";
 
 struct ElementAction {
-    driver_action: &'static str,
-    ax_action: &'static str,
+    driver_action: String,
+    ax_action: String,
 }
 
-fn cua_element_action(name: &str) -> Option<ElementAction> {
-    let (driver_action, ax_action) = match name.to_lowercase().as_str() {
-        "axpress" | "press" => ("press", "AXPress"),
-        "open" => ("open", "AXOpen"),
-        "show_menu" | "menu" => ("show_menu", "AXShowMenu"),
-        "pick" => ("pick", "AXPick"),
-        "confirm" => ("confirm", "AXConfirm"),
-        "cancel" => ("cancel", "AXCancel"),
-        _ => return None,
+fn cua_element_action(name: &str, advertised: Option<&HashSet<String>>) -> Option<ElementAction> {
+    let known = match name.to_lowercase().as_str() {
+        "axpress" | "press" => Some(("press", "AXPress")),
+        "open" => Some(("open", "AXOpen")),
+        "show_menu" | "menu" => Some(("show_menu", "AXShowMenu")),
+        "pick" => Some(("pick", "AXPick")),
+        "confirm" => Some(("confirm", "AXConfirm")),
+        "cancel" => Some(("cancel", "AXCancel")),
+        _ => None,
     };
+    if let Some((driver_action, ax_action)) = known {
+        return Some(ElementAction {
+            driver_action: driver_action.to_owned(),
+            ax_action: ax_action.to_owned(),
+        });
+    }
+    let advertised = advertised?;
+    let name = name.trim();
+    let raw = advertised.get(name).or_else(|| {
+        let wanted = name.to_lowercase();
+        let mut named = advertised.iter().filter(|raw| {
+            raw.to_lowercase() == wanted || action_words(raw).to_lowercase() == wanted
+        });
+        let only = named.next()?;
+        named.next().is_none().then_some(only)
+    })?;
     Some(ElementAction {
-        driver_action,
-        ax_action,
+        driver_action: raw.clone(),
+        ax_action: raw.clone(),
     })
 }
 
@@ -247,31 +264,118 @@ fn app_window_ids(windows: &[ComputerWindow], pid: Option<u32>) -> Vec<String> {
     ids
 }
 
-fn cua_ax_tree(data: &Map<String, Value>, targets: &HashMap<u64, u32>) -> Option<ComputerAxTree> {
-    let nodes = data.get("tree_nodes")?.as_array()?;
-    let elements: HashMap<u64, &Value> = data
-        .get("elements")
+fn elements_by_index(data: &Map<String, Value>) -> HashMap<u64, &Value> {
+    data.get("elements")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|element| Some((element.get("element_index")?.as_u64()?, element)))
+        .collect()
+}
+
+const DESCENDANT_LABEL_ROLES: &[&str] = &[
+    "AXRow",
+    "AXCell",
+    "AXButton",
+    "AXRadioButton",
+    "AXCheckBox",
+    "AXMenuButton",
+    "AXPopUpButton",
+    "AXDisclosureTriangle",
+    "AXLink",
+    "AXTab",
+];
+
+fn descendant_text(nodes: &[Value], position: usize) -> Option<String> {
+    let node = nodes.get(position)?;
+    if !DESCENDANT_LABEL_ROLES.contains(&node.get("role")?.as_str()?) {
+        return None;
+    }
+    let depth = |node: &Value| node.get("depth").and_then(Value::as_u64).unwrap_or(0);
+    let mut texts: Vec<String> = Vec::new();
+    for child in nodes[position + 1..]
+        .iter()
+        .take(64)
+        .take_while(|child| depth(child) > depth(node))
+    {
+        let text = ["title", "description", "value"]
+            .into_iter()
+            .map(|key| text1024(child.get(key)).trim().to_owned())
+            .find(|text| !text.is_empty());
+        if let Some(text) = text
+            && !texts.contains(&text)
+        {
+            texts.push(text);
+        }
+    }
+    let joined = texts.join(", ");
+    (!joined.is_empty()).then(|| js_slice(&joined, 1024).to_owned())
+}
+
+fn node_label(nodes: &[Value], position: usize, element: Option<&Value>) -> String {
+    let node = &nodes[position];
+    let named = match element {
+        Some(element) => text1024(element.get("label")),
+        None => ["title", "description", "value"]
+            .into_iter()
+            .map(|key| text1024(node.get(key)))
+            .find(|name| !name.is_empty())
+            .unwrap_or_default(),
+    };
+    if !named.is_empty() {
+        return named;
+    }
+    Some(text1024(node.get("help")))
+        .filter(|help| !help.is_empty())
+        .or_else(|| descendant_text(nodes, position))
+        .unwrap_or_default()
+}
+
+fn cua_ax_tree(data: &Map<String, Value>, targets: &HashMap<usize, u32>) -> Option<ComputerAxTree> {
+    let nodes = data.get("tree_nodes")?.as_array()?;
+    let elements = elements_by_index(data);
+    let positions: HashMap<u64, usize> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(position, node)| Some((node.get("element_index")?.as_u64()?, position)))
         .collect();
     let optional = |value: Option<&Value>, max: usize| {
         Some(text(value, max)).filter(|value| !value.is_empty())
     };
-    let line = |node: &Value| {
+    let line = |node: &Value, position: Option<usize>| {
         let index = node.get("element_index").and_then(Value::as_u64);
         let element = index.and_then(|index| elements.get(&index));
         let field = |name: &str| element.and_then(|element| element.get(name));
+        let flag = |name: &str| {
+            field(name)
+                .or_else(|| node.get(name))
+                .and_then(Value::as_bool)
+        };
+        let description = optional(node.get("description"), 1024);
+        let value = optional(node.get("value"), 16384).or_else(|| optional(field("value"), 16384));
+        let title = optional(node.get("title"), 1024).or_else(|| {
+            (description.is_none() && value.is_none())
+                .then(|| position.and_then(|position| descendant_text(nodes, position)))
+                .flatten()
+        });
+        let visible_rows = node.get("visible_rows").and_then(|rows| {
+            let row = |name: &str| rows.get(name).and_then(Value::as_u64);
+            Some(ComputerVisibleRows {
+                first: row("first")?,
+                last: row("last")?,
+                total: row("total")?,
+            })
+        });
         ComputerAxLine {
             depth: node
                 .get("depth")
                 .and_then(Value::as_u64)
                 .map_or(0, |depth| depth.min(64) as u32),
             role: text(node.get("role"), 128),
-            title: optional(node.get("title"), 1024),
-            description: optional(node.get("description"), 1024),
-            value: optional(node.get("value"), 16384).or_else(|| optional(field("value"), 16384)),
+            role_description: optional(node.get("role_description"), 128),
+            title,
+            description,
+            value,
             identifier: optional(node.get("identifier"), 1024),
             help: optional(node.get("help"), 1024),
             actions: field("actions")
@@ -283,21 +387,33 @@ fn cua_ax_tree(data: &Map<String, Value>, targets: &HashMap<u64, u32>) -> Option
                 .map(|action| js_slice(action, 256).to_owned())
                 .collect(),
             settable: node.get("settable") == Some(&Value::Bool(true)),
-            selected: field("selected").and_then(Value::as_bool),
-            enabled: field("enabled").and_then(Value::as_bool),
+            selected: flag("selected"),
+            enabled: flag("enabled"),
             expanded: node.get("expanded").and_then(Value::as_bool),
-            target: index
-                .and_then(|index| targets.get(&index))
+            visible_rows,
+            target: position
+                .and_then(|position| targets.get(&position))
                 .map(|child| vec![*child]),
         }
     };
     Some(ComputerAxTree {
         url: optional(data.get("window_url"), 2048),
-        lines: nodes.iter().take(4096).map(line).collect(),
+        lines: nodes
+            .iter()
+            .take(4096)
+            .enumerate()
+            .map(|(position, node)| line(node, Some(position)))
+            .collect(),
         focused: data
             .get("focused_element")
             .filter(|focused| focused.is_object())
-            .map(line),
+            .map(|focused| {
+                let position = focused
+                    .get("element_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| positions.get(&index).copied());
+                line(focused, position)
+            }),
         selected_text: optional(data.get("selected_text"), 16384),
         truncated: data.get("tree_truncated") == Some(&Value::Bool(true)),
     })
@@ -2062,77 +2178,72 @@ impl CuaInner {
         let mut children = Vec::new();
         let mut elements = Vec::new();
         let mut targets = HashMap::new();
-        let settable: HashSet<u64> = data
-            .get("tree_nodes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|node| node.get("settable") == Some(&Value::Bool(true)))
-            .filter_map(|node| node.get("element_index").and_then(Value::as_u64))
-            .collect();
-        if let Some(values) = data.get("elements").and_then(Value::as_array) {
-            for value in values.iter().take(CUA_TREE_ELEMENT_LIMIT) {
-                let element = record(Some(value));
-                match element.get("frame") {
-                    None | Some(Value::Null) => continue,
-                    _ => {}
-                }
-                let Some(frame) = optional_rect(element.get("frame")) else {
-                    continue;
-                };
-                let index = element.get("element_index").and_then(Value::as_u64);
-                if let Some(index) = index {
-                    targets.insert(index, children.len() as u32);
-                }
-                let label = text1024(element.get("label"));
-                let description = text1024(element.get("value_description"));
-                let role = text(element.get("role"), 128);
-                // Only a settable AXComboBox accepts text; a read-only one is a select.
-                let editable = (role == "AXComboBox")
-                    .then(|| index.is_some_and(|index| settable.contains(&index)));
-                let node = ComputerUiNode {
-                    role,
-                    label: (!label.is_empty()).then_some(label),
-                    value: element
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .map(|value| js_slice(value, 16384).to_owned()),
-                    description: (!description.is_empty()).then_some(description),
-                    frame,
-                    activation_point: Some(ComputerPoint {
-                        x: frame.x + frame.width / 2.0,
-                        y: frame.y + frame.height / 2.0,
-                    }),
-                    on_screen: window.visible,
-                    window_id: Some(window.id.clone()),
-                    accessibility_root: None,
-                    node_path: Some(vec![children.len() as u32]),
-                    editable,
-                    truncated: None,
-                    children: Vec::new(),
-                };
-                let native = element
-                    .get("element_token")
-                    .and_then(Value::as_str)
-                    .map(|token| NativeElement {
-                        token: token.to_owned(),
-                        actions: element
-                            .get("actions")
-                            .and_then(Value::as_array)
-                            .map(|actions| {
-                                Arc::new(
-                                    actions
-                                        .iter()
-                                        .filter_map(Value::as_str)
-                                        .map(str::to_owned)
-                                        .collect(),
-                                )
-                            }),
-                        in_web_content: element.get("in_web_content") == Some(&Value::Bool(true)),
-                    });
-                elements.push(native);
-                children.push(node);
+        let indexed = elements_by_index(&data);
+        let tree_nodes = data.get("tree_nodes").and_then(Value::as_array);
+        // A driver without tree_nodes still numbers its actionable elements.
+        let nodes = tree_nodes
+            .or_else(|| data.get("elements").and_then(Value::as_array))
+            .map_or(&[][..], Vec::as_slice);
+        for (position, node) in nodes.iter().enumerate() {
+            if children.len() == CUA_TREE_ELEMENT_LIMIT {
+                break;
             }
+            let element = match tree_nodes {
+                Some(_) => node
+                    .get("element_index")
+                    .and_then(Value::as_u64)
+                    .and_then(|index| indexed.get(&index).copied()),
+                None => Some(node),
+            };
+            let field = |name: &str| element.and_then(|element| element.get(name));
+            let Some(frame) =
+                optional_rect(node.get("frame")).or_else(|| optional_rect(field("frame")))
+            else {
+                continue;
+            };
+            targets.insert(position, children.len() as u32);
+            let label = node_label(nodes, position, element);
+            let description = text1024(field("value_description"));
+            let role = text(node.get("role"), 128);
+            // Only a settable AXComboBox accepts text; a read-only one is a select.
+            let editable =
+                (role == "AXComboBox").then(|| node.get("settable") == Some(&Value::Bool(true)));
+            children.push(ComputerUiNode {
+                role,
+                label: (!label.is_empty()).then_some(label),
+                value: field("value")
+                    .or_else(|| node.get("value"))
+                    .and_then(Value::as_str)
+                    .map(|value| js_slice(value, 16384).to_owned()),
+                description: (!description.is_empty()).then_some(description),
+                frame,
+                activation_point: Some(ComputerPoint {
+                    x: frame.x + frame.width / 2.0,
+                    y: frame.y + frame.height / 2.0,
+                }),
+                on_screen: window.visible,
+                window_id: Some(window.id.clone()),
+                accessibility_root: None,
+                node_path: Some(vec![children.len() as u32]),
+                editable,
+                truncated: None,
+                children: Vec::new(),
+            });
+            elements.push(field("element_token").and_then(Value::as_str).map(|token| {
+                NativeElement {
+                    token: token.to_owned(),
+                    actions: field("actions").and_then(Value::as_array).map(|actions| {
+                        Arc::new(
+                            actions
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect(),
+                        )
+                    }),
+                    in_web_content: field("in_web_content") == Some(&Value::Bool(true)),
+                }
+            }));
         }
         let root = ComputerUiNode {
             role: "AXWindow".into(),
@@ -3301,15 +3412,13 @@ impl CuaInner {
     }
 
     fn supports_action(&self, target: &ComputerResolvedTarget, action: &str) -> bool {
-        let Some(spec) = cua_element_action(action) else {
-            return false;
-        };
         // The driver pointer-clicks web elements that ignore AXPress.
         self.native_element(target).is_some_and(|element| {
-            (element.in_web_content && spec.ax_action == "AXPress")
-                || element
-                    .actions
-                    .is_some_and(|actions| actions.contains(spec.ax_action))
+            let actions = element.actions.as_deref();
+            cua_element_action(action, actions).is_some_and(|spec| {
+                (element.in_web_content && spec.ax_action == "AXPress")
+                    || actions.is_some_and(|actions| actions.contains(&spec.ax_action))
+            })
         })
     }
 
@@ -3318,14 +3427,6 @@ impl CuaInner {
         target: &ComputerResolvedTarget,
         action: &str,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
-        let Some(spec) = cua_element_action(action) else {
-            return Err(CuaActionError::new(
-                format!("Cua does not expose {action} through this integration."),
-                CuaEffect::NotDispatched,
-            )
-            .code("unsupported_operation")
-            .into());
-        };
         let element = self.native_element(target);
         let (Some(element), Some(window_id)) = (element, target.node.window_id.clone()) else {
             return Err(CuaActionError::new(
@@ -3335,11 +3436,19 @@ impl CuaInner {
             .code("stale_target")
             .into());
         };
+        let Some(spec) = cua_element_action(action, element.actions.as_deref()) else {
+            return Err(CuaActionError::new(
+                format!("The element does not list the action {action}; nothing was dispatched."),
+                CuaEffect::NotDispatched,
+            )
+            .code("unsupported_operation")
+            .into());
+        };
         if spec.ax_action != "AXPress"
             && !element
                 .actions
                 .as_ref()
-                .is_some_and(|actions| actions.contains(spec.ax_action))
+                .is_some_and(|actions| actions.contains(&spec.ax_action))
         {
             return Err(CuaActionError::new(
                 format!(

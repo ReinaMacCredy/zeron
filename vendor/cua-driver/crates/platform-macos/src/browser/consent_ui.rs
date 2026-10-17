@@ -456,6 +456,9 @@ mod tests {
             placeholder: None,
             settable: false,
             expanded: None,
+            subrole: None,
+            role_description: None,
+            visible_rows: None,
         }
     }
 

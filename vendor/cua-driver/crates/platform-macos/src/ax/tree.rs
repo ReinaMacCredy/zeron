@@ -100,6 +100,16 @@ pub struct AXNode {
     pub placeholder: Option<String>,
     pub settable: bool,
     pub expanded: Option<bool>,
+    pub subrole: Option<String>,
+    pub role_description: Option<String>,
+    pub visible_rows: Option<VisibleRows>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleRows {
+    pub first: usize,
+    pub last: usize,
+    pub total: usize,
 }
 
 #[derive(Default)]
@@ -344,7 +354,10 @@ pub fn walk_tree_bounded(
         // The fetch pool overlaps sibling elements' AX round trips. Every
         // ordering and budget decision still runs on this thread (see
         // walk_children), so the rendered tree is identical to a serial walk.
-        let pool = FetchPool::new();
+        let env = WalkEnv {
+            pool: FetchPool::new(),
+            focused: copy_element_attr(app_elem, "AXFocusedUIElement"),
+        };
 
         // Walk each top-level child at depth 0. walk_children never releases
         // the refs it is handed — `walk_these` borrows `top_level`, whose
@@ -364,8 +377,11 @@ pub fn walk_tree_bounded(
             &mut truncated,
             max_elements,
             max_depth,
-            &pool,
+            &env,
         );
+        if let Some(focused) = env.focused {
+            CFRelease(focused as CFTypeRef);
+        }
 
         // Release all top-level elements; every application-level read retains.
         for child in top_level {
@@ -474,6 +490,18 @@ unsafe fn fetch_element(element: AXUIElementRef) -> FetchedElement {
     let value_settable = (actions.is_empty() || role == "AXComboBox")
         && role_supports_value_addressing(role)
         && is_attribute_settable(element, "AXValue");
+    let mut actions = actions;
+    if attrs.expanded.is_none()
+        && attrs.disclosing.is_some()
+        && is_attribute_settable(element, "AXDisclosing")
+    {
+        attrs.expanded = attrs.disclosing;
+        actions.extend(
+            attrs
+                .disclosing
+                .map(|open| crate::input::ax_actions::disclosure_action(open).to_owned()),
+        );
+    }
     FetchedElement {
         attrs,
         actions,
@@ -601,6 +629,12 @@ impl Drop for FetchPool {
     }
 }
 
+// Focus is read before the walk: display-only pointers are released as it goes.
+struct WalkEnv {
+    pool: FetchPool,
+    focused: Option<AXUIElementRef>,
+}
+
 /// Release the retained children of a prefetched element whose subtree was
 /// never entered — the fetch already ran, so its `AXChildren` refs exist and
 /// must not leak. Children that ARE walked release through the caller's loop
@@ -640,7 +674,7 @@ unsafe fn walk_children(
     truncated: &mut bool,
     max_elements: usize,
     max_depth: usize,
-    pool: &FetchPool,
+    env: &WalkEnv,
 ) {
     let prefetch_count = if child_depth > max_depth {
         0
@@ -656,7 +690,7 @@ unsafe fn walk_children(
         // trip and fetch on this thread.
         vec![Some(fetch_element(children[0]))]
     } else {
-        pool.fetch_batch(&children[..prefetch_count])
+        env.pool.fetch_batch(&children[..prefetch_count])
     };
     for (index, &child) in children.iter().enumerate() {
         let fetched = if index < prefetch_count {
@@ -680,7 +714,7 @@ unsafe fn walk_children(
             truncated,
             max_elements,
             max_depth,
-            pool,
+            env,
         );
     }
 }
@@ -702,7 +736,7 @@ unsafe fn walk_element(
     truncated: &mut bool,
     max_elements: usize,
     max_depth: usize,
-    pool: &FetchPool,
+    env: &WalkEnv,
 ) {
     if depth > max_depth {
         release_prefetched_children(prefetched);
@@ -746,10 +780,23 @@ unsafe fn walk_element(
         frame,
         bounds,
         expanded,
+        subrole,
+        role_description,
         ..
     } = attrs;
 
     let role = role.unwrap_or_else(|| "AXUnknown".into());
+    let mut children = children;
+    if role == "AXMenuBarItem" && attr_selected != Some(true) {
+        for child in children.drain(..) {
+            CFRelease(child as CFTypeRef);
+        }
+    }
+    let visible_rows = if !in_web_content && matches!(role.as_str(), "AXTable" | "AXOutline") {
+        walk_visible_rows(element, &mut children)
+    } else {
+        None
+    };
 
     if in_web_content && bounds.is_some_and(|bounds| outside_clip(bounds, clip)) {
         if *below_fold > 0 && bounds.is_some_and(|bounds| below_viewport(bounds, clip)) {
@@ -793,7 +840,7 @@ unsafe fn walk_element(
             truncated,
             max_elements,
             max_depth,
-            pool,
+            env,
         );
         for child in children {
             CFRelease(child as CFTypeRef);
@@ -841,13 +888,17 @@ unsafe fn walk_element(
         None
     };
     // ARIA options and custom selects act on pointer events their AX node does not advertise.
+    let focused = env
+        .focused
+        .is_some_and(|focused| CFEqual(focused as CFTypeRef, element as CFTypeRef) != 0);
     let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled)
-        || (in_web_content && has_content && attr_enabled != Some(false));
+        || (in_web_content && has_content && attr_enabled != Some(false))
+        || focused;
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
         walk_children(
             &children,
-            depth + 1,
+            depth,
             parent_index,
             in_web_content,
             clip,
@@ -860,7 +911,7 @@ unsafe fn walk_element(
             truncated,
             max_elements,
             max_depth,
-            pool,
+            env,
         );
         for child in children {
             CFRelease(child as CFTypeRef);
@@ -922,6 +973,9 @@ unsafe fn walk_element(
             placeholder: placeholder.clone(),
             settable: value_settable,
             expanded,
+            subrole,
+            role_description,
+            visible_rows,
         }
     } else {
         AXNode {
@@ -953,12 +1007,15 @@ unsafe fn walk_element(
             value_description: control_state.value_description.clone(),
             min_value: control_state.min_value,
             max_value: control_state.max_value,
-            enabled: control_state.enabled,
-            selected: control_state.selected,
+            enabled: attr_enabled,
+            selected: attr_selected,
             in_web_content,
             placeholder: placeholder.clone(),
             settable: value_settable,
             expanded,
+            subrole,
+            role_description,
+            visible_rows,
         }
     };
 
@@ -986,11 +1043,47 @@ unsafe fn walk_element(
         truncated,
         max_elements,
         max_depth,
-        pool,
+        env,
     );
     for child in children {
         CFRelease(child as CFTypeRef);
     }
+}
+
+// AppKit builds a cell view for every row whose cells are read, so only short tables walk off-screen rows.
+const SHORT_TABLE_ROWS: usize = 50;
+
+unsafe fn walk_visible_rows(
+    table: AXUIElementRef,
+    children: &mut Vec<AXUIElementRef>,
+) -> Option<VisibleRows> {
+    attribute_count(table, "AXVisibleRows")?;
+    let total = attribute_count(table, "AXRows");
+    let rows = copy_element_array(
+        table,
+        if total.is_some_and(|total| total <= SHORT_TABLE_ROWS) {
+            "AXRows"
+        } else {
+            "AXVisibleRows"
+        },
+    );
+    let total = total.unwrap_or(0);
+    for child in children.drain(..) {
+        CFRelease(child as CFTypeRef);
+    }
+    children.extend(copy_element_attr(table, "AXHeader"));
+    let index = |row: AXUIElementRef| {
+        set_messaging_timeout(row);
+        copy_number_attr(row, "AXIndex").map(|index| index.max(0.0) as usize)
+    };
+    let range = match (rows.first(), rows.last()) {
+        (Some(&first), Some(&last)) => index(first)
+            .zip(index(last))
+            .map(|(first, last)| VisibleRows { first, last, total }),
+        _ => None,
+    };
+    children.extend(rows);
+    range
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1108,6 +1201,9 @@ unsafe fn focused_node(element: AXUIElementRef, index: usize, settable: bool) ->
         placeholder,
         settable,
         expanded: attrs.expanded,
+        subrole: attrs.subrole,
+        role_description: attrs.role_description,
+        visible_rows: None,
     }
 }
 

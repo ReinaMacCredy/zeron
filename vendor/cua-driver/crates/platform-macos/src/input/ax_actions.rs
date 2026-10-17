@@ -10,11 +10,15 @@ fn is_selectable_container_role(role: &str) -> bool {
 }
 
 /// An AX error can be returned after the target processed a mutation. Only
-/// `NotAttempted` permits choosing another ancestor or a different actuator.
+/// `NotAttempted` permits choosing another ancestor or a different actuator;
+/// `Ignored` permits only the read-back-verified pointer click.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SelectionOutcome {
     NotAttempted,
     AttemptedConfirmed {
+        role: String,
+    },
+    Ignored {
         role: String,
     },
     AttemptedUncertain {
@@ -165,14 +169,25 @@ fn select_container_with(
     settable: bool,
     before_write: impl FnOnce() -> anyhow::Result<()>,
     write: impl FnOnce() -> AXError,
-    readback: impl FnOnce() -> Option<bool>,
+    readback: impl Fn() -> Option<bool>,
 ) -> anyhow::Result<SelectionOutcome> {
     if !is_selectable_container_role(&role) || selected.is_none() || !settable {
         return Ok(SelectionOutcome::NotAttempted);
     }
     before_write().map_err(AxActionFailure::before_dispatch)?;
     let error = write();
-    let selected = readback();
+    let mut selected = readback();
+    if error == kAXErrorSuccess && selected == Some(false) {
+        // Little Snitch's source list accepts the write and keeps its selection.
+        let deadline = std::time::Instant::now() + AX_READBACK_TIMEOUT;
+        while selected == Some(false) && std::time::Instant::now() < deadline {
+            std::thread::sleep(AX_READBACK_POLL);
+            selected = readback();
+        }
+        if selected == Some(false) {
+            return Ok(SelectionOutcome::Ignored { role });
+        }
+    }
     if error == kAXErrorSuccess && selected == Some(true) {
         Ok(SelectionOutcome::AttemptedConfirmed { role })
     } else {
@@ -217,8 +232,9 @@ impl Drop for SelectionElement {
 
 /// Select the nearest writable collection item before attempting AXPress.
 /// Read-only capability checks may advance to an ancestor. Once AXSelected is
-/// written, even an AX error or an absent/false read-back is terminal: it is
-/// never permission to mutate another ancestor or submit a pointer click.
+/// written, an AX error or an absent read-back is terminal: it is never
+/// permission to mutate another ancestor or submit a pointer click. A write
+/// the app accepted but ignored allows only the verified pointer click.
 pub fn select_nearest_container(element_ptr: usize) -> anyhow::Result<SelectionOutcome> {
     select_ancestor_with(
         SelectionElement {
@@ -411,31 +427,97 @@ pub fn ensure_ax_action_enabled(element_ptr: usize, action: &str) -> anyhow::Res
 /// Perform an AX action on a cached element.
 pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()> {
     let ax_action = map_action(action);
+    let element = element_ptr as AXUIElementRef;
     dispatch_ax_action_with(
         ax_action,
         || {
             ensure_ax_action_enabled(element_ptr, ax_action)?;
             crate::input::cancellation::gate().ensure_active()
         },
-        || unsafe { perform_action(element_ptr as AXUIElementRef, ax_action) },
+        || unsafe {
+            match disclosure_target(element, ax_action) {
+                Some(open) => set_bool_attr(element, "AXDisclosing", open),
+                None => perform_action(element, ax_action),
+            }
+        },
+        || unsafe {
+            Some(OwnState {
+                role: copy_string_attr(element, "AXRole")?,
+                value: copy_stringish_attr(element, "AXValue").map(|value| value.state_value),
+                actions: copy_action_names(element),
+            })
+        },
     )
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct OwnState {
+    role: String,
+    value: Option<String>,
+    actions: Vec<String>,
+}
+
+const AX_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+const AX_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 fn dispatch_ax_action_with(
     action: &str,
     before_dispatch: impl FnOnce() -> anyhow::Result<()>,
     dispatch: impl FnOnce() -> AXError,
+    own_state: impl Fn() -> Option<OwnState>,
 ) -> anyhow::Result<()> {
     before_dispatch().map_err(AxActionFailure::before_dispatch)?;
+    let before = own_state();
     let err = dispatch();
     if err == kAXErrorSuccess {
-        Ok(())
+        return Ok(());
+    }
+    // Some apps (Little Snitch's custom outline actions) act and still return an AX error.
+    if let Some(before) = before {
+        let deadline = std::time::Instant::now() + AX_READBACK_TIMEOUT;
+        loop {
+            if own_state().is_some_and(|after| {
+                after.role == before.role
+                    && (after.value != before.value || after.actions != before.actions)
+            }) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(AX_READBACK_POLL);
+        }
+    }
+    Err(AxActionFailure::from_ax_error(action, err).into())
+}
+
+const EXPAND: &str = "Expand";
+const COLLAPSE: &str = "Collapse";
+
+// Outline rows expose open/closed only as AXDisclosing, settable exactly on rows that can expand.
+pub(crate) fn disclosure_action(open: bool) -> &'static str {
+    if open {
+        COLLAPSE
     } else {
-        Err(AxActionFailure::from_ax_error(action, err).into())
+        EXPAND
     }
 }
 
-fn map_action(action: &str) -> &'static str {
+pub(crate) unsafe fn advertised_disclosure_action(element: AXUIElementRef) -> Option<&'static str> {
+    let open = copy_bool_attr(element, "AXDisclosing")?;
+    is_attribute_settable(element, "AXDisclosing").then(|| disclosure_action(open))
+}
+
+unsafe fn disclosure_target(element: AXUIElementRef, action: &str) -> Option<bool> {
+    let open = match action {
+        EXPAND => true,
+        COLLAPSE => false,
+        _ => return None,
+    };
+    is_attribute_settable(element, "AXDisclosing").then_some(open)
+}
+
+pub(crate) fn map_action(action: &str) -> &str {
     match action.to_lowercase().as_str() {
         "press" | "click" | "axpress" => "AXPress",
         "show_menu" | "right_click" | "rightclick" | "axshowmenu" => "AXShowMenu",
@@ -443,7 +525,7 @@ fn map_action(action: &str) -> &'static str {
         "confirm" | "axconfirm" => "AXConfirm",
         "cancel" | "axcancel" => "AXCancel",
         "open" | "axopen" => "AXOpen",
-        _ => "AXPress",
+        _ => action,
     }
 }
 
@@ -537,6 +619,13 @@ mod tests {
                     outcome,
                     SelectionOutcome::AttemptedConfirmed { .. }
                 ));
+            } else if error == kAXErrorSuccess && selected == Some(false) {
+                assert_eq!(
+                    outcome,
+                    SelectionOutcome::Ignored {
+                        role: "AXRow".to_owned()
+                    }
+                );
             } else {
                 assert_eq!(
                     outcome,
@@ -619,23 +708,69 @@ mod tests {
         assert_eq!(outcome, SelectionOutcome::NotAttempted);
     }
 
+    fn triangle_state(value: &str, action: &str) -> OwnState {
+        OwnState {
+            role: "AXDisclosureTriangle".to_owned(),
+            value: Some(value.to_owned()),
+            actions: vec![action.to_owned()],
+        }
+    }
+
     #[test]
     fn ax_dispatch_errors_are_uncertain_after_exactly_one_attempt() {
         for code in [kAXErrorFailure, kAXErrorInvalidUIElement, -25204] {
-            let dispatches = Cell::new(0);
-            let error = dispatch_ax_action_with(
-                "AXPress",
-                || Ok(()),
-                || {
-                    dispatches.set(dispatches.get() + 1);
-                    code
-                },
-            )
-            .unwrap_err();
-            assert_eq!(dispatches.get(), 1);
-            assert!(error.downcast_ref::<AxActionFailure>().unwrap().attempted);
-            assert!(error.to_string().contains("do not replay"));
+            for after in ["unchanged", "gone", "replaced"] {
+                let dispatches = Cell::new(0);
+                let reads = Cell::new(0);
+                let error = dispatch_ax_action_with(
+                    "AXPress",
+                    || Ok(()),
+                    || {
+                        dispatches.set(dispatches.get() + 1);
+                        code
+                    },
+                    || {
+                        reads.set(reads.get() + 1);
+                        match (reads.get(), after) {
+                            (1, _) | (_, "unchanged") => Some(triangle_state("1", "_collapse")),
+                            (_, "gone") => None,
+                            _ => Some(OwnState {
+                                role: "AXRow".to_owned(),
+                                ..triangle_state("0", "_expand")
+                            }),
+                        }
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(dispatches.get(), 1);
+                assert!(error.downcast_ref::<AxActionFailure>().unwrap().attempted);
+                assert!(error.to_string().contains("do not replay"));
+            }
         }
+    }
+
+    #[test]
+    fn an_ax_error_after_the_target_itself_changed_is_a_performed_action() {
+        let dispatches = Cell::new(0);
+        let reads = Cell::new(0);
+        dispatch_ax_action_with(
+            "_collapse",
+            || Ok(()),
+            || {
+                dispatches.set(dispatches.get() + 1);
+                -25205
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Some(if reads.get() == 1 {
+                    triangle_state("1", "_collapse")
+                } else {
+                    triangle_state("0", "_expand")
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(dispatches.get(), 1);
     }
 
     #[test]
@@ -644,6 +779,7 @@ mod tests {
             "AXPress",
             || anyhow::bail!("target is disabled"),
             || panic!("refused AXPress was submitted"),
+            || -> Option<OwnState> { panic!("refused AXPress read its target") },
         )
         .unwrap_err();
         assert!(!error.downcast_ref::<AxActionFailure>().unwrap().attempted);
@@ -658,6 +794,9 @@ mod tests {
             "AXConfirm",
             "AXCancel",
             "AXOpen",
+            "AXIncrement",
+            "_new Rule Group",
+            "Name:Copy\nTarget:0x0\nSelector:(null)",
         ] {
             assert_eq!(map_action(action), action);
         }

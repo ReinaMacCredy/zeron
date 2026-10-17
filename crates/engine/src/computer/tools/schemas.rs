@@ -252,25 +252,16 @@ fn object_schema(properties: Map<String, Value>, required: &[&str]) -> Value {
     Value::Object(schema)
 }
 
-pub(super) fn semantic_action_names(dialect: ComputerAgentDialect) -> &'static [&'static str] {
-    match dialect {
-        ComputerAgentDialect::Macos => &[
-            "AXPress", "press", "open", "show_menu", "menu", "pick", "confirm", "cancel",
-        ],
-        ComputerAgentDialect::Linux => &["activate", "click"],
-    }
-}
-
 fn perform_action_note(dialect: ComputerAgentDialect) -> &'static str {
     match dialect {
-        ComputerAgentDialect::Macos => "Cua performs named AX actions through a freshly resolved element token: press (or the legacy AXPress spelling) activates the control, open performs AXOpen, show_menu/menu perform AXShowMenu, and pick, confirm and cancel perform their namesakes. Every name past press dispatches only when the element advertises that AX action in a fresh snapshot; otherwise the call refuses and nothing is submitted.",
+        ComputerAgentDialect::Macos => "Cua performs named AX actions through a freshly resolved element token: press (or the legacy AXPress spelling) activates the control, open performs AXOpen, show_menu/menu perform AXShowMenu, and pick, confirm and cancel perform their namesakes. Any other action the element lists under Secondary Actions is performed by those printed words or by its raw AX name. Every name past press dispatches only when the element advertises that AX action in a fresh snapshot; otherwise the call refuses and nothing is submitted.",
         ComputerAgentDialect::Linux => "This desktop supports \"activate\" and \"click\".",
     }
 }
 
 fn perform_action_argument_note(dialect: ComputerAgentDialect) -> &'static str {
     match dialect {
-        ComputerAgentDialect::Macos => "One of \"press\" (AXPress), \"open\" (AXOpen), \"show_menu\"/\"menu\" (AXShowMenu), \"pick\", \"confirm\" or \"cancel\"; use the exact window and its fresh accessibility snapshot, and expect a refusal when the element does not advertise the action.",
+        ComputerAgentDialect::Macos => "\"press\" (AXPress), \"open\" (AXOpen), \"show_menu\"/\"menu\" (AXShowMenu), \"pick\", \"confirm\", \"cancel\", or any Secondary Action the element lists (its printed words or raw AX name); use the exact window and its fresh accessibility snapshot, and expect a refusal when the element does not advertise the action.",
         ComputerAgentDialect::Linux => "Use \"activate\" or \"click\".",
     }
 }
@@ -435,15 +426,13 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
         "value".into(),
         json!({ "type": "string", "description": "The control's complete new value." }),
     );
+    let mut perform_action =
+        json!({ "type": "string", "description": perform_action_argument_note(dialect) });
+    if let ComputerAgentDialect::Linux = dialect {
+        perform_action["enum"] = json!(["activate", "click"]);
+    }
     let mut perform_properties = pointer.clone();
-    perform_properties.insert(
-        "action".into(),
-        json!({
-            "type": "string",
-            "enum": semantic_action_names(dialect),
-            "description": perform_action_argument_note(dialect),
-        }),
-    );
+    perform_properties.insert("action".into(), perform_action);
     let mut select_properties = text_target.clone();
     select_properties.extend(object(json!({
         "start": {

@@ -197,11 +197,32 @@
     return info;
   };
 
-  const windowsFor = (appName, pid) => {
-    const windows = call("computer_list_windows", pid === undefined ? { app: appName } : {}).data.windows || [];
-    return visibleWindows(windows.filter((w) => pid === undefined || w.pid === pid)).sort(
-      (a, b) => (a.stackingIndex || 0) - (b.stackingIndex || 0),
+  const windowsFor = (appName, pid) =>
+    (call("computer_list_windows", pid === undefined ? { app: appName } : {}).data.windows || [])
+      .filter((w) => pid === undefined || w.pid === pid)
+      .sort((a, b) => (a.stackingIndex || 0) - (b.stackingIndex || 0));
+
+  const noUsableWindow = (appName, windows) => {
+    const parked = windows.filter(
+      (w) => (w.minimized || w.onCurrentSpace === false) && w.bounds && w.bounds.width > 40 && w.bounds.height > 40,
     );
+    if (!parked.length)
+      return `"${appName}" has no usable window. Open one, then call cua.getApp again, or use ${PICK_WINDOW}.`;
+    const where = parked
+      .map((w) => `"${w.id}" (${w.minimized ? "minimized" : "on another Space"}${w.title ? `, ${JSON.stringify(w.title)}` : ""})`)
+      .join(", ");
+    return `"${appName}" has no window on this screen, only ${where}. Read one where it is with cua.getApp({ windowId: "${parked[0].id}" }).`;
+  };
+
+  // Little Snitch opens its first window about 12 s after launch, past launch_app's own wait.
+  const LATE_WINDOW_MS = 10000;
+  const lateWindows = async (appName, launched) => {
+    const deadline = Date.now() + (launched.windowReason === "no_window" ? LATE_WINDOW_MS : 0);
+    for (;;) {
+      const windows = windowsFor(appName, launched.pid);
+      if (visibleWindows(windows).length || Date.now() >= deadline) return windows;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
   };
 
   const inside = (inner, outer) =>
@@ -472,7 +493,7 @@
         const state = call("computer_browser_state", { pid: this.pid }).structured;
         this.binding = { target_id: state.target_id, tabs: state.tabs || [] };
       } else {
-        const windows = windowsFor(this.appName, this.pid);
+        const windows = visibleWindows(windowsFor(this.appName, this.pid));
         const window = windows.find((w) => !windows.some((o) => o !== w && inside(w.bounds, o.bounds))) || windows[0];
         if (!window) throw new Error(`${this.name} has no open window to attach to.`);
         const windowNumber = Number(String(window.id).split(":").pop());
@@ -706,7 +727,7 @@
       return windows;
     },
 
-    getApp(target) {
+    async getApp(target) {
       let window;
       let appName;
       if (target && typeof target === "object" && target.windowId !== undefined) {
@@ -721,18 +742,21 @@
           throw new Error(`No app is running from ${target}, and Zeron cannot launch an app by its path. Start it, then call cua.getApp again, or use ${PICK_WINDOW}.`);
         appName = info ? info.name : String(target);
         let windows = info && info.running ? windowsFor(appName, info.pid) : [];
-        if (!windows.length && !(byPath && info.running)) {
+        window = visibleWindows(windows)[0];
+        if (!window && !(byPath && info.running)) {
           const launched = call("computer_launch_app", { app: info ? info.bundleId || info.name : String(target) }).data;
           if (byPath) {
             const opened = (call("computer_list_apps").data.apps || []).find((a) => a.running && a.pid === launched.pid);
             if (!opened || !atPath(opened, target))
               throw new Error(`Launching ${info.bundleId || info.name} opened ${(opened && opened.launchPath) || "another copy"}, not ${target}. Use ${PICK_WINDOW}.`);
           }
-          if (launched.window && launched.window.id) windows = [launched.window];
-          else windows = windowsFor(appName, launched.pid);
+          if (launched.window && launched.window.id) window = launched.window;
+          else {
+            windows = await lateWindows(appName, launched);
+            window = visibleWindows(windows)[0];
+          }
         }
-        window = windows[0];
-        if (!window) throw new Error(`"${appName}" has no usable window. Open one, then call cua.getApp again, or use ${PICK_WINDOW}.`);
+        if (!window) throw new Error(noUsableWindow(appName, windows));
       }
       const app = new App(window, appName);
       app.getAXState({ disableDiffing: true });
