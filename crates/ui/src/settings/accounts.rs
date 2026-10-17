@@ -134,7 +134,7 @@ pub fn is_openable_login_url(url: &str) -> bool {
     }
 }
 
-fn open_login_url(url: &str, cx: &mut gpui::App) {
+pub(crate) fn open_login_url(url: &str, cx: &mut gpui::App) {
     if is_openable_login_url(url) {
         cx.open_url(url);
     } else {

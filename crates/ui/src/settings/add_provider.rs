@@ -5,7 +5,11 @@ use gpui::{
     px,
 };
 use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{HarnessId, HomeDir, InstanceConfig, ProviderInstance};
+use zeron_proto::{AcpSource, HarnessId, HomeDir, InstanceConfig, ProviderInstance};
+
+mod acp;
+
+use acp::{AcpFlow, RegistryState, SelectedAgent, SignInState};
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
@@ -73,6 +77,7 @@ pub enum Step {
     Provider,
     Identity,
     Config,
+    SignIn,
 }
 
 impl Step {
@@ -91,6 +96,7 @@ impl Step {
             Step::Provider => "Provider",
             Step::Identity => "Identity",
             Step::Config => "Config",
+            Step::SignIn => "Sign in",
         }
     }
 }
@@ -141,6 +147,14 @@ pub enum AddProviderEvent {
         instance: ProviderInstance,
         sign_in: bool,
     },
+    Created {
+        instances: Vec<ProviderInstance>,
+    },
+}
+
+enum AfterSave {
+    Close { sign_in: bool },
+    SignIn,
 }
 
 pub struct AddProviderDialog {
@@ -152,6 +166,13 @@ pub struct AddProviderDialog {
     editing: Option<ProviderInstance>,
     step: Step,
     driver: HarnessId,
+    tile: HarnessId,
+    acp: Option<AcpFlow>,
+    selected: Option<SelectedAgent>,
+    registry: RegistryState,
+    sign_in: Option<SignInState>,
+    pending_sign_in: Option<String>,
+    acp_error: Option<SharedString>,
     identities: HashMap<HarnessId, Identity>,
     label_input: Entity<ComposerInput>,
     id_input: Entity<ComposerInput>,
@@ -159,6 +180,10 @@ pub struct AddProviderDialog {
     home_input: Entity<ComposerInput>,
     args_input: Entity<ComposerInput>,
     env_rows: Vec<EnvRow>,
+    search_input: Entity<ComposerInput>,
+    manual_input: Entity<ComposerInput>,
+    command_input: Entity<ComposerInput>,
+    acp_args_input: Entity<ComposerInput>,
     saving: bool,
     error: Option<SharedString>,
     save_task: Option<Task<()>>,
@@ -182,7 +207,28 @@ impl AddProviderDialog {
         let binary_input = cx.new(|cx| mono_input("", cx));
         let home_input = cx.new(|cx| mono_input("", cx));
         let args_input = cx.new(|cx| mono_input("--flag value", cx));
+        let search_input = cx.new(|cx| ComposerInput::new("Search agents…", cx).with_single_line());
+        let manual_input = cx.new(|cx| mono_input("devin", cx));
+        let command_input = cx.new(|cx| mono_input("~/bin/my-agent", cx));
+        let acp_args_input = cx.new(|cx| mono_input("--acp", cx));
         let subscriptions = vec![
+            cx.subscribe(&search_input, |this: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    this.search_edited(cx);
+                }
+            }),
+            cx.subscribe(&command_input, |this: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) && this.acp_error.is_some() {
+                    this.acp_error = None;
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&manual_input, |this: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) && this.acp_error.is_some() {
+                    this.acp_error = None;
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&label_input, |this: &mut Self, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Edited) {
                     this.label_edited(cx);
@@ -195,6 +241,7 @@ impl AddProviderDialog {
             }),
         ];
         let driver = editing.as_ref().map_or(HarnessId::Codex, |i| i.driver);
+        let searching = editing.is_none();
         let mut dialog = Self {
             state,
             target_device,
@@ -204,6 +251,17 @@ impl AddProviderDialog {
             editing: None,
             step: Step::Provider,
             driver,
+            tile: if driver == HarnessId::Acp {
+                HarnessId::Codex
+            } else {
+                driver
+            },
+            acp: None,
+            selected: None,
+            registry: RegistryState::default(),
+            sign_in: None,
+            pending_sign_in: None,
+            acp_error: None,
             identities: HashMap::new(),
             label_input,
             id_input,
@@ -211,6 +269,10 @@ impl AddProviderDialog {
             home_input,
             args_input,
             env_rows: Vec::new(),
+            search_input,
+            manual_input,
+            command_input,
+            acp_args_input,
             saving: false,
             error: None,
             save_task: None,
@@ -219,6 +281,9 @@ impl AddProviderDialog {
         match editing {
             Some(instance) => dialog.load_instance(instance, cx),
             None => dialog.load_driver(cx),
+        }
+        if searching {
+            dialog.search(false, cx);
         }
         dialog
     }
@@ -261,6 +326,20 @@ impl AddProviderDialog {
                     input.set_placeholder("Managed by Zeron", cx)
                 });
             }
+        } else if let InstanceConfig::Acp { source, env, .. } = &instance.config {
+            self.acp = Some(match source {
+                AcpSource::Registry { .. } => AcpFlow::Registry,
+                AcpSource::Local { .. } => AcpFlow::Local,
+            });
+            if let AcpSource::Local { command, args } = source {
+                self.command_input
+                    .update(cx, |input, cx| input.set_text(command.clone(), cx));
+                self.acp_args_input
+                    .update(cx, |input, cx| input.set_text(args.join(" "), cx));
+            }
+            for (key, value) in env {
+                self.add_env_row(key, value, cx);
+            }
         }
         self.editing = Some(instance);
     }
@@ -270,6 +349,7 @@ impl AddProviderDialog {
         if self.identity().id_override.is_none() {
             self.sync_id_input(cx);
         }
+        self.try_pending_sign_in(cx);
         cx.notify();
     }
 
@@ -298,9 +378,15 @@ impl AddProviderDialog {
     }
 
     pub fn select_driver(&mut self, driver: HarnessId, cx: &mut Context<Self>) {
-        if self.editing.is_some() || self.driver == driver {
+        if self.editing.is_some() || self.registry.preparing.is_some() {
             return;
         }
+        self.tile = driver;
+        if self.acp.take().is_none() && self.driver == driver {
+            return;
+        }
+        self.selected = None;
+        self.acp_error = None;
         self.driver = driver;
         self.load_driver(cx);
         self.error = None;
@@ -357,6 +443,10 @@ impl AddProviderDialog {
     }
 
     fn derived_id(&self, label: &str) -> String {
+        if self.driver == HarnessId::Acp && label.trim().is_empty() {
+            return zeron_proto::derive_instance_id(HarnessId::Acp, "custom", self.taken())
+                .unwrap_or_default();
+        }
         provider_instances::default_instance_id(
             self.driver,
             driver_name(self.driver),
@@ -439,11 +529,45 @@ impl AddProviderDialog {
         match self.step {
             Step::Config => self.go(Step::Identity, cx),
             Step::Identity if self.editing.is_none() => self.go(Step::Provider, cx),
-            _ => cx.emit(AddProviderEvent::Close),
+            _ => self.close(cx),
         }
     }
 
-    fn config(&self, cx: &Context<Self>) -> InstanceConfig {
+    fn close(&mut self, cx: &mut Context<Self>) {
+        self.cancel_login(cx);
+        cx.emit(AddProviderEvent::Close);
+    }
+
+    fn steps(&self) -> &'static [Step] {
+        match self.acp.filter(|_| self.editing.is_none()) {
+            None => &[Step::Provider, Step::Identity, Step::Config],
+            Some(AcpFlow::Local) => &[Step::Provider, Step::Identity],
+            Some(_) => &[Step::Provider, Step::Identity, Step::SignIn],
+        }
+    }
+
+    fn step_reachable(&self, step: Step, cx: &Context<Self>) -> bool {
+        if self.editing.is_some() {
+            return step != Step::Provider;
+        }
+        if self.acp.is_none() {
+            return true;
+        }
+        if self.sign_in.is_some() || self.registry.preparing.is_some() || self.saving {
+            return false;
+        }
+        match step {
+            Step::Provider => true,
+            Step::Identity => self.acp_selection_ok(cx),
+            Step::Config | Step::SignIn => false,
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.saving || self.registry.preparing.is_some()
+    }
+
+    fn config(&self, cx: &Context<Self>) -> Option<InstanceConfig> {
         let text = |input: &Entity<ComposerInput>| input.read(cx).text().trim().to_string();
         let env: BTreeMap<String, String> = self
             .env_rows
@@ -451,13 +575,16 @@ impl AddProviderDialog {
             .map(|row| (text(&row.key), row.value.read(cx).text().to_string()))
             .filter(|(key, _)| !key.is_empty())
             .collect();
+        if self.driver == HarnessId::Acp {
+            return self.acp_config(env, cx);
+        }
         if self.driver == HarnessId::Cursor {
-            return InstanceConfig::Native {
+            return Some(InstanceConfig::Native {
                 executable: None,
                 home_dir: None,
                 launch_args: Vec::new(),
                 env,
-            };
+            });
         }
         let executable = Some(text(&self.binary_input)).filter(|path| !path.is_empty());
         let home = text(&self.home_input);
@@ -476,7 +603,7 @@ impl AddProviderDialog {
             Some(_) if managed => Some(HomeDir::Managed),
             Some(_) => None,
         };
-        InstanceConfig::Native {
+        Some(InstanceConfig::Native {
             executable,
             home_dir,
             launch_args: text(&self.args_input)
@@ -484,7 +611,7 @@ impl AddProviderDialog {
                 .map(str::to_owned)
                 .collect(),
             env,
-        }
+        })
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -495,18 +622,33 @@ impl AddProviderDialog {
             self.go(Step::Identity, cx);
             return;
         }
+        let Some(config) = self.config(cx) else {
+            self.error = Some("Choose an ACP agent first.".into());
+            cx.notify();
+            return;
+        };
         let identity = self.identity();
+        let fallback = match (&self.selected, self.acp) {
+            (Some(selected), _) => selected.agent.name.clone(),
+            (None, Some(AcpFlow::Local)) => "Local ACP".to_string(),
+            _ => driver_name(self.driver).to_string(),
+        };
         let label = Some(identity.label.trim().to_string())
             .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| driver_name(self.driver).to_string());
+            .unwrap_or(fallback);
         let instance = ProviderInstance {
             id: self.instance_id(),
             driver: self.driver,
             label,
             accent: identity.accent,
-            config: self.config(cx),
+            config,
         };
-        self.upsert(instance, false, cx);
+        let after = if self.editing.is_none() && self.acp == Some(AcpFlow::Registry) {
+            AfterSave::SignIn
+        } else {
+            AfterSave::Close { sign_in: false }
+        };
+        self.upsert(instance, after, cx);
     }
 
     /// D1: upsert before the login starts, since an upsert during a login kills it.
@@ -536,10 +678,10 @@ impl AddProviderDialog {
                 env: BTreeMap::new(),
             },
         };
-        self.upsert(instance, true, cx);
+        self.upsert(instance, AfterSave::Close { sign_in: true }, cx);
     }
 
-    fn upsert(&mut self, instance: ProviderInstance, sign_in: bool, cx: &mut Context<Self>) {
+    fn upsert(&mut self, instance: ProviderInstance, after: AfterSave, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.error = Some("Engine not connected".into());
             cx.notify();
@@ -557,13 +699,20 @@ impl AddProviderDialog {
             .await;
             this.update(cx, |dialog, cx| {
                 dialog.saving = false;
-                match result {
-                    Ok(instances) => cx.emit(AddProviderEvent::Saved {
-                        instances,
-                        instance,
-                        sign_in,
-                    }),
-                    Err(error) => dialog.error = Some(error.into()),
+                match (result, after) {
+                    (Ok(instances), AfterSave::Close { sign_in }) => {
+                        cx.emit(AddProviderEvent::Saved {
+                            instances,
+                            instance,
+                            sign_in,
+                        })
+                    }
+                    (Ok(instances), AfterSave::SignIn) => {
+                        dialog.instances = instances.clone();
+                        cx.emit(AddProviderEvent::Created { instances });
+                        dialog.open_sign_in(instance, cx);
+                    }
+                    (Err(error), _) => dialog.error = Some(error.into()),
                 }
                 cx.notify();
             })
@@ -574,14 +723,31 @@ impl AddProviderDialog {
 
     fn render_steps(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let identity = self.identity();
-        let summaries = [
-            Some(driver_name(self.driver).to_string()),
-            (self.step > Step::Identity || self.editing.is_some())
+        let provider_summary = match self.acp {
+            None => Some(driver_name(self.driver).to_string()),
+            Some(AcpFlow::Local) => Some("Local ACP command".to_string()),
+            Some(_) => self
+                .selected
+                .as_ref()
+                .map(|selected| selected.agent.name.clone())
+                .or_else(|| {
+                    self.sign_in
+                        .as_ref()
+                        .map(|sign_in| sign_in.instance.label.clone())
+                })
+                .or_else(|| {
+                    Some(self.manual_input.read(cx).text().trim().to_string())
+                        .filter(|id| !id.is_empty())
+                }),
+        };
+        let identity_summary = match &self.sign_in {
+            Some(sign_in) => Some(sign_in.instance.label.clone()),
+            None => (self.step > Step::Identity || self.editing.is_some())
                 .then(|| identity.label.trim().to_string())
                 .filter(|label| !label.is_empty()),
-            None,
-        ];
-        let steps = [Step::Provider, Step::Identity, Step::Config];
+        };
+        let summaries = [provider_summary, identity_summary, None];
+        let steps = self.steps();
         div()
             .mt(px(12.0))
             .p(px(3.0))
@@ -590,89 +756,85 @@ impl AddProviderDialog {
             .flex()
             .flex_row()
             .gap(px(4.0))
-            .children(
-                steps
-                    .into_iter()
-                    .zip(summaries)
-                    .enumerate()
-                    .map(|(ix, (step, summary))| {
-                        let current = step == self.step;
-                        let done = step < self.step;
-                        let reachable = !(self.editing.is_some() && step == Step::Provider);
-                        let number = div()
-                            .flex_none()
-                            .size(px(18.0))
-                            .rounded_full()
-                            .border_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .map(|n| {
-                                if done {
-                                    n.bg(theme.accent).border_color(theme.accent).child(
-                                        icon(icons::CHECK)
-                                            .size(px(11.0))
-                                            .text_color(theme.on_accent),
-                                    )
-                                } else if current {
-                                    n.border_color(theme.accent)
-                                        .text_color(theme.accent)
-                                        .child(SharedString::from((ix + 1).to_string()))
-                                } else {
-                                    n.border_color(theme.border_strong)
-                                        .child(SharedString::from((ix + 1).to_string()))
-                                }
-                            });
-                        div()
-                            .id(("add-provider-step", ix))
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(gpui::transparent_black())
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .text_color(if current {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            })
-                            .when(current, |el| el.bg(ink(0.06)).border_color(theme.border))
-                            .when(reachable && !current, |el| {
-                                el.cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| this.go(step, cx)))
-                            })
-                            .child(number)
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(step.title()),
-                            )
-                            .when_some(summary.filter(|_| !current), |el, summary| {
-                                el.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(crate::typography::ui_rems(12.0))
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from(format!("· {summary}"))),
+            .children(steps.iter().copied().zip(summaries).enumerate().map(
+                |(ix, (step, summary))| {
+                    let current = step == self.step;
+                    let done = step < self.step;
+                    let reachable = self.step_reachable(step, cx);
+                    let number = div()
+                        .flex_none()
+                        .size(px(18.0))
+                        .rounded_full()
+                        .border_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .map(|n| {
+                            if done {
+                                n.bg(theme.accent).border_color(theme.accent).child(
+                                    icon(icons::CHECK)
+                                        .size(px(11.0))
+                                        .text_color(theme.on_accent),
                                 )
-                            })
-                    }),
-            )
+                            } else if current {
+                                n.border_color(theme.accent)
+                                    .text_color(theme.accent)
+                                    .child(SharedString::from((ix + 1).to_string()))
+                            } else {
+                                n.border_color(theme.border_strong)
+                                    .child(SharedString::from((ix + 1).to_string()))
+                            }
+                        });
+                    div()
+                        .id(("add-provider-step", ix))
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .text_color(if current {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        })
+                        .when(current, |el| el.bg(ink(0.06)).border_color(theme.border))
+                        .when(reachable && !current, |el| {
+                            el.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| this.go(step, cx)))
+                        })
+                        .child(number)
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(step.title()),
+                        )
+                        .when_some(summary.filter(|_| !current), |el, summary| {
+                            el.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(format!("· {summary}"))),
+                            )
+                        })
+                },
+            ))
             .into_any_element()
     }
 
     fn render_provider_step(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let tiles = DRIVERS.into_iter().enumerate().map(|(ix, driver)| {
-            let selected = driver == self.driver;
+            let selected = self.acp.is_none() && driver == self.driver;
             let not_installed = self
                 .harnesses
                 .iter()
@@ -766,6 +928,7 @@ impl AddProviderDialog {
                     .child("Or choose from ACP Registry")
                     .child(rule()),
             )
+            .child(self.render_acp_section(theme, cx))
             .into_any_element()
     }
 
@@ -773,18 +936,7 @@ impl AddProviderDialog {
         let identity = self.identity();
         let id_error = self.id_error();
         let id_control = match &self.editing {
-            Some(instance) => div()
-                .w_full()
-                .h(px(30.0))
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .justify_end()
-                .font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(instance.id.clone()))
-                .into_any_element(),
+            Some(instance) => readonly_value(theme, instance.id.clone()),
             None => field(theme, &self.id_input, id_error.is_some()),
         };
         let swatch = |id: (&'static str, usize), on: bool| {
@@ -840,6 +992,7 @@ impl AddProviderDialog {
         div()
             .flex()
             .flex_col()
+            .children(self.render_picked(theme, cx))
             .child(setting_row(
                 theme,
                 "Label",
@@ -868,6 +1021,9 @@ impl AddProviderDialog {
     }
 
     fn render_config_step(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if self.driver == HarnessId::Acp {
+            return self.render_acp_edit_config(theme, cx);
+        }
         let name = driver_name(self.driver);
         let cursor = self.driver == HarnessId::Cursor;
         let mut rows = div().flex().flex_col();
@@ -912,6 +1068,16 @@ impl AddProviderDialog {
                 true,
             ));
         }
+        rows.child(self.env_row(theme, "Set for this instance only.", cx))
+            .into_any_element()
+    }
+
+    fn env_row(
+        &self,
+        theme: &Theme,
+        description: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let env = div()
             .w(px(240.0))
             .flex()
@@ -962,22 +1128,14 @@ impl AddProviderDialog {
                         .child("+ Add variable"),
                 ),
             );
-        rows.child(
-            div()
-                .py(px(12.0))
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(16.0))
-                .child(row_text(
-                    theme,
-                    "Environment",
-                    "Set for this instance only.".into(),
-                    None,
-                ))
-                .child(div().flex_none().child(env)),
-        )
-        .into_any_element()
+        div()
+            .py(px(12.0))
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(16.0))
+            .child(row_text(theme, "Environment", description.into(), None))
+            .child(div().flex_none().child(env))
     }
 
     fn render_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1002,6 +1160,29 @@ impl AddProviderDialog {
             .items_center()
             .justify_end()
             .gap(px(8.0));
+        let busy = self.busy();
+        if self.step == Step::SignIn {
+            let (active, signed_in) = self.sign_in.as_ref().map_or((false, false), |sign_in| {
+                (sign_in.active(), sign_in.signed_in)
+            });
+            return footer
+                .child(
+                    button(
+                        "add-provider-finish",
+                        if signed_in {
+                            widgets::ActionTone::Solid
+                        } else {
+                            widgets::ActionTone::Outlined
+                        },
+                    )
+                    .when(active, |el| el.opacity(0.5).cursor_default())
+                    .when(!active, |el| {
+                        el.on_click(cx.listener(|this, _, _, cx| this.close(cx)))
+                    })
+                    .child(if signed_in { "Done" } else { "Skip for now" }),
+                )
+                .into_any_element();
+        }
         let first_step =
             self.step == Step::Provider || (self.step == Step::Identity && self.editing.is_some());
         footer = footer.child(
@@ -1013,10 +1194,25 @@ impl AddProviderDialog {
                     widgets::ActionTone::Outlined
                 },
             )
-            .on_click(cx.listener(|this, _, _, cx| this.back(cx)))
+            .when(busy, |el| el.opacity(0.5).cursor_default())
+            .when(!busy, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| this.back(cx)))
+            })
             .child(if first_step { "Cancel" } else { "Back" }),
         );
+        let acp_new = self.acp.is_some() && self.editing.is_none();
         match self.step {
+            Step::Provider if acp_new => {
+                let preparing = self.registry.preparing.is_some();
+                footer = footer.child(
+                    button("add-provider-next", widgets::ActionTone::Solid)
+                        .when(preparing, |el| el.opacity(0.5).cursor_default())
+                        .when(!preparing, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| this.acp_next(cx)))
+                        })
+                        .child(if preparing { "Preparing…" } else { "Next" }),
+                );
+            }
             Step::Provider => {
                 footer = footer.child(
                     button("add-provider-manual", widgets::ActionTone::Outlined)
@@ -1026,15 +1222,33 @@ impl AddProviderDialog {
                 footer = footer.child(match sign_in_action(self.driver) {
                     Some((label, mark)) => {
                         button("add-provider-sign-in", widgets::ActionTone::Solid)
-                            .when(saving, |el| el.opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| this.sign_in(cx)))
+                            .when(busy, |el| el.opacity(0.5))
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(|this, _, _, cx| this.sign_in(cx)))
+                            })
                             .child(icon(mark).size(px(14.0)).text_color(theme.on_solid))
                             .child(label)
                     }
                     None => button("add-provider-next", widgets::ActionTone::Solid)
-                        .on_click(cx.listener(|this, _, _, cx| this.go(Step::Identity, cx)))
+                        .when(busy, |el| el.opacity(0.5))
+                        .when(!busy, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| this.go(Step::Identity, cx)))
+                        })
                         .child("Next"),
                 });
+            }
+            Step::Identity if acp_new => {
+                let label = match (self.acp == Some(AcpFlow::Local), saving) {
+                    (_, true) => "Adding...",
+                    (true, false) => "Add instance",
+                    (false, false) => "Continue to sign-in",
+                };
+                footer = footer.child(
+                    button("add-provider-save", widgets::ActionTone::Solid)
+                        .when(saving, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                        .child(label),
+                );
             }
             Step::Identity => {
                 footer = footer.child(
@@ -1043,7 +1257,7 @@ impl AddProviderDialog {
                         .child("Next"),
                 );
             }
-            Step::Config => {
+            Step::Config | Step::SignIn => {
                 let label = match (self.editing.is_some(), saving) {
                     (true, true) => "Saving…",
                     (true, false) => "Save",
@@ -1076,6 +1290,7 @@ impl AddProviderDialog {
             Step::Provider => self.render_provider_step(&theme, cx),
             Step::Identity => self.render_identity_step(&theme, cx),
             Step::Config => self.render_config_step(&theme, cx),
+            Step::SignIn => self.render_sign_in_step(&theme, cx),
         };
         let max_body = (f32::from(viewport.height) - 260.0).max(200.0);
         let header = div()
@@ -1116,7 +1331,7 @@ impl AddProviderDialog {
                     .hover(|s| s.bg(ink(0.06)))
                     .role(gpui::Role::Button)
                     .aria_label("Close")
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AddProviderEvent::Close)))
+                    .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
                     .child(
                         icon(icons::CLOSE)
                             .size(px(14.0))
@@ -1133,9 +1348,9 @@ impl AddProviderDialog {
             .text_size(crate::typography::ui_rems(13.0))
             .role(gpui::Role::Dialog)
             .aria_label(title)
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
-                    cx.emit(AddProviderEvent::Close);
+                    this.close(cx);
                     cx.stop_propagation();
                 }
             }))
@@ -1177,6 +1392,21 @@ fn mono_input(placeholder: &'static str, cx: &mut Context<ComposerInput>) -> Com
         .with_single_line()
         .with_mono()
         .with_text_metrics(12.0, 16.0)
+}
+
+fn readonly_value(theme: &Theme, value: String) -> AnyElement {
+    div()
+        .w_full()
+        .h(px(30.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .justify_end()
+        .font_family(theme.font_mono.clone())
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(value))
+        .into_any_element()
 }
 
 fn field(theme: &Theme, input: &Entity<ComposerInput>, error: bool) -> AnyElement {

@@ -1,7 +1,8 @@
 use gpui::App;
 use serde_json::{Value, json};
 use zeron_proto::{
-    HarnessId, InstanceConfig, ProviderInstance, ProviderInstancesSnapshot, validate_instance_id,
+    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, HarnessId,
+    InstanceConfig, ProviderInstance, ProviderInstancesSnapshot, validate_instance_id,
 };
 use zeron_rpc::methods;
 
@@ -65,6 +66,139 @@ pub async fn write(
         .await
         .map(|snapshot| snapshot.instances)
         .map_err(|err| err.to_string())
+}
+
+fn with_target(mut params: Value, target: Option<Value>) -> Value {
+    if let Some(target) = target {
+        params["targetDeviceId"] = target;
+    }
+    params
+}
+
+pub async fn search_registry(
+    engine: &EngineHandle,
+    query: &str,
+    target: Option<Value>,
+) -> Result<Vec<AcpRegistryAgent>, String> {
+    engine
+        .client()
+        .call_as(
+            methods::SEARCH_ACP_REGISTRY,
+            with_target(json!({ "query": query }), target),
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn prepare_agent(
+    engine: &EngineHandle,
+    agent_id: &str,
+    target: Option<Value>,
+) -> Result<AcpPreparedAgent, String> {
+    engine
+        .client()
+        .call_as(
+            methods::PREPARE_ACP_AGENT,
+            with_target(json!({ "agentId": agent_id }), target),
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn auth_methods(
+    engine: &EngineHandle,
+    instance_id: &str,
+    target: Option<Value>,
+) -> Result<Vec<AcpAuthMethod>, String> {
+    engine
+        .client()
+        .call_as(
+            methods::LIST_ACP_AUTH_METHODS,
+            with_target(json!({ "instanceId": instance_id }), target),
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub enum InstanceIcon {
+    Brand(&'static str, Option<gpui::Hsla>),
+    File(gpui::SharedString),
+}
+
+impl InstanceIcon {
+    pub fn of(instance: &ProviderInstance) -> Self {
+        if let InstanceConfig::Acp {
+            icon_path: Some(path),
+            ..
+        } = &instance.config
+        {
+            return InstanceIcon::File(path.clone().into());
+        }
+        let (mark, tint) = crate::pickers::harness_brand_icon(instance.driver);
+        InstanceIcon::Brand(mark, tint)
+    }
+
+    pub fn registry(icon_path: Option<&str>) -> Self {
+        match icon_path {
+            Some(path) => InstanceIcon::File(path.to_owned().into()),
+            None => InstanceIcon::Brand(crate::icons::BOT, None),
+        }
+    }
+
+    pub fn svg(&self, color: gpui::Hsla) -> gpui::Svg {
+        use gpui::Styled;
+        match self {
+            InstanceIcon::Brand(mark, tint) => {
+                crate::icons::icon(mark).text_color(tint.unwrap_or(color))
+            }
+            InstanceIcon::File(path) => gpui::svg()
+                .external_path(path.clone())
+                .flex_none()
+                .text_color(color),
+        }
+    }
+}
+
+pub fn acp_source_summary(instance: &ProviderInstance) -> Option<String> {
+    match &instance.config {
+        InstanceConfig::Acp {
+            source:
+                AcpSource::Registry {
+                    agent_id,
+                    version,
+                    distribution,
+                },
+            ..
+        } => Some(format!(
+            "{agent_id} · v{version} · {}",
+            distribution_name(*distribution)
+        )),
+        InstanceConfig::Acp {
+            source: AcpSource::Local { command, .. },
+            ..
+        } => Some(command.clone()),
+        InstanceConfig::Native { .. } => None,
+    }
+}
+
+pub fn uses_registry_agent(instances: &[ProviderInstance], id: &str) -> bool {
+    instances.iter().any(|instance| {
+        matches!(
+            &instance.config,
+            InstanceConfig::Acp {
+                source: AcpSource::Registry { agent_id, .. },
+                ..
+            } if agent_id == id
+        )
+    })
+}
+
+pub fn distribution_name(distribution: AcpDistribution) -> &'static str {
+    match distribution {
+        AcpDistribution::Npx => "npx",
+        AcpDistribution::Uvx => "uvx",
+        AcpDistribution::Binary => "binary",
+    }
 }
 
 pub fn accent_color(accent: &str) -> Option<gpui::Hsla> {

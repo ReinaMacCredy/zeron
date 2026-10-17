@@ -244,6 +244,9 @@ impl HarnessesPage {
             let step = std::env::var("ZERON_ADD_PROVIDER_STEP")
                 .ok()
                 .and_then(|step| add_provider::Step::from_knob(&step));
+            let knob = std::env::var("ZERON_ADD_PROVIDER_STEP").unwrap_or_default();
+            let query = std::env::var("ZERON_ADD_PROVIDER_QUERY").ok();
+            let acp_instance = std::env::var("ZERON_ADD_PROVIDER_ACP_INSTANCE").ok();
             if let Some((wizard, _)) = &page.wizard {
                 wizard.update(cx, |wizard, cx| {
                     if let Some(driver) = driver {
@@ -252,6 +255,7 @@ impl HarnessesPage {
                     if let Some((step, taken)) = step {
                         wizard.open_at(step, taken, cx);
                     }
+                    wizard.apply_acp_knob(&knob, query, acp_instance, cx);
                 });
             }
         }
@@ -296,6 +300,10 @@ impl HarnessesPage {
                 if *sign_in && let Some(accounts) = page.instance_accounts.get(&instance.id) {
                     accounts.update(cx, |accounts, cx| accounts.sign_in(cx));
                 }
+            }
+            AddProviderEvent::Created { instances } => {
+                page.set_instances(Ok(instances.clone()), cx);
+                provider_instances::bump_provider_instances(cx);
             }
         });
         self.confirm_delete = None;
@@ -387,7 +395,7 @@ impl HarnessesPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (mark, tint) = crate::pickers::harness_brand_icon(instance.driver);
+        let mark = provider_instances::InstanceIcon::of(instance);
         let id = instance.id.clone();
         let confirming = self.confirm_delete.as_deref() == Some(id.as_str());
         let accounts = self.instance_accounts.get(&id).cloned();
@@ -395,6 +403,7 @@ impl HarnessesPage {
             .as_ref()
             .is_some_and(|accounts| accounts.read(cx).signing_in());
         let native = matches!(instance.config, InstanceConfig::Native { .. });
+        let editable = native || instance.driver == HarnessId::Acp;
         let status = match accounts {
             Some(accounts) => Some(div().min_w_0().max_w(px(240.0)).child(accounts)),
             None if native && accounts::signs_in(instance.driver) => Some(
@@ -420,11 +429,7 @@ impl HarnessesPage {
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                crate::icons::icon(mark)
-                    .size(px(14.0))
-                    .text_color(tint.unwrap_or(theme.text_muted)),
-            );
+            .child(mark.svg(theme.text_muted).size(px(14.0)));
         widgets::card_row(theme, false)
             .id(SharedString::from(format!("provider-instance-{id}")))
             .ml(px(16.0 + DETAILS_INSET))
@@ -451,12 +456,22 @@ impl HarnessesPage {
                     )
                     .child(widgets::meta_line(
                         theme,
-                        vec![
+                        std::iter::once(
                             div()
                                 .font_family(theme.font_mono.clone())
                                 .child(SharedString::from(id.clone()))
                                 .into_any_element(),
-                        ],
+                        )
+                        .chain(
+                            provider_instances::acp_source_summary(instance).map(|summary| {
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(SharedString::from(summary))
+                                    .into_any_element()
+                            }),
+                        )
+                        .collect(),
                     )),
             )
             .children(status)
@@ -468,8 +483,8 @@ impl HarnessesPage {
                     .role(gpui::Role::Button)
                     .aria_label("Edit")
                     .tooltip(widgets::text_tooltip("Edit"))
-                    .when(busy || !native, |el| el.opacity(0.4))
-                    .when(!busy && native, |el| {
+                    .when(busy || !editable, |el| el.opacity(0.4))
+                    .when(!busy && editable, |el| {
                         el.on_click(cx.listener(move |page, _, _, cx| {
                             page.open_wizard(Some(editing.clone()), cx)
                         }))
