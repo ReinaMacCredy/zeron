@@ -18699,6 +18699,62 @@ impl Render for Shell {
                     })
                     .detach();
                 }
+                // `=btw|btw-closed|btw-expand` (capture knobs): seed a main draft,
+                // ask two side questions in two btw tabs, then optionally Esc
+                // out or expand the active tab into the right pane.
+                if matches!(
+                    self.debug_dialog.as_deref(),
+                    Some("btw" | "btw-closed" | "btw-expand")
+                ) && self.sidechat_source_chat(cx).is_some()
+                {
+                    let which = self.debug_dialog.take().unwrap_or_default();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(3000))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| {
+                            shell
+                                .composer
+                                .update(cx, |c, cx| c.seed_text("Okay + các".into(), cx));
+                            if let Some(source) = shell.sidechat_source_chat(cx) {
+                                shell.open_sidechat(
+                                    source,
+                                    Some("chat_status_tone nằm ở file nào?".into()),
+                                    SidechatStaged::default(),
+                                    cx,
+                                );
+                            }
+                        });
+                        cx.background_executor()
+                            .timer(Duration::from_millis(5000))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| {
+                            if let Some(source) = shell.sidechat_source_chat(cx) {
+                                shell.create_sidechat_on(
+                                    SidechatSurface::Btw,
+                                    source,
+                                    Some("agent còn mấy bước nữa?".into()),
+                                    SidechatStaged::default(),
+                                    cx,
+                                );
+                            }
+                        });
+                        cx.background_executor()
+                            .timer(Duration::from_millis(6000))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| {
+                            let Some(source) = shell.sidechat_source_chat(cx) else {
+                                return;
+                            };
+                            match which.as_str() {
+                                "btw-closed" => shell.close_btw(&source, cx),
+                                "btw-expand" => shell.expand_btw(&source, cx),
+                                _ => {}
+                            }
+                        });
+                    })
+                    .detach();
+                }
                 if self.debug_dialog.as_deref() == Some("swipe")
                     && self.state.read(cx).focused_id().is_some()
                 {
