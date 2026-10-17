@@ -10,11 +10,15 @@ fn is_selectable_container_role(role: &str) -> bool {
 }
 
 /// An AX error can be returned after the target processed a mutation. Only
-/// `NotAttempted` permits choosing another ancestor or a different actuator.
+/// `NotAttempted` permits choosing another ancestor or a different actuator;
+/// `Ignored` permits only the read-back-verified pointer click.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SelectionOutcome {
     NotAttempted,
     AttemptedConfirmed {
+        role: String,
+    },
+    Ignored {
         role: String,
     },
     AttemptedUncertain {
@@ -165,14 +169,25 @@ fn select_container_with(
     settable: bool,
     before_write: impl FnOnce() -> anyhow::Result<()>,
     write: impl FnOnce() -> AXError,
-    readback: impl FnOnce() -> Option<bool>,
+    readback: impl Fn() -> Option<bool>,
 ) -> anyhow::Result<SelectionOutcome> {
     if !is_selectable_container_role(&role) || selected.is_none() || !settable {
         return Ok(SelectionOutcome::NotAttempted);
     }
     before_write().map_err(AxActionFailure::before_dispatch)?;
     let error = write();
-    let selected = readback();
+    let mut selected = readback();
+    if error == kAXErrorSuccess && selected == Some(false) {
+        // Little Snitch's source list accepts the write and keeps its selection.
+        let deadline = std::time::Instant::now() + AX_READBACK_TIMEOUT;
+        while selected == Some(false) && std::time::Instant::now() < deadline {
+            std::thread::sleep(AX_READBACK_POLL);
+            selected = readback();
+        }
+        if selected == Some(false) {
+            return Ok(SelectionOutcome::Ignored { role });
+        }
+    }
     if error == kAXErrorSuccess && selected == Some(true) {
         Ok(SelectionOutcome::AttemptedConfirmed { role })
     } else {
@@ -217,8 +232,9 @@ impl Drop for SelectionElement {
 
 /// Select the nearest writable collection item before attempting AXPress.
 /// Read-only capability checks may advance to an ancestor. Once AXSelected is
-/// written, even an AX error or an absent/false read-back is terminal: it is
-/// never permission to mutate another ancestor or submit a pointer click.
+/// written, an AX error or an absent read-back is terminal: it is never
+/// permission to mutate another ancestor or submit a pointer click. A write
+/// the app accepted but ignored allows only the verified pointer click.
 pub fn select_nearest_container(element_ptr: usize) -> anyhow::Result<SelectionOutcome> {
     select_ancestor_with(
         SelectionElement {
@@ -441,8 +457,8 @@ struct OwnState {
     actions: Vec<String>,
 }
 
-const OWN_STATE_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
-const OWN_STATE_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const AX_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+const AX_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 fn dispatch_ax_action_with(
     action: &str,
@@ -458,7 +474,7 @@ fn dispatch_ax_action_with(
     }
     // Some apps (Little Snitch's custom outline actions) act and still return an AX error.
     if let Some(before) = before {
-        let deadline = std::time::Instant::now() + OWN_STATE_READBACK_TIMEOUT;
+        let deadline = std::time::Instant::now() + AX_READBACK_TIMEOUT;
         loop {
             if own_state().is_some_and(|after| {
                 after.role == before.role
@@ -469,7 +485,7 @@ fn dispatch_ax_action_with(
             if std::time::Instant::now() >= deadline {
                 break;
             }
-            std::thread::sleep(OWN_STATE_READBACK_POLL);
+            std::thread::sleep(AX_READBACK_POLL);
         }
     }
     Err(AxActionFailure::from_ax_error(action, err).into())
@@ -603,6 +619,13 @@ mod tests {
                     outcome,
                     SelectionOutcome::AttemptedConfirmed { .. }
                 ));
+            } else if error == kAXErrorSuccess && selected == Some(false) {
+                assert_eq!(
+                    outcome,
+                    SelectionOutcome::Ignored {
+                        role: "AXRow".to_owned()
+                    }
+                );
             } else {
                 assert_eq!(
                     outcome,

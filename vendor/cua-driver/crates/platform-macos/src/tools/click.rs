@@ -1461,9 +1461,13 @@ fn perform_ax_click(
     // read-back-verified AXSelected write over dispatching a known hollow press
     // or forcing the caller onto a less stable pixel coordinate.
     if ax_action == "AXPress" && !advertised.iter().any(|action| action == ax_action) {
+        let mut ignored = None;
         if modifiers.is_empty() {
             match crate::input::ax_actions::select_nearest_container(element_ptr)? {
                 SelectionOutcome::NotAttempted => {}
+                SelectionOutcome::Ignored {
+                    role: selected_role,
+                } => ignored = Some(selected_role),
                 SelectionOutcome::AttemptedConfirmed {
                     role: selected_role,
                 } => {
@@ -1589,6 +1593,14 @@ fn perform_ax_click(
                  before_selected={before}, last_readback={last_observation:?}; \
                  observe fresh state; do not replay"
             );
+        }
+        if let Some(selected_role) = ignored {
+            return Err(AxActionFailure::uncertain(format!(
+                "the app ignored the AXSelected write for nearest {selected_role} of [{idx}] \
+                 and the element has no on-screen point for a pointer click; observe fresh \
+                 state; do not replay"
+            ))
+            .into());
         }
     }
 
