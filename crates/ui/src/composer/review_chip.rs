@@ -54,6 +54,7 @@ struct Target {
 
 enum Look {
     Idle(u32, u32),
+    Empty(String),
     Busy,
     Findings(usize),
     Again(u32, u32),
@@ -106,6 +107,40 @@ async fn checkout_diff(
         .map_err(|err| err.to_string())?;
     let diff = serde_json::from_value::<CheckoutDiff>(value).map_err(|err| err.to_string())?;
     Ok((diff, base))
+}
+
+fn chip_look(review: &review::ChatReview, scope: ReviewScope) -> Option<Look> {
+    let counts = review.changes(scope).filter(|(add, del)| add + del > 0);
+    let idle = || match counts {
+        Some((add, del)) => Some(Look::Idle(add, del)),
+        None => review.scope.is_some().then(|| {
+            Look::Empty(match (review.changes(scope), review.unavailable(scope)) {
+                (Some(_), _) => "No changes".to_string(),
+                (None, Some(message)) => capitalize(message),
+                (None, None) => "…".to_string(),
+            })
+        }),
+    };
+    let Some(run) = &review.run else {
+        return idle();
+    };
+    let look = match &run.status {
+        status if run.busy() && *status != RunStatus::Done => Look::Busy,
+        RunStatus::Unreadable => Look::Unreadable,
+        RunStatus::Stopped => {
+            let (add, del) = counts.unwrap_or_default();
+            Look::Stopped(add, del)
+        }
+        RunStatus::Failed(message) => Look::Failed(message.clone()),
+        _ if run.outdated() > 0 => {
+            let (add, del) = counts.unwrap_or_default();
+            Look::Again(add, del)
+        }
+        _ if !run.findings.is_empty() => Look::Findings(run.findings.len()),
+        _ if run.reported > 0 || counts.is_none() => return idle(),
+        _ => Look::Clean,
+    };
+    Some(look)
 }
 
 fn capitalize(text: &str) -> String {
@@ -621,29 +656,7 @@ impl Composer {
     }
 
     fn review_look(&self, target: &Target, scope: ReviewScope, cx: &App) -> Option<Look> {
-        let review = self.state.read(cx).reviews.get(&target.chat_id)?;
-        let counts = review.changes(scope).filter(|(add, del)| add + del > 0);
-        let Some(run) = &review.run else {
-            return counts.map(|(add, del)| Look::Idle(add, del));
-        };
-        let look = match &run.status {
-            status if run.busy() && *status != RunStatus::Done => Look::Busy,
-            RunStatus::Unreadable => Look::Unreadable,
-            RunStatus::Stopped => {
-                let (add, del) = counts.unwrap_or_default();
-                Look::Stopped(add, del)
-            }
-            RunStatus::Failed(message) => Look::Failed(message.clone()),
-            _ if run.outdated() > 0 => {
-                let (add, del) = counts.unwrap_or_default();
-                Look::Again(add, del)
-            }
-            _ if !run.findings.is_empty() => Look::Findings(run.findings.len()),
-            _ if run.reported > 0 => return counts.map(|(add, del)| Look::Idle(add, del)),
-            _ if counts.is_none() => return None,
-            _ => Look::Clean,
-        };
-        Some(look)
+        chip_look(self.state.read(cx).reviews.get(&target.chat_id)?, scope)
     }
 
     pub(crate) fn render_review_chip(
@@ -693,19 +706,32 @@ impl Composer {
                         .child(format!("−{del}")),
                 )
         };
+        let review_label: SharedString = match (scope, &picked) {
+            (ReviewScope::Commit, Some(short)) => format!("Review {short}").into(),
+            _ => "Review".into(),
+        };
         let (icon, label, color, border, fill, tip): (&str, SharedString, _, _, _, SharedString) =
             match &look {
                 Look::Idle(..) => (
                     crate::icons::CHECKLIST,
-                    match (scope, &picked) {
-                        (ReviewScope::Commit, Some(short)) => format!("Review {short}").into(),
-                        _ => "Review".into(),
-                    },
+                    review_label,
                     theme.text,
                     theme.border,
                     None,
                     format!(
                         "Review {} with a fresh agent",
+                        scope.label(None).to_lowercase()
+                    )
+                    .into(),
+                ),
+                Look::Empty(_) => (
+                    crate::icons::CHECKLIST,
+                    review_label,
+                    theme.text_muted,
+                    theme.border,
+                    None,
+                    format!(
+                        "Nothing to review in {}. Pick another scope from the menu.",
                         scope.label(None).to_lowercase()
                     )
                     .into(),
@@ -793,10 +819,17 @@ impl Composer {
         let next_reviewer = (!busy && !matches!(look, Look::Findings(_)))
             .then(|| self.next_reviewer(&target, cx))
             .flatten();
-        let trailing_counts = match look {
+        let inert = matches!(look, Look::Empty(_));
+        let trailing_counts = match &look {
             Look::Idle(add, del) | Look::Again(add, del) | Look::Stopped(add, del) => {
-                Some(counts(add, del))
+                Some(counts(*add, *del))
             }
+            Look::Empty(note) => Some(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(note.clone()),
+            ),
             _ => None,
         };
         let main = div()
@@ -810,7 +843,7 @@ impl Composer {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .when(!busy || stoppable, |el| {
+            .when((!busy && !inert) || stoppable, |el| {
                 el.cursor_pointer().hover(|s| s.bg(crate::theme::ink(0.06)))
             })
             .when(busy, |el| {
@@ -843,7 +876,7 @@ impl Composer {
                     .child(name)
             }))
             .children(trailing_counts)
-            .when(!busy, |el| {
+            .when(!busy && !inert, |el| {
                 el.on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.on_review_click(scope, cx);
@@ -927,7 +960,7 @@ impl Composer {
         };
         match self.review_look(&target, scope, cx) {
             Some(Look::Findings(_)) => self.open_review_findings(cx),
-            Some(Look::Busy) | None => {}
+            Some(Look::Busy | Look::Empty(_)) | None => {}
             Some(_) => self.start_review(scope, cx),
         }
     }
@@ -2025,5 +2058,39 @@ impl Composer {
             state.dismiss_review_finding(&key, id);
             cx.notify();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::ChatReview;
+
+    #[test]
+    fn a_picked_scope_with_nothing_to_review_keeps_the_chip() {
+        let turn = ReviewScope::LatestTurn;
+        let picked = |stat: Option<Result<(u32, u32), String>>| ChatReview {
+            scope: Some(turn),
+            stats: stat.into_iter().map(|stat| (turn, stat)).collect(),
+            ..ChatReview::default()
+        };
+        for review in [
+            picked(Some(Ok((0, 0)))),
+            picked(Some(Err("no turn recorded".into()))),
+            picked(None),
+        ] {
+            assert!(matches!(chip_look(&review, turn), Some(Look::Empty(_))));
+        }
+        let mut clean = picked(Some(Ok((0, 0))));
+        let mut run = ReviewRun::new(turn);
+        run.status = RunStatus::Done;
+        clean.run = Some(run);
+        assert!(matches!(chip_look(&clean, turn), Some(Look::Empty(_))));
+
+        let untouched = ChatReview {
+            stats: [(ReviewScope::Uncommitted, Ok((0, 0)))].into(),
+            ..ChatReview::default()
+        };
+        assert!(chip_look(&untouched, ReviewScope::Uncommitted).is_none());
     }
 }
