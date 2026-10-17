@@ -1,4 +1,4 @@
-//! Prompt and input shape are benched in .maestro/topic/compact-nudge-bench (Sonnet judged 0 of 279 follow-ups NEW); change them only with a rerun.
+//! Prompt and input shape are benched in .maestro/topic/compact-nudge-bench (dataset/tune: 0 of 96 holdout follow-up runs NEW); change them only with a rerun.
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::HarnessId;
@@ -9,13 +9,19 @@ use crate::titles::{OneShot, mid_tier_model, one_shot_target, run_one_shot};
 
 const INSTRUCTIONS: &str = "You decide whether a chat should be compacted before its next message is answered. Compacting replaces the conversation so far with a short summary of its conclusions; the specific details (numbers, steps, file contents, exact wording) are lost.
 
+Messages are often informal Vietnamese with typos.
+
 Answer NEW only when the new message starts a different task or topic whose work will not need those details, only the conclusions.
 Answer CONTINUE when it is a follow-up, a clarification, a correction, a question about something just said, or the next step of the same task.
+These are CONTINUE even when they open with \"ok\", \"giờ\", \"now\" or \"next\": approving or choosing what the agent just proposed (\"ok làm đi\", \"oke đó làm đi\", \"yes 1\", \"làm luôn\"); asking to test, run, open, merge or ship the work just done; reporting a result, a problem or a doubt about it; asking how to do the next step of the plan being discussed; asking to act on what the agent just found or explained.
+
+A new task usually comes right after a finished one: the agent's last reply reports the work done (merged, committed, tests green, cleaned up, or a complete answer) and the user then asks for a different deliverable instead of reacting to that reply. That is NEW even inside the same project or app, for example another feature next to the one just built, or a different question in the same domain, as long as the new work can start from a summary of what exists. It stays CONTINUE when the request builds on specifics from the recent turns (a command, a number, a finding, an option or next step the agent offered).
+
 When unsure, answer CONTINUE: a missed compaction is retried later, a wrong one loses details for good.
 
 Reply with exactly one word: NEW or CONTINUE.";
 
-const TURNS: usize = 8;
+const TURNS: usize = 4;
 const CLIP_CHARS: usize = 800;
 
 fn clip(text: &str) -> String {
@@ -133,7 +139,7 @@ mod tests {
 
     #[test]
     fn input_keeps_the_last_turns_with_the_agents_last_words() {
-        let mut entries: Vec<_> = (0..9)
+        let mut entries: Vec<_> = (0..5)
             .map(|n| entry(MessageRole::User, &format!("ask {n}")))
             .collect();
         let mut thread = entry(MessageRole::User, "from another thread");
@@ -143,7 +149,7 @@ mod tests {
         entries.push(entry(MessageRole::Assistant, &"x".repeat(900)));
         let input = classifier_input(&entries, " next thing ");
         let expected = format!(
-            "Recent conversation:\nuser: ask 1\nuser: ask 2\nuser: ask 3\nuser: ask 4\nuser: ask 5\nuser: ask 6\nuser: ask 7\nuser: ask 8\nagent: ...{}\n\nNew message:\nuser: next thing",
+            "Recent conversation:\nuser: ask 1\nuser: ask 2\nuser: ask 3\nuser: ask 4\nagent: ...{}\n\nNew message:\nuser: next thing",
             "x".repeat(800)
         );
         assert_eq!(input, expected);
