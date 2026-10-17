@@ -6103,6 +6103,7 @@ const COMPACT_COMMAND: &str = "compact";
 /// Zeron's second own command — it opens a side conversation instead of
 /// running a turn on this chat.
 const SIDECHAT_COMMAND: &str = "sidechat";
+const BTW_COMMAND: &str = "btw";
 
 /// `Some(argument)` when the prompt invokes zeron's own `command`: the first
 /// token must be exactly `/command`, and the rest of the line is its argument.
@@ -6122,10 +6123,10 @@ fn compact_focus(text: &str) -> Option<Option<String>> {
     app_command_argument(text, COMPACT_COMMAND)
 }
 
-/// `Some(prompt)` when the prompt is a `/sidechat` invocation: bare opens the
-/// side conversation, and the rest of the line is its first turn.
+/// `Some(prompt)` when the prompt is a `/btw` or `/sidechat` invocation: bare
+/// opens the side conversation, and the rest of the line is its first turn.
 fn sidechat_prompt(text: &str) -> Option<Option<String>> {
-    app_command_argument(text, SIDECHAT_COMMAND)
+    app_command_argument(text, BTW_COMMAND).or_else(|| app_command_argument(text, SIDECHAT_COMMAND))
 }
 
 /// Zeron's `/compact` rides every harness's list; one that advertises its own
@@ -6200,21 +6201,23 @@ fn computer_send_blockers(
     crate::computer::cards::missing_computer_permissions(capabilities)
 }
 
-/// Same ride as `/compact`: zeron's `/sidechat` joins every harness's list
-/// unless the harness already advertises that name.
+/// Same ride as `/compact`: zeron's `/btw` and `/sidechat` join every
+/// harness's list unless the harness already advertises that name.
 fn with_sidechat_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
-    if commands.iter().any(|c| c.name == SIDECHAT_COMMAND) {
-        return commands;
+    for name in [SIDECHAT_COMMAND, BTW_COMMAND] {
+        if commands.iter().any(|c| c.name == name) {
+            continue;
+        }
+        commands.insert(
+            0,
+            SlashCommand {
+                name: name.into(),
+                description: "Ask about this chat on the side, without touching it".into(),
+                input_hint: Some("prompt".into()),
+                kind: SlashCommandKind::BuiltIn,
+            },
+        );
     }
-    commands.insert(
-        0,
-        SlashCommand {
-            name: SIDECHAT_COMMAND.into(),
-            description: "Ask about this chat on the side, without touching it".into(),
-            input_hint: Some("prompt".into()),
-            kind: SlashCommandKind::BuiltIn,
-        },
-    );
     commands
 }
 
@@ -6233,7 +6236,13 @@ fn with_zeron_commands(
 
 // Send intercepts these from the typed text, so they insert as plain `/name`.
 fn zeron_owned_command(name: &str) -> bool {
-    [COMPACT_COMMAND, SIDECHAT_COMMAND, COMPUTER_USE_COMMAND].contains(&name)
+    [
+        COMPACT_COMMAND,
+        SIDECHAT_COMMAND,
+        BTW_COMMAND,
+        COMPUTER_USE_COMMAND,
+    ]
+    .contains(&name)
 }
 
 fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
@@ -10309,26 +10318,23 @@ impl Composer {
 
     // ---- sidechats ---------------------------------------------------------
 
-    /// Ask the shell to open this chat's side conversation — from `/sidechat`
-    /// or from the sidechat tab. The shell owns the right pane, the creation
-    /// RPC and the first turn; the composer only names the source.
+    /// Ask the shell to open this chat's side conversation — from `/btw`,
+    /// `/sidechat` or the sidechat tab. The shell owns the surface, the
+    /// creation RPC and the first turn; the composer only names the source.
     pub(crate) fn request_sidechat(
         &mut self,
         prompt: Option<String>,
         carry_staged: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some((source_chat_id, nested)) = self
-            .bound_chat_row(cx)
-            .map(|chat| (chat.id.clone(), chat.sidechat_source_chat_id.is_some()))
-        else {
+        let Some(source_chat_id) = self.bound_chat_row(cx).map(|chat| {
+            chat.sidechat_source_chat_id
+                .clone()
+                .unwrap_or_else(|| chat.id.clone())
+        }) else {
             self.set_chat_failure("Start a chat before opening a sidechat.".into(), cx);
             return;
         };
-        if nested {
-            self.set_chat_failure("Nested sidechats are not supported".into(), cx);
-            return;
-        }
         self.failure = None;
         let staged = if carry_staged {
             SidechatStaged {
@@ -11304,8 +11310,8 @@ impl Composer {
             self.request_compaction(focus, cx);
             return;
         }
-        // `/sidechat` is zeron's own too: it opens a side conversation and
-        // never runs a turn on THIS chat.
+        // `/btw` and `/sidechat` are zeron's own too: they open a side
+        // conversation and never run a turn on THIS chat.
         if let Some(prompt) = sidechat_prompt(&plain) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
             self.request_sidechat(prompt, true, cx);
@@ -18132,6 +18138,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                BTW_COMMAND,
                 SIDECHAT_COMMAND,
                 COMPACT_COMMAND,
                 COMPUTER_USE_COMMAND,
@@ -18145,6 +18152,8 @@ mod tests {
     #[test]
     fn a_leading_zeron_command_is_the_only_plain_text_painted_as_a_command() {
         assert_eq!(zeron_owned_command_range("/sidechat á"), Some(0..9));
+        assert_eq!(zeron_owned_command_range("/btw á"), Some(0..4));
+        assert_eq!(zeron_owned_command_range("/btws"), None);
         assert_eq!(zeron_owned_command_range("\n  /compact"), Some(3..11));
         assert_eq!(zeron_owned_command_range("/sidechats"), None);
         assert_eq!(zeron_owned_command_range("/model"), None);
@@ -18502,16 +18511,18 @@ mod tests {
 
     #[test]
     fn sidechat_is_intercepted_with_its_prompt_and_nothing_else_is() {
-        assert_eq!(sidechat_prompt("/sidechat"), Some(None));
-        assert_eq!(
-            sidechat_prompt("/sidechat compare the two"),
-            Some(Some("compare the two".into()))
-        );
-        // A longer name that merely starts with it is another command.
-        assert!(sidechat_prompt("/sidechats").is_none());
-        assert!(sidechat_prompt("/sidechat-now").is_none());
-        // Not the first token → an ordinary prompt, sent as a turn.
-        assert!(sidechat_prompt("ask in a /sidechat").is_none());
+        for command in ["sidechat", "btw"] {
+            assert_eq!(sidechat_prompt(&format!("/{command}")), Some(None));
+            assert_eq!(
+                sidechat_prompt(&format!("/{command} compare the two")),
+                Some(Some("compare the two".into()))
+            );
+            // A longer name that merely starts with it is another command.
+            assert!(sidechat_prompt(&format!("/{command}s")).is_none());
+            assert!(sidechat_prompt(&format!("/{command}-now")).is_none());
+            // Not the first token → an ordinary prompt, sent as a turn.
+            assert!(sidechat_prompt(&format!("ask in a /{command}")).is_none());
+        }
         assert!(sidechat_prompt("/compact").is_none());
     }
 
@@ -18527,15 +18538,20 @@ mod tests {
             commands.iter().map(|c| c.name.clone()).collect()
         };
         let merged = with_sidechat_entry(vec![advertised("sidechat"), advertised("clear")]);
-        assert_eq!(names(&merged), vec!["sidechat", "clear"]);
-        assert_eq!(merged[0].description, "harness copy");
-        // The popup's real list: both zeron commands ride, each exactly once.
+        assert_eq!(names(&merged), vec!["btw", "sidechat", "clear"]);
+        assert_eq!(merged[1].description, "harness copy");
+        let merged = with_sidechat_entry(vec![advertised("btw")]);
+        assert_eq!(names(&merged), vec!["sidechat", "btw"]);
+        assert_eq!(merged[1].description, "harness copy");
+        // The popup's real list: every zeron command rides, each exactly once.
         let merged = with_sidechat_entry(with_compact_entry(Vec::new()));
-        assert_eq!(names(&merged), vec!["sidechat", "compact"]);
-        assert_eq!(
-            merged[0].description,
-            "Ask about this chat on the side, without touching it"
-        );
+        assert_eq!(names(&merged), vec!["btw", "sidechat", "compact"]);
+        for entry in &merged[..2] {
+            assert_eq!(
+                entry.description,
+                "Ask about this chat on the side, without touching it"
+            );
+        }
     }
 
     #[test]
@@ -18612,7 +18628,12 @@ mod tests {
                     state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
                     state.selected_chat = Some("src".into());
                 });
-                for (text, image) in [("/sidechat", None), ("/sidechat compare", Some("shot"))] {
+                for (text, image) in [
+                    ("/sidechat", None),
+                    ("/sidechat compare", Some("shot")),
+                    ("/btw", None),
+                    ("/btw compare", Some("shot")),
+                ] {
                     if let Some(id) = image {
                         composer.add_staged(
                             vec![StagedAttachment {
@@ -18651,6 +18672,12 @@ mod tests {
                     "src".to_string(),
                     Some("compare".to_string()),
                     vec!["shot".to_string()]
+                ),
+                ("src".to_string(), None, vec![]),
+                (
+                    "src".to_string(),
+                    Some("compare".to_string()),
+                    vec!["shot".to_string()]
                 )
             ]
         );
@@ -18683,38 +18710,50 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_sidechat_refuses_to_open_one_of_its_own(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        let composer = handle.root(cx).unwrap();
-        let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
-        cx.update(|cx| {
+    fn a_sidechat_opens_a_sibling_of_its_source(cx: &mut gpui::TestAppContext) {
+        let (_dir, _) = composer_focus_window(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
+            state.selected_chat = Some("src".into());
+        });
+        let (composer, cx) =
+            cx.add_window_view(|_, cx| Composer::for_chat(state, "side".into(), cx));
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<(String, Option<String>)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
             let seen = seen.clone();
             cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
-                if matches!(event, ComposerEvent::OpenSidechat { .. }) {
-                    seen.set(seen.get() + 1);
+                if let ComposerEvent::OpenSidechat {
+                    source_chat_id,
+                    prompt,
+                    ..
+                } = event
+                {
+                    seen.borrow_mut()
+                        .push((source_chat_id.clone(), prompt.clone()));
                 }
             })
             .detach();
         });
         cx.run_until_parked();
-        handle
-            .update(cx, |composer, _, cx| {
-                composer.state.update(cx, |state, _| {
-                    state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
-                    state.selected_chat = Some("side".into());
-                });
+        composer.update(cx, |composer, cx| {
+            for text in ["/btw compare", "/sidechat"] {
                 composer
                     .input
-                    .update(cx, |input, cx| input.set_text("/sidechat compare", cx));
+                    .update(cx, |input, cx| input.set_text(text, cx));
                 composer.on_submit(cx);
-                assert_eq!(
-                    composer.failure.as_deref(),
-                    Some("Nested sidechats are not supported")
-                );
-            })
-            .unwrap();
+                assert!(composer.failure.is_none());
+            }
+        });
         cx.run_until_parked();
-        assert_eq!(seen.get(), 0);
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [
+                ("src".to_string(), Some("compare".to_string())),
+                ("src".to_string(), None)
+            ]
+        );
     }
 
     #[gpui::test]
@@ -20599,7 +20638,7 @@ mod computer_use_tests {
             Vec::new(),
         )));
         let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["sidechat", "compact", "computer-use"]);
+        assert_eq!(names, vec!["btw", "sidechat", "compact", "computer-use"]);
     }
 
     #[test]
