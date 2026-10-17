@@ -6251,10 +6251,14 @@ fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
     zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
 
+const SIDECHAT_TAB_PREFIX: &str = "Sidechats (btw) \u{b7} ";
+const SIDECHAT_COUNT_ROLL: motion::MotionSpec =
+    motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
+
 fn sidechat_tab_label(live: usize) -> String {
     match live {
         0 => "New sidechat (btw)".to_string(),
-        count => format!("Sidechats (btw) \u{b7} {count}"),
+        count => format!("{SIDECHAT_TAB_PREFIX}{count}"),
     }
 }
 
@@ -7013,6 +7017,8 @@ pub struct Composer {
     dock_height_changed: bool,
     dock_clearance_correction: f32,
     surface_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    sidechat_tab_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    sidechat_count: Option<(String, usize, usize, Instant)>,
     last_target_height: f32,
     height_morph: Option<FlipMorph>,
     /// Monotonic clock anchor for the morph timeline.
@@ -7077,6 +7083,10 @@ impl Composer {
 
     pub(crate) fn surface_bounds(&self) -> crate::new_thread_background_mask::SurfaceBounds {
         self.surface_bounds.clone()
+    }
+
+    pub(crate) fn sidechat_tab_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.sidechat_tab_bounds.get()
     }
 
     fn set_running_tab(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -7502,6 +7512,8 @@ impl Composer {
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
             surface_bounds: Default::default(),
+            sidechat_tab_bounds: Default::default(),
+            sidechat_count: None,
             last_target_height: 0.0,
             height_morph: None,
             morph_clock: Instant::now(),
@@ -10379,11 +10391,13 @@ impl Composer {
 
     /// Expired sidechats are left to the sidecar, so they are not counted here.
     fn render_sidechat_tab(
-        &self,
+        &mut self,
         trays: usize,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        self.sidechat_tab_bounds.set(None);
         if self.chat_override.is_some() || self.side_chat || self.pr_chat {
             return None;
         }
@@ -10393,6 +10407,26 @@ impl Composer {
         }
         let state = self.state.read(cx);
         let sidechats = state.live_sidechats_of(&chat.id, chrono::Utc::now());
+        let count = sidechats.len();
+        let now = Instant::now();
+        let roll = match &self.sidechat_count {
+            Some((id, _, to, _)) if *id == chat.id && *to == count => self.sidechat_count.clone(),
+            Some((id, _, to, _))
+                if *id == chat.id && *to > 0 && count > 0 && !motion::reduced_motion(cx) =>
+            {
+                Some((chat.id.clone(), *to, count, now))
+            }
+            _ => Some((chat.id.clone(), count, count, now)),
+        };
+        self.sidechat_count = roll.clone();
+        let roll = roll.and_then(|(_, from, _, since)| {
+            let total = SIDECHAT_COUNT_ROLL.total().mul_f32(motion::speed_scale());
+            let raw = now.saturating_duration_since(since).as_secs_f32() / total.as_secs_f32();
+            (from != count && raw < 1.0).then(|| (from, SIDECHAT_COUNT_ROLL.progress(raw)))
+        });
+        if roll.is_some() {
+            window.request_animation_frame();
+        }
         let sidechat = sidechats.last().copied();
         let open = sidechats
             .iter()
@@ -10405,13 +10439,49 @@ impl Composer {
                 zeron_proto::SessionStatus::Errored => Some(theme.danger),
                 zeron_proto::SessionStatus::Idle => None,
             });
-        let label: SharedString = sidechat_tab_label(sidechats.len()).into();
+        let label: SharedString = sidechat_tab_label(count).into();
         let icon = if sidechat.is_some() {
             crate::icons::CHAT_ROUND_LINE
         } else {
             crate::icons::ASTRA_PLUS
         };
         let text = if open { theme.text } else { theme.text_muted };
+        let label = match roll {
+            Some((from, t)) => {
+                let number = |value: usize| {
+                    div()
+                        .h(px(SIDECHAT_TAB_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .child(value.to_string())
+                };
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .child(div().min_w_0().truncate().child(SIDECHAT_TAB_PREFIX))
+                    .child(
+                        div()
+                            .flex_none()
+                            .relative()
+                            .h(px(SIDECHAT_TAB_HEIGHT))
+                            .overflow_hidden()
+                            .child(
+                                number(from)
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(-SIDECHAT_TAB_HEIGHT * t)),
+                            )
+                            .child(
+                                number(count)
+                                    .relative()
+                                    .top(px(SIDECHAT_TAB_HEIGHT * (1.0 - t))),
+                            ),
+                    )
+            }
+            None => div().min_w_0().truncate().child(label),
+        };
+        let measured = self.sidechat_tab_bounds.clone();
         let surface = crate::queue::queue_panel_surface(theme, cx.has_active_drag())
             .id("composer-sidechat-tab")
             .debug_selector(|| "composer-sidechat-tab".into())
@@ -10441,7 +10511,15 @@ impl Composer {
                     .children(
                         dot.map(|color| div().flex_none().size(px(6.0)).rounded_full().bg(color)),
                     )
-                    .child(div().min_w_0().truncate().child(label)),
+                    .child(label),
+            )
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| measured.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
             );
         Some(
             div()
@@ -13763,7 +13841,7 @@ impl Render for Composer {
         let todo = self.render_todo_panel(has_queue, window, cx);
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
-        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx);
+        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), window, cx);
         // Out of flow: the shell measures this stack for transcript clearance.
         let card = card.map(|card| {
             div()
