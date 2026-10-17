@@ -20,10 +20,14 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         model_options: Default::default(),
         cwd: cwd.display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         resume: None,
+        forked_at: None,
         attachments: vec![],
         worktree: None,
+        branch: None,
+        computer_control: false,
         mcp: None,
         disabled_tools: Vec::new(),
     }
@@ -43,6 +47,8 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
                 rx
             }),
             turn: Default::default(),
+            tool_server: None,
+            stop_tasks: None,
         },
         tx,
         token,
