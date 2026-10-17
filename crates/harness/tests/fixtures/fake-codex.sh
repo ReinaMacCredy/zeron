@@ -451,13 +451,12 @@ case "$turnline" in
   ;;
 
 *scenario:approve*)
-  # Wire policy is always "never" (unattended parity with the Claude
-  # adapter); the requests below are the STRAY-approval path, which must
-  # still round-trip as input questions.
-  has "$thread_line" '"approvalPolicy":"never"' ||
-    { fail_turn "$tid" "thread approvalPolicy should be never"; exit 0; }
-  has "$turnline" '"approvalPolicy":"never"' ||
-    { fail_turn "$tid" "turn approvalPolicy should be never"; exit 0; }
+  # An Ask run sends "untrusted"; its approvals must round-trip as input
+  # questions.
+  has "$thread_line" '"approvalPolicy":"untrusted"' ||
+    { fail_turn "$tid" "thread approvalPolicy should be untrusted"; exit 0; }
+  has "$turnline" '"approvalPolicy":"untrusted"' ||
+    { fail_turn "$tid" "turn approvalPolicy should be untrusted"; exit 0; }
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"rm -rf /tmp/x"}}'

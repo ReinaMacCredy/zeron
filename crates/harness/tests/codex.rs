@@ -666,6 +666,7 @@ async fn approvals_round_trip_as_input_requests() {
         turn: Default::default(),
     };
     let mut req = request("scenario:approve");
+    req.permission_mode = zeron_proto::PermissionMode::Ask;
     req.auto_approve = false;
     let events = run_to_end(&harness(), req, controls).await;
 
@@ -700,6 +701,7 @@ async fn approvals_round_trip_as_input_requests() {
 async fn approval_no_answer_becomes_decline() {
     let (controls, _steer, _token) = controls("No");
     let mut req = request("scenario:decline");
+    req.permission_mode = zeron_proto::PermissionMode::Ask;
     req.auto_approve = false;
     let events = run_to_end(&harness(), req, controls).await;
 
