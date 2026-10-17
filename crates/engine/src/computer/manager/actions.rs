@@ -1570,5 +1570,8 @@ fn is_pressable_role(role: &str) -> bool {
             | "checkbox"
             | "radiobutton"
             | "menuitem"
+            // The driver turns a press on a row or cell into a read-back-checked AXSelected write.
+            | "row"
+            | "cell"
     )
 }
