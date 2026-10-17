@@ -2494,6 +2494,17 @@ impl Harness for AcpHarness {
             events
         })
     }
+
+    async fn run_one_shot(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        instructions: &'static str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut request = crate::one_shot_request(request);
+        request.prompt = crate::prepend_instructions(instructions, &request.prompt);
+        self.run(request, controls).await
+    }
 }
 
 // ---------------------------------------------------------------------------

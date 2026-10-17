@@ -803,8 +803,39 @@ pub const PREDICTION_INSTRUCTIONS: &str = "You write the next message the person
 pub fn supports_titles(id: HarnessId) -> bool {
     matches!(
         id,
-        HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
+        HarnessId::Codex
+            | HarnessId::ClaudeCode
+            | HarnessId::Mock
+            | HarnessId::Pi
+            | HarnessId::Cursor
+            | HarnessId::Opencode
+            | HarnessId::Grok
+            | HarnessId::Devin
+            | HarnessId::Hermes
+            | HarnessId::Antigravity
     )
+}
+
+/// A one-shot run starts clean and can never approve anything on its own.
+pub(crate) fn one_shot_request(mut request: RunRequest) -> RunRequest {
+    request.resume = None;
+    request.worktree = None;
+    request.attachments.clear();
+    request.mcp = None;
+    request.model_options.clear();
+    request.auto_approve = false;
+    request.permission_mode = zeron_proto::PermissionMode::Ask;
+    request.computer_control = false;
+    request
+}
+
+/// For agents without a system-prompt slot: the instructions lead the user turn.
+pub(crate) fn prepend_instructions(instructions: &str, prompt: &str) -> String {
+    if prompt.starts_with(instructions) {
+        prompt.to_owned()
+    } else {
+        format!("{instructions}\n\n{prompt}")
+    }
 }
 
 // Pi and Cursor never read permission_mode; OpenCode and ACP agents ask only when their own config requests it.

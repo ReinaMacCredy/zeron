@@ -341,6 +341,10 @@ impl TurnWire {
                 kind: Default::default(),
             }]),
             initial_native_command_selected: native_command_reply.is_some(),
+            one_shot: overrides["oneShot"]
+                .as_bool()
+                .unwrap_or(false)
+                .then_some(ONE_SHOT_RULES),
         }));
         Self {
             bus,
@@ -440,6 +444,41 @@ impl TurnWire {
         })
         .await
         .unwrap()
+    }
+}
+
+const ONE_SHOT_RULES: &str = "Reply with one word.";
+
+#[tokio::test]
+async fn one_shot_prompt_carries_its_instructions_and_no_tools() {
+    for v2 in [false, true] {
+        let mut wire = TurnWire::start_config(
+            false,
+            v2,
+            false,
+            None,
+            if v2 { "2.0.3" } else { "1.18.21" },
+            json!({ "oneShot": true }),
+            false,
+        )
+        .await;
+        if v2 {
+            wire.request("/api/model").await;
+        }
+        wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+            .await;
+        let posts = wire.posts.lock().unwrap().clone();
+        let (_, body) = posts
+            .iter()
+            .find(|(path, _)| path.ends_with("/prompt") || path.ends_with("/prompt_async"))
+            .unwrap();
+        if v2 {
+            assert_eq!(body["text"], format!("{ONE_SHOT_RULES}\n\nfirst"));
+        } else {
+            assert_eq!(body["system"], ONE_SHOT_RULES);
+            assert_eq!(body["tools"], json!({ "*": false }));
+            assert_eq!(body["parts"][0]["text"], "first");
+        }
     }
 }
 

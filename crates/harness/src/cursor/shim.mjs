@@ -11,7 +11,8 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?}   start / first turn
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"oneShot"?}   start / first turn
+//                                                       `oneShot` = no tools, no settings, throwaway store
 //     {"op":"user","prompt"}                            explicit next turn
 //     {"op":"steer","prompt","model"?,"modelOptions"?,"reconfigure"?}
 //                                                       native mid-turn input;
@@ -631,13 +632,21 @@ async function start(msg) {
   const local = {
     cwd: msg.cwd || process.cwd(),
     enableAgentRetries: true,
-    settingSources: ["user", "team", "mdm", "plugins"],
+    settingSources: msg.oneShot ? [] : ["user", "team", "mdm", "plugins"],
   };
   // Isolated per-run store (see the header above). Resume looks the agent's
   // store up by marker; a markerless (pre-isolation) agent resumes from the
   // SDK's default store exactly as before.
   let runDir = null;
-  if (msg.resume) {
+  if (msg.oneShot) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeron-cursor-oneshot-"));
+    const removeStore = beforeExit;
+    beforeExit = async () => {
+      await removeStore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    };
+    local.store = new JsonlLocalAgentStore(dir);
+  } else if (msg.resume) {
     const found = storeForResume(msg.resume);
     if (found) {
       await claimStore(found);
@@ -660,6 +669,7 @@ async function start(msg) {
     // carries only a request id) — a question would block the run forever.
     // generateImage has nowhere to land in a zeron session (ACP parity).
     disallowedTools: ["askQuestion", "generateImage"],
+    ...(msg.oneShot ? { tools: [] } : {}),
     local,
   };
   try {

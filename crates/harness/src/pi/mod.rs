@@ -345,10 +345,33 @@ impl Harness for PiHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, None).await
+    }
+    async fn run_one_shot(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        instructions: &'static str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(
+            crate::one_shot_request(request),
+            controls,
+            Some(instructions),
+        )
+        .await
+    }
+}
+impl PiHarness {
+    async fn run_with_mode(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        one_shot: Option<&'static str>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let mut request = request;
         let store = sessions::Store::new(self.session_store.clone(), self.agent_dir.clone());
         let mut lost_context = None;
-        let args = match &request.resume {
+        let mut args = match &request.resume {
             Some(id) => match store.resume_args(id, Path::new(&request.cwd)) {
                 Ok(args) => args,
                 // Like every other harness, a session that can no longer be
@@ -365,6 +388,22 @@ impl Harness for PiHarness {
         };
         if lost_context.is_some() {
             request.resume = None;
+        }
+        if let Some(instructions) = one_shot {
+            args.extend(
+                [
+                    "--no-session",
+                    "--system-prompt",
+                    instructions,
+                    "--no-tools",
+                    "--no-mcp",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--no-prompt-templates",
+                    "--no-context-files",
+                ]
+                .map(String::from),
+            );
         }
         let process = self.spawn(Path::new(&request.cwd), &args, request.mcp.as_ref())?;
         let (tx, rx) = mpsc::channel(256);
