@@ -885,7 +885,7 @@ fn column_tone(status: TaskStatus, theme: &Theme) -> (Option<SharedString>, &'st
     }
 }
 
-fn dashed_circle(theme: &Theme) -> AnyElement {
+pub(crate) fn dashed_circle(theme: &Theme) -> AnyElement {
     let color = theme.text_faint;
     gpui::canvas(
         |_, _, _| {},

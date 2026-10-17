@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Timelike, Utc};
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, Hsla, IntoElement, Render, SharedString,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, IntoElement, Render, SharedString,
     Subscription, Task, Window, div, prelude::*, px, relative,
 };
 use zeron_proto::change_request_assessment::{AttentionReason, Facts};
@@ -13,35 +13,52 @@ use zeron_proto::{
 };
 use zeron_rpc::methods;
 
-use crate::composer::{Composer, ComposerInput, ComposerInputEvent};
+use crate::composer::{Composer, ComposerInput, ComposerInputEvent, MentionTab};
 use crate::home::HomePrs;
 use crate::icons::{self, icon};
 use crate::settings::accounts;
 use crate::settings::widgets;
 use crate::state::AppState;
+use crate::tasks::{CardFocus, TaskCard, TaskCardEvent};
 use crate::theme::Theme;
+use crate::typography::ui_rems;
 
-const PAGE_MAX_WIDTH: f32 = 1080.0;
-const CARD_RADIUS: f32 = 14.0;
-const LEFT_COLUMN: f32 = 400.0;
-const ROW_HEIGHT: f32 = 34.0;
+const PAGE_MAX_WIDTH: f32 = 1760.0;
+const TILE_RADIUS: f32 = 16.0;
+const CARD_WIDTH: f32 = 352.0;
+const CHECK_SIZE: f32 = 18.0;
 const TICK: Duration = Duration::from_secs(30);
 const PRS_EVERY: Duration = Duration::from_secs(120);
 const RUNS_EVERY: Duration = Duration::from_secs(60);
-const RUNS_SHOWN: usize = 8;
 const DAY_STARTS_AT_HOUR: u32 = 4;
+const SLOTS: [(&str, u32, u32); 3] = [
+    ("Morning", DAY_STARTS_AT_HOUR, 12),
+    ("Afternoon", 12, 18),
+    ("Evening", 18, 24 + DAY_STARTS_AT_HOUR),
+];
+const ADD_PLACEHOLDER: &str = "Add a task for today, or press Tab to hand it to an agent";
 
 pub enum InboxEvent {
     OpenChat(String),
     OpenPullRequests,
     OpenTasks,
-    CreateTask { title: String, due_on: String },
-    SetTaskCompleted { task_id: String, completed: bool },
+    CreateTask {
+        task_id: String,
+        title: String,
+        due_on: String,
+    },
+    SetTaskCompleted {
+        task_id: String,
+        completed: bool,
+    },
+    Card(TaskCardEvent),
 }
 
 pub struct InboxPage {
     state: Entity<AppState>,
     add_input: Entity<ComposerInput>,
+    card: Entity<TaskCard>,
+    open_first_card: bool,
     accounts: Option<AgentAccountsSnapshot>,
     asks: HashMap<String, bool>,
     prs: Option<HomePrs>,
@@ -50,6 +67,7 @@ pub struct InboxPage {
     projects_seen: Vec<String>,
     runs: Option<Result<TodayRuns, String>>,
     runs_fetched: Option<Instant>,
+    runs_updated: Option<DateTime<Local>>,
     runs_task: Option<Task<()>>,
     working_seen: usize,
     last_render: Option<Instant>,
@@ -66,10 +84,10 @@ impl InboxPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let add_input = cx.new(|cx| {
-            ComposerInput::new("Add a task for today…", cx)
+            ComposerInput::new(ADD_PLACEHOLDER, cx)
                 .with_single_line()
                 .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS)
-                .with_text_metrics(13.0, 18.0)
+                .with_text_metrics(13.5, 18.0)
                 .with_accessibility_role(gpui::Role::TextInput)
         });
         let ticker = cx.spawn(async move |this, cx| {
@@ -80,19 +98,17 @@ impl InboxPage {
                 }
             }
         });
+        let card = cx.new(|cx| TaskCard::new(state.clone(), cx));
         let subscriptions = vec![
-            cx.subscribe(&add_input, |_, input, event, cx| {
+            cx.subscribe(&add_input, |page, _, event, cx| {
                 if matches!(event, ComposerInputEvent::Submitted) {
-                    let title = input.read(cx).text().trim().to_owned();
-                    if !title.is_empty() {
-                        cx.emit(InboxEvent::CreateTask {
-                            title,
-                            due_on: Local::now().date_naive().format("%Y-%m-%d").to_string(),
-                        });
-                        input.update(cx, |input, cx| input.set_text("", cx));
-                    }
+                    page.submit_add(None, cx);
                 }
             }),
+            cx.subscribe(&card, |_, _, event: &TaskCardEvent, cx| {
+                cx.emit(InboxEvent::Card(event.clone()))
+            }),
+            cx.observe(&card, |_, _, cx| cx.notify()),
             cx.observe(&composer, |this, composer, cx| {
                 let asks = composer.read(cx).ask_kinds();
                 if asks != this.asks {
@@ -103,9 +119,11 @@ impl InboxPage {
             cx.observe(&state, |this, _, cx| this.on_state_changed(cx)),
         ];
         let asks = composer.read(cx).ask_kinds();
-        Self {
+        let mut page = Self {
             state,
             add_input,
+            card,
+            open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
             accounts: None,
             asks,
             prs: None,
@@ -114,12 +132,19 @@ impl InboxPage {
             projects_seen: Vec::new(),
             runs: None,
             runs_fetched: None,
+            runs_updated: None,
             runs_task: None,
             working_seen: 0,
             last_render: None,
             _ticker: ticker,
             _subscriptions: subscriptions,
-        }
+        };
+        page.open_knob_card(cx);
+        page
+    }
+
+    pub fn card(&self) -> &Entity<TaskCard> {
+        &self.card
     }
 
     pub fn set_accounts(
@@ -130,6 +155,58 @@ impl InboxPage {
         if self.accounts != accounts {
             self.accounts = accounts;
             cx.notify();
+        }
+    }
+
+    fn submit_add(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) -> bool {
+        let title = self.add_input.read(cx).text().trim().to_owned();
+        if title.is_empty() {
+            return false;
+        }
+        self.add_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        let task_id = uuid::Uuid::new_v4().to_string();
+        cx.emit(InboxEvent::CreateTask {
+            task_id: task_id.clone(),
+            title: title.clone(),
+            due_on: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+        });
+        if window.is_some() {
+            self.card.update(cx, |card, cx| {
+                card.open(task_id, Some(title), CardFocus::Agent, window, cx)
+            });
+        }
+        true
+    }
+
+    fn open_task(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.card.update(cx, |card, cx| {
+            card.open(task_id, None, CardFocus::Title, Some(window), cx)
+        });
+    }
+
+    fn open_knob_card(&mut self, cx: &mut Context<Self>) {
+        if !self.open_first_card {
+            return;
+        }
+        let now = Local::now();
+        let first = {
+            let state = self.state.read(cx);
+            today_tasks(
+                &state.tasks,
+                &state.chats,
+                now.date_naive(),
+                local_midnight(now).with_timezone(&Utc),
+            )
+            .into_iter()
+            .find(|task| task.completed_at.is_none())
+            .map(|task| task.id.clone())
+        };
+        if let Some(id) = first {
+            self.open_first_card = false;
+            self.card.update(cx, |card, cx| {
+                card.open(id, None, CardFocus::Title, None, cx)
+            });
         }
     }
 
@@ -146,6 +223,7 @@ impl InboxPage {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        self.open_knob_card(cx);
         let working = self
             .state
             .read(cx)
@@ -204,7 +282,7 @@ impl InboxPage {
             return;
         };
         let request = TodayRunsRequest {
-            since_ms: local_midnight(Local::now()).timestamp_millis(),
+            since_ms: work_day_start(Local::now()).timestamp_millis(),
         };
         let params = serde_json::to_value(request).unwrap_or_default();
         self.runs_task = Some(cx.spawn(async move |this, cx| {
@@ -216,6 +294,9 @@ impl InboxPage {
             this.update(cx, |this, cx| {
                 this.runs_task = None;
                 this.runs_fetched = Some(Instant::now());
+                if result.is_ok() {
+                    this.runs_updated = Some(Local::now());
+                }
                 this.runs = Some(result);
                 cx.notify();
             })
@@ -228,6 +309,16 @@ pub(crate) fn work_day(now: DateTime<Local>) -> NaiveDate {
     (now - chrono::Duration::hours(i64::from(DAY_STARTS_AT_HOUR))).date_naive()
 }
 
+fn local_at(day: NaiveDate, hour: u32) -> Option<DateTime<Local>> {
+    let date = day.checked_add_days(chrono::Days::new(u64::from(hour / 24)))?;
+    let at = date.and_hms_opt(hour % 24, 0, 0)?;
+    Local.from_local_datetime(&at).earliest()
+}
+
+fn work_day_start(now: DateTime<Local>) -> DateTime<Local> {
+    local_at(work_day(now), DAY_STARTS_AT_HOUR).unwrap_or(now)
+}
+
 pub(crate) fn greeting(now: DateTime<Local>) -> &'static str {
     match now.hour() {
         h if (DAY_STARTS_AT_HOUR..12).contains(&h) => "Good morning",
@@ -236,14 +327,23 @@ pub(crate) fn greeting(now: DateTime<Local>) -> &'static str {
     }
 }
 
-pub(crate) fn header_line(now: DateTime<Local>, needs: usize) -> String {
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+pub(crate) fn header_line(now: DateTime<Local>, needs: usize, open_tasks: usize) -> String {
     let date = work_day(now).format("%A, %B %-d");
-    let needs = match needs {
-        0 => "Nothing needs you.".to_owned(),
-        1 => "1 thing needs you.".to_owned(),
-        n => format!("{n} things need you."),
+    let tasks = match open_tasks {
+        0 => String::new(),
+        n => format!(" {} to do.", plural(n, "task", "tasks")),
     };
-    format!("{}. {date}. {needs}", greeting(now))
+    let rest = match (needs, open_tasks) {
+        (0, 0) => " You’re all caught up.".to_owned(),
+        (0, _) => tasks,
+        (1, _) => format!(" 1 thing needs you.{tasks}"),
+        (n, _) => format!(" {n} things need you.{tasks}"),
+    };
+    format!("{}. {date}.{rest}", greeting(now))
 }
 
 fn local_midnight(now: DateTime<Local>) -> DateTime<Local> {
@@ -352,125 +452,242 @@ pub(crate) fn tightest_window(
         .max_by(|a, b| a.1.used_fraction.total_cmp(&b.1.used_fraction))
 }
 
-fn run_duration(ms: i64) -> String {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Slot {
+    label: &'static str,
+    now: bool,
+    prompts: usize,
+    work_ms: i64,
+    hours: Vec<(usize, bool)>,
+}
+
+pub(crate) fn day_slots(runs: &[TodayRun], now: DateTime<Local>) -> Vec<Slot> {
+    let day = work_day(now);
+    let now_ms = now.timestamp_millis();
+    SLOTS
+        .iter()
+        .filter_map(|&(label, from, to)| {
+            let start = local_at(day, from)?.timestamp_millis();
+            let end = local_at(day, to)?.timestamp_millis();
+            if start > now_ms {
+                return None;
+            }
+            let inside: Vec<&TodayRun> = runs
+                .iter()
+                .filter(|run| (start..end).contains(&run.started_at_ms))
+                .collect();
+            let hours = (from..to)
+                .filter_map(|hour| {
+                    let at = local_at(day, hour)?.timestamp_millis();
+                    let count = inside
+                        .iter()
+                        .filter(|run| (at..at + 3_600_000).contains(&run.started_at_ms))
+                        .count();
+                    Some((count, at > now_ms))
+                })
+                .collect();
+            let slot = Slot {
+                label,
+                now: now_ms < end,
+                prompts: inside.len(),
+                work_ms: inside.iter().map(|run| run_work_ms(run, now_ms)).sum(),
+                hours,
+            };
+            (slot.now || slot.prompts > 0).then_some(slot)
+        })
+        .collect()
+}
+
+fn run_work_ms(run: &TodayRun, now_ms: i64) -> i64 {
+    match (run.status, run.duration_ms) {
+        (_, Some(ms)) => ms.max(0),
+        (TodayRunStatus::Running, None) => (now_ms - run.started_at_ms).max(0),
+        _ => 0,
+    }
+}
+
+fn clock_duration(ms: i64) -> String {
     let seconds = (ms / 1000).max(1);
     match seconds {
         s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
-        s => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => match (s % 3600) / 60 {
+            0 => format!("{}h", s / 3600),
+            m => format!("{}h {m}m", s / 3600),
+        },
     }
 }
 
-fn card_fill(theme: &Theme) -> Hsla {
-    if theme.is_frost() {
-        theme.wash(0.045)
-    } else {
-        theme.surface_card
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Part {
+    Text(String),
+    Strong(String),
+    Bad(String),
 }
 
-fn card(
+pub(crate) fn digest(
+    runs: &[TodayRun],
+    slots: &[Slot],
+    open: usize,
+    done: usize,
+    overdue: usize,
+) -> Vec<Vec<Part>> {
+    let text = |s: &str| Part::Text(s.to_owned());
+    let mut sentences = Vec::new();
+    if !runs.is_empty() {
+        let chats: HashSet<&str> = runs.iter().map(|run| run.chat_id.as_str()).collect();
+        sentences.push(vec![
+            text("You sent "),
+            Part::Strong(plural(runs.len(), "prompt", "prompts")),
+            text(" across "),
+            Part::Strong(plural(chats.len(), "chat", "chats")),
+            text("."),
+        ]);
+    }
+    let work: i64 = slots.iter().map(|slot| slot.work_ms).sum();
+    if work >= 1_000 {
+        let mut parts = vec![
+            text("Your agents ran for "),
+            Part::Strong(clock_duration(work)),
+        ];
+        if slots.len() > 1
+            && let Some(busiest) = slots.iter().max_by_key(|slot| slot.work_ms)
+        {
+            parts.push(Part::Text(format!(
+                ", mostly in the {}",
+                busiest.label.to_lowercase()
+            )));
+        }
+        parts.push(text("."));
+        sentences.push(parts);
+    }
+    if open > 0 || done > 0 {
+        let mut parts = if open == 0 {
+            vec![
+                text(if done == 1 {
+                    "You finished your "
+                } else {
+                    "You finished all "
+                }),
+                Part::Strong(plural(done, "task", "tasks")),
+                text(" for today"),
+            ]
+        } else if done > 0 {
+            vec![
+                text("You finished "),
+                Part::Strong(plural(done, "task", "tasks")),
+                text(" today, "),
+                Part::Strong(format!("{open} to go")),
+            ]
+        } else {
+            vec![
+                text("You have "),
+                Part::Strong(plural(open, "task", "tasks")),
+                text(" to do today"),
+            ]
+        };
+        if overdue > 0 && open > 0 {
+            parts.push(text(", "));
+            parts.push(Part::Bad(format!("{overdue} overdue")));
+        }
+        parts.push(text("."));
+        sentences.push(parts);
+    }
+    sentences
+}
+
+fn tile(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .w_full()
+        .min_w_0()
+        .rounded(px(TILE_RADIUS))
+        .bg(if theme.is_frost() {
+            theme.wash(0.045)
+        } else {
+            theme.surface_card
+        })
+}
+
+fn group_heading(
     theme: &Theme,
-    id: &'static str,
-    title: &str,
-    count: Option<usize>,
-    accessory: Option<AnyElement>,
-) -> gpui::Stateful<gpui::Div> {
+    label: &str,
+    count: usize,
+    action: Option<AnyElement>,
+) -> gpui::Div {
+    div()
+        .h(px(28.0))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .text_size(ui_rems(12.5))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(label.to_owned()))
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(count.to_string())),
+                ),
+        )
+        .children(action)
+}
+
+fn task_row(theme: &Theme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    let hover = theme.wash(0.06);
     div()
         .id(id)
         .w_full()
+        .min_w_0()
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(12.0))
         .flex()
-        .flex_col()
-        .rounded(px(CARD_RADIUS))
-        .border_1()
-        .border_color(theme.border)
-        .bg(card_fill(theme))
-        .p(px(6.0))
-        .child(
-            div()
-                .h(px(32.0))
-                .px(px(10.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(SharedString::from(title.to_owned())),
-                )
-                .when_some(count, |el, count| {
-                    el.child(
-                        div()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(count.to_string())),
-                    )
-                })
-                .when_some(accessory, |el, accessory| {
-                    el.child(div().flex_1()).child(accessory)
-                }),
-        )
-}
-
-fn row_base(theme: &Theme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .min_h(px(ROW_HEIGHT))
-        .px(px(10.0))
-        .py(px(6.0))
-        .rounded(px(9.0))
-        .flex()
-        .flex_row()
-        .items_center()
+        .items_start()
         .gap(px(10.0))
-        .text_size(crate::typography::ui_rems(13.0))
-        .hover(|style| style.bg(theme.element_hover))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
 }
 
-fn row_text(theme: &Theme, title: String, meta: Option<String>) -> gpui::Div {
+fn row_text(theme: &Theme, title: String, meta: String) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
         .flex()
         .flex_col()
+        .gap(px(2.0))
         .child(
             div()
                 .truncate()
+                .text_size(ui_rems(13.5))
+                .line_height(ui_rems(20.0))
                 .text_color(theme.text)
                 .child(SharedString::from(title)),
         )
-        .when_some(meta, |el, meta| {
-            el.child(
-                div()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(meta)),
-            )
-        })
+        .child(
+            div()
+                .truncate()
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(meta)),
+        )
 }
 
-fn brand_mark(theme: &Theme, harness: Option<HarnessId>) -> AnyElement {
+fn brand_mark(theme: &Theme, harness: Option<HarnessId>, size: f32) -> AnyElement {
     let (mark, tint) = harness
         .map(crate::pickers::harness_brand_icon)
         .unwrap_or((icons::CHAT_ROUND_LINE, None));
     icon(mark)
-        .size(px(14.0))
+        .size(px(size))
         .flex_none()
         .text_color(tint.unwrap_or(theme.text_muted))
-        .into_any_element()
-}
-
-fn empty_copy(theme: &Theme, copy: &str) -> AnyElement {
-    div()
-        .px(px(10.0))
-        .pt(px(2.0))
-        .pb(px(10.0))
-        .text_size(crate::typography::ui_rems(12.5))
-        .text_color(theme.text_faint)
-        .child(SharedString::from(copy.to_owned()))
         .into_any_element()
 }
 
@@ -485,10 +702,14 @@ impl InboxPage {
         chats: &[Chat],
         prs: &[(&ChangeRequestListItem, Vec<AttentionReason>)],
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let state = self.state.read(cx);
+    ) -> Option<AnyElement> {
         let total = chats.len() + prs.len();
-        let mut body: Vec<AnyElement> = chats
+        if total == 0 {
+            return None;
+        }
+        let (_, _, attention) = crate::shell::chat_status_tone(ChatIndicator::AwaitingInput, theme);
+        let state = self.state.read(cx);
+        let mut rows: Vec<AnyElement> = chats
             .iter()
             .map(|chat| {
                 let project = chat
@@ -506,19 +727,23 @@ impl InboxPage {
                     None => ask.to_owned(),
                 };
                 let chat_id = chat.id.clone();
-                row_base(
+                task_row(
                     theme,
                     SharedString::from(format!("inbox-needs-{}", chat.id)),
                 )
-                .cursor_pointer()
-                .child(brand_mark(theme, chat.config.as_ref().map(|c| c.harness)))
-                .child(row_text(theme, chat_title(chat), Some(meta)))
                 .child(
-                    icon(icons::ALT_ARROW_RIGHT)
-                        .size(px(12.0))
-                        .flex_none()
-                        .text_color(theme.text_faint),
+                    div().mt(px(2.0)).child(
+                        icon(icons::LUCIDE_CIRCLE_ALERT)
+                            .size(px(16.0))
+                            .text_color(attention),
+                    ),
                 )
+                .child(row_text(theme, chat_title(chat), meta))
+                .child(div().mt(px(3.0)).child(brand_mark(
+                    theme,
+                    chat.config.as_ref().map(|c| c.harness),
+                    14.0,
+                )))
                 .on_click(
                     cx.listener(move |_, _, _, cx| cx.emit(InboxEvent::OpenChat(chat_id.clone()))),
                 )
@@ -526,36 +751,46 @@ impl InboxPage {
             })
             .collect();
         if !prs.is_empty() {
-            let title = match prs.len() {
-                1 => "1 pull request needs you".to_owned(),
-                n => format!("{n} pull requests need you"),
+            let reviews = prs
+                .iter()
+                .all(|(_, why)| why.contains(&AttentionReason::ReviewRequested));
+            let count = plural(prs.len(), "pull request", "pull requests");
+            let title = if reviews {
+                format!("{count} to review")
+            } else if prs.len() == 1 {
+                format!("{count} needs you")
+            } else {
+                format!("{count} need you")
             };
-            body.push(
-                row_base(theme, "inbox-needs-prs")
-                    .cursor_pointer()
+            let meta = if reviews {
+                "GitHub".to_owned()
+            } else {
+                format!("GitHub, {}", attention_breakdown(prs))
+            };
+            rows.push(
+                task_row(theme, "inbox-needs-prs")
                     .child(
-                        icon(icons::LUCIDE_GIT_PULL_REQUEST)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(theme.text_muted),
+                        div().mt(px(2.0)).child(
+                            icon(icons::LUCIDE_GIT_PULL_REQUEST)
+                                .size(px(16.0))
+                                .text_color(attention),
+                        ),
                     )
-                    .child(row_text(theme, title, Some(attention_breakdown(prs))))
-                    .child(
-                        icon(icons::ALT_ARROW_RIGHT)
-                            .size(px(12.0))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    )
+                    .child(row_text(theme, title, meta))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(InboxEvent::OpenPullRequests)))
                     .into_any_element(),
             );
         }
-        if body.is_empty() {
-            body.push(empty_copy(theme, "Nothing needs you right now."));
-        }
-        card(theme, "inbox-needs-you", "Needs you", Some(total), None)
-            .children(body)
-            .into_any_element()
+        Some(
+            tile(theme, "inbox-needs-you")
+                .px(px(8.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .child(group_heading(theme, "Needs you", total, None))
+                .children(rows)
+                .into_any_element(),
+        )
     }
 
     fn render_tasks(
@@ -567,6 +802,7 @@ impl InboxPage {
         let day_start = local_midnight(now).with_timezone(&Utc);
         let today = now.date_naive();
         let today_key = today.format("%Y-%m-%d").to_string();
+        let selected = self.card.read(cx).task_id().map(str::to_owned);
         let state = self.state.read(cx);
         let tasks = today_tasks(&state.tasks, &state.chats, today, day_start);
         let open = tasks
@@ -588,27 +824,35 @@ impl InboxPage {
                         None => None,
                     }
                 };
+                let overdue = meta.as_deref() == Some("Overdue");
                 let task_id = task.id.clone();
+                let accent = theme.accent;
                 let check = div()
                     .id(SharedString::from(format!("inbox-task-check-{}", task.id)))
-                    .size(px(16.0))
+                    .role(gpui::Role::CheckBox)
+                    .aria_label(if done {
+                        "Mark as not done"
+                    } else {
+                        "Mark as done"
+                    })
+                    .size(px(CHECK_SIZE))
                     .flex_none()
                     .rounded_full()
-                    .border_1()
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
                     .map(|el| {
                         if done {
-                            el.border_color(theme.accent).bg(theme.accent).child(
+                            el.bg(accent).child(
                                 icon(icons::CHECK)
-                                    .size(px(10.0))
+                                    .size(px(12.0))
                                     .text_color(theme.on_accent),
                             )
                         } else {
-                            el.border_color(theme.text_faint)
-                                .hover(|style| style.border_color(theme.text_muted))
+                            el.border_1()
+                                .border_color(theme.text_muted)
+                                .hover(move |s| s.border_color(accent).bg(accent.opacity(0.12)))
                         }
                     })
                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -618,122 +862,283 @@ impl InboxPage {
                             completed: !done,
                         })
                     }));
-                row_base(theme, SharedString::from(format!("inbox-task-{}", task.id)))
-                    .when(done, |el| el.opacity(0.55))
-                    .child(check)
-                    .child(row_text(theme, task.title.clone(), meta))
-                    .into_any_element()
-            })
-            .collect();
-        let add = div()
-            .mx(px(4.0))
-            .mt(px(2.0))
-            .h(px(ROW_HEIGHT))
-            .px(px(6.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .child(
-                icon(icons::PLUS)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
-            )
-            .child(div().flex_1().min_w_0().child(self.add_input.clone()));
-        let all_tasks = div()
-            .id("inbox-all-tasks")
-            .debug_selector(|| "inbox-all-tasks".into())
-            .role(gpui::Role::Link)
-            .px(px(6.0))
-            .py(px(2.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text).bg(theme.glass_hover()))
-            .child("All tasks")
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(InboxEvent::OpenTasks)))
-            .into_any_element();
-        card(
-            theme,
-            "inbox-tasks",
-            "Today's tasks",
-            Some(open),
-            Some(all_tasks),
-        )
-        .children(rows)
-        .child(add)
-        .into_any_element()
-    }
-
-    fn render_runs(&self, theme: &Theme, awaiting: &[Chat], cx: &mut Context<Self>) -> AnyElement {
-        let runs: &[TodayRun] = match &self.runs {
-            Some(Ok(runs)) => &runs.runs,
-            _ => &[],
-        };
-        let mut body: Vec<AnyElement> = runs
-            .iter()
-            .take(RUNS_SHOWN)
-            .enumerate()
-            .map(|(index, run)| {
-                let started = chrono::DateTime::from_timestamp_millis(run.started_at_ms)
-                    .map(|at| at.with_timezone(&Local).format("%-I:%M %p").to_string())
-                    .unwrap_or_default();
-                let outcome = match (run.status, run.duration_ms) {
-                    (TodayRunStatus::Running, _)
-                        if awaiting.iter().any(|chat| chat.id == run.chat_id) =>
-                    {
-                        "Waiting for you".to_owned()
-                    }
-                    (TodayRunStatus::Running, _) => "Working…".to_owned(),
-                    (TodayRunStatus::Aborted, Some(ms)) => {
-                        format!("Stopped after {}", run_duration(ms))
-                    }
-                    (TodayRunStatus::Aborted, None) => "Stopped".to_owned(),
-                    (_, Some(ms)) => format!("Worked for {}", run_duration(ms)),
-                    (_, None) => "Finished".to_owned(),
-                };
-                let title = run
-                    .title
-                    .as_deref()
-                    .map(crate::transcript::single_line)
-                    .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| "New session".to_owned());
-                let chat_id = run.chat_id.clone();
-                row_base(theme, ("inbox-run", index))
+                let open_id = task.id.clone();
+                let is_selected = selected.as_deref() == Some(task.id.as_str());
+                div()
+                    .id(SharedString::from(format!("inbox-task-{}", task.id)))
+                    .debug_selector(|| format!("inbox-task-{}", task.id))
+                    .role(gpui::Role::ListItem)
+                    .min_h(px(42.0))
+                    .px(px(12.0))
+                    .rounded(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
                     .cursor_pointer()
-                    .child(brand_mark(theme, run.harness))
-                    .child(row_text(theme, title, Some(outcome)))
+                    .when(is_selected, |el| el.bg(theme.wash(0.08)))
+                    .when(!is_selected, |el| el.hover(|s| s.bg(theme.wash(0.06))))
+                    .when(done, |el| el.opacity(0.8))
+                    .child(check)
                     .child(
                         div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(started)),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(ui_rems(13.5))
+                                    .text_color(if done { theme.text_muted } else { theme.text })
+                                    .when(done, |el| el.line_through())
+                                    .child(SharedString::from(task.title.clone())),
+                            )
+                            .children(meta.map(|meta| {
+                                div()
+                                    .flex_none()
+                                    .max_w(relative(0.5))
+                                    .truncate()
+                                    .text_size(ui_rems(12.5))
+                                    .text_color(if overdue {
+                                        theme.danger
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .child(SharedString::from(meta))
+                            })),
                     )
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(InboxEvent::OpenChat(chat_id.clone()))
+                    .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
+                        page.open_task(open_id.clone(), window, cx)
                     }))
                     .into_any_element()
             })
             .collect();
-        if runs.len() > RUNS_SHOWN {
-            body.push(empty_copy(
-                theme,
-                &format!("{} more earlier today", runs.len() - RUNS_SHOWN),
-            ));
-        }
-        if body.is_empty() {
+        let add = div()
+            .id("inbox-add-task")
+            .debug_selector(|| "inbox-add-task".into())
+            .min_h(px(42.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .capture_action(cx.listener(|page, _: &MentionTab, window, cx| {
+                if page.submit_add(Some(window), cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .child(crate::tasks::dashed_circle(theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(ui_rems(13.5))
+                    .child(self.add_input.clone()),
+            );
+        let all_tasks = div()
+            .id("inbox-all-tasks")
+            .debug_selector(|| "inbox-all-tasks".into())
+            .role(gpui::Role::Link)
+            .cursor_pointer()
+            .text_size(ui_rems(12.5))
+            .text_color(theme.text_muted)
+            .hover(|s| s.text_color(theme.text))
+            .child("All tasks")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(InboxEvent::OpenTasks)))
+            .into_any_element();
+        tile(theme, "inbox-tasks")
+            .px(px(8.0))
+            .py(px(12.0))
+            .flex()
+            .flex_col()
+            .child(group_heading(theme, "Today’s tasks", open, Some(all_tasks)))
+            .child(div().flex().flex_col().gap(px(2.0)).children(rows))
+            .child(add)
+            .into_any_element()
+    }
+
+    fn render_day(
+        &self,
+        theme: &Theme,
+        now: DateTime<Local>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let runs: &[TodayRun] = match &self.runs {
+            Some(Ok(runs)) => &runs.runs,
+            _ => &[],
+        };
+        let slots = day_slots(runs, now);
+        let (open, done, overdue) = {
+            let state = self.state.read(cx);
+            let today_key = now.date_naive().format("%Y-%m-%d").to_string();
+            let tasks = today_tasks(
+                &state.tasks,
+                &state.chats,
+                now.date_naive(),
+                local_midnight(now).with_timezone(&Utc),
+            );
+            let open: Vec<_> = tasks.iter().filter(|t| t.completed_at.is_none()).collect();
+            let overdue = open
+                .iter()
+                .filter(|t| {
+                    t.due_on
+                        .as_deref()
+                        .is_some_and(|due| due < today_key.as_str())
+                })
+                .count();
+            (open.len(), tasks.len() - open.len(), overdue)
+        };
+        let sentences = digest(runs, &slots, open, done, overdue);
+        let heading = div()
+            .flex()
+            .items_baseline()
+            .justify_between()
+            .gap(px(12.0))
+            .text_size(ui_rems(12.5))
+            .text_color(theme.text_muted)
+            .child("Your day so far")
+            .children(self.runs_updated.map(|at| {
+                div().opacity(0.8).child(SharedString::from(format!(
+                    "Updated {}",
+                    at.format("%I:%M %p")
+                )))
+            }));
+        let body = if sentences.is_empty() {
             let copy = match &self.runs {
-                Some(Err(_)) => "Today's runs did not load.",
+                Some(Err(_)) => "Today’s runs did not load.",
                 _ => "Nothing ran yet today. This fills in as your agents work.",
             };
-            body.push(empty_copy(theme, copy));
-        }
-        let count = (!runs.is_empty()).then_some(runs.len());
-        card(theme, "inbox-today", "Today", count, None)
-            .children(body)
+            div()
+                .text_size(ui_rems(16.0))
+                .text_color(theme.text_muted)
+                .child(copy)
+        } else {
+            let mut text = String::new();
+            let mut highlights = Vec::new();
+            for (ix, parts) in sentences.into_iter().enumerate() {
+                if ix > 0 {
+                    text.push(' ');
+                }
+                for part in parts {
+                    let (run, color) = match part {
+                        Part::Text(run) => (run, None),
+                        Part::Strong(run) => (run, Some(theme.text)),
+                        Part::Bad(run) => (run, Some(theme.danger)),
+                    };
+                    let start = text.len();
+                    text.push_str(&run);
+                    if let Some(color) = color {
+                        highlights.push((
+                            start..text.len(),
+                            gpui::HighlightStyle {
+                                color: Some(color),
+                                font_weight: Some(gpui::FontWeight::MEDIUM),
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                }
+            }
+            div()
+                .debug_selector(|| "inbox-digest".into())
+                .text_size(ui_rems(20.0))
+                .line_height(ui_rems(32.0))
+                .text_color(theme.text_muted)
+                .child(gpui::StyledText::new(text).with_highlights(highlights))
+        };
+        let max = slots
+            .iter()
+            .flat_map(|slot| slot.hours.iter().map(|(count, _)| *count))
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let columns: Vec<AnyElement> = slots
+            .iter()
+            .map(|slot| {
+                let bars = slot.hours.iter().map(|&(count, future)| {
+                    let fill = if future || count == 0 {
+                        theme.wash(0.08)
+                    } else if slot.now {
+                        theme.text
+                    } else {
+                        theme.text_muted.opacity(0.45)
+                    };
+                    div()
+                        .flex_1()
+                        .max_w(px(8.0))
+                        .min_h(px(3.0))
+                        .h(relative(count as f32 / max as f32))
+                        .rounded(px(2.0))
+                        .bg(fill)
+                });
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .text_size(ui_rems(12.5))
+                            .text_color(theme.text_muted)
+                            .child(div().flex().child(slot.label).when(slot.now, |el| {
+                                el.child(div().text_color(theme.text).child(", now"))
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(4.0))
+                                    .child(
+                                        div()
+                                            .when(slot.now, |el| {
+                                                el.font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(theme.text)
+                                            })
+                                            .child(SharedString::from(slot.prompts.to_string())),
+                                    )
+                                    .child(if slot.prompts == 1 {
+                                        "prompt"
+                                    } else {
+                                        "prompts"
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(28.0))
+                            .flex()
+                            .items_end()
+                            .justify_between()
+                            .gap(px(3.0))
+                            .children(bars),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        tile(theme, "inbox-day")
+            .px(px(28.0))
+            .py(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .child(heading)
+            .child(body)
+            .when(!columns.is_empty(), |el| {
+                el.child(
+                    div()
+                        .pt(px(16.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .flex()
+                        .gap(px(28.0))
+                        .children(columns),
+                )
+            })
             .into_any_element()
     }
 
@@ -753,31 +1158,30 @@ impl InboxPage {
             window.label.to_lowercase()
         );
         Some(
-            div()
-                .id("inbox-usage")
-                .w_full()
-                .rounded(px(CARD_RADIUS))
-                .border_1()
-                .border_color(theme.border)
-                .bg(card_fill(theme))
+            tile(theme, "inbox-usage")
+                .min_h(px(112.0))
                 .px(px(16.0))
                 .py(px(14.0))
                 .flex()
                 .flex_col()
-                .gap(px(10.0))
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(ui_rems(12.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(lead)),
+                )
                 .child(
                     div()
                         .flex()
-                        .flex_row()
                         .items_center()
                         .gap(px(8.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .child(brand_mark(theme, Some(harness)))
-                        .child(div().flex_1().truncate().child(SharedString::from(lead)))
+                        .child(brand_mark(theme, Some(harness), 18.0))
                         .child(
                             div()
-                                .text_size(crate::typography::ui_rems(20.0))
+                                .text_size(ui_rems(20.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(SharedString::from(format!(
@@ -788,23 +1192,31 @@ impl InboxPage {
                 )
                 .child(
                     div()
-                        .h(px(6.0))
-                        .w_full()
-                        .rounded_full()
-                        .bg(theme.wash(0.08))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
                         .child(
                             div()
-                                .h_full()
-                                .w(relative(remaining))
+                                .flex_none()
+                                .w(px(56.0))
+                                .h(px(4.0))
                                 .rounded_full()
-                                .bg(fill.opacity(0.85)),
+                                .bg(theme.wash(0.08))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(remaining))
+                                        .rounded_full()
+                                        .bg(fill),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(ui_rems(12.5))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(detail)),
                         ),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(detail)),
                 )
                 .into_any_element(),
         )
@@ -826,32 +1238,53 @@ impl Render for InboxPage {
             .collect();
         let prs = self.prs.as_ref().map(attention_prs).unwrap_or_default();
         let needs = chats.len() + prs.len();
+        let open_tasks = {
+            let state = self.state.read(cx);
+            today_tasks(
+                &state.tasks,
+                &state.chats,
+                now.date_naive(),
+                local_midnight(now).with_timezone(&Utc),
+            )
+            .iter()
+            .filter(|task| task.completed_at.is_none())
+            .count()
+        };
         let header = div()
-            .px(px(4.0))
             .flex()
-            .flex_col()
-            .gap(px(6.0))
+            .flex_wrap()
+            .items_baseline()
+            .gap_x(px(12.0))
+            .gap_y(px(4.0))
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(28.0))
-                    .line_height(crate::typography::ui_rems(34.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_size(ui_rems(30.0))
+                    .line_height(ui_rems(36.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child("Inbox"),
             )
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(14.0))
+                    .debug_selector(|| "inbox-greeting".into())
+                    .text_size(ui_rems(15.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(header_line(now, needs))),
+                    .child(SharedString::from(header_line(now, needs, open_tasks))),
             );
         let needs_card = self.render_needs_you(&theme, &chats, &prs, cx);
         let tasks_card = self.render_tasks(&theme, now, cx);
-        let runs_card = self.render_runs(&theme, &chats, cx);
+        let day_card = self.render_day(&theme, now, cx);
         let usage_card = self.render_usage(&theme);
-        let column = widgets::page_column()
+        let column = div()
+            .w_full()
             .max_w(px(PAGE_MAX_WIDTH))
-            .gap(px(24.0))
+            .mx_auto()
+            .px(px(40.0))
+            .pt(px(Theme::TITLEBAR_HEIGHT + 28.0))
+            .pb(px(48.0))
+            .flex()
+            .flex_col()
+            .gap(px(28.0))
             .child(header)
             .child(
                 div()
@@ -863,35 +1296,62 @@ impl Render for InboxPage {
                     .gap(px(16.0))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(300.0))
-                            .max_w(px(LEFT_COLUMN))
+                            .flex_grow(1.0)
+                            .flex_basis(px(300.0))
                             .flex()
                             .flex_col()
                             .gap(px(16.0))
-                            .child(needs_card)
+                            .children(needs_card)
                             .child(tasks_card),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(320.0))
+                            .flex_grow(2.0)
+                            .flex_basis(px(600.0))
+                            .min_w(px(360.0))
                             .flex()
                             .flex_col()
                             .gap(px(16.0))
-                            .child(runs_card)
+                            .child(day_card)
                             .children(usage_card),
                     ),
             );
-        widgets::scroll_faded(
-            "inbox-page-scroll",
+        let card = self.card.read(cx).is_open().then(|| {
             div()
-                .id("inbox-page")
-                .debug_selector(|| "inbox-page".into())
-                .size_full()
-                .overflow_y_scroll()
-                .child(column),
-        )
+                .absolute()
+                .top(px(Theme::TITLEBAR_HEIGHT + 16.0))
+                .right(px(16.0))
+                .bottom(px(16.0))
+                .w(px(CARD_WIDTH))
+                .flex()
+                .flex_col()
+                .occlude()
+                .child(crate::frost::frosted(
+                    24.0,
+                    crate::frost::MENU_BLUR,
+                    self.card.clone(),
+                ))
+        });
+        div()
+            .id("inbox-root")
+            .relative()
+            .size_full()
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
+                    cx.stop_propagation();
+                    page.card.update(cx, |card, cx| card.close(cx));
+                }
+            }))
+            .child(widgets::scroll_faded(
+                "inbox-page-scroll",
+                div()
+                    .id("inbox-page")
+                    .debug_selector(|| "inbox-page".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(column),
+            ))
+            .children(card)
     }
 }
 
@@ -912,16 +1372,71 @@ mod tests {
         assert_eq!(greeting(local(2026, 10, 16, 17, 59)), "Good afternoon");
         assert_eq!(greeting(local(2026, 10, 16, 18, 0)), "Good evening");
         assert_eq!(
-            header_line(local(2026, 10, 17, 2, 30), 0),
-            "Good evening. Friday, October 16. Nothing needs you."
+            header_line(local(2026, 10, 17, 2, 30), 0, 0),
+            "Good evening. Friday, October 16. You’re all caught up."
         );
         assert_eq!(
-            header_line(local(2026, 10, 17, 9, 0), 1),
+            header_line(local(2026, 10, 17, 9, 0), 1, 0),
             "Good morning. Saturday, October 17. 1 thing needs you."
         );
         assert_eq!(
-            header_line(local(2026, 10, 17, 13, 0), 3),
-            "Good afternoon. Saturday, October 17. 3 things need you."
+            header_line(local(2026, 10, 17, 9, 0), 5, 1),
+            "Good morning. Saturday, October 17. 5 things need you. 1 task to do."
+        );
+        assert_eq!(
+            header_line(local(2026, 10, 17, 13, 0), 0, 3),
+            "Good afternoon. Saturday, October 17. 3 tasks to do."
+        );
+    }
+
+    fn run(chat: &str, at: DateTime<Local>, ms: Option<i64>) -> TodayRun {
+        TodayRun {
+            chat_id: chat.into(),
+            title: None,
+            harness: None,
+            started_at_ms: at.timestamp_millis(),
+            duration_ms: ms,
+            status: TodayRunStatus::Complete,
+        }
+    }
+
+    #[test]
+    fn the_day_counts_prompts_per_slot_from_four_am() {
+        let now = local(2026, 10, 17, 14, 30);
+        let runs = vec![
+            run("a", local(2026, 10, 17, 3, 59), Some(60_000)),
+            run("a", local(2026, 10, 17, 9, 10), Some(120_000)),
+            run("b", local(2026, 10, 17, 9, 40), Some(60_000)),
+            run("b", local(2026, 10, 17, 13, 5), Some(30_000)),
+        ];
+        let slots = day_slots(&runs, now);
+        let summary: Vec<(&str, bool, usize)> = slots
+            .iter()
+            .map(|slot| (slot.label, slot.now, slot.prompts))
+            .collect();
+        assert_eq!(summary, [("Morning", false, 2), ("Afternoon", true, 1)]);
+        assert_eq!(slots[0].hours.len(), 8);
+        assert_eq!(slots[0].hours[5], (2, false));
+        assert_eq!(slots[1].hours[1], (1, false));
+        assert_eq!(slots[1].hours[3], (0, true));
+        let sentences = digest(&runs[1..], &slots, 1, 0, 0);
+        assert_eq!(
+            sentences.last().unwrap(),
+            &vec![
+                Part::Text("You have ".into()),
+                Part::Strong("1 task".into()),
+                Part::Text(" to do today".into()),
+                Part::Text(".".into()),
+            ]
+        );
+        assert_eq!(
+            sentences[1],
+            vec![
+                Part::Text("Your agents ran for ".into()),
+                Part::Strong("3m".into()),
+                Part::Text(", mostly in the morning".into()),
+                Part::Text(".".into()),
+            ]
         );
     }
 
