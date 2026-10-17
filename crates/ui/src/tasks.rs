@@ -1,24 +1,24 @@
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, Hsla, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Task, Window,
-    div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use zeron_proto::{ChatIndicator, TaskPatch, TaskStatus, task_status};
 
-use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab, Submit};
+use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
 use crate::settings::{self, TasksView, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::typography::ui_rems;
 
+mod card;
 mod logic;
 
-use logic::{COLUMNS, DuePick};
+pub use card::{TaskCard, TaskCardEvent};
+use logic::COLUMNS;
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
@@ -30,21 +30,15 @@ const START_PENDING: Duration = Duration::from_secs(15);
 
 pub enum TasksEvent {
     Create {
+        task_id: String,
         title: String,
         space_id: Option<String>,
-        open_card: bool,
     },
     Update {
         task_id: String,
         patch: TaskPatch,
     },
-    Delete(String),
-    Start {
-        task_id: String,
-        patch: Option<TaskPatch>,
-    },
-    OpenChat(String),
-    Refused(String),
+    Card(TaskCardEvent),
 }
 
 #[derive(Clone)]
@@ -78,18 +72,6 @@ impl Render for TaskDragGhost {
     }
 }
 
-struct Card {
-    task_id: String,
-    title: Entity<ComposerInput>,
-    notes: Entity<ComposerInput>,
-    saved_title: String,
-    saved_notes: String,
-    refused: bool,
-    seen: bool,
-    save: Option<Task<()>>,
-    _subscriptions: [Subscription; 2],
-}
-
 struct Linked {
     indicator: ChatIndicator,
     brand: (&'static str, Option<Hsla>),
@@ -106,11 +88,9 @@ struct Row {
 pub struct TasksPage {
     state: Entity<AppState>,
     add: Entity<ComposerInput>,
-    card: Option<Card>,
-    project_select: widgets::SelectState,
+    card: Entity<TaskCard>,
     done_open: bool,
     open_first_card: bool,
-    starting: HashMap<String, Instant>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -132,13 +112,18 @@ impl TasksPage {
         });
         let add_events = cx.subscribe(&add, |page, _, event: &ComposerInputEvent, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
-                page.submit_add(false, cx);
+                page.submit_add(false, None, cx);
             }
         });
         let state_changes = cx.observe(&state, |page, _, cx| {
-            page.sync_card(cx);
+            page.open_knob_card(cx);
             cx.notify();
         });
+        let card = cx.new(|cx| TaskCard::new(state.clone(), cx));
+        let card_events = cx.subscribe(&card, |_, _, event: &TaskCardEvent, cx| {
+            cx.emit(TasksEvent::Card(event.clone()))
+        });
+        let card_changes = cx.observe(&card, |_, _, cx| cx.notify());
         let settings_changes = cx.observe_global::<settings::SettingsStore>(|_, cx| cx.notify());
         if std::env::var("ZERON_TASKS_VIEW").as_deref() == Ok("kanban") {
             settings::update(settings::SavePolicy::Debounced, cx, |s| {
@@ -148,23 +133,54 @@ impl TasksPage {
         let mut page = Self {
             state,
             add,
-            card: None,
-            project_select: widgets::SelectState::default(),
+            card,
             done_open: true,
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
-            starting: HashMap::new(),
             focus: cx.focus_handle(),
-            _subscriptions: vec![add_events, state_changes, settings_changes],
+            _subscriptions: vec![
+                add_events,
+                state_changes,
+                settings_changes,
+                card_events,
+                card_changes,
+            ],
         };
-        page.sync_card(cx);
+        page.open_knob_card(cx);
         page
+    }
+
+    pub fn card(&self) -> &Entity<TaskCard> {
+        &self.card
+    }
+
+    fn open_knob_card(&mut self, cx: &mut Context<Self>) {
+        if !self.open_first_card {
+            return;
+        }
+        let first = {
+            let (open, _) = logic::split_tasks(&self.state.read(cx).tasks);
+            open.iter()
+                .find(|task| task.chat_id.is_none())
+                .or(open.first())
+                .map(|task| task.id.clone())
+        };
+        if let Some(id) = first {
+            self.open_first_card = false;
+            self.card
+                .update(cx, |card, cx| card.open(id, None, false, None, cx));
+        }
     }
 
     fn today() -> NaiveDate {
         Local::now().date_naive()
     }
 
-    fn submit_add(&mut self, open_card: bool, cx: &mut Context<Self>) -> bool {
+    fn submit_add(
+        &mut self,
+        open_card: bool,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(title) = logic::quick_add_title(self.add.read(cx).text()) else {
             return false;
         };
@@ -174,257 +190,18 @@ impl TasksPage {
             .selected_space_row()
             .map(|space| space.id.clone());
         self.add.update(cx, |input, cx| input.set_text("", cx));
+        let task_id = uuid::Uuid::new_v4().to_string();
         cx.emit(TasksEvent::Create {
-            title,
+            task_id: task_id.clone(),
+            title: title.clone(),
             space_id,
-            open_card,
         });
+        if open_card {
+            self.card.update(cx, |card, cx| {
+                card.open(task_id, Some(title), true, window, cx)
+            });
+        }
         true
-    }
-
-    /// `title` seeds the card of a task whose row has not arrived yet.
-    pub fn open_card(
-        &mut self,
-        task_id: String,
-        title: Option<String>,
-        focus_notes: bool,
-        window: Option<&mut Window>,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .card
-            .as_ref()
-            .is_some_and(|card| card.task_id == task_id)
-        {
-            return;
-        }
-        self.flush_card(cx);
-        let row = self
-            .state
-            .read(cx)
-            .tasks
-            .iter()
-            .find(|task| task.id == task_id)
-            .cloned();
-        let saved_title = row
-            .as_ref()
-            .map(|task| task.title.clone())
-            .or(title)
-            .unwrap_or_default();
-        let saved_notes = row
-            .as_ref()
-            .map(|task| task.notes.clone())
-            .unwrap_or_default();
-        let title_input = cx.new(|cx| {
-            let mut input = ComposerInput::new("Task title", cx)
-                .with_single_line()
-                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
-            input.set_text(saved_title.clone(), cx);
-            input
-        });
-        let notes_input = cx.new(|cx| {
-            let mut input =
-                ComposerInput::new("Add notes", cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
-            input.set_text(saved_notes.clone(), cx);
-            input
-        });
-        let edits = |page: &mut Self,
-                     _: Entity<ComposerInput>,
-                     event: &ComposerInputEvent,
-                     cx: &mut Context<Self>| match event {
-            ComposerInputEvent::Edited => page.schedule_save(cx),
-            ComposerInputEvent::Submitted => page.flush_card(cx),
-            _ => {}
-        };
-        let subscriptions = [
-            cx.subscribe(&title_input, edits),
-            cx.subscribe(&notes_input, edits),
-        ];
-        if let Some(window) = window {
-            let target = if focus_notes {
-                &notes_input
-            } else {
-                &title_input
-            };
-            window.focus(&target.focus_handle(cx), cx);
-        }
-        self.card = Some(Card {
-            task_id,
-            title: title_input,
-            notes: notes_input,
-            saved_title,
-            saved_notes,
-            refused: false,
-            seen: row.is_some(),
-            save: None,
-            _subscriptions: subscriptions,
-        });
-        cx.notify();
-    }
-
-    fn close_card(&mut self, cx: &mut Context<Self>) {
-        self.flush_card(cx);
-        self.card = None;
-        cx.notify();
-    }
-
-    fn sync_card(&mut self, cx: &mut Context<Self>) {
-        if self.open_first_card {
-            let first = {
-                let (open, _) = logic::split_tasks(&self.state.read(cx).tasks);
-                open.iter()
-                    .find(|task| task.chat_id.is_none())
-                    .or(open.first())
-                    .map(|task| task.id.clone())
-            };
-            if let Some(id) = first {
-                self.open_first_card = false;
-                self.open_card(id, None, false, None, cx);
-            }
-        }
-        let linked: Vec<String> = {
-            let state = self.state.read(cx);
-            self.starting
-                .keys()
-                .filter(|id| {
-                    state
-                        .tasks
-                        .iter()
-                        .any(|task| &task.id == *id && linked_chat(&state.chats, task).is_some())
-                })
-                .cloned()
-                .collect()
-        };
-        for id in linked {
-            self.starting.remove(&id);
-        }
-        self.starting.retain(|_, at| at.elapsed() < START_PENDING);
-        let Some(card) = self.card.as_mut() else {
-            return;
-        };
-        let present = self
-            .state
-            .read(cx)
-            .tasks
-            .iter()
-            .any(|task| task.id == card.task_id && !task.deleted);
-        if present {
-            card.seen = true;
-        } else if card.seen {
-            self.card = None;
-        }
-    }
-
-    fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        let Some(card) = self.card.as_mut() else {
-            return;
-        };
-        card.save = Some(cx.spawn(async move |page, cx| {
-            cx.background_executor().timer(SAVE_DEBOUNCE).await;
-            page.update(cx, |page, cx| page.flush_card(cx)).ok();
-        }));
-    }
-
-    /// Notes too large to sync stay unsaved, so a later flush retries them once shortened.
-    fn take_card_patch(&mut self, cx: &mut Context<Self>) -> Option<(String, TaskPatch)> {
-        let card = self.card.as_mut()?;
-        card.save = None;
-        let title = card.title.read(cx).text().trim().to_string();
-        let notes = card.notes.read(cx).text().to_string();
-        let mut patch = TaskPatch::default();
-        if !title.is_empty() && title != card.saved_title {
-            patch.title = Some(title);
-        }
-        let notes_dirty = notes != card.saved_notes;
-        if notes_dirty {
-            patch.notes = Some(notes);
-        }
-        if patch == TaskPatch::default() {
-            return None;
-        }
-        let refusal = self
-            .state
-            .read(cx)
-            .tasks
-            .iter()
-            .find(|task| task.id == card.task_id)
-            .and_then(|row| zeron_doc::check_task_syncs(&patched(row, &patch)).err());
-        if refusal.is_some() {
-            patch.notes = None;
-        }
-        if let Some(error) = refusal.filter(|_| !card.refused) {
-            cx.emit(TasksEvent::Refused(error.to_string()));
-        }
-        card.refused = notes_dirty && patch.notes.is_none();
-        if let Some(title) = &patch.title {
-            card.saved_title = title.clone();
-        }
-        if let Some(notes) = &patch.notes {
-            card.saved_notes = notes.clone();
-        }
-        (patch != TaskPatch::default()).then(|| (card.task_id.clone(), patch))
-    }
-
-    pub fn save_failed(&mut self, task_id: &str, patch: &TaskPatch, cx: &mut Context<Self>) {
-        let row = self
-            .state
-            .read(cx)
-            .tasks
-            .iter()
-            .find(|task| task.id == task_id)
-            .cloned();
-        let Some(card) = self.card.as_mut().filter(|card| card.task_id == task_id) else {
-            return;
-        };
-        if patch.title.as_ref() == Some(&card.saved_title) {
-            card.saved_title = row.as_ref().map(|t| t.title.clone()).unwrap_or_default();
-        }
-        if patch.notes.as_ref() == Some(&card.saved_notes) {
-            card.saved_notes = row.map(|t| t.notes).unwrap_or_default();
-        }
-    }
-
-    pub fn start_failed(&mut self, task_id: &str, cx: &mut Context<Self>) {
-        self.starting.remove(task_id);
-        cx.notify();
-    }
-
-    fn flush_card(&mut self, cx: &mut Context<Self>) {
-        if let Some((task_id, patch)) = self.take_card_patch(cx) {
-            cx.emit(TasksEvent::Update { task_id, patch });
-        }
-    }
-
-    fn start_card(&mut self, cx: &mut Context<Self>) {
-        let Some(card) = self.card.as_ref() else {
-            return;
-        };
-        let task_id = card.task_id.clone();
-        let state = self.state.read(cx);
-        let startable = state.tasks.iter().any(|task| {
-            task.id == task_id
-                && linked_chat(&state.chats, task).is_none()
-                && task.completed_at.is_none()
-        });
-        if !startable || self.is_starting(&task_id) {
-            return;
-        }
-        self.starting.insert(task_id.clone(), Instant::now());
-        cx.spawn(async move |page, cx| {
-            cx.background_executor().timer(START_PENDING).await;
-            page.update(cx, |_, cx| cx.notify()).ok();
-        })
-        .detach();
-        let patch = self.take_card_patch(cx).map(|(_, patch)| patch);
-        cx.emit(TasksEvent::Start { task_id, patch });
-        cx.notify();
-    }
-
-    /// Covers the gap until the link lands; a failed start frees it on expiry.
-    fn is_starting(&self, task_id: &str) -> bool {
-        self.starting
-            .get(task_id)
-            .is_some_and(|at| at.elapsed() < START_PENDING)
     }
 
     fn update(&mut self, task_id: &str, patch: TaskPatch, cx: &mut Context<Self>) {
@@ -472,35 +249,14 @@ impl TasksPage {
     fn rows(&self, cx: &gpui::App) -> (Vec<Row>, Vec<Row>) {
         let state = self.state.read(cx);
         let now = Utc::now();
-        let row = |task: &zeron_proto::Task| {
-            let chat = linked_chat(&state.chats, task);
-            let linked = chat.map(|chat| {
-                let harness = chat.config.as_ref().map(|config| config.harness);
-                let model = chat
-                    .config
-                    .as_ref()
-                    .and_then(|config| config.model.as_deref());
-                Linked {
-                    indicator: state.display_status_for(chat, now),
-                    brand: crate::pickers::agent_brand_icon(harness, model),
-                    since: state.session_for(&chat.id).and_then(|s| s.started_at),
-                }
-            });
-            Row {
-                status: task_status(task, linked.as_ref().map(|l| l.indicator)),
-                project: task
-                    .space_id
-                    .as_deref()
-                    .and_then(|id| state.spaces.iter().find(|space| space.id == id))
-                    .map(|space| SharedString::from(space.display_name().to_string())),
-                linked,
-                task: task.clone(),
-            }
-        };
         let (open, done) = logic::split_tasks(&state.tasks);
         (
-            open.into_iter().map(row).collect(),
-            done.into_iter().map(row).collect(),
+            open.into_iter()
+                .map(|task| row_for(state, task, now))
+                .collect(),
+            done.into_iter()
+                .map(|task| row_for(state, task, now))
+                .collect(),
         )
     }
 
@@ -638,10 +394,7 @@ impl TasksPage {
     ) -> AnyElement {
         let task_id = row.task.id.clone();
         let done = row.status == TaskStatus::Done;
-        let selected = self
-            .card
-            .as_ref()
-            .is_some_and(|card| card.task_id == task_id);
+        let selected = self.card.read(cx).task_id() == Some(task_id.as_str());
         let meta = Self::meta(row, today, theme);
         let hover = theme.glass_hover();
         let accent = theme.accent;
@@ -690,7 +443,9 @@ impl TasksPage {
                     }),
             )
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_card(open_id.clone(), None, false, Some(window), cx);
+                page.card.update(cx, |card, cx| {
+                    card.open(open_id.clone(), None, false, Some(window), cx)
+                });
             }))
             .when(!done, |el| {
                 el.on_drag(drag, |drag, _, _, cx| {
@@ -729,8 +484,8 @@ impl TasksPage {
             .on_drop(cx.listener(|page, drag: &TaskDrag, _, cx| {
                 page.reorder(&drag.task_id, None, cx);
             }))
-            .capture_action(cx.listener(|page, _: &MentionTab, _, cx| {
-                if page.submit_add(true, cx) {
+            .capture_action(cx.listener(|page, _: &MentionTab, window, cx| {
+                if page.submit_add(true, Some(window), cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -862,10 +617,7 @@ impl TasksPage {
 
     fn kanban_card(&self, row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let task_id = row.task.id.clone();
-        let selected = self
-            .card
-            .as_ref()
-            .is_some_and(|card| card.task_id == task_id);
+        let selected = self.card.read(cx).task_id() == Some(task_id.as_str());
         let title = SharedString::from(row.task.title.clone());
         let drag = TaskDrag {
             task_id: task_id.clone(),
@@ -940,7 +692,9 @@ impl TasksPage {
             )
             .child(footer)
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_card(open_id.clone(), None, false, Some(window), cx);
+                page.card.update(cx, |card, cx| {
+                    card.open(open_id.clone(), None, false, Some(window), cx)
+                });
             }))
             .on_drag(drag, |drag, _, _, cx| {
                 cx.stop_propagation();
@@ -1060,328 +814,30 @@ impl TasksPage {
             )
             .into_any_element()
     }
+}
 
-    fn render_card(
-        &self,
-        row: Option<&Row>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let card = self.card.as_ref()?;
-        let today = Self::today();
-        let task_id = card.task_id.clone();
-        let status = row.map_or(TaskStatus::ToDo, |row| row.status);
-        let (_, _, tone) = column_tone(status, theme);
-        let close = div()
-            .id("task-card-close")
-            .debug_selector(|| "task-card-close".into())
-            .role(gpui::Role::Button)
-            .aria_label("Close")
-            .size(px(24.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-            .child(icon(icons::LUCIDE_X).size(px(14.0)))
-            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.close_card(cx)));
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(div().size(px(8.0)).rounded_full().bg(tone))
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(logic::column_title(status)),
-            )
-            .child(close);
-
-        let spaces: Vec<(String, String)> = self
-            .state
-            .read(cx)
-            .spaces
-            .iter()
-            .map(|space| (space.id.clone(), space.display_name().to_string()))
-            .collect();
-        let current_space = row.and_then(|row| row.task.space_id.clone());
-        let selected_space = current_space
+fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {
+    let linked = linked_chat(&state.chats, task).map(|chat| {
+        let harness = chat.config.as_ref().map(|config| config.harness);
+        let model = chat
+            .config
+            .as_ref()
+            .and_then(|config| config.model.as_deref());
+        Linked {
+            indicator: state.display_status_for(chat, now),
+            brand: crate::pickers::agent_brand_icon(harness, model),
+            since: state.session_for(&chat.id).and_then(|s| s.started_at),
+        }
+    });
+    Row {
+        status: task_status(task, linked.as_ref().map(|l| l.indicator)),
+        project: task
+            .space_id
             .as_deref()
-            .and_then(|id| spaces.iter().position(|(sid, _)| sid == id))
-            .map_or(0, |ix| ix + 1);
-        let space_ids: Vec<String> = spaces.iter().map(|(id, _)| id.clone()).collect();
-        let project_task = task_id.clone();
-        let project = widgets::select("task-card-project", "Project", theme, |page: &mut Self| {
-            &mut page.project_select
-        })
-        .options(
-            std::iter::once(widgets::SelectOption::new("No project")).chain(
-                spaces
-                    .iter()
-                    .map(|(_, name)| widgets::SelectOption::new(name.clone())),
-            ),
-            selected_space,
-        )
-        .width(180.0)
-        .menu_width(220.0)
-        .on_select(move |page, ix, _, cx| {
-            let space = ix.checked_sub(1).and_then(|i| space_ids.get(i).cloned());
-            page.update(
-                &project_task,
-                TaskPatch {
-                    space_id: Some(space),
-                    ..Default::default()
-                },
-                cx,
-            );
-        })
-        .render(&self.project_select, cx);
-
-        let due_on = row.and_then(|row| row.task.due_on.clone());
-        let pick = logic::due_pick(due_on.as_deref(), today);
-        let page = cx.weak_entity();
-        let due_task = task_id.clone();
-        let due = widgets::segmented(
-            theme,
-            "task-card-due",
-            &[
-                (DuePick::None, "None"),
-                (DuePick::Today, "Today"),
-                (DuePick::Tomorrow, "Tomorrow"),
-            ],
-            pick,
-            move |pick, _, cx| {
-                let due_task = due_task.clone();
-                page.update(cx, |page, cx| {
-                    page.update(
-                        &due_task,
-                        TaskPatch {
-                            due_on: Some(logic::due_value(pick, Self::today())),
-                            ..Default::default()
-                        },
-                        cx,
-                    )
-                })
-                .ok();
-            },
-        );
-        let due_note = (pick == DuePick::Other)
-            .then(|| due_on.as_deref().and_then(|d| logic::due_label(d, today)))
-            .flatten();
-
-        let property = |label: &'static str, control: AnyElement| {
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .text_size(ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(label),
-                )
-                .child(control)
-        };
-
-        let linked_block = row.and_then(|row| {
-            let linked = row.linked.as_ref()?;
-            let (mark, tint) = linked.brand;
-            let (_, _, tone) = crate::shell::chat_status_tone(linked.indicator, theme);
-            Some(
-                div()
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(widgets::block_fill(theme))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(ui_rems(12.0))
-                    .child(
-                        icon(mark)
-                            .size(px(14.0))
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(tone)
-                            .child(Self::linked_label(linked.indicator)),
-                    )
-                    .children(
-                        linked
-                            .since
-                            .filter(|_| linked.indicator == ChatIndicator::Working)
-                            .map(|since| {
-                                crate::loaders::elapsed_label(
-                                    format!("task-card-elapsed-{task_id}"),
-                                    since,
-                                    ui_rems(12.0),
-                                    tone,
-                                )
-                            }),
-                    ),
-            )
-        });
-
-        let starting = self.is_starting(&task_id);
-        let chat_id = row
-            .filter(|row| row.linked.is_some())
-            .and_then(|row| row.task.chat_id.clone());
-        let done = status == TaskStatus::Done;
-        let primary = match chat_id.clone() {
-            Some(chat) => widgets::text_action(theme, widgets::ActionTone::Solid, "Open thread")
-                .id("task-card-open-thread")
-                .debug_selector(|| "task-card-open-thread".into())
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.emit(TasksEvent::OpenChat(chat.clone()));
-                }))
-                .into_any_element(),
-            None if !done => widgets::action_button(theme, widgets::ActionTone::Solid)
-                .id("task-card-start")
-                .debug_selector(|| "task-card-start".into())
-                .when(row.is_none() || starting, |el| el.opacity(0.5))
-                .child(if starting { "Starting…" } else { "Start" })
-                .child(
-                    div()
-                        .text_size(ui_rems(11.0))
-                        .opacity(0.7)
-                        .child(crate::settings::badge_combo("mod-enter")),
-                )
-                .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.start_card(cx)))
-                .into_any_element(),
-            None => div().into_any_element(),
-        };
-        let done_task = task_id.clone();
-        let toggle_done = widgets::text_action(
-            theme,
-            widgets::ActionTone::Filled,
-            if done {
-                "Mark as not done"
-            } else {
-                "Mark as done"
-            },
-        )
-        .id("task-card-toggle-done")
-        .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-            page.set_completed(&done_task, !done, cx);
-        }));
-        let delete_task = task_id.clone();
-        let delete = div()
-            .id("task-card-delete")
-            .debug_selector(|| "task-card-delete".into())
-            .role(gpui::Role::Button)
-            .aria_label("Delete task")
-            .size(px(32.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .text_color(theme.text_muted)
-            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.danger))
-            .child(
-                icon(icons::TRASH_BIN_MINIMALISTIC)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
-            .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                if let Some(card) = page.card.as_mut() {
-                    card.save = None;
-                }
-                page.card = None;
-                cx.emit(TasksEvent::Delete(delete_task.clone()));
-                cx.notify();
-            }));
-
-        Some(
-            div()
-                .id("task-card")
-                .debug_selector(|| "task-card".into())
-                .w_full()
-                .max_h_full()
-                .overflow_y_scroll()
-                .p(px(16.0))
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .rounded(px(16.0))
-                .bg(theme.surface_raised)
-                .border_1()
-                .border_color(theme.border)
-                .on_key_down(cx.listener(|page, event: &KeyDownEvent, _, cx| {
-                    let modifiers = &event.keystroke.modifiers;
-                    if event.keystroke.key == "enter" && (modifiers.platform || modifiers.control) {
-                        cx.stop_propagation();
-                        page.start_card(cx);
-                    }
-                }))
-                .child(header)
-                .child(
-                    div()
-                        .text_size(ui_rems(15.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(card.title.clone()),
-                )
-                .child(
-                    div()
-                        .id("task-card-notes")
-                        .debug_selector(|| "task-card-notes".into())
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .rounded(px(8.0))
-                        .bg(widgets::block_fill(theme))
-                        .text_size(ui_rems(13.0))
-                        .capture_action(cx.listener(|page, _: &Submit, window, cx| {
-                            let Some(card) = page.card.as_ref() else {
-                                return;
-                            };
-                            if card.notes.focus_handle(cx).is_focused(window) {
-                                cx.stop_propagation();
-                                card.notes.update(cx, |input, cx| {
-                                    input.replace_text_in_range(None, "\n", window, cx)
-                                });
-                            }
-                        }))
-                        .child(crate::composer::growing_field(
-                            card.notes.clone(),
-                            60.0,
-                            220.0,
-                            cx,
-                        )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(property("Project", project.into_any_element()))
-                        .child(property("Due", due.into_any_element()))
-                        .children(due_note.map(|note| {
-                            div()
-                                .text_size(ui_rems(11.5))
-                                .text_color(theme.text_faint)
-                                .child(note)
-                        })),
-                )
-                .children(linked_block)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(primary)
-                        .child(toggle_done)
-                        .child(div().flex_1())
-                        .child(delete),
-                )
-                .into_any_element(),
-        )
+            .and_then(|id| state.spaces.iter().find(|space| space.id == id))
+            .map(|space| SharedString::from(space.display_name().to_string())),
+        linked,
+        task: task.clone(),
     }
 }
 
@@ -1468,11 +924,7 @@ impl Render for TasksPage {
             TasksView::List => self.render_list(&open, &done, &theme, cx),
             TasksView::Kanban => self.render_kanban(&open, &done, &theme, cx),
         };
-        let selected = self.card.as_ref().map(|card| card.task_id.clone());
-        let row = selected
-            .as_deref()
-            .and_then(|id| open.iter().chain(done.iter()).find(|row| row.task.id == id));
-        let card = self.render_card(row, &theme, cx);
+        let card = self.card.read(cx).is_open().then(|| self.card.clone());
         div()
             .id("tasks-page")
             .debug_selector(|| "tasks-page".into())
@@ -1481,9 +933,9 @@ impl Render for TasksPage {
             .flex()
             .flex_row()
             .on_key_down(cx.listener(|page, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && page.card.is_some() {
+                if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
                     cx.stop_propagation();
-                    page.close_card(cx);
+                    page.card.update(cx, |card, cx| card.close(cx));
                 }
             }))
             .child(

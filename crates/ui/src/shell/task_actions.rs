@@ -20,12 +20,12 @@ impl Shell {
 
     pub fn create_task(
         &mut self,
+        task_id: &str,
         title: &str,
         space_id: Option<String>,
         due_on: Option<String>,
         cx: &mut Context<Self>,
-    ) -> String {
-        let task_id = uuid::Uuid::new_v4().to_string();
+    ) {
         self.mutate_task_row(
             serde_json::json!({
                 "op": "createTask", "taskId": task_id, "title": title,
@@ -33,7 +33,6 @@ impl Shell {
             }),
             cx,
         );
-        task_id
     }
 
     pub fn update_task(&mut self, task_id: &str, patch: TaskPatch, cx: &mut Context<Self>) {
@@ -45,22 +44,22 @@ impl Shell {
 
     fn update_card_task(
         &mut self,
-        page: &Entity<crate::tasks::TasksPage>,
+        card: &Entity<crate::tasks::TaskCard>,
         task_id: &str,
         patch: &TaskPatch,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.task_engine(cx) else {
-            page.update(cx, |page, cx| page.save_failed(task_id, patch, cx));
+            card.update(cx, |card, cx| card.save_failed(task_id, patch, cx));
             return;
         };
         let params = serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch });
-        let (page, task_id, patch) = (page.clone(), task_id.to_string(), patch.clone());
+        let (card, task_id, patch) = (card.clone(), task_id.to_string(), patch.clone());
         cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 this.update(cx, |shell, cx| {
                     shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
-                    page.update(cx, |page, cx| page.save_failed(&task_id, &patch, cx));
+                    card.update(cx, |card, cx| card.save_failed(&task_id, &patch, cx));
                     cx.notify();
                 })
                 .ok();
@@ -79,7 +78,7 @@ impl Shell {
     /// Saves the card's unsaved edits first, so the agent's first turn carries them.
     fn start_task(
         &mut self,
-        page: &Entity<crate::tasks::TasksPage>,
+        card: &Entity<crate::tasks::TaskCard>,
         task_id: &str,
         patch: Option<TaskPatch>,
         harness: Option<HarnessId>,
@@ -87,11 +86,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.task_engine(cx) else {
-            page.update(cx, |page, cx| {
+            card.update(cx, |card, cx| {
                 if let Some(patch) = &patch {
-                    page.save_failed(task_id, patch, cx);
+                    card.save_failed(task_id, patch, cx);
                 }
-                page.start_failed(task_id, cx);
+                card.start_failed(task_id, cx);
             });
             return;
         };
@@ -103,18 +102,18 @@ impl Shell {
             "op": "startTask", "taskId": task_id, "chatId": chat_id,
             "harness": harness, "model": model,
         });
-        let (page, task_id) = (page.clone(), task_id.to_string());
+        let (card, task_id) = (card.clone(), task_id.to_string());
         cx.spawn(async move |this, cx| {
             let saving = update.is_some();
             for (step, params) in update.into_iter().chain([start]).enumerate() {
                 if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                     this.update(cx, |shell, cx| {
                         shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
-                        page.update(cx, |page, cx| {
+                        card.update(cx, |card, cx| {
                             if let Some(patch) = patch.as_ref().filter(|_| saving && step == 0) {
-                                page.save_failed(&task_id, patch, cx);
+                                card.save_failed(&task_id, patch, cx);
                             }
-                            page.start_failed(&task_id, cx);
+                            card.start_failed(&task_id, cx);
                         });
                         cx.notify();
                     })
@@ -169,39 +168,47 @@ impl Shell {
         &mut self,
         page: &Entity<crate::tasks::TasksPage>,
         event: &crate::tasks::TasksEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use crate::tasks::TasksEvent;
+        let card = page.read(cx).card().clone();
         match event {
             TasksEvent::Create {
+                task_id,
                 title,
                 space_id,
-                open_card,
-            } => {
-                let task_id = self.create_task(title, space_id.clone(), None, cx);
-                if *open_card {
-                    let title = title.clone();
-                    page.update(cx, |page, cx| {
-                        page.open_card(task_id, Some(title), true, Some(window), cx)
-                    });
-                }
-            }
+            } => self.create_task(task_id, title, space_id.clone(), None, cx),
             TasksEvent::Update { task_id, patch } => {
-                self.update_card_task(page, task_id, patch, cx)
+                self.update_card_task(&card, task_id, patch, cx)
             }
-            TasksEvent::Delete(task_id) => self.delete_task(task_id, cx),
-            TasksEvent::Start { task_id, patch } => {
+            TasksEvent::Card(event) => self.on_task_card_event(&card, event, cx),
+        }
+    }
+
+    pub(super) fn on_task_card_event(
+        &mut self,
+        card: &Entity<crate::tasks::TaskCard>,
+        event: &crate::tasks::TaskCardEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::tasks::TaskCardEvent;
+        match event {
+            TaskCardEvent::Update { task_id, patch } => {
+                self.update_card_task(card, task_id, patch, cx)
+            }
+            TaskCardEvent::Delete(task_id) => self.delete_task(task_id, cx),
+            TaskCardEvent::Start { task_id, patch } => {
                 let (harness, model) = self
                     .composer
                     .read(cx)
                     .pickers()
                     .read(cx)
                     .canvas_harness_model();
-                self.start_task(page, task_id, patch.clone(), harness, model, cx)
+                self.start_task(card, task_id, patch.clone(), harness, model, cx)
             }
-            TasksEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
-            TasksEvent::Refused(message) => {
+            TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
+            TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);
                 cx.notify();
             }
