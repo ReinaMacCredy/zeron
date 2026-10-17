@@ -12,7 +12,7 @@
 
 use core_foundation::{
     array::CFArrayRef,
-    base::{CFRelease, CFRetain, CFTypeID, CFTypeRef},
+    base::{CFIndex, CFRelease, CFRetain, CFTypeID, CFTypeRef},
     runloop::CFRunLoopSourceRef,
     string::CFStringRef,
 };
@@ -87,6 +87,11 @@ extern "C" {
         attributes: CFArrayRef,
         options: u32,
         values: *mut CFArrayRef,
+    ) -> AXError;
+    pub fn AXUIElementGetAttributeValueCount(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        count: *mut CFIndex,
     ) -> AXError;
     pub fn AXUIElementCopyAttributeNames(
         element: AXUIElementRef,
@@ -701,7 +706,16 @@ pub(crate) fn focused_window_id_for_restore(
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr = CFStr::new("AXChildren");
+    copy_element_array(element, "AXChildren")
+}
+
+/// Copy an array-of-elements attribute such as `AXChildren` or `AXVisibleRows`.
+///
+/// # Safety
+///
+/// `element` must be valid, and the caller must release every returned element.
+pub unsafe fn copy_element_array(element: AXUIElementRef, attr_name: &str) -> Vec<AXUIElementRef> {
+    let attr = CFStr::new(attr_name);
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
     if err != kAXErrorSuccess || value.is_null() {
@@ -726,6 +740,18 @@ pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
             }
         })
         .collect()
+}
+
+/// Number of values in an array attribute, without copying them.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn attribute_count(element: AXUIElementRef, attr_name: &str) -> Option<usize> {
+    let attr = CFStr::new(attr_name);
+    let mut count: CFIndex = 0;
+    let err = AXUIElementGetAttributeValueCount(element, attr.as_concrete_TypeRef(), &mut count);
+    (err == kAXErrorSuccess && count >= 0).then_some(count as usize)
 }
 
 /// Copy an AX element-valued attribute. The returned element is retained and
@@ -998,30 +1024,7 @@ pub unsafe fn ax_get_window_id(element: AXUIElementRef) -> Option<u32> {
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr = CFStr::new("AXWindows");
-    let mut value: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return vec![];
-    }
-    let cf_array_type_id = CFArray::<CFTypeRef>::type_id();
-    if core_foundation::base::CFGetTypeID(value) != cf_array_type_id {
-        CFRelease(value);
-        return vec![];
-    }
-    let arr = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
-    let ax_type_id = AXUIElementGetTypeID();
-    (0..arr.len())
-        .filter_map(|i| {
-            let item = *arr.get(i)?;
-            if core_foundation::base::CFGetTypeID(item) == ax_type_id {
-                CFRetain(item);
-                Some(item as AXUIElementRef)
-            } else {
-                None
-            }
-        })
-        .collect()
+    copy_element_array(element, "AXWindows")
 }
 
 // ── Batched attribute reads ──────────────────────────────────────────────────
@@ -1055,6 +1058,8 @@ const ELEMENT_BATCH_ATTRS: &[&str] = &[
     "AXPosition",         // 14
     "AXSize",             // 15
     "AXExpanded",         // 16
+    "AXSubrole",          // 17
+    "AXRoleDescription",  // 18
 ];
 
 /// One element's attribute values, decoded from a single
@@ -1090,6 +1095,8 @@ pub struct ElementAttrs {
     pub bounds: Option<[f64; 4]>,
     pub children: Vec<AXUIElementRef>,
     pub expanded: Option<bool>,
+    pub subrole: Option<String>,
+    pub role_description: Option<String>,
 }
 
 /// Fetch every attribute the AX tree walker reads for one element in a
@@ -1142,6 +1149,8 @@ pub unsafe fn copy_element_attrs(element: AXUIElementRef) -> ElementAttrs {
         bounds: slot_bounds(batch_slot(&slots, 14), batch_slot(&slots, 15)),
         frame: slot_rect(batch_slot(&slots, 14), batch_slot(&slots, 15)),
         expanded: batch_slot(&slots, 16).and_then(|v| slot_bool(v)),
+        subrole: batch_slot(&slots, 17).and_then(|v| slot_string(v)),
+        role_description: batch_slot(&slots, 18).and_then(|v| slot_string(v)),
     }
 }
 

@@ -890,6 +890,8 @@ pub(crate) fn build_tree_nodes(nodes: &[crate::ax::tree::AXNode]) -> Vec<serde_j
                 ("value", value),
                 ("identifier", node.identifier.as_ref()),
                 ("help", node.help.as_ref()),
+                ("subrole", node.subrole.as_ref()),
+                ("role_description", node.role_description.as_ref()),
             ] {
                 if let Some(value) = value {
                     entry[key] = serde_json::json!(value);
@@ -898,8 +900,21 @@ pub(crate) fn build_tree_nodes(nodes: &[crate::ax::tree::AXNode]) -> Vec<serde_j
             if node.settable {
                 entry["settable"] = serde_json::json!(true);
             }
-            if let Some(expanded) = node.expanded {
-                entry["expanded"] = serde_json::json!(expanded);
+            for (key, value) in [
+                ("expanded", node.expanded),
+                ("selected", node.selected),
+                ("enabled", node.enabled),
+            ] {
+                if let Some(value) = value {
+                    entry[key] = serde_json::json!(value);
+                }
+            }
+            if let Some([x, y, w, h]) = node.frame {
+                entry["frame"] = serde_json::json!({ "x": x, "y": y, "w": w, "h": h });
+            }
+            if let Some(rows) = node.visible_rows {
+                entry["visible_rows"] =
+                    serde_json::json!({ "first": rows.first, "last": rows.last, "total": rows.total });
             }
             entry
         })
@@ -1263,6 +1278,9 @@ mod tests {
             placeholder: None,
             settable: false,
             expanded: None,
+            subrole: None,
+            role_description: None,
+            visible_rows: None,
         }
     }
 
@@ -1671,7 +1689,25 @@ mod tests {
         field.settable = true;
         let mut outline = node(Some(2), "AXRow", Some("Docs"), 3, Some(0), None, vec![]);
         outline.expanded = Some(false);
-        let entries = build_tree_nodes(&[display, field, outline]);
+        let mut table = node(
+            None,
+            "AXTable",
+            None,
+            1,
+            None,
+            Some([10.0, 20.0, 300.0, 400.0]),
+            vec![],
+        );
+        table.subrole = Some("AXTableSubrole".into());
+        table.role_description = Some("table".into());
+        table.selected = Some(false);
+        table.enabled = Some(true);
+        table.visible_rows = Some(crate::ax::tree::VisibleRows {
+            first: 1829,
+            last: 1855,
+            total: 1856,
+        });
+        let entries = build_tree_nodes(&[display, field, outline, table]);
         assert_eq!(
             entries[0],
             json!({ "depth": 2, "role": "AXStaticText", "description": "Edit field", "value": "408" })
@@ -1680,6 +1716,19 @@ mod tests {
         assert_eq!(entries[1]["settable"], json!(true));
         assert_eq!(entries[1]["element_index"], json!(1));
         assert_eq!(entries[2]["expanded"], json!(false));
+        assert_eq!(
+            entries[3],
+            json!({
+                "depth": 1,
+                "role": "AXTable",
+                "subrole": "AXTableSubrole",
+                "role_description": "table",
+                "selected": false,
+                "enabled": true,
+                "frame": { "x": 10.0, "y": 20.0, "w": 300.0, "h": 400.0 },
+                "visible_rows": { "first": 1829, "last": 1855, "total": 1856 },
+            })
+        );
     }
 
     #[test]
