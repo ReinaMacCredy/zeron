@@ -3,6 +3,8 @@
 //! In zeron these were synced Postgres rows; in zeron they live in the per-org
 //! workspace Loro doc (see ARCHITECTURE.md §2.2) with the same field surface.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -322,12 +324,40 @@ pub struct Delegation {
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub finding_outcomes: BTreeMap<String, FindingOutcome>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub findings_handed: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub findings_announced: BTreeSet<String>,
 }
 
 impl Delegation {
     pub fn is_running(&self) -> bool {
         self.status == DelegationStatus::Running
     }
+
+    pub fn finding_handed(&self, id: &str) -> bool {
+        self.wake == DelegationWake::Always || self.findings_handed.contains(id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingOutcome {
+    pub outcome: FindingOutcomeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingOutcomeKind {
+    Fixed,
+    Skipped,
+    NoChange,
 }
 
 /// When a finished child wakes its owner. `SettledOnly` is a `mode: wait`

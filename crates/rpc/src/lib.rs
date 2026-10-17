@@ -129,6 +129,8 @@ pub mod methods {
     /// `{chatId, taskId}` → `{}`: a timed-out `mode: wait` hands the result
     /// back to the wake.
     pub const TASK_WAKE_ALWAYS: &str = "TaskWakeAlways";
+    pub const RESOLVE_REVIEW_FINDINGS: &str = "ResolveReviewFindings";
+    pub const HAND_REVIEW_FINDINGS: &str = "HandReviewFindings";
     /// Compact joined transcript count, last role and bounded prose preview. `{chatId}`.
     pub const GET_THREAD_SUMMARY: &str = "GetThreadSummary";
     /// `{days}` → `UsageSummary`: tokens and API-priced cost from the Claude,

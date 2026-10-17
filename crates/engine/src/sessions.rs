@@ -3233,14 +3233,7 @@ impl Inner {
         let config = self
             .workspace()
             .and_then(|workspace| workspace.chat_config(chat_id));
-        let chat_disabled = config.as_ref().map_or(&[][..], |c| &c.disabled_tools);
-        if self
-            .registry
-            .tool_settings()
-            .for_chat(chat_disabled)
-            .disabled(&[])
-            .contains("compact")
-        {
+        if self.tool_disabled(config.as_ref(), "compact") {
             return None;
         }
         let usage = self.doc_host()?.open(chat_id).ok()?.doc().context_usage()?;
@@ -3253,6 +3246,36 @@ impl Inner {
             .filter(|window| *window > 0)
             .map_or(floor, |window| floor.min(window * 7 / 10));
         (tokens >= floor).then_some(tokens)
+    }
+
+    fn tool_disabled(&self, config: Option<&zeron_proto::ChatConfig>, tool: &str) -> bool {
+        let chat_disabled = config.map_or(&[][..], |c| &c.disabled_tools);
+        self.registry
+            .tool_settings()
+            .for_chat(chat_disabled)
+            .disabled(&[])
+            .contains(tool)
+    }
+
+    fn findings_reminder(&self, chat_id: &str) -> Option<String> {
+        let config = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        if self.tool_disabled(config.as_ref(), "resolve_findings") {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .doc_host()?
+            .announce_review_findings(chat_id)
+            .into_iter()
+            .map(|(task_id, ids)| {
+                format!(
+                    "Review task {task_id} has findings for you to resolve: {}. Fix or decline each, then call resolve_findings with taskId {task_id}: fixed (with the commit when you made one), skipped or no_change (each with a note saying why).",
+                    ids.join(", ")
+                )
+            })
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
     /// Slash commands go out untouched: the note would become their arguments.
@@ -3278,7 +3301,8 @@ impl Inner {
                 )
             })
         };
-        let lines: Vec<&str> = [owed.as_deref(), reminder.as_deref()]
+        let findings = self.findings_reminder(chat_id);
+        let lines: Vec<&str> = [owed.as_deref(), findings.as_deref(), reminder.as_deref()]
             .into_iter()
             .flatten()
             .collect();

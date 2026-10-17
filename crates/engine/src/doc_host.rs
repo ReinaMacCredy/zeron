@@ -47,7 +47,9 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 #[path = "doc_host_delegation.rs"]
 mod delegation;
-pub use delegation::{DELEGATION_GUIDANCE, DelegateTaskParams, ProfileParams, TaskView};
+pub use delegation::{
+    DELEGATION_GUIDANCE, DelegateTaskParams, ProfileParams, ResolveFindingsParams, TaskView,
+};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;

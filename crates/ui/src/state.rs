@@ -6389,6 +6389,9 @@ mod tests {
             summary: None,
             started_at: chrono::Utc::now(),
             completed_at: None,
+            finding_outcomes: Default::default(),
+            findings_handed: Default::default(),
+            findings_announced: Default::default(),
         });
         state.apply_chats(vec![child, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();

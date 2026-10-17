@@ -5,6 +5,7 @@ use zeron_proto::{AgentProfile, HarnessId, ReasoningLevel};
 
 pub const REQUEST_PREFIX: &str = "zeron-review:";
 const MAX_PATCH_BYTES: usize = 120_000;
+const FENCE: &str = "```zeron-review";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReviewScope {
@@ -65,6 +66,13 @@ pub fn request_id(scope: ReviewScope, commit: Option<&str>, nonce: &str) -> Stri
         Some(sha) => format!("{REQUEST_PREFIX}{}:{nonce}:{sha}", scope.key()),
         None => format!("{REQUEST_PREFIX}{}:{nonce}", scope.key()),
     }
+}
+
+pub fn is_review(delegation: &zeron_proto::Delegation) -> bool {
+    delegation
+        .client_request_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with(REQUEST_PREFIX))
 }
 
 pub fn parse_request(request_id: &str) -> Option<(ReviewScope, Option<String>)> {
@@ -323,9 +331,172 @@ pub fn prompt(input: PromptInput) -> String {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Bug,
+    Risk,
+    Nit,
+}
+
+impl Severity {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Bug => "Bug",
+            Self::Risk => "Risk",
+            Self::Nit => "Nit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingSide {
+    Old,
+    New,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewFinding {
+    pub id: String,
+    pub path: String,
+    pub side: FindingSide,
+    pub line: u32,
+    pub text: Option<String>,
+    pub severity: Severity,
+    pub title: String,
+    pub body: String,
+}
+
+impl ReviewFinding {
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.path, self.line)
+    }
+}
+
+#[derive(Deserialize)]
+struct RawFinding {
+    path: String,
+    #[serde(default)]
+    side: Option<String>,
+    line: serde_json::Value,
+    #[serde(default)]
+    text: Option<String>,
+    severity: String,
+    title: String,
+    #[serde(default)]
+    body: String,
+}
+
+fn finding_from(ix: usize, raw: RawFinding) -> Option<ReviewFinding> {
+    let line = match &raw.line {
+        serde_json::Value::Number(n) => u32::try_from(n.as_u64()?).ok()?,
+        serde_json::Value::String(s) => s.trim().parse().ok()?,
+        _ => return None,
+    };
+    let severity = match raw.severity.trim().to_ascii_lowercase().as_str() {
+        "bug" => Severity::Bug,
+        "risk" => Severity::Risk,
+        "nit" => Severity::Nit,
+        _ => return None,
+    };
+    Some(ReviewFinding {
+        id: format!("F{}", ix + 1),
+        path: raw.path.trim().trim_start_matches("./").to_string(),
+        side: match raw.side.as_deref().map(str::trim) {
+            Some("L" | "l" | "old") => FindingSide::Old,
+            _ => FindingSide::New,
+        },
+        line,
+        text: raw.text.filter(|text| !text.trim().is_empty()),
+        severity,
+        title: raw.title,
+        body: raw.body,
+    })
+}
+
+pub fn parse_findings(result: &str) -> Option<Vec<ReviewFinding>> {
+    let start = result.rfind(FENCE)? + FENCE.len();
+    let rest = result[start..].split_once('\n')?.1;
+    let end = if rest.starts_with("```") {
+        0
+    } else {
+        rest.find("\n```")?
+    };
+    let items: Vec<serde_json::Value> = serde_json::from_str(rest[..end].trim()).ok()?;
+    let total = items.len();
+    let findings: Vec<ReviewFinding> = items
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<RawFinding>(value).ok())
+        .enumerate()
+        .filter_map(|(ix, raw)| finding_from(ix, raw))
+        .collect();
+    (total == 0 || !findings.is_empty()).then_some(findings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reply(block: &str) -> String {
+        format!("I looked at the diff.\n\n```zeron-review\n{block}\n```\n")
+    }
+
+    #[test]
+    fn parses_the_last_block_and_an_empty_array_means_clean() {
+        let text = format!(
+            "{}\nSecond pass:\n{}",
+            reply("[{\"path\":\"a\",\"line\":1,\"severity\":\"nit\",\"title\":\"x\"}]"),
+            reply("[]")
+        );
+        assert_eq!(parse_findings(&text), Some(Vec::new()));
+        let found = parse_findings(&reply(
+            "[{\"path\":\"./src/a.rs\",\"side\":\"L\",\"line\":3,\"severity\":\"bug\",\"title\":\"t\",\"body\":\"b\"}]",
+        ))
+        .unwrap()
+        .remove(0);
+        assert_eq!(found.path, "src/a.rs");
+        assert_eq!(found.side, FindingSide::Old);
+        assert_eq!(found.severity, Severity::Bug);
+    }
+
+    #[test]
+    fn one_bad_item_does_not_sink_the_block() {
+        let found = parse_findings(&reply(
+            "[{\"path\":\"a\",\"line\":\"4\",\"severity\":\"Bug\",\"title\":\"x\",\"text\":\"/// ```rust\"},\
+             {\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"y\"}]",
+        ))
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].line, found[0].severity), (4, Severity::Bug));
+        assert_eq!(
+            parse_findings(&reply(
+                "[{\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"y\"}]"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_or_garbled_block_is_unreadable_not_clean() {
+        assert_eq!(parse_findings("No issues found."), None);
+        assert_eq!(parse_findings(&reply("[{\"path\": ")), None);
+        assert_eq!(parse_findings("```zeron-review\n[]"), None);
+    }
+
+    #[test]
+    fn findings_are_numbered_from_one_in_reply_order() {
+        let found = parse_findings(&reply(
+            "[{\"path\":\"a\",\"line\":1,\"severity\":\"bug\",\"title\":\"first\"},\
+             {\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"dropped\"},\
+             {\"path\":\"c\",\"line\":3,\"severity\":\"nit\",\"title\":\"third\"}]",
+        ))
+        .unwrap();
+        let ids: Vec<(&str, &str)> = found
+            .iter()
+            .map(|f| (f.id.as_str(), f.title.as_str()))
+            .collect();
+        assert_eq!(ids, [("F1", "first"), ("F3", "third")]);
+    }
 
     fn profile(id: &str, name: &str, harness: HarnessId) -> AgentProfile {
         serde_json::from_value(serde_json::json!({
