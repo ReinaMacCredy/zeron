@@ -204,6 +204,7 @@ pub struct HarnessesPage {
     instance_accounts: HashMap<String, Entity<AccountsPage>>,
     confirm_delete: Option<String>,
     wizard: Option<(Entity<AddProviderDialog>, Subscription)>,
+    scroll_end_knob: bool,
 }
 
 impl HarnessesPage {
@@ -234,6 +235,7 @@ impl HarnessesPage {
             instance_accounts: HashMap::new(),
             confirm_delete: None,
             wizard: None,
+            scroll_end_knob: std::env::var("ZERON_PROVIDERS_SCROLL").as_deref() == Ok("end"),
         };
         page.load(cx);
         if std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("add-provider") {
@@ -392,6 +394,7 @@ impl HarnessesPage {
     fn instance_row(
         &self,
         instance: &ProviderInstance,
+        nested: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -421,18 +424,29 @@ impl HarnessesPage {
         };
         let accent = provider_instances::instance_accent(instance);
         let editing = instance.clone();
+        let (tile_size, tile_radius, mark_size) = if nested {
+            (28.0, 8.0, 14.0)
+        } else {
+            (36.0, 10.0, 16.0)
+        };
         let tile = div()
             .flex_none()
-            .size(px(28.0))
-            .rounded(px(8.0))
+            .size(px(tile_size))
+            .rounded(px(tile_radius))
             .bg(theme.wash(0.06))
             .flex()
             .items_center()
             .justify_center()
-            .child(mark.svg(theme.text_muted).size(px(14.0)));
+            .child(mark.svg(theme.text_muted).size(px(mark_size)));
         widgets::card_row(theme, false)
             .id(SharedString::from(format!("provider-instance-{id}")))
-            .ml(px(16.0 + DETAILS_INSET))
+            .map(|row| {
+                if nested {
+                    row.ml(px(16.0 + DETAILS_INSET))
+                } else {
+                    row.pl(px(4.0))
+                }
+            })
             .min_h(px(52.0))
             .flex_nowrap()
             .gap(px(12.0))
@@ -1221,7 +1235,7 @@ impl HarnessesPage {
         let orphans: Vec<AnyElement> = instances
             .iter()
             .filter(|instance| !listed(instance))
-            .map(|instance| self.instance_row(instance, &theme, cx))
+            .map(|instance| self.instance_row(instance, false, &theme, cx))
             .collect();
         let mut rows: Vec<AnyElement> = descriptors
             .clone()
@@ -1544,7 +1558,7 @@ impl HarnessesPage {
                 let instance_rows: Vec<AnyElement> = instances
                     .iter()
                     .filter(|instance| instance.driver == harness && listed(instance))
-                    .map(|instance| self.instance_row(instance, &theme, cx))
+                    .map(|instance| self.instance_row(instance, true, &theme, cx))
                     .collect();
                 div()
                     .flex()
@@ -1581,6 +1595,13 @@ impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let supports_updates = self.supports_updates(cx);
+        if self.scroll_end_knob
+            && self.harnesses.ready().is_some()
+            && self.instances.ready().is_some()
+        {
+            self.scroll_end_knob = false;
+            self.scroll.scroll.scroll_to_bottom();
+        }
         let add_provider = widgets::action_button(&theme, widgets::ActionTone::Outlined)
             .id("add-provider")
             .flex_none()

@@ -1233,7 +1233,7 @@ impl AddProviderDialog {
         } else if in_app.is_empty() {
             NO_IN_APP_SIGN_IN.into()
         } else {
-            format!("Sign in on {}.", self.device_name).into()
+            format!("{} advertises browser sign-in.", sign_in.instance.label).into()
         };
         let retry = sign_in.error.is_some();
         let sign_in_button = |id: (&'static str, usize), method_id: Option<String>| {

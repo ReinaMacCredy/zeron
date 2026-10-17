@@ -1216,7 +1216,10 @@ impl AddProviderDialog {
             Step::Provider => {
                 footer = footer.child(
                     button("add-provider-manual", widgets::ActionTone::Outlined)
-                        .on_click(cx.listener(|this, _, _, cx| this.go(Step::Identity, cx)))
+                        .when(busy, |el| el.opacity(0.5).cursor_default())
+                        .when(!busy, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| this.go(Step::Identity, cx)))
+                        })
                         .child("Configure manually"),
                 );
                 footer = footer.child(match sign_in_action(self.driver) {
