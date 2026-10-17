@@ -35,22 +35,8 @@ impl ProviderInstancesStore {
         let state = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<ProviderInstancesFile>(&bytes) {
                 Ok(file) if file.version == STORE_VERSION => file,
-                Ok(file) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        version = file.version,
-                        "unsupported provider instances store version; starting empty"
-                    );
-                    empty_file()
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "invalid provider instances store; starting empty"
-                    );
-                    empty_file()
-                }
+                Ok(file) => set_aside(&path, &format!("unsupported version {}", file.version))?,
+                Err(err) => set_aside(&path, &err.to_string())?,
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => empty_file(),
             Err(err) => return Err(err.into()),
@@ -126,6 +112,19 @@ impl ProviderInstancesStore {
             instances: state.instances.clone(),
         })
     }
+}
+
+// Instances name paths, env and managed homes; never overwrite a file this build cannot read.
+fn set_aside(path: &Path, reason: &str) -> Result<ProviderInstancesFile, EngineError> {
+    let kept = path.with_extension(format!("unreadable-{}.json", uuid::Uuid::new_v4()));
+    tracing::warn!(
+        path = %path.display(),
+        kept = %kept.display(),
+        reason,
+        "provider instances store unreadable; kept aside, starting empty"
+    );
+    std::fs::rename(path, &kept)?;
+    Ok(empty_file())
 }
 
 fn empty_file() -> ProviderInstancesFile {
@@ -232,6 +231,11 @@ mod tests {
         std::fs::write(temp.path().join(STORE_FILE), b"not json").unwrap();
         let store = ProviderInstancesStore::open(temp.path()).unwrap();
         assert!(store.snapshot().instances.is_empty());
+        let kept: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(kept, [b"not json".to_vec()]);
         for bad in ["codex", "2work", "work space", ""] {
             assert!(
                 store.upsert(instance(bad, HarnessId::Codex)).is_err(),

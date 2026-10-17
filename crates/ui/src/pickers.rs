@@ -3354,9 +3354,9 @@ impl Pickers {
                 config.instance_id = existing.instance_id.clone();
             }
         }
-        let harness = config.harness;
+        let (harness, instance_id) = (config.harness, config.instance_id.clone());
         change(&mut config);
-        if config.harness != harness {
+        if config.harness != harness && config.instance_id == instance_id {
             config.instance_id = None;
         }
         // Reasoning must stay concrete for whatever model the row now names —
