@@ -113,9 +113,10 @@ fn terminal_button(open: bool, theme: &Theme, cx: &App) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .px(px(8.0))
+        .px(px(4.0))
         .rounded(px(6.0))
         .cursor_pointer()
+        .tooltip(crate::settings::widgets::text_tooltip_above("Terminal"))
         .bg(if open {
             theme.accent_wash
         } else {
@@ -134,7 +135,6 @@ fn terminal_button(open: bool, theme: &Theme, cx: &App) -> AnyElement {
                 .flex_none()
                 .text_color(fg),
         )
-        .child("Terminal")
         .when(open, |el| {
             el.child(popover::kbd_hint(theme, &shortcut))
         })
@@ -1240,7 +1240,6 @@ pub struct Pickers {
     /// list follows it; the chat's harness changes on a confirmed pick.
     viewed_harness: Option<HarnessId>,
     stats_chip: Entity<crate::session_stats::StatsChip>,
-    compact_chip: Entity<crate::session_stats::CompactChip>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -1594,7 +1593,6 @@ impl Pickers {
             pending_model_switch: None,
             viewed_harness: None,
             stats_chip: cx.new(crate::session_stats::StatsChip::new),
-            compact_chip: cx.new(crate::session_stats::CompactChip::new),
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -5201,26 +5199,13 @@ impl Pickers {
                 .turn_in_flight(&chat.id, chrono::Utc::now());
             self.stats_chip
                 .update(cx, |chip, cx| chip.set(stats, working, cx));
-            let compact = {
-                let state = self.state.read(cx);
-                state
-                    .session_for(&chat.id)
-                    .map(|session| crate::session_stats::CompactView {
-                        plan: session.compact_plan,
-                        compacting: state.chat_compacting(&chat.id),
-                        tokens: self.chat_context_usage(cx).and_then(|usage| usage.tokens),
-                        stats,
-                    })
-            };
-            self.compact_chip
-                .update(cx, |chip, cx| chip.set(compact, cx));
             return Some(
                 row()
                     .pr_0()
+                    .overflow_hidden()
                     .child(left)
                     .child(right)
                     .child(self.stats_chip.clone())
-                    .child(self.compact_chip.clone())
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
