@@ -1207,6 +1207,7 @@ impl WorkspaceHost {
         new_chat_id: &str,
         from: HarnessId,
         config: Option<ChatConfig>,
+        space: Option<&Space>,
     ) -> Result<Chat, EngineError> {
         let seed = source
             .title
@@ -1219,23 +1220,32 @@ impl WorkspaceHost {
             .filter(|config| config.harness != from)
             .map(|_| vec![from])
             .unwrap_or_default();
+        let (cwd, branch, checkout_id, space_id) = match space {
+            Some(space) => (Some(space.path.clone()), None, None, Some(space.id.clone())),
+            None => (
+                source.cwd.clone(),
+                source.branch.clone(),
+                source.checkout_id.clone(),
+                source.space_id.clone(),
+            ),
+        };
         let chat = Chat {
             id: new_chat_id.to_string(),
             device_id: source.device_id.clone(),
             title: Some(format!("{seed} (cont.)")),
             archived: false,
-            cwd: source.cwd.clone(),
-            branch: source.branch.clone(),
-            checkout_id: source.checkout_id.clone(),
+            cwd: cwd.clone(),
+            branch,
+            checkout_id,
             source_context: None,
             config,
             last_message_preview: None,
             last_message_at: None,
             created_at: Utc::now(),
             harness_session_id: Some(String::new()),
-            harness_session_cwd: source.cwd.clone(),
+            harness_session_cwd: cwd,
             room_gen: Some(2),
-            space_id: source.space_id.clone(),
+            space_id,
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,

@@ -623,6 +623,13 @@ pub struct SessionsEngine {
 }
 
 impl Inner {
+    fn scratch_root(&self) -> std::path::PathBuf {
+        self.scratch_root
+            .get()
+            .cloned()
+            .unwrap_or_else(|| crate::repos::home_dir().join(".zeron").join("scratch"))
+    }
+
     /// The thread-tools server for one chat's run: this binary as
     /// `zeron mcp --chat <id> --port <port>`. `None` until an IPC port is
     /// recorded, so a run never gets a server it cannot dial.
@@ -1264,13 +1271,7 @@ impl SessionsEngine {
         // Project-less chats store a home-relative cwd (the creating device
         // can't know the host's home); expand it here, on the host, where the
         // run spawns, creating a new chat's scratch folder.
-        let scratch_root = self
-            .inner
-            .scratch_root
-            .get()
-            .cloned()
-            .unwrap_or_else(|| crate::repos::home_dir().join(".zeron").join("scratch"));
-        request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &scratch_root)
+        request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &self.inner.scratch_root())
             .map_err(EngineError::Other)?;
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
@@ -2471,6 +2472,32 @@ impl SessionsEngine {
             .ok()?;
         let history = bounded_source_copy(&entries, SIDECHAT_CONTEXT_BUDGET_CHARS);
         (!history.is_empty()).then(|| provider_switch_context(&history))
+    }
+
+    pub fn handoff_pointer(
+        &self,
+        source: &zeron_proto::Chat,
+        title: &str,
+        config: Option<&zeron_proto::ChatConfig>,
+    ) -> Option<String> {
+        if lock(&self.inner.tool_server_port).is_none()
+            || self.inner.tool_disabled(config, "read_thread")
+        {
+            return None;
+        }
+        let mut packet = format!(
+            "Handed off from chat \"{title}\" (id {}). Read it with the zeron read_thread tool before acting.",
+            source.id
+        );
+        if let Some(files) = source
+            .cwd
+            .as_deref()
+            .filter(|cwd| !zeron_proto::projectless::is_home_cwd(cwd))
+            .and_then(|cwd| crate::repos::resolve_chat_cwd(cwd, &self.inner.scratch_root()).ok())
+        {
+            packet.push_str(&format!(" Its files are in {files}."));
+        }
+        Some(packet)
     }
 
     fn branch_context(

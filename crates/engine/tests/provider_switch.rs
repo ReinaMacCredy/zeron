@@ -694,6 +694,106 @@ async fn a_continued_thread_resends_its_source_packet_after_a_failed_first_turn(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_chat_handed_off_to_a_project_points_at_itself_unless_read_thread_is_off() {
+    const LINKED: &str = "chat-linked";
+    const COPIED: &str = "chat-copied";
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.core.sessions.set_tool_server_port(1);
+    let project = tmp.path().join("api");
+    std::fs::create_dir(&project).unwrap();
+    let project_path = project.to_string_lossy().into_owned();
+    rig.core
+        .workspace
+        .create_space("space-api", &rig.core.device_id, &project_path, None, false)
+        .unwrap();
+    rig.turn(CHAT, "first", "m1").await;
+    let source = rig.core.workspace.chat(CHAT).unwrap().unwrap();
+    assert_eq!(source.space_id, None);
+    let scratch = tmp
+        .path()
+        .join("data")
+        .join("scratch")
+        .join(source.cwd.as_deref().unwrap().rsplit('/').next().unwrap());
+    let hand_off = |chat: &'static str, extra: serde_json::Value| {
+        let mut params = serde_json::json!({
+            "sourceChatId": CHAT, "chatId": chat, "targetSpaceId": "space-api",
+        });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        rig.client
+            .call(zeron_rpc::methods::CONTINUE_IN_NEW_THREAD, params)
+    };
+
+    let linked: zeron_proto::Chat =
+        serde_json::from_value(hand_off(LINKED, serde_json::json!({})).await.unwrap()).unwrap();
+    assert_eq!(linked.space_id.as_deref(), Some("space-api"));
+    assert_eq!(linked.cwd.as_deref(), Some(project_path.as_str()));
+    assert_eq!(linked.branch, None);
+    assert_eq!(linked.checkout_id, None);
+    let (to, pointer, route) = handoff_route(&entries(&rig.core, LINKED)[0]);
+    assert_eq!(to, HarnessId::Mock, "the source's agent by default");
+    assert_eq!(route.kind, zeron_doc::HandoffKind::Pointer);
+    assert_eq!(
+        pointer,
+        format!(
+            "Handed off from chat \"Auth work\" (id {CHAT}). Read it with the zeron read_thread tool before acting. Its files are in {}.",
+            scratch.display()
+        )
+    );
+    let source_doc = entries(&rig.core, CHAT);
+    let note = source_doc.last().unwrap();
+    assert_eq!(note.role, MessageRole::System);
+    assert_eq!(entry_text(note), "Handed off to api › Auth work (cont.)");
+    assert!(
+        !note
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::Handoff { .. }))
+    );
+
+    rig.turn(LINKED, "go on", "l1").await;
+    let first = rig.old.runs.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(first.resume, None);
+    assert_eq!(
+        first.prompt,
+        format!("{pointer}\n\n<latest_user_message>\ngo on\n</latest_user_message>")
+    );
+
+    hand_off(
+        COPIED,
+        serde_json::json!({ "harness": "pi", "disabledTools": ["mcp__zeron__read_thread"] }),
+    )
+    .await
+    .unwrap();
+    let (_, packet, route) = handoff_route(&entries(&rig.core, COPIED)[0]);
+    assert_eq!(route.kind, zeron_doc::HandoffKind::Text);
+    assert!(
+        packet.contains("User: first\n\nAssistant: Old answer 1"),
+        "{packet}"
+    );
+    assert!(!packet.contains("Handed off"), "{packet}");
+
+    rig.core
+        .workspace
+        .create_space("space-far", "dev-far", "/tmp", None, false)
+        .unwrap();
+    let err = rig
+        .client
+        .call(
+            zeron_rpc::methods::CONTINUE_IN_NEW_THREAD,
+            serde_json::json!({
+                "sourceChatId": CHAT, "chatId": "chat-far", "targetSpaceId": "space-far",
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("same device"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_thread_continued_twice_still_carries_the_first_conversation() {
     const B: &str = "chat-b";
     const C: &str = "chat-c";

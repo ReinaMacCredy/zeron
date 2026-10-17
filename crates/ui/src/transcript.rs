@@ -10059,9 +10059,18 @@ impl Transcript {
             .from_harness
             .map(|from| HandoffSide::new(from, route.from_model.as_deref(), cx));
         let to = HandoffSide::new(harness, route.to_model.as_deref(), cx);
+        let pointer = route.kind == zeron_doc::HandoffKind::Pointer;
         let label = match &route.source_title {
             Some(title) => format!("Continued from {title}"),
             None => "Context handoff".to_string(),
+        };
+        let label = if pointer {
+            format!(
+                "{label} · handed over as a link · {}",
+                if open { "hide" } else { "view" }
+            )
+        } else {
+            label
         };
         let toggle_id = row_id.clone();
         let rule = || {
@@ -10104,6 +10113,8 @@ impl Transcript {
             let messages = handoff_message_count(&text);
             let context = if text.is_empty() {
                 "None".to_string()
+            } else if pointer {
+                "A link to the source thread".to_string()
             } else {
                 format!(
                     "{} · {}",
@@ -10187,9 +10198,11 @@ impl Transcript {
                             div()
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(
-                                    "Sent ahead of your next message so the new model can continue this thread.",
-                                ),
+                                .child(if pointer {
+                                    "Sent ahead of your next message so the new model reads the source thread itself."
+                                } else {
+                                    "Sent ahead of your next message so the new model can continue this thread."
+                                }),
                         )
                 })
         });

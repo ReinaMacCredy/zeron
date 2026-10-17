@@ -128,12 +128,28 @@ impl Shell {
             .map(|target| {
                 handoff_row(&popup, "new", target, cx, |this, harness, model, cx| {
                     if let Some(chat_id) = this.state.read(cx).selected_chat.clone() {
-                        this.continue_in_new_thread(chat_id, harness, Some(model), cx);
+                        this.continue_in_new_thread(chat_id, Some(harness), Some(model), None, cx);
                     }
                 })
             })
             .collect();
+        let state = self.state.read(cx);
+        let device = state
+            .selected_chat_row()
+            .filter(|chat| chat.space_id.is_none())
+            .map(|chat| chat.device_id.as_str());
+        let projects: Vec<(String, String)> = state
+            .spaces
+            .iter()
+            .filter(|space| Some(space.device_id.as_str()) == device)
+            .map(|space| (space.id.clone(), space.display_name().to_string()))
+            .collect();
+        let projects: Vec<AnyElement> = projects
+            .into_iter()
+            .map(|(space_id, name)| handoff_project_row(&popup, space_id, name, cx))
+            .collect();
         let has_in_place = !in_place.is_empty();
+        let has_new_thread = !new_thread.is_empty();
         let card = popover::popover_card(&popup)
             .id("handoff-menu-card")
             .w(px(224.0))
@@ -150,6 +166,13 @@ impl Shell {
                 card.when(has_in_place, |card| card.child(popover::menu_separator()))
                     .child(popover::menu_heading(&popup, "Continue in a new thread"))
                     .children(new_thread)
+            })
+            .when(!projects.is_empty(), |card| {
+                card.when(has_in_place || has_new_thread, |card| {
+                    card.child(popover::menu_separator())
+                })
+                .child(popover::menu_heading(&popup, "Hand off to project"))
+                .children(projects)
             })
             .into_any_element();
         popover::anchored_menu_below_end("handoff-menu", card, self.handoff_menu.closing_since())
@@ -192,6 +215,35 @@ fn handoff_row(
         .on_click(cx.listener(move |this, _, _, cx| {
             this.close_handoff_menu(cx);
             pick(this, harness, model.clone(), cx);
+        }))
+        .into_any_element()
+}
+
+fn handoff_project_row(
+    popup: &Theme,
+    space_id: String,
+    name: String,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let id = SharedString::from(format!("handoff-project-{space_id}"));
+    let selector = id.clone();
+    popover::menu_row(popup, false, id.clone())
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .role(gpui::Role::MenuItem)
+        .gap(px(8.0))
+        .child(
+            icon(icons::LUCIDE_FOLDER)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(popup.text_muted),
+        )
+        .child(div().min_w_0().truncate().child(name))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.close_handoff_menu(cx);
+            if let Some(chat_id) = this.state.read(cx).selected_chat.clone() {
+                this.continue_in_new_thread(chat_id, None, None, Some(space_id.clone()), cx);
+            }
         }))
         .into_any_element()
 }

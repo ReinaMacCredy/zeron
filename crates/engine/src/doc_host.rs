@@ -485,6 +485,22 @@ fn thread_message_prompt(from_chat_id: &str, from_title: Option<&str>, body: &st
     )
 }
 
+fn space_on_device(
+    workspace: &WorkspaceHost,
+    space_id: &str,
+    device_id: &str,
+) -> Result<zeron_proto::Space, EngineError> {
+    let space = workspace
+        .space(space_id)?
+        .ok_or_else(|| EngineError::Other(format!("no such project: {space_id}")))?;
+    if space.device_id != device_id {
+        return Err(EngineError::Other(
+            "threads can only be created in projects on the same device".into(),
+        ));
+    }
+    Ok(space)
+}
+
 fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
@@ -3899,14 +3915,7 @@ impl DocHost {
             .chat(from_chat_id)?
             .ok_or_else(|| EngineError::Other(format!("no such chat: {from_chat_id}")))?;
         if let Some(space_id) = space_id {
-            let space = workspace
-                .space(space_id)?
-                .ok_or_else(|| EngineError::Other(format!("no such project: {space_id}")))?;
-            if space.device_id != from.device_id {
-                return Err(EngineError::Other(
-                    "threads can only be created in projects on the same device".into(),
-                ));
-            }
+            space_on_device(workspace, space_id, &from.device_id)?;
         }
         let cwd = cwd.map(str::trim).filter(|cwd| !cwd.is_empty());
         if let Some(cwd) = cwd
@@ -3954,11 +3963,17 @@ impl DocHost {
         &self,
         source_chat_id: &str,
         chat_id: &str,
-        harness: zeron_proto::HarnessId,
+        harness: Option<zeron_proto::HarnessId>,
         model: Option<&str>,
         reasoning: Option<zeron_proto::ReasoningLevel>,
         profile: &ProfileParams,
+        space_id: Option<&str>,
         packet: &str,
+        pointer: impl FnOnce(
+            &zeron_proto::Chat,
+            &str,
+            Option<&zeron_proto::ChatConfig>,
+        ) -> Option<String>,
     ) -> Result<zeron_proto::Chat, EngineError> {
         let workspace = self
             .workspace()
@@ -3969,9 +3984,12 @@ impl DocHost {
         let source = workspace
             .chat(source_chat_id)?
             .ok_or_else(|| EngineError::Other(format!("no such chat: {source_chat_id}")))?;
-        let config = self.derived_config(&source, Some(harness), model, reasoning, profile)?;
+        let space = space_id
+            .map(|space_id| space_on_device(workspace, space_id, &source.device_id))
+            .transpose()?;
+        let config = self.derived_config(&source, harness, model, reasoning, profile)?;
         let from = self.harness_for(source_chat_id);
-        let chat = workspace.create_handoff_chat(&source, chat_id, from, config)?;
+        let harness = config.as_ref().map_or(from, |config| config.harness);
         let title = source
             .title
             .as_deref()
@@ -3979,20 +3997,42 @@ impl DocHost {
             .filter(|title| !title.is_empty())
             .unwrap_or("chat")
             .to_string();
+        let (packet, kind) = match space
+            .is_some()
+            .then(|| pointer(&source, &title, config.as_ref()))
+            .flatten()
+        {
+            Some(pointer) => (pointer, zeron_doc::HandoffKind::Pointer),
+            None => (packet.to_string(), zeron_doc::HandoffKind::Text),
+        };
+        let chat = workspace.create_handoff_chat(&source, chat_id, from, config, space.as_ref())?;
         let route = zeron_doc::HandoffRoute {
             from_harness: Some(from),
             from_model: source.config.and_then(|config| config.model),
             to_model: chat.config.as_ref().and_then(|config| config.model.clone()),
             source_chat_id: Some(source.id),
             source_title: Some(title.clone()),
+            kind,
         };
         self.open(chat_id)?.write_system_note_with(
             &new_id(),
             &format!("Continued from {title}."),
             None,
-            Some((harness, packet, route)),
+            Some((harness, &packet, route)),
             now_ms(),
         )?;
+        if let Some(space) = &space {
+            self.open(source_chat_id)?.write_system_note(
+                &new_id(),
+                &format!(
+                    "Handed off to {} › {}",
+                    space.display_name(),
+                    chat.title.as_deref().unwrap_or("chat")
+                ),
+                None,
+                now_ms(),
+            )?;
+        }
         Ok(chat)
     }
 
