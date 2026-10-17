@@ -2058,9 +2058,12 @@ impl EngineRpc {
                 note,
             } => {
                 self.voice.retire_chat(&chat_id);
-                let left_model = self.workspace.chat_config(&chat_id).and_then(|c| c.model);
+                let left_config = self.workspace.chat_config(&chat_id);
+                let left_instance = left_config.as_ref().and_then(|c| c.instance_id.clone());
+                let left_model = left_config.and_then(|c| c.model);
                 let left = self.doc_host.harness_for(&chat_id);
-                let switching = left != config.harness;
+                // Another instance of the same driver is another home and login: its session cannot resume.
+                let switching = left != config.harness || left_instance != config.instance_id;
                 if switching {
                     self.sessions
                         .switch_harness(&chat_id)

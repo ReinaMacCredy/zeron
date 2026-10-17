@@ -822,3 +822,23 @@ async fn a_thread_continued_twice_still_carries_the_first_conversation() {
         "{packet}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_to_another_instance_of_the_same_driver_closes_the_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    assert_eq!(rig.session(CHAT).as_deref(), Some("Old-sess"));
+    rig.client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig",
+                "chatId": CHAT,
+                "config": {"harness": "mock", "sandbox": "workspace-write", "instanceId": "mock_work"},
+            }),
+        )
+        .await
+        .expect("setChatConfig");
+    assert_eq!(rig.session(CHAT).as_deref(), Some(""));
+}
