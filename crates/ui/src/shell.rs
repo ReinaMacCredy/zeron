@@ -2215,8 +2215,42 @@ enum SidechatSurface {
 
 #[derive(Default)]
 struct BtwView {
-    open: bool,
+    phase: BtwPhase,
     active: Option<String>,
+    slide: Option<BtwSlide>,
+    born: std::collections::HashMap<String, std::time::Instant>,
+}
+
+impl BtwView {
+    fn is_open(&self) -> bool {
+        matches!(self.phase, BtwPhase::Open { .. })
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum BtwPhase {
+    #[default]
+    Closed,
+    Open {
+        since: std::time::Instant,
+        from: Option<gpui::Bounds<Pixels>>,
+    },
+    Closing {
+        since: std::time::Instant,
+        from: gpui::Bounds<Pixels>,
+    },
+    Expanding {
+        since: std::time::Instant,
+        from: gpui::Bounds<Pixels>,
+        to: Option<gpui::Bounds<Pixels>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct BtwSlide {
+    since: std::time::Instant,
+    from: Option<gpui::Bounds<Pixels>>,
+    dir: f32,
 }
 
 struct BtwTab {
@@ -2228,6 +2262,43 @@ struct BtwTab {
 
 const BTW_THREAD_MAX_HEIGHT: f32 = 360.0;
 const BTW_PANEL_RADIUS: f32 = 14.0;
+const BTW_OPEN: MotionSpec = motion::SEGMENT_SLIDE;
+const BTW_CONTENT_IN: MotionSpec = MotionSpec::new(160, motion::EASE).with_delay(90);
+const BTW_SWAP: MotionSpec = MotionSpec::new(140, motion::EASE);
+const BTW_DRAFT_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT_QUINT).with_delay(160);
+const BTW_TITLE_FADE: MotionSpec = MotionSpec::new(120, motion::EASE);
+const BTW_CHIP_GROW: MotionSpec = MotionSpec::new(180, motion::EASE_OUT_QUINT);
+const BTW_HIGHLIGHT: MotionSpec = MotionSpec::new(200, motion::EASE_OUT_QUINT);
+const BTW_THREAD_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT_QUINT);
+const BTW_CONTENT_OUT: MotionSpec = MotionSpec::new(80, motion::EASE);
+const BTW_COLLAPSE: MotionSpec = MotionSpec::new(200, motion::EASE_IN).with_delay(60);
+const BTW_FLY: MotionSpec = MotionSpec::new(300, motion::EASE_OUT_QUINT);
+const BTW_THREAD_SHIFT: f32 = 8.0;
+const BTW_DRAFT_RISE: f32 = 3.0;
+
+fn lerp_bounds(
+    from: gpui::Bounds<Pixels>,
+    to: gpui::Bounds<Pixels>,
+    t: f32,
+) -> gpui::Bounds<Pixels> {
+    let mix = |a: Pixels, b: Pixels| px(motion::lerp(f32::from(a), f32::from(b), t));
+    gpui::Bounds {
+        origin: gpui::point(
+            mix(from.origin.x, to.origin.x),
+            mix(from.origin.y, to.origin.y),
+        ),
+        size: gpui::size(
+            mix(from.size.width, to.size.width),
+            mix(from.size.height, to.size.height),
+        ),
+    }
+}
+
+fn btw_surface(theme: &Theme, occlude: bool) -> gpui::Div {
+    crate::queue::queue_panel_surface(theme, !occlude)
+        .rounded(px(BTW_PANEL_RADIUS))
+        .border_color(theme.accent.opacity(0.55))
+}
 
 fn btw_tab_title(
     state: &AppState,
@@ -2453,6 +2524,11 @@ pub struct Shell {
     sidechat_create: Option<(String, Task<()>)>,
     btw: std::collections::HashMap<String, BtwView>,
     btw_tabs: std::collections::HashMap<String, BtwTab>,
+    btw_panel_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    btw_strip_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    btw_chip_bounds:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, gpui::Bounds<Pixels>>>>,
+    btw_titles: std::collections::HashMap<String, (SharedString, SharedString, std::time::Instant)>,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
@@ -3166,6 +3242,10 @@ impl Shell {
             sidechat_create: None,
             btw: std::collections::HashMap::new(),
             btw_tabs: std::collections::HashMap::new(),
+            btw_panel_bounds: Default::default(),
+            btw_strip_bounds: Default::default(),
+            btw_chip_bounds: Default::default(),
+            btw_titles: std::collections::HashMap::new(),
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
@@ -5647,7 +5727,7 @@ impl Shell {
         let source = self.sidechat_source_chat(cx)?;
         self.btw
             .get(&source)
-            .is_some_and(|view| view.open)
+            .is_some_and(BtwView::is_open)
             .then_some(source)
     }
 
@@ -5700,12 +5780,46 @@ impl Shell {
         if !live.contains(&chat_id) {
             return None;
         }
-        for id in live {
+        let fresh: Vec<String> = live
+            .iter()
+            .filter(|id| !self.btw_tabs.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in live.iter().cloned() {
             self.ensure_btw_tab(id, cx);
         }
         let composer = self.btw_tabs.get(&chat_id)?.composer.clone();
+        let now = self.render_time.unwrap_or_else(|| self.motion_time());
+        let tab_rect = self.composer.read(cx).sidechat_tab_bounds();
+        let highlight = self
+            .btw
+            .get(source)
+            .and_then(|view| self.btw_highlight_rect(view.slide, view.active.as_deref()));
         let view = self.btw.entry(source.to_string()).or_default();
-        view.open = true;
+        if view.is_open() {
+            view.born.extend(fresh.into_iter().map(|id| (id, now)));
+            let position =
+                |id: Option<&str>| live.iter().position(|live| Some(live.as_str()) == id);
+            if view.active.as_deref() != Some(chat_id.as_str()) {
+                let dir = match (position(view.active.as_deref()), position(Some(&chat_id))) {
+                    (Some(from), Some(to)) if to < from => -1.0,
+                    _ => 1.0,
+                };
+                view.slide = Some(BtwSlide {
+                    since: now,
+                    from: highlight,
+                    dir,
+                });
+            }
+        } else {
+            view.phase = BtwPhase::Open {
+                since: now,
+                from: tab_rect,
+            };
+            view.slide = None;
+            // The btw panel grows from the edge tab; the dock's glide would slide the whole slot.
+            self.composer_dock.borrow_mut().jump();
+        }
         view.active = Some(chat_id);
         composer.update(cx, |composer, cx| {
             composer.focus_pending = true;
@@ -5734,10 +5848,21 @@ impl Shell {
     }
 
     fn close_btw(&mut self, source: &str, cx: &mut Context<Self>) {
+        let Some(exit) = self
+            .btw
+            .get(source)
+            .map(|view| self.btw_exit_from(view.phase))
+        else {
+            return;
+        };
         let Some(view) = self.btw.get_mut(source) else {
             return;
         };
-        view.open = false;
+        view.phase = exit.map_or(BtwPhase::Closed, |(since, from)| BtwPhase::Closing {
+            since,
+            from,
+        });
+        self.composer_dock.borrow_mut().jump();
         let unstarted = view.active.clone().filter(|active| {
             let state = self.state.read(cx);
             state
@@ -5796,24 +5921,101 @@ impl Shell {
             return;
         }
         view.active = neighbour.clone();
-        let open = view.open;
+        let (open, phase) = (view.is_open(), view.phase);
         match neighbour {
             Some(next) if open => {
                 self.show_btw_tab(source, next, cx);
             }
             None if open => {
-                view.open = false;
+                let exit = self.btw_exit_from(phase);
+                if let Some(view) = self.btw.get_mut(source) {
+                    view.phase = exit.map_or(BtwPhase::Closed, |(since, from)| BtwPhase::Closing {
+                        since,
+                        from,
+                    });
+                }
+                self.composer_dock.borrow_mut().jump();
                 self.focus_composer(cx);
             }
             _ => {}
         }
     }
 
+    fn btw_exit_from(&self, phase: BtwPhase) -> Option<(std::time::Instant, gpui::Bounds<Pixels>)> {
+        let BtwPhase::Open { since, from } = phase else {
+            return None;
+        };
+        if self.reduced_motion {
+            return None;
+        }
+        let rect = self.btw_box_rect(since, from)?;
+        Some((self.render_time.unwrap_or_else(|| self.motion_time()), rect))
+    }
+
+    fn btw_raw(&self, since: std::time::Instant, spec: MotionSpec) -> f32 {
+        if self.reduced_motion {
+            return 1.0;
+        }
+        let total = spec.total().mul_f32(motion::speed_scale());
+        let raw = (self.tween_elapsed(since).as_secs_f32() / total.as_secs_f32()).min(1.0);
+        if raw < 1.0 {
+            self.motion_active.set(true);
+        }
+        raw
+    }
+
+    fn btw_t(&self, since: std::time::Instant, spec: MotionSpec) -> f32 {
+        spec.progress(self.btw_raw(since, spec))
+    }
+
+    fn btw_box_rect(
+        &self,
+        since: std::time::Instant,
+        from: Option<gpui::Bounds<Pixels>>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        let panel = self.btw_panel_bounds.get()?;
+        Some(from.map_or(panel, |from| {
+            lerp_bounds(from, panel, self.btw_t(since, BTW_OPEN))
+        }))
+    }
+
+    fn btw_highlight_rect(
+        &self,
+        slide: Option<BtwSlide>,
+        active: Option<&str>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        let target = self.btw_chip_bounds.borrow().get(active?).copied()?;
+        Some(
+            match slide.and_then(|slide| slide.from.map(|from| (slide.since, from))) {
+                Some((since, from)) => lerp_bounds(from, target, self.btw_t(since, BTW_HIGHLIGHT)),
+                None => target,
+            },
+        )
+    }
+
+    // The pane is not laid out yet on the frame that opens it.
+    fn btw_pane_rect(&self, cx: &App) -> Option<gpui::Bounds<Pixels>> {
+        let width = self.right_settled_target(cx);
+        (width > 0.0).then(|| {
+            let right = self.viewport_width - self.content_inset() - self.files_settled_width(cx);
+            let top = Theme::TITLEBAR_HEIGHT;
+            gpui::Bounds {
+                origin: gpui::point(px(right - width), px(top)),
+                size: gpui::size(
+                    px(width),
+                    px((self.viewport_height - top - self.content_inset()).max(0.0)),
+                ),
+            }
+        })
+    }
+
     fn expand_btw(&mut self, source: &str, cx: &mut Context<Self>) {
+        let leaving = self.btw.get(source).map(|view| view.phase);
         let Some(view) = self.btw.get_mut(source) else {
             return;
         };
-        view.open = false;
+        view.phase = BtwPhase::Closed;
+        self.composer_dock.borrow_mut().jump();
         let Some(active) = view.active.clone() else {
             return;
         };
@@ -5828,6 +6030,12 @@ impl Shell {
             return;
         };
         self.open_sidechat_in_right_pane(&chat, None, SidechatStaged::default(), cx);
+        if let Some((since, from)) = leaving.and_then(|phase| self.btw_exit_from(phase)) {
+            let to = self.btw_pane_rect(cx);
+            if let Some(view) = self.btw.get_mut(source) {
+                view.phase = BtwPhase::Expanding { since, from, to };
+            }
+        }
         self.btw_tabs.remove(&active);
         self.release_sidechat_doc(&active, cx);
         cx.notify();
@@ -6066,17 +6274,175 @@ impl Shell {
     fn render_btw(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (source, tab) = self.active_btw_tab(cx)?;
         let (transcript, composer) = (tab.transcript.clone(), tab.composer.clone());
-        let active = self.btw.get(&source)?.active.clone()?;
+        let view = self.btw.get(&source)?;
+        let active = view.active.clone()?;
+        let BtwPhase::Open { since, from } = view.phase else {
+            return None;
+        };
+        let slide = view.slide;
+        let open_t = self.btw_t(since, BTW_OPEN);
+        let content_t = self.btw_t(since, BTW_CONTENT_IN);
+        let swap_t = self.btw_t(since, BTW_SWAP);
+        let draft_t = self.btw_t(since, BTW_DRAFT_IN);
+        let (thread_t, dir) = slide.map_or((1.0, 0.0), |slide| {
+            (self.btw_t(slide.since, BTW_THREAD_IN), slide.dir)
+        });
+        let header = self.render_btw_header(&source, Some(&active), true, draft_t, cx);
+        let theme = Theme::of(cx).clone();
+        let occlude = !cx.has_active_drag();
+        let thread_height = (self.viewport_height * 0.4).min(BTW_THREAD_MAX_HEIGHT);
+        let growing = from.filter(|_| open_t < 1.0);
+        let box_opacity = match (growing, self.btw_panel_bounds.get()) {
+            (Some(_), None) => 0.0,
+            _ => motion::lerp(0.7, 1.0, open_t),
+        };
+        let chrome = match growing.zip(self.btw_panel_bounds.get()) {
+            Some((from, panel)) => {
+                let rect = lerp_bounds(from, panel, open_t);
+                div()
+                    .absolute()
+                    .left(rect.left() - panel.left())
+                    .top(rect.top() - panel.top())
+                    .w(rect.size.width)
+                    .h(rect.size.height)
+            }
+            None => div().absolute().inset_0(),
+        }
+        .opacity(box_opacity)
+        .child(crate::frost::frosted(
+            BTW_PANEL_RADIUS,
+            crate::frost::MENU_BLUR * box_opacity,
+            btw_surface(&theme, occlude).size_full(),
+        ));
+        let content = btw_surface(&theme, occlude)
+            .bg(gpui::transparent_black())
+            .border_color(gpui::transparent_black())
+            .shadow_none()
+            .pb(px(8.0))
+            .gap(px(6.0))
+            .opacity(content_t)
+            .child(header)
+            .child(
+                div()
+                    .h(px(thread_height))
+                    .overflow_hidden()
+                    .relative()
+                    .left(px(BTW_THREAD_SHIFT * dir * (1.0 - thread_t)))
+                    .opacity(thread_t)
+                    .child(transcript),
+            );
+        let measured = self.btw_panel_bounds.clone();
+        let panel = div()
+            .mx(px(Theme::SPACE_LG))
+            .relative()
+            .child(chrome)
+            .child(content)
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| measured.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+        let main = self.composer.clone();
+        Some(
+            div()
+                .id("btw")
+                .debug_selector(|| "btw".into())
+                .relative()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(Theme::SPACE_SM))
+                .when(swap_t < 1.0, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .opacity(1.0 - swap_t)
+                            .child(main),
+                    )
+                })
+                .child(panel)
+                .child(div().opacity(swap_t).child(composer))
+                .into_any_element(),
+        )
+    }
+
+    fn render_btw_header(
+        &mut self,
+        source: &str,
+        active: Option<&str>,
+        live: bool,
+        draft_t: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let now = Utc::now();
         let tabs: Vec<(String, SharedString)> = {
             let state = self.state.read(cx);
             state
-                .live_sidechats_of(&source, now)
+                .live_sidechats_of(source, now)
                 .into_iter()
                 .map(|chat| (chat.id.clone(), btw_tab_title(state, chat, now)))
                 .collect()
         };
         let theme = Theme::of(cx).clone();
+        let frame = self.render_time.unwrap_or_else(|| self.motion_time());
+        let titles: Vec<(String, SharedString, Option<(SharedString, f32)>)> = tabs
+            .into_iter()
+            .map(|(id, title)| {
+                if !live {
+                    return (id, title, None);
+                }
+                let (old, since) = {
+                    let entry = self
+                        .btw_titles
+                        .entry(id.clone())
+                        .or_insert_with(|| (title.clone(), title.clone(), frame));
+                    if entry.1 != title {
+                        *entry = (entry.1.clone(), title.clone(), frame);
+                    }
+                    (entry.0.clone(), entry.2)
+                };
+                let t = if old == title {
+                    1.0
+                } else {
+                    self.btw_t(since, BTW_TITLE_FADE)
+                };
+                (id, title, (t < 1.0).then_some((old, t)))
+            })
+            .collect();
+        if live {
+            self.btw_titles
+                .retain(|id, _| self.btw_tabs.contains_key(id));
+            self.btw_chip_bounds
+                .borrow_mut()
+                .retain(|id, _| self.btw_tabs.contains_key(id));
+        }
+        let view = self.btw.get(source);
+        let slide = view.and_then(|view| view.slide).filter(|_| live);
+        let born = view
+            .map(|view| view.born.clone())
+            .filter(|_| live)
+            .unwrap_or_default();
+        let highlight = slide
+            .filter(|slide| self.btw_raw(slide.since, BTW_HIGHLIGHT) < 1.0)
+            .and_then(|slide| self.btw_highlight_rect(Some(slide), active))
+            .zip(self.btw_strip_bounds.get())
+            .map(|(rect, strip)| (rect.left() - strip.left(), rect.size.width));
+        let grown: Vec<String> = born
+            .iter()
+            .filter(|(_, since)| self.btw_raw(**since, BTW_CHIP_GROW) >= 1.0)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if let Some(view) = self.btw.get_mut(source) {
+            for id in grown {
+                view.born.remove(&id);
+            }
+        }
         let draft = self
             .composer
             .read(cx)
@@ -6087,7 +6453,6 @@ impl Shell {
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map(|line| SharedString::from(format!("Draft: {line}")));
-        let thread_height = (self.viewport_height * 0.4).min(BTW_THREAD_MAX_HEIGHT);
         let icon_button = |id: &'static str, glyph: &'static str, label: &'static str| {
             div()
                 .id(id)
@@ -6098,74 +6463,138 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
+                .when(live, |el| el.cursor_pointer())
                 .role(gpui::Role::Button)
                 .aria_label(label)
-                .tooltip(crate::settings::widgets::text_tooltip(label))
-                .hover(|s| s.bg(theme.element_hover))
+                .when(live, |el| {
+                    el.tooltip(crate::settings::widgets::text_tooltip(label))
+                        .hover(|s| s.bg(theme.element_hover))
+                })
                 .child(icon(glyph).size(px(13.0)).text_color(theme.text_faint))
         };
-        let tab_chips = tabs.into_iter().enumerate().map(|(ix, (id, title))| {
-            let group: SharedString = format!("btw-tab-{ix}").into();
-            let selected = id == active;
-            let (open_source, close_source, close_id) =
-                (source.clone(), source.clone(), id.clone());
-            div()
-                .id(("btw-tab", ix))
-                .debug_selector(move || format!("btw-tab-{ix}"))
-                .group(group.clone())
-                .flex_none()
-                .min_w_0()
-                .max_w(px(160.0))
-                .h(px(22.0))
-                .pl(px(8.0))
-                .pr(px(2.0))
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .rounded(px(7.0))
-                .cursor_pointer()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(if selected {
-                    theme.text
-                } else {
-                    theme.text_muted
-                })
-                .when(selected, |el| el.bg(theme.element_active))
-                .when(!selected, |el| el.hover(|s| s.bg(theme.element_hover)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.show_btw_tab(&open_source, id.clone(), cx);
-                }))
-                .child(div().min_w_0().truncate().child(title))
-                .child(
-                    div()
-                        .id(("btw-tab-close", ix))
-                        .debug_selector(move || format!("btw-tab-close-{ix}"))
-                        .flex_none()
-                        .size(px(16.0))
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .role(gpui::Role::Button)
-                        .aria_label("Archive sidechat")
-                        .opacity(0.0)
-                        .group_hover(group, |s| s.opacity(1.0))
-                        .hover(|s| s.bg(crate::theme::wash(0.12)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.archive_btw_tab(&close_source, &close_id, cx);
-                        }))
+        let tab_chips: Vec<_> = titles
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (id, title, fade))| {
+                let group: SharedString = format!("btw-tab-{ix}").into();
+                let selected = Some(id.as_str()) == active;
+                let grow = born
+                    .get(&id)
+                    .map(|since| self.btw_t(*since, BTW_CHIP_GROW))
+                    .filter(|t| *t < 1.0)
+                    .map(|t| {
+                        self.btw_chip_bounds
+                            .borrow()
+                            .get(&id)
+                            .map_or(0.0, |bounds| f32::from(bounds.size.width))
+                            * t
+                    });
+                let measured = live.then(|| (self.btw_chip_bounds.clone(), id.clone()));
+                let (open_source, close_source, close_id) =
+                    (source.to_string(), source.to_string(), id.clone());
+                let label = match fade {
+                    Some((old, t)) => div()
+                        .relative()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(div().truncate().opacity(t).child(title))
                         .child(
-                            icon(icons::CLOSE)
-                                .size(px(10.0))
-                                .text_color(theme.text_muted),
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .whitespace_nowrap()
+                                .opacity(1.0 - t)
+                                .child(old),
                         ),
-                )
-        });
+                    None => div().min_w_0().truncate().child(title),
+                };
+                div()
+                    .id(("btw-tab", ix))
+                    .debug_selector(move || format!("btw-tab-{ix}"))
+                    .group(group.clone())
+                    .flex_none()
+                    .flex()
+                    .h(px(22.0))
+                    .rounded(px(7.0))
+                    .when_some(grow, |el, width| el.w(px(width)).overflow_hidden())
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(if selected {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .when(selected && highlight.is_none(), |el| {
+                        el.bg(theme.element_active)
+                    })
+                    .when(live && !selected, |el| {
+                        el.hover(|s| s.bg(theme.element_hover))
+                    })
+                    .when(live, |el| {
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.show_btw_tab(&open_source, id.clone(), cx);
+                            }))
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .relative()
+                            .min_w_0()
+                            .max_w(px(160.0))
+                            .h_full()
+                            .pl(px(8.0))
+                            .pr(px(2.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(label)
+                            .child(
+                                div()
+                                    .id(("btw-tab-close", ix))
+                                    .debug_selector(move || format!("btw-tab-close-{ix}"))
+                                    .flex_none()
+                                    .size(px(16.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Archive sidechat")
+                                    .opacity(0.0)
+                                    .when(live, |el| {
+                                        el.group_hover(group, |s| s.opacity(1.0))
+                                            .hover(|s| s.bg(crate::theme::wash(0.12)))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.archive_btw_tab(&close_source, &close_id, cx);
+                                            }))
+                                    })
+                                    .child(
+                                        icon(icons::CLOSE)
+                                            .size(px(10.0))
+                                            .text_color(theme.text_muted),
+                                    ),
+                            )
+                            .when_some(measured, |el, (measured, id)| {
+                                el.child(
+                                    gpui::canvas(
+                                        move |bounds, _, _| {
+                                            measured.borrow_mut().insert(id.clone(), bounds);
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
+                            }),
+                    )
+            })
+            .collect();
         let (new_source, expand_source, close_source) =
-            (source.clone(), source.clone(), source.clone());
-        let header = div()
+            (source.to_string(), source.to_string(), source.to_string());
+        let strip_bounds = live.then(|| self.btw_strip_bounds.clone());
+        div()
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -6185,13 +6614,27 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(4.0))
+                    .when_some(highlight, |el, (left, width)| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left(left)
+                                .w(width)
+                                .h(px(22.0))
+                                .rounded(px(7.0))
+                                .bg(theme.element_active),
+                        )
+                    })
                     .children(tab_chips)
-                    .child(
-                        icon_button("btw-new-tab", icons::PLUS, "New btw tab").on_click(
-                            cx.listener(move |this, _, _, cx| {
+                    .child(icon_button("btw-new-tab", icons::PLUS, "New btw tab").when(
+                        live,
+                        |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
                                 this.create_sidechat_on(
                                     SidechatSurface::Btw,
                                     new_source.clone(),
@@ -6199,9 +6642,19 @@ impl Shell {
                                     SidechatStaged::default(),
                                     cx,
                                 )
-                            }),
-                        ),
-                    ),
+                            }))
+                        },
+                    ))
+                    .when_some(strip_bounds, |el, measured| {
+                        el.child(
+                            gpui::canvas(
+                                move |bounds, _, _| measured.set(Some(bounds)),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                    }),
             )
             .children(draft.map(|draft| {
                 div()
@@ -6216,11 +6669,19 @@ impl Shell {
                     .border_color(theme.border_strong)
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
+                    .relative()
+                    .top(px(BTW_DRAFT_RISE * (1.0 - draft_t)))
+                    .opacity(draft_t)
                     .child(draft)
             }))
             .child(
-                icon_button("btw-expand", icons::LUCIDE_MAXIMIZE_2, "Open in side pane").on_click(
-                    cx.listener(move |this, _, _, cx| this.expand_btw(&expand_source, cx)),
+                icon_button("btw-expand", icons::LUCIDE_MAXIMIZE_2, "Open in side pane").when(
+                    live,
+                    |el| {
+                        el.on_click(
+                            cx.listener(move |this, _, _, cx| this.expand_btw(&expand_source, cx)),
+                        )
+                    },
                 ),
             )
             .child(
@@ -6228,38 +6689,88 @@ impl Shell {
                     .id("btw-close")
                     .debug_selector(|| "btw-close".into())
                     .flex_none()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.close_btw(&close_source, cx)))
+                    .when(live, |el| {
+                        el.cursor_pointer().on_click(
+                            cx.listener(move |this, _, _, cx| this.close_btw(&close_source, cx)),
+                        )
+                    })
                     .child(popover::kbd_hint(&theme, "Esc")),
-            );
-        let panel = crate::queue::queue_panel_surface(&theme, cx.has_active_drag())
-            .rounded(px(BTW_PANEL_RADIUS))
-            .border_color(theme.accent.opacity(0.55))
-            .pb(px(8.0))
-            .gap(px(6.0))
-            .child(header)
+            )
+    }
+
+    fn render_btw_ghost(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let source = self.sidechat_source_chat(cx)?;
+        let view = self.btw.get(&source)?;
+        let active = view.active.clone();
+        let (since, from, target, expand) = match view.phase {
+            BtwPhase::Closing { since, from } => (
+                since,
+                from,
+                self.composer.read(cx).sidechat_tab_bounds(),
+                false,
+            ),
+            BtwPhase::Expanding { since, from, to } => (since, from, to, true),
+            _ => return None,
+        };
+        let spec = match (expand, target) {
+            (false, _) => BTW_COLLAPSE,
+            (true, Some(_)) => BTW_FLY,
+            (true, None) => motion::FADE_QUICK,
+        };
+        let raw = self.btw_raw(since, spec);
+        if raw >= 1.0 {
+            if let Some(view) = self.btw.get_mut(&source) {
+                view.phase = BtwPhase::Closed;
+            }
+            return None;
+        }
+        let t = spec.progress(raw);
+        let (rect, opacity) = match (expand, target) {
+            (false, target) => (target.map_or(from, |to| lerp_bounds(from, to, t)), 1.0 - t),
+            (true, Some(to)) => (lerp_bounds(from, to, t), ((1.0 - raw) / 0.3).min(1.0)),
+            (true, None) => (from, 1.0 - t),
+        };
+        let theme = Theme::of(cx).clone();
+        let content_t = self.btw_t(since, BTW_CONTENT_OUT);
+        let content = (content_t < 1.0).then(|| {
+            let header = self.render_btw_header(&source, active.as_deref(), false, 1.0, cx);
+            gpui::anchored().position(from.origin).child(
+                btw_surface(&theme, false)
+                    .bg(gpui::transparent_black())
+                    .border_color(gpui::transparent_black())
+                    .shadow_none()
+                    .w(from.size.width)
+                    .h(from.size.height)
+                    .opacity(1.0 - content_t)
+                    .child(header),
+            )
+        });
+        let layer = div()
+            .absolute()
+            .size_0()
             .child(
-                div()
-                    .h(px(thread_height))
-                    .overflow_hidden()
-                    .child(transcript),
-            );
-        Some(
+                gpui::anchored().position(rect.origin).child(
+                    div()
+                        .w(rect.size.width)
+                        .h(rect.size.height)
+                        .opacity(opacity)
+                        .child(crate::frost::frosted(
+                            BTW_PANEL_RADIUS,
+                            crate::frost::MENU_BLUR * opacity,
+                            btw_surface(&theme, false).size_full(),
+                        )),
+                ),
+            )
+            .children(content);
+        Some(if expand {
             div()
-                .id("btw")
-                .debug_selector(|| "btw".into())
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(Theme::SPACE_SM))
-                .child(div().mx(px(Theme::SPACE_LG)).child(crate::frost::frosted(
-                    BTW_PANEL_RADIUS,
-                    crate::frost::MENU_BLUR,
-                    panel,
-                )))
-                .child(composer)
-                .into_any_element(),
-        )
+                .absolute()
+                .size_0()
+                .child(gpui::deferred(layer))
+                .into_any_element()
+        } else {
+            layer.into_any_element()
+        })
     }
 
     fn sidechat_entities(
@@ -15845,6 +16356,7 @@ impl Shell {
                                 .w(px(composer_width))
                                 .opacity(composer_opacity)
                                 .mx_auto()
+                                .children(self.render_btw_ghost(cx))
                                 .child(
                                     self.render_btw(cx).unwrap_or_else(|| {
                                         self.composer.clone().into_any_element()
@@ -23449,9 +23961,24 @@ mod right_tab_mouse_regressions {
             shell
                 .state
                 .update(cx, |state, _| state.chats[1].archived = false);
+            let closed_at = std::time::Instant::now();
+            shell.test_time = Some(closed_at);
+            shell.btw_panel_bounds.set(Some(gpui::Bounds {
+                origin: gpui::point(px(40.0), px(300.0)),
+                size: gpui::size(px(600.0), px(200.0)),
+            }));
             assert!(shell.close_btw_on_escape(cx));
             assert!(shell.open_btw_source(cx).is_none());
             assert!(shell.render_btw(cx).is_none());
+            assert!(matches!(
+                shell.btw["parent"].phase,
+                BtwPhase::Closing { .. }
+            ));
+            assert!(shell.render_btw_ghost(cx).is_some());
+            shell.test_time = Some(closed_at + BTW_COLLAPSE.total().mul_f32(motion::speed_scale()));
+            assert!(shell.render_btw_ghost(cx).is_none());
+            assert!(matches!(shell.btw["parent"].phase, BtwPhase::Closed));
+            shell.test_time = None;
             assert_eq!(
                 shell.composer.read(cx).input.read(cx).text(),
                 "keep my draft"

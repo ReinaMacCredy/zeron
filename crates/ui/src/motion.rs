@@ -417,6 +417,7 @@ pub const EASE_RESORT: CubicBezier = EASE_OUT_QUINT;
 /// CSS `ease-in-out` — the transcript scroll glide (browser smooth-scroll
 /// shape: gentle start, cruise, gentle landing).
 pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.42, 0.0, 0.58, 1.0);
+pub const EASE_IN: CubicBezier = CubicBezier::new(0.42, 0.0, 1.0, 1.0);
 
 // ---------------------------------------------------------------------------
 // Motion specs (the catalog)

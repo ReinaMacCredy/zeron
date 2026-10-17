@@ -363,6 +363,10 @@ impl DockState {
         }
     }
 
+    pub fn jump(&mut self) {
+        self.position = None;
+    }
+
     pub fn hero_y(&self, viewport: f32, height: f32) -> f32 {
         (viewport - height) * self.hero_anchor + 8.0
     }
