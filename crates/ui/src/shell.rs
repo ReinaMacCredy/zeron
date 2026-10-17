@@ -12895,8 +12895,7 @@ impl Shell {
             Utc::now(),
             theme,
         );
-        // The transparent left pad bridges the rail gutter so the pointer
-        // reaches the card without leaving both hover targets.
+        // The transparent pad bridges the rail gutter between ring and card.
         let host = div()
             .id("rail-usage-hover")
             .occlude()
@@ -17996,8 +17995,7 @@ impl Render for Shell {
                     self.debug_dialog = None;
                     self.rail_usage_menu.open(harness);
                 }
-                // `=rail-usage-hover` pins the first ring's hover card open;
-                // `=rail-usage-hover-details` also unfolds its Details.
+                // `=rail-usage-hover[-details]` pins the first ring's card open.
                 if matches!(
                     self.debug_dialog.as_deref(),
                     Some("rail-usage-hover" | "rail-usage-hover-details")

@@ -62,8 +62,7 @@ fn window_minutes(label: &str) -> Option<f64> {
     }
 }
 
-/// Synara's `deriveUsagePace`: where usage sits against an even burn across
-/// the window, and whether it lasts until the reset. Pure given `now`.
+/// Ported from Synara's `deriveUsagePace` (apps/web/src/lib/usagePace.ts).
 pub fn usage_pace(window: &AgentUsageWindow, now: DateTime<Utc>) -> Option<UsagePace> {
     let resets_at = window.resets_at?;
     let duration_ms = window_minutes(&window.label)? * 60_000.0;

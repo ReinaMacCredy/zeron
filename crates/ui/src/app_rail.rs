@@ -236,8 +236,7 @@ pub(crate) fn ring(account: Option<&AgentAccount>, theme: &Theme) -> Div {
         )
 }
 
-/// The pointer can sit on the ring or on its card; the card stays while
-/// either holds it, so the Details fold is reachable.
+/// The card stays while the ring or the card holds the pointer, so Details is reachable.
 #[derive(Default)]
 pub(crate) struct RingHover {
     pub harness: Option<HarnessId>,
@@ -387,8 +386,6 @@ fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) ->
         )
 }
 
-/// Synara's rail usage hover card: plan header, which window each ring draws,
-/// then one pace block per window and a Details fold.
 pub(crate) fn ring_hover_card(
     account: &AgentAccount,
     details_open: bool,
