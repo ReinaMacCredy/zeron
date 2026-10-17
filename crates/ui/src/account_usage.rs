@@ -112,6 +112,7 @@ fn window_minutes(label: &str) -> Option<f64> {
         "Session" => Some(300.0),
         "Week" => Some(10_080.0),
         "Day" => Some(1_440.0),
+        "Month" => Some(43_200.0),
         _ => None,
     }
 }
@@ -493,7 +494,11 @@ mod tests {
             Some("Limit reached")
         );
         assert_eq!(pace("Session", 0.496, 0.5).unwrap().amount, None);
-        assert_eq!(pace("Month", 0.5, 0.5), None);
+        assert_eq!(
+            pace("Month", 0.38, 0.33).unwrap().amount.as_deref(),
+            Some("5% in deficit")
+        );
+        assert_eq!(pace("Premium", 0.5, 0.5), None);
         assert_eq!(pace("Session", 0.5, 1.0), None);
     }
 
