@@ -41,7 +41,7 @@ use zeron_proto::{
 use crate::computer::runtime::ComputerRuntime;
 
 use crate::doc_host::{ChatDocHandle, DocHost, Since};
-use crate::registry::{HarnessDescriptor, HarnessRegistry};
+use crate::registry::{CompactionMode, HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
 
@@ -592,6 +592,8 @@ struct Inner {
     compact_owed: Mutex<HashMap<String, String>>,
     /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
     nudged_at: Mutex<HashMap<String, u64>>,
+    /// The last message the boundary classifier saw per chat: a steer falling back to dispatch is not judged twice.
+    boundary_checked: Mutex<HashMap<String, String>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
@@ -808,6 +810,7 @@ impl SessionsEngine {
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
                 compact_owed: Mutex::new(HashMap::new()),
                 nudged_at: Mutex::new(HashMap::new()),
+                boundary_checked: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 predictions: crate::predictions::Predictions::new(registry),
@@ -1306,6 +1309,10 @@ impl SessionsEngine {
             turn_computer = false;
             request.computer_control = live;
         }
+        if !idle && !startup_retry {
+            self.compact_at_boundary(chat_id, harness_id, &request.prompt, message_id.as_deref())
+                .await;
+        }
         let instructions = self.inner.instructions_for(chat_id);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
@@ -1701,6 +1708,14 @@ impl SessionsEngine {
         zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
             .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
+        // A compaction that could not run in place retired this run.
+        if self
+            .compact_at_boundary(chat_id, harness_id, prompt, Some(&user_id))
+            .await
+            && !self.is_live(chat_id, &run_id)
+        {
+            return Ok(SteerOutcome::NotSteerable);
+        }
         let turn_computer = computer_control.unwrap_or(run_computer);
         let bootstrap = self.warm_fork_history(chat_id, harness_id, prompt, &history_sent);
         let delivered = bootstrap.as_deref().unwrap_or(prompt);
@@ -1933,6 +1948,78 @@ impl SessionsEngine {
 
     pub async fn compact_idle(&self, chat_id: &str) -> Result<CompactOutcome, EngineError> {
         self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
+    }
+
+    /// Classifier mode: before a person's message starts a turn, compact if it opens a new task.
+    async fn compact_at_boundary(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        prompt: &str,
+        message_id: Option<&str>,
+    ) -> bool {
+        let settings = self.inner.registry.compaction_settings();
+        if settings.mode != CompactionMode::Classifier
+            || zeron_proto::invocation::leading_command(prompt).is_some()
+            || self.turn_in_flight(chat_id)
+            || lock(&self.inner.compacting).contains(chat_id)
+            || lock(&self.inner.agent_compacted).contains(chat_id)
+        {
+            return false;
+        }
+        if let Some(id) = message_id {
+            let mut checked = lock(&self.inner.boundary_checked);
+            if checked.get(chat_id).is_some_and(|last| last == id) {
+                return false;
+            }
+            checked.insert(chat_id.to_string(), id.to_string());
+        }
+        let config = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let Some(tokens) = self.inner.past_floor(chat_id, harness_id, config.as_ref()) else {
+            return false;
+        };
+        let Some(mut entries) = self
+            .doc_handle(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc().read_entries().ok())
+        else {
+            return false;
+        };
+        if let Some(at) = message_id.and_then(|id| entries.iter().position(|e| e.id == id)) {
+            if !crate::predictions::is_person_prompt(&entries[at]) {
+                return false;
+            }
+            entries.truncate(at);
+        }
+        let input = crate::compact_boundary::classifier_input(&entries, prompt);
+        if !crate::compact_boundary::starts_new_task(
+            &self.inner.registry,
+            settings.classifier,
+            harness_id,
+            input,
+        )
+        .await
+        {
+            lock(&self.inner.nudged_at).insert(chat_id.to_string(), tokens);
+            return false;
+        }
+        let focus = format!(
+            "The next message starts a new task. Keep only what it may need from this conversation. The message: {}",
+            last_chars(prompt.trim(), 2000)
+        );
+        match self
+            .compact_noting(chat_id, Some(focus), COMPACTED_BOUNDARY_NOTE)
+            .await
+        {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "boundary compaction skipped");
+                false
+            }
+        }
     }
 
     /// The reminder a Claude Code PostToolUse hook hands the running turn, if one is due.
@@ -3253,21 +3340,30 @@ impl Inner {
 
     /// Context tokens once past the reminder floor, when the agent can act on a reminder.
     fn nudge_tokens(&self, chat_id: &str, harness_id: HarnessId) -> Option<u64> {
-        let floor = self.registry.compaction_settings().nudge_tokens;
-        if floor == 0 || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
-            return None;
-        }
         let config = self
             .workspace()
             .and_then(|workspace| workspace.chat_config(chat_id));
         if self.tool_disabled(config.as_ref(), "compact") {
             return None;
         }
+        self.past_floor(chat_id, harness_id, config.as_ref())
+    }
+
+    /// Context tokens once past `nudgeTokens`, on a harness that can compact.
+    fn past_floor(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        config: Option<&zeron_proto::ChatConfig>,
+    ) -> Option<u64> {
+        let floor = self.registry.compaction_settings().nudge_tokens;
+        if floor == 0 || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
+            return None;
+        }
         let usage = self.doc_host()?.open(chat_id).ok()?.doc().context_usage()?;
         let tokens = usage.tokens?;
         // A window smaller than the floor would never see the reminder.
         let floor = config
-            .as_ref()
             .and_then(zeron_harness::claude::catalog::chat_budget)
             .or(usage.window)
             .filter(|window| *window > 0)
@@ -3317,7 +3413,9 @@ impl Inner {
             self.drop_agent_compact(chat_id, &request);
         }
         let owed = lock(&self.compact_owed).remove(chat_id);
-        let reminder = if lock(&self.agent_compacted).remove(chat_id) {
+        let reminder = if lock(&self.agent_compacted).remove(chat_id)
+            || self.registry.compaction_settings().mode != CompactionMode::Threshold
+        {
             None
         } else {
             self.nudge_tokens(chat_id, harness_id).map(|tokens| {
@@ -4287,6 +4385,7 @@ fn record_compaction(
 const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
 const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
+const COMPACTED_BOUNDARY_NOTE: &str = "Compacted before a new task";
 
 fn unsent_note(continue_with: &str) -> String {
     format!(

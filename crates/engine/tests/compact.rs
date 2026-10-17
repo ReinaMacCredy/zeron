@@ -13,6 +13,7 @@ use futures::stream::BoxStream;
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };
+use zeron_engine::registry::{CompactionMode, CompactionSettings};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -38,6 +39,8 @@ struct TestHarness {
     mailbox: Arc<Mutex<Vec<String>>>,
     /// Held by the next run until the test releases it.
     gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// The boundary classifier's answer; None fails the one-shot.
+    verdict: Mutex<Option<String>>,
 }
 
 impl TestHarness {
@@ -50,6 +53,7 @@ impl TestHarness {
             in_place: AtomicBool::new(false),
             mailbox: Arc::new(Mutex::new(Vec::new())),
             gate: Mutex::new(None),
+            verdict: Mutex::new(None),
         }
     }
 }
@@ -83,6 +87,27 @@ impl Harness for TestHarness {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
+    }
+    async fn run_one_shot(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+        _instructions: &'static str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let verdict = self.verdict.lock().unwrap().clone();
+        let Some(text) = verdict else {
+            return Err(HarnessError::Protocol("no verdict".into()));
+        };
+        Ok(futures::stream::iter([
+            Ok(AgentEvent::TextDelta { text }),
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            }),
+        ])
+        .boxed())
     }
     async fn run(
         &self,
@@ -688,6 +713,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
     core.registry
         .set_compaction_settings(zeron_engine::registry::CompactionSettings {
             nudge_tokens: 20_000,
+            mode: CompactionMode::Threshold,
             ..Default::default()
         })
         .unwrap();
@@ -713,6 +739,94 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         .map(entry_text)
         .collect();
     assert_eq!(typed, ["hello", "hello", "hello", "hello"], "the transcript keeps what was typed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_classifier_compacts_before_a_new_task_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    core.registry
+        .set_compaction_settings(CompactionSettings {
+            nudge_tokens: 20_000,
+            ..Default::default()
+        })
+        .unwrap();
+    let cwd = tmp.path().to_string_lossy().to_string();
+    let send = |id: &'static str, verdict: Option<&str>| {
+        *harness.verdict.lock().unwrap() = verdict.map(str::to_string);
+        core.doc_host
+            .queue_command(CHAT, run_payload(id, &cwd))
+            .expect("queue run");
+    };
+
+    send("msg-2", Some("CONTINUE"));
+    wait_for(|| requests.lock().unwrap().len() == 2, "follow-up runs").await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "follow-up settles").await;
+    send("msg-3", None);
+    wait_for(
+        || requests.lock().unwrap().len() == 3,
+        "unclassified send runs",
+    )
+    .await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "it settles").await;
+    assert!(
+        entries(&core).iter().all(|e| e.role != MessageRole::System),
+        "a follow-up or a failed check never compacts"
+    );
+
+    send("msg-4", Some("NEW"));
+    wait_for(
+        || requests.lock().unwrap().len() == 5,
+        "compaction, then the new task",
+    )
+    .await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "new task settles").await;
+    let prompts: Vec<String> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.prompt.clone())
+        .collect();
+    assert_eq!(prompts[1], "hello", "no reminder in classifier mode");
+    assert!(
+        prompts[3].starts_with("/compact The next message starts a new task.")
+            && prompts[3].ends_with("The message: hello"),
+        "{}",
+        prompts[3]
+    );
+    assert_eq!(prompts[4], "hello");
+    let system = entries(&core)
+        .into_iter()
+        .find(|e| e.role == MessageRole::System)
+        .expect("boundary entry");
+    assert_eq!(
+        entry_text(&system),
+        "Compacted before a new task · 22.8k → 2.3k tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_classifier_compacts_a_parked_run_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.in_place.store(true, Ordering::SeqCst);
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    core.registry
+        .set_compaction_settings(CompactionSettings {
+            nudge_tokens: 20_000,
+            ..Default::default()
+        })
+        .unwrap();
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    let mailbox = || harness.mailbox.lock().unwrap().clone();
+    wait_for(|| mailbox().len() == 2, "compaction, then the message").await;
+    assert!(mailbox()[0].starts_with("/compact The next message starts a new task."));
+    assert_eq!(mailbox()[1], "hello");
+    assert_eq!(requests.lock().unwrap().len(), 1, "no second process");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -118,7 +118,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
             let settings = registry.compaction_settings();
             if settings != last_settings {
                 seen.clear();
-                last_settings = settings;
+                last_settings = settings.clone();
             }
             let min_tokens = min_tokens_override.unwrap_or(settings.min_tokens);
             let idle: Vec<Session> = statuses

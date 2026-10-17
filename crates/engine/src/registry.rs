@@ -196,13 +196,26 @@ impl Default for DelegationSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompactionMode {
+    /// Every message past `nudge_tokens` reminds the agent to decide.
+    Threshold,
+    /// Past `nudge_tokens`, a one-shot model decides before the message is sent.
+    #[default]
+    Classifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CompactionSettings {
     pub enabled: bool,
     pub min_tokens: u64,
     /// 0 turns the nudge off.
     pub nudge_tokens: u64,
+    pub mode: CompactionMode,
+    /// None model picks a Sonnet-class model of the harness.
+    pub classifier: TitleSettings,
 }
 
 impl Default for CompactionSettings {
@@ -211,6 +224,8 @@ impl Default for CompactionSettings {
             enabled: true,
             min_tokens: 100_000,
             nudge_tokens: 150_000,
+            mode: CompactionMode::default(),
+            classifier: TitleSettings::default(),
         }
     }
 }
@@ -645,7 +660,7 @@ impl HarnessRegistry {
     }
 
     pub fn compaction_settings(&self) -> CompactionSettings {
-        self.prefs().compaction
+        self.prefs().compaction.clone()
     }
 
     pub fn set_compaction_settings(&self, settings: CompactionSettings) -> Result<(), String> {

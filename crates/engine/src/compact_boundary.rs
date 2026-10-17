@@ -1,0 +1,151 @@
+//! Prompt and input shape are benched in .maestro/topic/compact-nudge-bench (Sonnet judged 0 of 279 follow-ups NEW); change them only with a rerun.
+
+use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use zeron_proto::HarnessId;
+
+use crate::predictions::{entry_text, is_person_prompt, tail};
+use crate::registry::{HarnessRegistry, TitleSettings};
+use crate::titles::{OneShot, mid_tier_model, one_shot_target, run_one_shot};
+
+const INSTRUCTIONS: &str = "You decide whether a chat should be compacted before its next message is answered. Compacting replaces the conversation so far with a short summary of its conclusions; the specific details (numbers, steps, file contents, exact wording) are lost.
+
+Answer NEW only when the new message starts a different task or topic whose work will not need those details, only the conclusions.
+Answer CONTINUE when it is a follow-up, a clarification, a correction, a question about something just said, or the next step of the same task.
+When unsure, answer CONTINUE: a missed compaction is retried later, a wrong one loses details for good.
+
+Reply with exactly one word: NEW or CONTINUE.";
+
+const TURNS: usize = 8;
+const CLIP_CHARS: usize = 800;
+
+fn clip(text: &str) -> String {
+    if text.chars().count() <= CLIP_CHARS {
+        text.to_string()
+    } else {
+        format!("...{}", tail(text, CLIP_CHARS))
+    }
+}
+
+fn last_text(entry: &SessionMessageEntry) -> Option<&str> {
+    entry.parts.iter().rev().find_map(|part| match part {
+        MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.trim()),
+        _ => None,
+    })
+}
+
+pub(crate) fn classifier_input(earlier: &[SessionMessageEntry], message: &str) -> String {
+    let mut turns: Vec<(String, Option<&str>)> = Vec::new();
+    for entry in earlier {
+        if is_person_prompt(entry) {
+            let text = entry_text(entry);
+            if !text.is_empty() {
+                turns.push((text, None));
+            }
+        } else if entry.role == MessageRole::Assistant
+            && let Some(turn) = turns.last_mut()
+            && let Some(text) = last_text(entry)
+        {
+            turn.1 = Some(text);
+        }
+    }
+    let mut lines = vec!["Recent conversation:".to_string()];
+    for (user, agent) in &turns[turns.len().saturating_sub(TURNS)..] {
+        lines.push(format!("user: {}", clip(user)));
+        if let Some(agent) = agent {
+            lines.push(format!("agent: {}", clip(agent)));
+        }
+    }
+    lines.extend([
+        String::new(),
+        "New message:".into(),
+        format!("user: {}", message.trim()),
+    ]);
+    lines.join("\n")
+}
+
+fn verdict(raw: &str) -> String {
+    raw.trim().to_ascii_uppercase()
+}
+
+/// Any failure reads as a follow-up: a missed compaction is retried later.
+pub(crate) async fn starts_new_task(
+    registry: &HarnessRegistry,
+    settings: TitleSettings,
+    session: HarnessId,
+    input: String,
+) -> bool {
+    let Some(target) = one_shot_target(
+        registry,
+        settings.harness,
+        settings.model,
+        session,
+        mid_tier_model,
+    )
+    .await
+    else {
+        return false;
+    };
+    match run_one_shot(
+        target.harness.as_ref(),
+        target.lease,
+        OneShot {
+            harness: target.harness_id,
+            model: target.model,
+            prompt: input,
+            instructions: INSTRUCTIONS,
+            attempt_timeout: std::time::Duration::from_secs(20),
+            retry_delays_ms: &[],
+        },
+        verdict,
+    )
+    .await
+    {
+        Ok(answer) => answer.starts_with("NEW"),
+        Err(err) => {
+            tracing::debug!(error = %err, "boundary classifier skipped");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(role: MessageRole, text: &str) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: text.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: format!("{text}:text"),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn input_keeps_the_last_turns_with_the_agents_last_words() {
+        let mut entries: Vec<_> = (0..9)
+            .map(|n| entry(MessageRole::User, &format!("ask {n}")))
+            .collect();
+        let mut thread = entry(MessageRole::User, "from another thread");
+        thread.from_chat_id = Some("other".into());
+        entries.push(thread);
+        entries.push(entry(MessageRole::Assistant, "first part"));
+        entries.push(entry(MessageRole::Assistant, &"x".repeat(900)));
+        let input = classifier_input(&entries, " next thing ");
+        let expected = format!(
+            "Recent conversation:\nuser: ask 1\nuser: ask 2\nuser: ask 3\nuser: ask 4\nuser: ask 5\nuser: ask 6\nuser: ask 7\nuser: ask 8\nagent: ...{}\n\nNew message:\nuser: next thing",
+            "x".repeat(800)
+        );
+        assert_eq!(input, expected);
+    }
+}

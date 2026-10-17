@@ -1,10 +1,11 @@
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, div, prelude::*, px};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use zeron_engine::registry::CompactionSettings;
+use zeron_engine::registry::{CompactionMode, CompactionSettings, TitleSettings};
 use zeron_proto::tools::{ToolSettings, ToolSettingsState};
 use zeron_rpc::methods;
 
+use crate::pickers::{Pickers, TitleModelPicked};
 use crate::popover::Loadable;
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -18,13 +19,34 @@ pub struct CompactionCard {
     state: Entity<AppState>,
     settings: Loadable<CompactionSettings>,
     tools: Loadable<ToolSettingsState>,
+    picker: Entity<Pickers>,
     error: Option<String>,
     tasks: Vec<Task<()>>,
+    _picked: Subscription,
     _state: Subscription,
 }
 
 impl CompactionCard {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let picker = {
+            let state = state.clone();
+            cx.new(|cx| Pickers::new_for_titles(state, TitleSettings::default(), cx))
+        };
+        let picked = cx.subscribe(
+            &picker,
+            |this: &mut Self, _, event: &TitleModelPicked, cx| {
+                let Some(current) = this.settings.ready().cloned() else {
+                    return;
+                };
+                this.save(
+                    CompactionSettings {
+                        classifier: event.0.clone(),
+                        ..current
+                    },
+                    cx,
+                );
+            },
+        );
         let state_sub = cx.observe(&state, |this: &mut Self, _, cx| {
             if matches!(this.settings, Loadable::Idle) || matches!(this.tools, Loadable::Idle) {
                 this.load(cx);
@@ -34,8 +56,10 @@ impl CompactionCard {
             state,
             settings: Loadable::Idle,
             tools: Loadable::Idle,
+            picker,
             error: None,
             tasks: Vec::new(),
+            _picked: picked,
             _state: state_sub,
         };
         card.load(cx);
@@ -107,6 +131,14 @@ impl CompactionCard {
                     Ok(value) => {
                         *slot(card) = Loadable::Ready(value);
                         card.error = None;
+                        if let Some(classifier) = card
+                            .settings
+                            .ready()
+                            .map(|settings| settings.classifier.clone())
+                        {
+                            card.picker
+                                .update(cx, |picker, cx| picker.set_title_settings(classifier, cx));
+                        }
                     }
                     Err(error) if matches!(slot(card), Loadable::Ready(_)) => {
                         card.error = Some(error);
@@ -155,7 +187,7 @@ impl Render for CompactionCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let card = widgets::section_card(&theme);
-        let (Some(settings), Some(tools)) = (self.settings.ready().copied(), self.tools.ready())
+        let (Some(settings), Some(tools)) = (self.settings.ready().cloned(), self.tools.ready())
         else {
             let note = match (&self.settings, &self.tools) {
                 (Loadable::Error(error), _) | (_, Loadable::Error(error)) => error.clone(),
@@ -171,15 +203,36 @@ impl Render for CompactionCard {
         };
         let agent_on = !tools.disabled.iter().any(|tool| tool == COMPACT_TOOL);
         let entity = cx.entity();
-        let pick = move |mutate: fn(&mut CompactionSettings, u64)| {
+        let pick = |mutate: fn(&mut CompactionSettings, u64)| {
             let entity = entity.clone();
+            let settings = settings.clone();
             move |value: u64, _: &mut gpui::Window, cx: &mut gpui::App| {
                 entity.update(cx, |card, cx| {
-                    let mut next = settings;
+                    let mut next = settings.clone();
                     mutate(&mut next, value);
                     card.save(next, cx);
                 });
             }
+        };
+        let pick_mode = {
+            let entity = entity.clone();
+            let settings = settings.clone();
+            move |mode: CompactionMode, _: &mut gpui::Window, cx: &mut gpui::App| {
+                entity.update(cx, |card, cx| {
+                    card.save(
+                        CompactionSettings {
+                            mode,
+                            ..settings.clone()
+                        },
+                        cx,
+                    );
+                });
+            }
+        };
+        let classifier = settings.mode == CompactionMode::Classifier;
+        let toggled = CompactionSettings {
+            enabled: !settings.enabled,
+            ..settings.clone()
         };
         let rows: Vec<AnyElement> = vec![
             widgets::card_row(&theme, true)
@@ -190,15 +243,7 @@ impl Render for CompactionCard {
                 ))
                 .child(
                     switch(&theme, settings.enabled, "idle-compaction", IDLE_TITLE).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.save(
-                                CompactionSettings {
-                                    enabled: !settings.enabled,
-                                    ..settings
-                                },
-                                cx,
-                            )
-                        }),
+                        cx.listener(move |this, _, _, cx| this.save(toggled.clone(), cx)),
                     ),
                 )
                 .into_any_element(),
@@ -229,8 +274,33 @@ impl Render for CompactionCard {
             widgets::card_row(&theme, false)
                 .child(row_text(
                     &theme,
-                    "Remind at",
-                    "Context tokens; a chat with a smaller window is reminded at 70% of it. Every message past it carries the reminder until the chat compacts.",
+                    "Compact new tasks",
+                    if classifier {
+                        "A model reads each message and compacts first when it starts a new task."
+                    } else {
+                        "Each message carries a reminder; the agent decides whether to compact."
+                    },
+                ))
+                .child(widgets::segmented(
+                    &theme,
+                    "compaction-mode",
+                    &[
+                        (CompactionMode::Threshold, "Reminder"),
+                        (CompactionMode::Classifier, "Classifier"),
+                    ],
+                    settings.mode,
+                    pick_mode,
+                ))
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(row_text(
+                    &theme,
+                    if classifier { "Check from" } else { "Remind at" },
+                    if classifier {
+                        "Context tokens; a chat with a smaller window is checked from 70% of it. Smaller chats are never checked."
+                    } else {
+                        "Context tokens; a chat with a smaller window is reminded at 70% of it. Every message past it carries the reminder until the chat compacts."
+                    },
                 ))
                 .child(widgets::segmented(
                     &theme,
@@ -241,7 +311,18 @@ impl Render for CompactionCard {
                 ))
                 .into_any_element(),
         ];
+        let model_row = classifier.then(|| {
+            widgets::card_row(&theme, false)
+                .child(row_text(
+                    &theme,
+                    "Classifier model",
+                    "Sonnet-class by default; a small model compacted follow-ups in testing.",
+                ))
+                .child(self.picker.clone())
+                .into_any_element()
+        });
         card.children(rows)
+            .children(model_row)
             .when_some(self.error.clone(), |card, error| {
                 card.child(
                     widgets::card_row(&theme, false).child(widgets::error_strip(&theme, error)),

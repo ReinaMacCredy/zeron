@@ -157,6 +157,7 @@ impl TitleGenerator {
             settings.harness,
             settings.model,
             harness_id,
+            cheapest_model,
         )
         .await?;
         let title_prompt = format!(
@@ -194,6 +195,7 @@ pub(crate) async fn one_shot_target(
     configured: Option<HarnessId>,
     model: Option<String>,
     session: HarnessId,
+    fallback: fn(&[Model]) -> Option<String>,
 ) -> Option<OneShotTarget> {
     let harness_id = configured.or_else(|| {
         if zeron_harness::supports_titles(session) {
@@ -221,7 +223,7 @@ pub(crate) async fn one_shot_target(
     };
     let model = match model {
         Some(model) => Some(model),
-        None => cheapest_model(
+        None => fallback(
             &tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 registry.discover_models_with_lease(harness_id, lease.clone()),
@@ -327,6 +329,18 @@ pub(crate) fn cheapest_model(models: &[Model]) -> Option<String> {
             .any(|tier| haystack.contains(tier))
     });
     small.or(models.last()).map(|m| m.id.clone())
+}
+
+/// A Sonnet-class model when the harness offers one; else its default model.
+pub(crate) fn mid_tier_model(models: &[Model]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| {
+            format!("{} {}", m.id, m.label)
+                .to_lowercase()
+                .contains("sonnet")
+        })
+        .map(|m| m.id.clone())
 }
 
 /// First line, stripped of quote/heading dressing, capped at 60 chars.
