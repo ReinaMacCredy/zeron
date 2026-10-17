@@ -2810,7 +2810,11 @@ impl HandoffSide {
 }
 
 fn new_task_tokens(transcript: &[SessionMessageEntry]) -> Option<u64> {
-    transcript.last()?.parts.iter().find_map(|part| match part {
+    let entry = transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role != MessageRole::User)?;
+    entry.parts.iter().find_map(|part| match part {
         MessagePart::Classifier { record, .. }
             if record.verdict == zeron_doc::ClassifierVerdict::New =>
         {

@@ -222,7 +222,7 @@ async fn automatic(registry: &HarnessRegistry) -> Result<Choice, EngineError> {
     let mut candidates: Vec<HarnessId> = registry
         .enabled_set()
         .into_iter()
-        .filter(|id| zeron_harness::supports_titles(*id))
+        .filter(|id| zeron_harness::one_shot_by_default(*id))
         .collect();
     candidates.sort_by_key(|id| *id != HarnessId::ClaudeCode);
     for harness in candidates {

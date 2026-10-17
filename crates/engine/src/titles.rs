@@ -199,13 +199,13 @@ pub(crate) async fn one_shot_target(
     fallback: fn(&[Model]) -> Option<String>,
 ) -> Option<OneShotTarget> {
     let harness_id = configured.or_else(|| {
-        if zeron_harness::supports_titles(session) {
+        if zeron_harness::one_shot_by_default(session) {
             Some(session)
         } else {
             registry
                 .enabled_set()
                 .into_iter()
-                .find(|id| zeron_harness::supports_titles(*id))
+                .find(|id| zeron_harness::one_shot_by_default(*id))
         }
     })?;
     if !zeron_harness::supports_titles(harness_id) {
@@ -393,6 +393,7 @@ pub(crate) async fn collect_text(
         .run_one_shot(request, controls, instructions)
         .await?;
     let mut reply = OneShotReply::default();
+    let (mut usage, mut cached) = (None, 0);
     let mut completed = false;
     while let Some(event) = stream.next().await {
         match event? {
@@ -400,7 +401,12 @@ pub(crate) async fn collect_text(
             AgentEvent::Usage {
                 input_tokens,
                 output_tokens,
-            } => reply.usage = Some((input_tokens, output_tokens)),
+            } => usage = Some((input_tokens, output_tokens)),
+            AgentEvent::PromptCache {
+                read_tokens,
+                write_tokens,
+                ..
+            } => cached = read_tokens + write_tokens,
             AgentEvent::ToolCall { .. } => {
                 return Err(EngineError::Other(
                     "the model attempted to use a tool".into(),
@@ -424,6 +430,7 @@ pub(crate) async fn collect_text(
     }
     drop(steer_tx); // keep the mailbox open for the run's whole lifetime
     if completed {
+        reply.usage = usage.map(|(input, output)| (input + cached, output));
         Ok(reply)
     } else {
         Err(EngineError::Other(
