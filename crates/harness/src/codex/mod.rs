@@ -1095,10 +1095,19 @@ fn thread_params(
         p.insert("baseInstructions".into(), instructions.into());
         p.insert("developerInstructions".into(), instructions.into());
         p.insert("ephemeral".into(), true.into());
+        p.insert("environments".into(), json!([]));
         p.insert(
             "config".into(),
             json!({
                 "project_doc_max_bytes": 0,
+                "skills.include_instructions": false,
+                "include_permissions_instructions": false,
+                "include_collaboration_mode_instructions": false,
+                "include_environment_context": false,
+                "features.plugins": false,
+                "features.goals": false,
+                "features.sleep_tool": false,
+                "tools.experimental_request_user_input.enabled": false,
                 "web_search": "disabled",
                 "features.shell_tool": false,
                 "features.apply_patch_freeform": false,
@@ -1416,9 +1425,13 @@ async fn run_session(session: Session) {
             cwd: thread["cwd"].as_str().unwrap_or(&request.cwd).to_owned(),
             model_provider: thread["modelProvider"].as_str().map(str::to_owned),
         };
-        Ok::<_, HarnessError>((thread_id, children, voice_context))
+        let model = thread["model"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned);
+        Ok::<_, HarnessError>((thread_id, children, voice_context, model))
     };
-    let (thread_id, mut children, voice_context) = tokio::select! {
+    let (thread_id, mut children, voice_context, resolved_model) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -1487,7 +1500,9 @@ async fn run_session(session: Session) {
         &event_tx,
         AgentEvent::SessionStarted {
             harness: HarnessId::Codex,
-            model: request.model.clone().unwrap_or_default(),
+            model: resolved_model
+                .or_else(|| request.model.clone())
+                .unwrap_or_default(),
             tools: Vec::new(),
             cwd: request.cwd.clone(),
             session_id: thread_id.clone(),
@@ -2347,6 +2362,7 @@ async fn compact_session(session: CompactSession) {
 
     let mut pre_tokens: Option<u64> = None;
     let mut post_tokens: Option<u64> = None;
+    let mut compacting = false;
     let mut compacted = false;
     let mut interrupted = false;
     let mut error: Option<String> = None;
@@ -2389,7 +2405,11 @@ async fn compact_session(session: CompactSession) {
                                 post_tokens = post_tokens.or(tokens);
                                 break 'main;
                             }
-                            pre_tokens = tokens.or(pre_tokens);
+                            if compacting {
+                                post_tokens = tokens.or(post_tokens);
+                            } else {
+                                pre_tokens = tokens.or(pre_tokens);
+                            }
                         }
 
                         // Either shape settles the compaction: the thread-level
@@ -2398,12 +2418,23 @@ async fn compact_session(session: CompactSession) {
                             compacted = true;
                             grace = Some(tokio::time::Instant::now() + COMPACT_TOKEN_GRACE);
                         }
+                        // Codex 0.163 sends the post-compaction usage before the item completes.
+                        "item/started"
+                            if item_type(params.get("item").unwrap_or(&Value::Null))
+                                .to_ascii_lowercase()
+                                .contains("compact") =>
+                        {
+                            compacting = true;
+                        }
                         "item/completed"
                             if item_type(params.get("item").unwrap_or(&Value::Null))
                                 .to_ascii_lowercase()
                                 .contains("compact") =>
                         {
                             compacted = true;
+                            if post_tokens.is_some() {
+                                break 'main;
+                            }
                             grace = Some(tokio::time::Instant::now() + COMPACT_TOKEN_GRACE);
                         }
 

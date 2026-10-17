@@ -58,6 +58,8 @@ if has "$line" '"method":"thread/resume"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
   elif has "$line" '"threadId":"resume-with-child-v2"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"subAgentActivity\",\"id\":\"spawn-alpha\",\"kind\":\"started\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"},{\"type\":\"subAgentActivity\",\"id\":\"subagent-completed-old\",\"kind\":\"completed\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"}]}]}}}"
+  elif has "$line" '"threadId":"compact-live"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-live\"}}}"
   elif has "$line" '"threadId":"compact-ok"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-ok\"}}}"
   elif has "$line" '"threadId":"compact-hang"'; then
@@ -172,6 +174,16 @@ case "$turnline" in
     # Never answer: the driver must settle through its interrupt.
     exec sleep 60
   fi
+  if has "$turnline" '"threadId":"th-compact-live"'; then
+    # Codex 0.163's order: no thread/compacted, post usage inside the item.
+    emit "{\"id\":$tid,\"result\":{}}"
+    emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-live","tokenUsage":{"last":{"totalTokens":30398},"modelContextWindow":258400}}}'
+    emit '{"method":"item/started","params":{"threadId":"th-compact-live","item":{"type":"contextCompaction","id":"c-1"}}}'
+    emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-live","tokenUsage":{"last":{"totalTokens":18515},"modelContextWindow":258400}}}'
+    emit '{"method":"item/completed","params":{"threadId":"th-compact-live","item":{"type":"contextCompaction","id":"c-1"}}}'
+    emit '{"method":"turn/completed","params":{"threadId":"th-compact-live","turn":{"id":"t-c","status":"completed"}}}'
+    exec sleep 30
+  fi
   has "$turnline" '"threadId":"th-compact-ok"' || exit 1
   emit "{\"id\":$tid,\"result\":{}}"
   emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-ok","tokenUsage":{"last":{"totalTokens":120000},"modelContextWindow":200000}}}'
@@ -212,7 +224,7 @@ case "$turnline" in
   ;;
 
 *scenario:title*)
-  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false'; do
+  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false' '"environments":[]' '"skills.include_instructions":false' '"features.plugins":false'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "title restriction missing"; exit 0; }
   done
   has "$turnline" '"sandboxPolicy":{"type":"readOnly"}' || { fail_turn "$tid" "title turn not read-only"; exit 0; }
