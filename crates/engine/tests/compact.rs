@@ -532,6 +532,7 @@ async fn a_message_before_the_agent_compaction_cancels_it() {
     assert!(prompts()[2].starts_with(
         "task X is done, merge it now\n\n<system-reminder>\nYour queued compaction was cancelled"
     ));
+    assert!(prompts()[2].contains("Its continueWith was: wait for task X, then merge"));
     assert_eq!(
         core.sessions.session_status(CHAT).and_then(|s| s.compact_plan),
         None
@@ -562,10 +563,16 @@ async fn a_message_during_the_agent_compaction_drops_its_continue_with() {
         .expect("the person writes");
     let _ = release.send(());
 
-    wait_for(|| prompts().iter().any(|p| p == "a new question"), "the person's message").await;
+    wait_for(|| prompts().iter().any(|p| p.starts_with("a new question")), "the person's message").await;
     wait_for(|| !core.sessions.turn_in_flight(CHAT), "its turn settles").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(prompts()[1..], ["/compact", "a new question"]);
+    assert_eq!(
+        prompts()[1..],
+        [
+            "/compact",
+            "a new question\n\n<system-reminder>\nYour compaction's continueWith was not sent because this message reached you first. It was: go on\n</system-reminder>",
+        ]
+    );
     assert!(
         entries(&core)
             .iter()
@@ -644,7 +651,7 @@ async fn a_stopped_auto_continue_keeps_its_caption() {
     let last_user = core.doc_host.last_user_entry(CHAT).unwrap();
     assert!(
         core.doc_host
-            .queue_auto_continue(CHAT, "go on", last_user.as_deref())
+            .queue_auto_continue(CHAT, "go on", last_user.as_deref(), || true)
             .await
             .expect("queue auto-continue")
     );

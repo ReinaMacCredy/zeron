@@ -76,12 +76,14 @@ fn run_agent_compaction(
                 tracing::info!(chat = %chat_id, compacted = outcome.compacted, "agent compaction ran");
                 if let Some(text) = request.continue_with {
                     match host
-                        .queue_auto_continue(&chat_id, &text, request.after_user.as_deref())
+                        .queue_auto_continue(&chat_id, &text, request.after_user.as_deref(), || {
+                            sessions.take_unsent_continue(&chat_id)
+                        })
                         .await
                     {
                         Ok(true) => {}
                         Ok(false) => {
-                            tracing::info!(chat = %chat_id, "agent auto-continue dropped: a newer message reached the chat")
+                            tracing::info!(chat = %chat_id, "agent auto-continue held for the agent's next message")
                         }
                         Err(err) => {
                             tracing::warn!(chat = %chat_id, error = %err, "agent auto-continue not sent")

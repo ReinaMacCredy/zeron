@@ -2004,7 +2004,6 @@ impl ThreadTools {
             "queued": true,
             "runs": runs,
             "replacedEarlierRequest": queued["replaced"].as_bool().unwrap_or(false),
-            "cancelledBy": "any message that reaches you before it runs",
             "continueWith": args["continueWith"].as_str().is_some_and(|text| !text.trim().is_empty()),
         }))
     }
