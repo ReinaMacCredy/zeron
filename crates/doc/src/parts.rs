@@ -136,11 +136,27 @@ pub struct HandoffRoute {
     pub source_chat_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_title: Option<String>,
+    #[serde(skip_serializing_if = "HandoffKind::is_text")]
+    pub kind: HandoffKind,
 }
 
 impl HandoffRoute {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HandoffKind {
+    #[default]
+    Text,
+    Pointer,
+}
+
+impl HandoffKind {
+    pub fn is_text(&self) -> bool {
+        *self == Self::Text
     }
 }
 

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
-use crate::parts::{HandoffRoute, MessagePart, MessageStatus, SubagentStatus};
+use crate::parts::{HandoffKind, HandoffRoute, MessagePart, MessageStatus, SubagentStatus};
 use zeron_proto::HarnessId;
 
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +152,8 @@ struct DocPartJson {
     from_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     to_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff_kind: Option<String>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -205,6 +207,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             to_model: route.to_model.clone(),
             source_chat_id: route.source_chat_id.clone(),
             source_title: route.source_title.clone(),
+            handoff_kind: (route.kind == HandoffKind::Pointer).then(|| "pointer".into()),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -353,6 +356,10 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     to_model: p.to_model,
                     source_chat_id: p.source_chat_id,
                     source_title: p.source_title,
+                    kind: match p.handoff_kind.as_deref() {
+                        Some("pointer") => HandoffKind::Pointer,
+                        _ => HandoffKind::Text,
+                    },
                 },
             },
             None => MessagePart::Text {
@@ -1148,6 +1155,7 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         ("sourceTitle", &doc_part.source_title),
         ("fromModel", &doc_part.from_model),
         ("toModel", &doc_part.to_model),
+        ("handoffKind", &doc_part.handoff_kind),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;

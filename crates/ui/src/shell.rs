@@ -5565,8 +5565,9 @@ impl Shell {
     pub fn continue_in_new_thread(
         &mut self,
         source_chat_id: String,
-        harness: HarnessId,
+        harness: Option<HarnessId>,
         model: Option<String>,
+        target_space_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -5584,6 +5585,7 @@ impl Shell {
             "chatId": uuid::Uuid::new_v4().to_string(),
             "harness": harness,
             "model": model,
+            "targetSpaceId": target_space_id,
         });
         if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
             object.insert("targetDeviceId".into(), device.into());
