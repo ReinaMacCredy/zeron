@@ -14,6 +14,9 @@
 //! that would skip enablement and return an empty web-content tree.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use core_foundation::base::{CFRelease, CFTypeRef};
@@ -83,9 +86,8 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
     if already_enabled {
         return;
     }
-    let Some(enabled) = enable_chromium_accessibility(app_element, || {
-        crate::browser::platform::is_chromium_process(pid)
-    }) else {
+    let Some(enabled) = enable_chromium_accessibility(app_element, || hosts_chromium_renderer(pid))
+    else {
         return;
     };
     if enabled {
@@ -98,6 +100,41 @@ pub unsafe fn ensure_chromium_ax_enabled(pid: i32, app_element: AXUIElementRef) 
     if let Ok(mut cache) = enabled_processes().lock() {
         cache.insert(pid, stamp);
     }
+}
+
+fn hosts_chromium_renderer(pid: i32) -> bool {
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: proc_pidpath writes at most `path.len()` bytes and returns the length written.
+    let len = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if len <= 0 {
+        return false;
+    }
+    let executable = Path::new(OsStr::from_bytes(&path[..len as usize]));
+    executable
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(bundle_has_chromium_renderer)
+}
+
+// Chromium browsers (in their framework's Helpers), Electron and CEF all ship a renderer helper app.
+fn bundle_has_chromium_renderer(contents: &Path) -> bool {
+    let is_renderer = |dir: &Path| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("Helper (Renderer).app")
+            })
+        })
+    };
+    let frameworks = contents.join("Frameworks");
+    is_renderer(&frameworks)
+        || std::fs::read_dir(&frameworks).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| is_renderer(&entry.path().join("Versions/Current/Helpers")))
+        })
 }
 
 // Chromium attaches AXPress to page controls about two seconds after the page tree appears.
@@ -168,6 +205,37 @@ mod tests {
                 "cache keys must differ across processes"
             );
         }
+    }
+
+    #[test]
+    fn renderer_helper_marks_chromium_electron_and_cef_bundles_only() {
+        let bundle = |helper: Option<&str>| {
+            let contents = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir_all(
+                contents
+                    .path()
+                    .join("Frameworks/Sparkle.framework/Versions/Current"),
+            )
+            .expect("native framework");
+            if let Some(helper) = helper {
+                std::fs::create_dir_all(contents.path().join(helper)).expect("helper");
+            }
+            contents
+        };
+        let chrome = bundle(Some(
+            "Frameworks/Dia Framework.framework/Versions/Current/Helpers/Dia Helper (Renderer).app",
+        ));
+        let electron = bundle(Some("Frameworks/Slack Helper (Renderer).app"));
+        let cef = bundle(Some("Frameworks/ZoomCefHelper (Renderer).app"));
+        let native = bundle(Some(
+            "Frameworks/Sparkle.framework/Versions/Current/Updater.app",
+        ));
+
+        assert!(bundle_has_chromium_renderer(chrome.path()));
+        assert!(bundle_has_chromium_renderer(electron.path()));
+        assert!(bundle_has_chromium_renderer(cef.path()));
+        assert!(!bundle_has_chromium_renderer(native.path()));
+        assert!(!bundle_has_chromium_renderer(bundle(None).path()));
     }
 
     #[test]
