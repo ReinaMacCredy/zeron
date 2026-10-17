@@ -6,7 +6,8 @@ use crate::computer::backend::ComputerBackendActionResult;
 
 // Catches dropping the driver's display-only rows (Calculator's result text),
 // pointing a tree line at the driver's element_index instead of the engine's
-// root child, and losing the focused element or selected text.
+// root child, numbering only indexed elements (a framed display row needs a
+// ref, named by its cell), and losing the focused element or selected text.
 #[tokio::test]
 async fn parses_the_driver_tree_with_static_values_focus_and_root_targets() {
     let f = fixture();
@@ -32,6 +33,8 @@ async fn parses_the_driver_tree_with_static_values_focus_and_root_targets() {
             { "depth": 0, "role": "AXWindow", "element_index": 0, "title": "Calculator", "identifier": "main" },
             { "depth": 1, "role": "AXStaticText", "description": "Edit field", "value": "408" },
             { "depth": 1, "role": "AXButton", "element_index": 1, "description": "All Clear", "identifier": "AllClear" },
+            { "depth": 1, "role": "AXRow", "frame": { "x": 10, "y": 40, "w": 80, "h": 20 } },
+            { "depth": 2, "role": "AXCell", "description": "History" },
         ],
         "focused_element": { "depth": 0, "role": "AXButton", "element_index": 1, "description": "All Clear" },
         "selected_text": "40",
@@ -46,16 +49,18 @@ async fn parses_the_driver_tree_with_static_values_focus_and_root_targets() {
         .await
         .unwrap();
     let tree = state.ax_tree.expect("tree");
-    assert_eq!(tree.lines.len(), 3);
+    assert_eq!(tree.lines.len(), 5);
     assert_eq!(tree.lines[0].actions, vec!["AXRaise".to_owned()]);
     assert_eq!(tree.lines[0].target, None);
     assert_eq!(tree.lines[1].value.as_deref(), Some("408"));
     assert_eq!(tree.lines[1].target, None);
     assert_eq!(tree.lines[2].target, Some(vec![0]));
-    assert_eq!(
-        state.root.unwrap().children[0].label.as_deref(),
-        Some("All Clear")
-    );
+    assert_eq!(tree.lines[3].target, Some(vec![1]));
+    assert_eq!(tree.lines[3].title.as_deref(), Some("History"));
+    let root = state.root.unwrap();
+    assert_eq!(root.children[0].label.as_deref(), Some("All Clear"));
+    assert_eq!(root.children[1].label.as_deref(), Some("History"));
+    assert!(f.backend.inner.node_element(&root.children[1]).is_none());
     assert_eq!(tree.focused.unwrap().target, Some(vec![0]));
     assert_eq!(tree.selected_text.as_deref(), Some("40"));
     assert_eq!(tree.url.as_deref(), Some("file:///tmp/calc"));

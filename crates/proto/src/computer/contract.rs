@@ -553,6 +553,7 @@ pub struct ComputerAxTree {
 pub struct ComputerAxLine {
     pub depth: u32,
     pub role: String,
+    pub role_description: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub value: Option<String>,
@@ -563,7 +564,15 @@ pub struct ComputerAxLine {
     pub selected: Option<bool>,
     pub enabled: Option<bool>,
     pub expanded: Option<bool>,
+    pub visible_rows: Option<ComputerVisibleRows>,
     pub target: Option<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputerVisibleRows {
+    pub first: u64,
+    pub last: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

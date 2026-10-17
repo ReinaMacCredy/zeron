@@ -159,8 +159,8 @@ async fn returns_a_codex_diff_after_a_value_change_and_a_no_change_sentence_afte
     h.dispose().await;
 }
 
-// Catches rendering the driver's menu bar into the window tree, dropping the
-// focused element's ref, or omitting the selected text.
+// Catches dropping the menu bar's top-level items, dropping the focused
+// element's ref, or omitting the selected text.
 #[tokio::test]
 async fn renders_the_backend_tree_with_focus_and_selection() {
     let h = calculator_harness();
@@ -193,7 +193,7 @@ async fn renders_the_backend_tree_with_focus_and_selection() {
     assert_eq!(
         tree,
         format!(
-            "Window: \"Calculator\", App: org.kde.kcalc.\nwindow Calculator\n\ttext Value: 408\n\t{delete} button Delete\nThe focused UI element is {delete} button Delete\nSelected text: ```40```"
+            "Window: \"Calculator\", App: org.kde.kcalc.\nmenu bar\n\tmenu bar item File\nwindow Calculator\n\ttext Value: 408\n\t{delete} button Delete\nThe focused UI element is {delete} button Delete\nSelected text: ```40```"
         )
     );
     h.dispose().await;

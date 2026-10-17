@@ -580,10 +580,10 @@ pub fn actionable_elements_limited(
             digest.source_incomplete = true;
         }
         let label = matchable_label(node);
-        let collectible = (filter.any_role || ACTIONABLE_ROLES.contains(&node.role.as_str()))
+        let collectible = (filter.any_role
+            || (ACTIONABLE_ROLES.contains(&node.role.as_str()) && !label.is_empty()))
             && node.on_screen
             && node.window_id.is_some()
-            && !label.is_empty()
             && filter
                 .window_id
                 .as_ref()

@@ -14,6 +14,7 @@ const QUIET_ACTIONS: &[&str] = &[
     "AXScrollToVisible",
     "AXShowDefaultUI",
     "AXShowAlternateUI",
+    "AXShowMenu",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,7 +63,7 @@ pub(super) fn build_tree(
             .and_then(|path| by_path.get(path).copied())
     };
     let source = match ax {
-        Some(ax) => without_menu_bar(&ax.lines),
+        Some(ax) => ax.lines.clone(),
         None => fallback_lines(root?, window_id),
     };
     if source.is_empty() {
@@ -70,26 +71,31 @@ pub(super) fn build_tree(
     }
     let mut lines = Vec::with_capacity(source.len());
     let mut ancestors: Vec<(usize, String, String)> = Vec::new();
+    let mut dropped: Vec<usize> = Vec::new();
     let mut ordinals: HashMap<String, usize> = HashMap::new();
     for line in &source {
         let depth = line.depth as usize;
         while ancestors.last().is_some_and(|(at, _, _)| *at >= depth) {
             ancestors.pop();
         }
-        let element_ref = ref_of(line);
-        if element_ref.is_none() && is_capture_chrome(line) {
+        while dropped.last().is_some_and(|at| *at >= depth) {
+            dropped.pop();
+        }
+        if is_capture_chrome(line) {
+            dropped.push(depth);
             continue;
         }
         let spoken = spoken_name(line);
-        if element_ref.is_none()
-            && matches!(line.role.as_str(), "AXImage" | "AXStaticText")
+        if matches!(line.role.as_str(), "AXImage" | "AXStaticText" | "AXCell")
             && !spoken.is_empty()
             && ancestors
                 .last()
                 .is_some_and(|(_, _, parent)| *parent == spoken)
         {
+            dropped.push(depth);
             continue;
         }
+        let element_ref = ref_of(line);
         let identity = match element_ref {
             Some(element_ref) => format!("#{element_ref}"),
             None => {
@@ -108,7 +114,7 @@ pub(super) fn build_tree(
         };
         ancestors.push((depth, identity.clone(), spoken));
         lines.push(TreeLine {
-            depth,
+            depth: depth - dropped.len(),
             element_ref,
             identity,
             text: describe_line(line),
@@ -330,25 +336,6 @@ fn id_ranges(ids: &mut [usize]) -> String {
     ranges.join(", ")
 }
 
-fn without_menu_bar(lines: &[ComputerAxLine]) -> Vec<ComputerAxLine> {
-    let mut kept = Vec::with_capacity(lines.len());
-    let mut skip_below: Option<u32> = None;
-    for line in lines {
-        if let Some(depth) = skip_below {
-            if line.depth > depth {
-                continue;
-            }
-            skip_below = None;
-        }
-        if line.role == "AXMenuBar" {
-            skip_below = Some(line.depth);
-            continue;
-        }
-        kept.push(line.clone());
-    }
-    kept
-}
-
 fn fallback_lines(root: &ComputerUiNode, window_id: &str) -> Vec<ComputerAxLine> {
     fn visit(
         node: &ComputerUiNode,
@@ -383,8 +370,11 @@ fn fallback_lines(root: &ComputerUiNode, window_id: &str) -> Vec<ComputerAxLine>
 }
 
 fn describe_line(line: &ComputerAxLine) -> String {
-    let mut head = role_words(&line.role);
+    let mut head = role_words(&line.role, line.role_description.as_deref());
     let mut flags = Vec::new();
+    if line.role == "AXRow" && line.selected == Some(false) {
+        flags.push("selectable");
+    }
     if line.settable {
         flags.push("settable");
     }
@@ -419,6 +409,14 @@ fn describe_line(line: &ComputerAxLine) -> String {
         head.push(' ');
         head.push_str(title);
     }
+    if let Some(rows) = line.visible_rows
+        && rows.last.saturating_sub(rows.first) + 1 < rows.total
+    {
+        head.push_str(&format!(
+            " (showing {}-{} of {} items)",
+            rows.first, rows.last, rows.total
+        ));
+    }
     let mut attributes = Vec::new();
     if let Some(description) = present(&line.description).filter(|d| Some(d) != title.as_ref()) {
         attributes.push(format!("Description: {description}"));
@@ -435,12 +433,13 @@ fn describe_line(line: &ComputerAxLine) -> String {
     if let Some(help) = present(&line.help) {
         attributes.push(format!("Help: {help}"));
     }
+    let own_name = spoken_name(line).to_lowercase();
     let secondary: Vec<String> = line
         .actions
         .iter()
         .filter(|action| !QUIET_ACTIONS.contains(&action.as_str()))
         .map(|action| action_words(action))
-        .filter(|action| !action.is_empty())
+        .filter(|action| !action.is_empty() && action.to_lowercase() != own_name)
         .collect();
     if !secondary.is_empty() {
         attributes.push(format!("Secondary Actions: {}", secondary.join(", ")));
@@ -452,16 +451,12 @@ fn describe_line(line: &ComputerAxLine) -> String {
     }
 }
 
-// While a window is captured (our own screenshots and the live preview), macOS
-// swaps its title-bar buttons for a "Window sharing" menu button and back, so
-// both would flicker in every diff. Neither carries a ref the agent could use.
+// macOS shows a "Window sharing" menu button in the title bar only while our
+// own screenshots or live preview capture the window, so it flickers in diffs.
 fn is_capture_chrome(line: &ComputerAxLine) -> bool {
     line.depth == 1
-        && match line.role.as_str() {
-            "AXButton" => present(&line.title).is_none(),
-            "AXMenuButton" => present(&line.title).as_deref() == Some("Window sharing"),
-            _ => false,
-        }
+        && line.role == "AXMenuButton"
+        && present(&line.title).as_deref() == Some("Window sharing")
 }
 
 fn spoken_name(line: &ComputerAxLine) -> String {
@@ -485,8 +480,9 @@ fn quote(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_default()
 }
 
-fn role_words(role: &str) -> String {
+fn role_words(role: &str, role_description: Option<&str>) -> String {
     let known = match role {
+        "AXRow" => "row",
         "AXStaticText" => "text",
         "AXTextArea" => "text entry area",
         "AXTextField" => "text field",
@@ -504,6 +500,12 @@ fn role_words(role: &str) -> String {
     if !known.is_empty() {
         return known.to_owned();
     }
+    if let Some(described) = role_description
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return described.to_owned();
+    }
     let bare = role.strip_prefix("AX").unwrap_or(role);
     split_words(bare).replace('-', " ")
 }
@@ -513,6 +515,7 @@ fn action_words(action: &str) -> String {
         return named.lines().next().unwrap_or_default().trim().to_owned();
     }
     let bare = action.strip_prefix("AX").unwrap_or(action);
+    let bare = bare.strip_prefix('_').unwrap_or(bare);
     let words = split_words(bare);
     let mut chars = words.chars();
     match chars.next() {
@@ -536,6 +539,8 @@ fn split_words(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use zeron_proto::computer::ComputerVisibleRows;
+
     use super::*;
 
     fn line(depth: u32, role: &str) -> ComputerAxLine {
@@ -580,7 +585,45 @@ mod tests {
         };
         assert_eq!(
             describe_line(&editor),
-            "text entry area (settable) ID: First Text View, Value: alpha\\nbeta, Secondary Actions: Show menu, Copy"
+            "text entry area (settable) ID: First Text View, Value: alpha\\nbeta, Secondary Actions: Copy"
+        );
+        let close = ComputerAxLine {
+            role_description: Some("close button".into()),
+            ..line(1, "AXButton")
+        };
+        assert_eq!(describe_line(&close), "close button");
+        let row = |selected: bool| ComputerAxLine {
+            title: Some("Rule Groups".into()),
+            role_description: Some("outline row".into()),
+            selected: Some(selected),
+            expanded: Some(true),
+            actions: vec!["_collapse".into(), "Name:Rule Groups".into()],
+            ..line(3, "AXRow")
+        };
+        assert_eq!(
+            describe_line(&row(false)),
+            "row (selectable, expanded) Rule Groups, Secondary Actions: Collapse"
+        );
+        assert_eq!(
+            describe_line(&row(true)),
+            "row (selected, expanded) Rule Groups, Secondary Actions: Collapse"
+        );
+        let table = |first: u64, last: u64| ComputerAxLine {
+            description: Some("Rule list".into()),
+            visible_rows: Some(ComputerVisibleRows {
+                first,
+                last,
+                total: 1856,
+            }),
+            ..line(3, "AXTable")
+        };
+        assert_eq!(
+            describe_line(&table(1829, 1855)),
+            "table (showing 1829-1855 of 1856 items) Description: Rule list"
+        );
+        assert_eq!(
+            describe_line(&table(0, 1855)),
+            "table Description: Rule list"
         );
     }
 
@@ -659,6 +702,15 @@ mod tests {
                 named(1, "AXLink", Some("Ryzen 7 5700X3D"), None),
                 named(2, "AXStaticText", None, Some("Ryzen 7 5700X3D")),
                 named(1, "AXStaticText", None, Some("5.990.000đ")),
+                ComputerAxLine {
+                    selected: Some(false),
+                    ..named(1, "AXRow", Some("All Rules"), None)
+                },
+                ComputerAxLine {
+                    description: Some("All Rules".into()),
+                    ..line(2, "AXCell")
+                },
+                named(3, "AXDisclosureTriangle", Some("Expand"), None),
             ],
             focused: None,
             selected_text: None,
@@ -672,20 +724,26 @@ mod tests {
             omitted: 0,
         };
         let tree = build_tree(None, "cua:1:2", Some(&ax), None, &refs).unwrap();
-        let texts: Vec<&str> = tree.lines.iter().map(|line| line.text.as_str()).collect();
+        let texts: Vec<(usize, &str)> = tree
+            .lines
+            .iter()
+            .map(|line| (line.depth, line.text.as_str()))
+            .collect();
         assert_eq!(
             texts,
             [
-                "HTML content Build PC",
-                "link Ryzen 7 5700X3D",
-                "link Ryzen 7 5700X3D",
-                "text Value: 5.990.000đ"
+                (0, "HTML content Build PC"),
+                (1, "link Ryzen 7 5700X3D"),
+                (1, "link Ryzen 7 5700X3D"),
+                (1, "text Value: 5.990.000đ"),
+                (1, "row (selectable) All Rules"),
+                (2, "disclosure triangle Expand"),
             ]
         );
     }
 
     #[test]
-    fn title_bar_buttons_and_the_capture_indicator_stay_out_of_the_tree() {
+    fn the_capture_indicator_stays_out_of_the_tree_but_title_bar_buttons_render() {
         let titled = |depth: u32, role: &str, title: Option<&str>| ComputerAxLine {
             title: title.map(str::to_owned),
             ..line(depth, role)
@@ -694,7 +752,10 @@ mod tests {
             url: None,
             lines: vec![
                 titled(0, "AXWindow", Some("Build PC")),
-                titled(1, "AXButton", None),
+                ComputerAxLine {
+                    role_description: Some("close button".into()),
+                    ..titled(1, "AXButton", None)
+                },
                 titled(1, "AXMenuButton", Some("Window sharing")),
                 titled(1, "AXButton", Some("New Tab")),
                 titled(2, "AXButton", None),
@@ -712,7 +773,15 @@ mod tests {
         };
         let tree = build_tree(None, "cua:1:2", Some(&ax), None, &refs).unwrap();
         let texts: Vec<&str> = tree.lines.iter().map(|line| line.text.as_str()).collect();
-        assert_eq!(texts, ["window Build PC", "button New Tab", "button"]);
+        assert_eq!(
+            texts,
+            [
+                "window Build PC",
+                "close button",
+                "button New Tab",
+                "button"
+            ]
+        );
     }
 
     #[test]
