@@ -146,6 +146,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "Have a fresh reviewer agent review this chat's changes, as the Review button does.",
             ),
             tool(
+                "resolve_findings",
+                "Report what this chat did about each finding of a review.",
+            ),
+            tool(
                 "agent_profiles",
                 "Create, change or remove the agent profiles in the model picker when asked.",
             ),

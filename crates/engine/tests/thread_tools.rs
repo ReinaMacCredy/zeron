@@ -26,6 +26,7 @@ struct RecordingHarness {
     steers: Arc<Mutex<Vec<String>>>,
     steerable: bool,
     step_delay: Duration,
+    reply: &'static str,
 }
 
 #[async_trait]
@@ -76,6 +77,7 @@ impl Harness for RecordingHarness {
             }
         });
         let delay = self.step_delay;
+        let reply = self.reply;
         tokio::spawn(async move {
             let script = vec![
                 AgentEvent::SessionStarted {
@@ -86,9 +88,7 @@ impl Harness for RecordingHarness {
                     session_id: "hs-rec".into(),
                     assistant_message_id: "a-rec".into(),
                 },
-                AgentEvent::TextDelta {
-                    text: "noted".into(),
-                },
+                AgentEvent::TextDelta { text: reply.into() },
                 AgentEvent::Done {
                     status: DoneStatus::Completed,
                     result: None,
@@ -142,6 +142,7 @@ fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
         steers: steers.clone(),
         steerable,
         step_delay,
+        reply: "noted",
     }));
     Rig {
         prompts,
@@ -1322,6 +1323,252 @@ async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
     rig.core.shutdown().await;
 }
 
+const REVIEW_REPLY: &str = "Looked it over.\n\n```zeron-review\n[{\"path\":\"src/a.rs\",\"line\":3,\"severity\":\"bug\",\"title\":\"Unwrap panics\"},{\"path\":\"src/b.rs\",\"line\":9,\"severity\":\"risk\",\"title\":\"Leaks a handle\"},{\"path\":\"src/c.rs\",\"line\":1,\"severity\":\"nit\",\"title\":\"Typo\"}]\n```\n";
+
+fn review_rig() -> Rig {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let rig = rig_on(Arc::new(RecordingHarness {
+        prompts: prompts.clone(),
+        steers: Arc::default(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: REVIEW_REPLY,
+    }));
+    Rig { prompts, ..rig }
+}
+
+async fn finished_child(rig: &Rig, request: &str, wake: zeron_proto::DelegationWake) -> String {
+    let mut params = delegate("review the diff");
+    params.client_request_id = Some(request.into());
+    params.wake = Some(wake);
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || !delegation(&rig.core, &child).is_running(),
+        "the child to finish",
+    )
+    .await;
+    child
+}
+
+#[tokio::test]
+async fn resolving_findings_checks_the_owner_the_review_the_ids_and_the_notes() {
+    let rig = review_rig();
+    let review = finished_child(
+        &rig,
+        "zeron-review:uncommitted:n1",
+        zeron_proto::DelegationWake::Never,
+    )
+    .await;
+    let plain = finished_child(&rig, "plain-1", zeron_proto::DelegationWake::Never).await;
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let resolve = |owner: &str, task: &str, findings: serde_json::Value| {
+        let client = &client;
+        let params =
+            serde_json::json!({ "ownerChatId": owner, "taskId": task, "findings": findings });
+        async move {
+            client
+                .call(zeron_rpc::methods::RESOLVE_REVIEW_FINDINGS, params)
+                .await
+        }
+    };
+    let fixed = serde_json::json!([{ "id": "F1", "outcome": "fixed", "commit": "abc1234" }]);
+    let refused = |result: Result<serde_json::Value, _>| match result {
+        Ok(value) => panic!("accepted: {value}"),
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(refused(resolve("stranger", &review, fixed.clone()).await).contains("task_not_found"));
+    assert!(refused(resolve("lead", &plain, fixed.clone()).await).contains("not_a_review"));
+    assert!(
+        refused(
+            resolve(
+                "lead",
+                &review,
+                serde_json::json!([{ "id": "F9", "outcome": "fixed" }])
+            )
+            .await
+        )
+        .contains("unknown_finding")
+    );
+    for outcome in ["skipped", "no_change"] {
+        assert!(
+            refused(
+                resolve(
+                    "lead",
+                    &review,
+                    serde_json::json!([
+                        { "id": "F1", "outcome": "fixed" },
+                        { "id": "F2", "outcome": outcome, "note": "  " }
+                    ])
+                )
+                .await
+            )
+            .contains("note_required")
+        );
+    }
+    assert!(
+        delegation(&rig.core, &review).finding_outcomes.is_empty(),
+        "a refused call writes nothing"
+    );
+
+    let reply = resolve(
+        "lead",
+        &review,
+        serde_json::json!([
+            { "id": "F1", "outcome": "fixed", "commit": "abc1234" },
+            { "id": "F2", "outcome": "skipped", "note": "Owned by the caller" }
+        ]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reply,
+        serde_json::json!({ "resolved": ["F1", "F2"], "open": ["F3"] })
+    );
+    let reply = resolve(
+        "lead",
+        &review,
+        serde_json::json!([{ "id": "F2", "outcome": "no_change", "note": "Already closed" }]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply["open"], serde_json::json!(["F3"]));
+    let outcomes = delegation(&rig.core, &review).finding_outcomes;
+    assert_eq!(
+        outcomes["F2"].outcome,
+        zeron_proto::FindingOutcomeKind::NoChange,
+        "a later call replaces the outcome"
+    );
+    assert_eq!(outcomes["F1"].commit.as_deref(), Some("abc1234"));
+
+    let view = serde_json::to_value(
+        rig.core
+            .doc_host
+            .task_status("lead", &review, false)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        view["findings"],
+        serde_json::json!([
+            { "id": "F1", "severity": "bug", "title": "Unwrap panics", "location": "src/a.rs:3", "outcome": "fixed", "commit": "abc1234" },
+            { "id": "F2", "severity": "risk", "title": "Leaks a handle", "location": "src/b.rs:9", "outcome": "no_change", "note": "Already closed" },
+            { "id": "F3", "severity": "nit", "title": "Typo", "location": "src/c.rs:1" }
+        ])
+    );
+    assert!(view["next"].as_str().unwrap().contains("resolve_findings"));
+    let plain_view = serde_json::to_value(
+        rig.core
+            .doc_host
+            .task_status("lead", &plain, false)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(plain_view.get("findings").is_none() && plain_view.get("next").is_none());
+    rig.core.shutdown().await;
+}
+
+fn reminders(rig: &Rig) -> Vec<String> {
+    prompts_with(rig, "call resolve_findings")
+}
+
+#[tokio::test]
+async fn a_handed_finding_is_named_to_the_owner_in_one_reminder() {
+    let rig = review_rig();
+    let review = finished_child(
+        &rig,
+        "zeron-review:uncommitted:n1",
+        zeron_proto::DelegationWake::Never,
+    )
+    .await;
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::RESOLVE_REVIEW_FINDINGS,
+            serde_json::json!({ "ownerChatId": "lead", "taskId": review, "findings": [{ "id": "F1", "outcome": "fixed" }] }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        client
+            .call(
+                zeron_rpc::methods::HAND_REVIEW_FINDINGS,
+                serde_json::json!({ "ownerChatId": "lead", "taskId": review, "ids": ["F9"] }),
+            )
+            .await
+            .is_err()
+    );
+    let handed = client
+        .call(
+            zeron_rpc::methods::HAND_REVIEW_FINDINGS,
+            serde_json::json!({ "ownerChatId": "lead", "taskId": review, "ids": ["F1", "F3"] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handed["handed"], serde_json::json!(["F1", "F3"]));
+    assert!(
+        reminders(&rig).is_empty(),
+        "nothing reminds before a prompt"
+    );
+
+    queue_human_run(&rig.core, "lead", "c1", "m1");
+    wait_for(
+        || prompts_with(&rig, "human prompt").len() == 1,
+        "the first run",
+    )
+    .await;
+    wait_for(|| idle(&rig.core, "lead"), "the first run to end").await;
+    queue_human_run(&rig.core, "lead", "c2", "m2");
+    wait_for(
+        || prompts_with(&rig, "human prompt").len() == 2,
+        "the second run",
+    )
+    .await;
+    let named = reminders(&rig);
+    assert_eq!(named.len(), 1, "one reminder: {named:?}");
+    assert!(named[0].contains(&format!(
+        "Review task {review} has findings for you to resolve: F3."
+    )));
+    assert_eq!(
+        delegation(&rig.core, &review).findings_announced,
+        std::collections::BTreeSet::from(["F3".to_string()])
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agent_started_review_names_its_findings_on_the_wake() {
+    let rig = review_rig();
+    let review = finished_child(
+        &rig,
+        "zeron-review:uncommitted:n2",
+        zeron_proto::DelegationWake::Always,
+    )
+    .await;
+    wait_for(|| !reminders(&rig).is_empty(), "the wake with its reminder").await;
+    wait_for(|| idle(&rig.core, "lead"), "the wake turn").await;
+    let named = reminders(&rig);
+    assert!(named[0].starts_with(&format!(
+        "Delegated task {review} reached a terminal state."
+    )));
+    assert!(named[0].contains("to resolve: F1, F2, F3."));
+    queue_human_run(&rig.core, "lead", "c1", "m1");
+    wait_for(
+        || prompts_with(&rig, "human prompt").len() == 1,
+        "the next run",
+    )
+    .await;
+    assert_eq!(reminders(&rig).len(), 1, "named once");
+    rig.core.shutdown().await;
+}
+
 #[tokio::test]
 async fn delegation_limits_and_retries_follow_the_settings() {
     let rig = rig(Duration::from_millis(200));
@@ -1772,6 +2019,7 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
             steers: Arc::new(Mutex::new(Vec::new())),
             steerable: false,
             step_delay: Duration::from_millis(50),
+            reply: "noted",
         }));
         let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
             .expect("engine core reassembles");

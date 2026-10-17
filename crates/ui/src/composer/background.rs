@@ -2105,6 +2105,9 @@ mod tests {
                 summary: None,
                 started_at: chrono::DateTime::from_timestamp_millis(started_ms).unwrap(),
                 completed_at: None,
+                finding_outcomes: Default::default(),
+                findings_handed: Default::default(),
+                findings_announced: Default::default(),
             });
             chat
         };

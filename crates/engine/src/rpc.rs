@@ -199,6 +199,14 @@ struct TaskParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct HandFindingsParams {
+    owner_chat_id: String,
+    task_id: String,
+    ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SendThreadMessageParams {
     chat_id: String,
     from_chat_id: String,
@@ -3206,6 +3214,22 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "taskId": p.task_id, "status": status }))
+            }
+            methods::RESOLVE_REVIEW_FINDINGS => {
+                let p: crate::doc_host::ResolveFindingsParams = parse_params(params)?;
+                let resolved = self
+                    .doc_host
+                    .resolve_review_findings(p)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&resolved)
+            }
+            methods::HAND_REVIEW_FINDINGS => {
+                let p: HandFindingsParams = parse_params(params)?;
+                let handed = self
+                    .doc_host
+                    .hand_review_findings(&p.owner_chat_id, &p.task_id, p.ids)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "handed": handed }))
             }
             methods::TASK_WAKE_ALWAYS => {
                 let p: TaskParams = parse_params(params)?;

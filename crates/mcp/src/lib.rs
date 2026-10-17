@@ -130,6 +130,33 @@ fn thread_tool_list() -> Value {
     let thread_id = json!({ "type": "string" });
     let wait = json!({ "type": "boolean", "description": "Block until the thread's turn ends and add its outcome as `turn`." });
     let timeout = json!({ "type": "integer", "minimum": 0, "maximum": 1800 });
+    let resolve_findings = json!({
+        "name": "resolve_findings",
+        "description": "Report what you did about a finished review's findings (review_changes, or a review the user handed you with Fix). The user's review card shows each outcome. Call it once you fixed or declined findings; a later call for the same id replaces its outcome. Ids are the F1, F2... that task_status lists for the review and that handed comments name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "taskId": { "type": "string", "description": "The review's taskId." },
+                "findings": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Finding id, such as F2." },
+                            "outcome": { "type": "string", "enum": ["fixed", "skipped", "no_change"], "description": "fixed: you changed the code; skipped: you chose not to fix it; no_change: nothing needed changing." },
+                            "note": { "type": "string", "maxLength": 2000, "description": "Why. Required for skipped and no_change." },
+                            "commit": { "type": "string", "description": "Commit sha of the fix, when you made one." }
+                        },
+                        "required": ["id", "outcome"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["taskId", "findings"],
+            "additionalProperties": false
+        }
+    });
     json!([
         {
             "name": "list_threads",
@@ -515,7 +542,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "review_changes",
-            "description": "Have a fresh reviewer agent review this chat's code changes, exactly as the user's Review button does. The reviewer, model, thinking level and review instructions default to the user's Settings > Code review. It returns at once; the findings show on the Review chip and in the Changes pane, and this chat is woken with the reviewer's findings when it finishes, so end the turn instead of polling. Call it when you finish a change you want checked.",
+            "description": "Have a fresh reviewer agent review this chat's code changes, exactly as the user's Review button does. The reviewer, model, thinking level and review instructions default to the user's Settings > Code review. It returns at once; the findings show on the Review chip and in the Changes pane, and this chat is woken when it finishes, so end the turn instead of polling. task_status then lists the findings with ids (F1, F2...); fix or decline each and report every one with resolve_findings. Call it when you finish a change you want checked.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -528,6 +555,7 @@ fn thread_tool_list() -> Value {
                 "additionalProperties": false
             }
         },
+        resolve_findings,
         {
             "name": "task_status",
             "description": "Read a Zeron-owned delegated task. A task another chat on this device delegated (its taskId is the child thread id, as list_threads names it) is read without touching that chat's wake, and the view adds `ownerChatId`. workState distinguishes working, waiting_for_children, and result_available; a finished turn with live nested work is not a finished task. summary is the final task result, including the error on failure, and stays stable once published. hasPendingChildRuns reports a later turn the child is running. Reading a finished result of this chat's own task acknowledges its automatic wake.",
@@ -692,6 +720,7 @@ impl ThreadTools {
             "orchestrator_capabilities" => self.orchestrator_capabilities().await,
             "delegate_task" => self.delegate_task(args).await,
             "review_changes" => self.review_changes(args).await,
+            "resolve_findings" => self.resolve_findings(args).await,
             "task_status" => self.task_status(args).await,
             "task_cancel" => self.task_cancel(args).await,
             other => Err(format!("unknown tool: {other}")),
@@ -1279,8 +1308,24 @@ impl ThreadTools {
             "scope": started["scope"],
             "commitSha": started["commitSha"],
             "note": started["note"],
-            "next": "The review runs in the background and this chat is woken with its findings when it finishes. End the turn instead of polling.",
+            "next": "The review runs in the background and this chat is woken when it finishes. End the turn instead of polling. Then read its findings with task_status: each has an id (F1, F2...); fix or decline each and report every one with resolve_findings.",
         }))
+    }
+
+    pub async fn resolve_findings(&self, args: &Value) -> Result<Value, String> {
+        let task_id = Self::task_id(args)?;
+        if !args["findings"].is_array() {
+            return Err("findings is required".into());
+        }
+        self.call_engine(
+            methods::RESOLVE_REVIEW_FINDINGS,
+            json!({
+                "ownerChatId": self.chat_id,
+                "taskId": task_id,
+                "findings": args["findings"],
+            }),
+        )
+        .await
     }
 
     pub async fn delegate_task(&self, args: &Value) -> Result<Value, String> {
@@ -2882,7 +2927,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 32] = [
+    const THREAD_TOOLS: [&str; 33] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2913,6 +2958,7 @@ mod tests {
         "orchestrator_capabilities",
         "delegate_task",
         "review_changes",
+        "resolve_findings",
         "task_status",
         "task_cancel",
     ];
@@ -3060,6 +3106,7 @@ mod tests {
                 | methods::SET_THREAD_WATCHES
                 | methods::TAKE_THREAD_MESSAGES
                 | methods::QUEUE_COMMAND
+                | methods::RESOLVE_REVIEW_FINDINGS
                 | methods::MUTATE => {
                     self.calls
                         .lock()
@@ -5018,6 +5065,27 @@ mod tests {
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0]["id"], "reviewer");
         assert_eq!(profiles[0]["whenToUse"], "Review a diff.");
+    }
+
+    #[tokio::test]
+    async fn resolve_findings_reports_for_the_caller_as_owner() {
+        let rig = rig(fixture());
+        let findings = json!([{ "id": "F2", "outcome": "skipped", "note": "Out of scope" }]);
+        rig.tools
+            .resolve_findings(&json!({ "taskId": "t-1", "findings": findings }))
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::RESOLVE_REVIEW_FINDINGS);
+        assert_eq!(
+            sent[0],
+            json!({ "ownerChatId": "a", "taskId": "t-1", "findings": findings })
+        );
+        assert!(
+            rig.tools
+                .resolve_findings(&json!({ "taskId": "t-1" }))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

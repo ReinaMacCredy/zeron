@@ -2,7 +2,8 @@ use chrono::Utc;
 use serde::Deserialize;
 use zeron_proto::{
     Chat, ChatConfig, Delegation, DelegationDelivery, DelegationStatus, DelegationWake,
-    PermissionMode, ReasoningLevel, Session, SessionStatus, UserInputQuestion,
+    FindingOutcome, FindingOutcomeKind, PermissionMode, ReasoningLevel, Session, SessionStatus,
+    UserInputQuestion,
 };
 
 use super::*;
@@ -82,6 +83,52 @@ pub struct TaskView {
     pub work_state: &'static str,
     pub has_pending_child_runs: bool,
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<FindingView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingView {
+    pub id: String,
+    pub severity: crate::review::Severity,
+    pub title: String,
+    pub location: String,
+    #[serde(flatten)]
+    pub outcome: Option<FindingOutcome>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveFindingsParams {
+    pub owner_chat_id: String,
+    pub task_id: String,
+    pub findings: Vec<FindingResolution>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingResolution {
+    pub id: String,
+    pub outcome: FindingOutcomeKind,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResolvedFindings {
+    pub resolved: Vec<String>,
+    pub open: Vec<String>,
+}
+
+fn resolve_next(task_id: &str) -> String {
+    format!(
+        "Fix or decline each finding, then call resolve_findings with taskId {task_id} and one entry per finding id: fixed (with the commit when you made one), skipped or no_change (each with a note saying why)."
+    )
 }
 
 fn failure(code: &str, message: impl std::fmt::Display) -> EngineError {
@@ -461,6 +508,9 @@ impl DocHost {
             summary: None,
             started_at: Utc::now(),
             completed_at: None,
+            finding_outcomes: Default::default(),
+            findings_handed: Default::default(),
+            findings_announced: Default::default(),
         };
         workspace.create_delegated_chat(
             &chat_id,
@@ -569,17 +619,28 @@ impl DocHost {
         } else {
             "working"
         };
-        let summary = (!delegation.is_running()).then(|| {
-            self.open(&child.id)
-                .ok()
-                .and_then(|handle| handle.doc.read_entries().ok())
-                .map(|entries| {
-                    let (text, error) = result_parts(&entries, &delegation.anchor);
-                    result_text(delegation.status, text, error)
-                })
-                .or(delegation.summary.clone())
-                .unwrap_or_default()
-        });
+        let summary = (!delegation.is_running()).then(|| self.result_of(child, &delegation));
+        let findings = summary
+            .as_deref()
+            .filter(|_| crate::review::is_review(&delegation))
+            .filter(|_| delegation.status == DelegationStatus::Completed)
+            .and_then(crate::review::parse_findings)
+            .map(|findings| {
+                findings
+                    .into_iter()
+                    .map(|finding| FindingView {
+                        outcome: delegation.finding_outcomes.get(&finding.id).cloned(),
+                        location: finding.location(),
+                        id: finding.id,
+                        severity: finding.severity,
+                        title: finding.title,
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let next = findings
+            .as_ref()
+            .filter(|findings| findings.iter().any(|finding| finding.outcome.is_none()))
+            .map(|_| resolve_next(&child.id));
         TaskView {
             task_id: child.id.clone(),
             child_thread_id: child.id.clone(),
@@ -590,7 +651,193 @@ impl DocHost {
             work_state,
             has_pending_child_runs: !delegation.is_running() && active,
             summary,
+            findings,
+            next,
         }
+    }
+
+    fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
+        self.open(&child.id)
+            .ok()
+            .and_then(|handle| handle.doc.read_entries().ok())
+            .map(|entries| {
+                let (text, error) = result_parts(&entries, &delegation.anchor);
+                result_text(delegation.status, text, error)
+            })
+            .or(delegation.summary.clone())
+            .unwrap_or_default()
+    }
+
+    fn review_findings(
+        &self,
+        child: &Chat,
+        delegation: &Delegation,
+    ) -> Option<Vec<crate::review::ReviewFinding>> {
+        (crate::review::is_review(delegation) && delegation.status == DelegationStatus::Completed)
+            .then(|| crate::review::parse_findings(&self.result_of(child, delegation)))
+            .flatten()
+    }
+
+    fn finished_review(
+        &self,
+        owner: &str,
+        task_id: &str,
+    ) -> Result<(Delegation, Vec<crate::review::ReviewFinding>), EngineError> {
+        let (child, _) = self.owned_child(owner, task_id)?;
+        let delegation = child.delegation.clone().expect("a delegated chat");
+        if !crate::review::is_review(&delegation) {
+            return Err(failure(
+                "not_a_review",
+                format!("task {task_id} is not a review_changes review"),
+            ));
+        }
+        if delegation.is_running() {
+            return Err(failure(
+                "review_running",
+                format!("review {task_id} has not finished"),
+            ));
+        }
+        let findings = self.review_findings(&child, &delegation).ok_or_else(|| {
+            failure(
+                "findings_unreadable",
+                format!("review {task_id} reported no readable findings"),
+            )
+        })?;
+        Ok((delegation, findings))
+    }
+
+    pub fn resolve_review_findings(
+        &self,
+        params: ResolveFindingsParams,
+    ) -> Result<ResolvedFindings, EngineError> {
+        let (_, findings) = self.finished_review(&params.owner_chat_id, &params.task_id)?;
+        if params.findings.is_empty() {
+            return Err(failure("invalid_request", "findings is empty"));
+        }
+        let mut outcomes = Vec::new();
+        for resolution in params.findings {
+            if !findings.iter().any(|finding| finding.id == resolution.id) {
+                return Err(failure(
+                    "unknown_finding",
+                    format!("review {} has no finding {}", params.task_id, resolution.id),
+                ));
+            }
+            let trimmed = |text: Option<String>| {
+                text.map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+            };
+            let note = trimmed(resolution.note);
+            if resolution.outcome != FindingOutcomeKind::Fixed && note.is_none() {
+                return Err(failure(
+                    "note_required",
+                    format!("{} needs a note saying why", resolution.id),
+                ));
+            }
+            outcomes.push((
+                resolution.id,
+                FindingOutcome {
+                    outcome: resolution.outcome,
+                    note,
+                    commit: trimmed(resolution.commit),
+                },
+            ));
+        }
+        let resolved: Vec<String> = outcomes.iter().map(|(id, _)| id.clone()).collect();
+        let updated = self
+            .workspace_or_fail()?
+            .update_chat_delegation(&params.task_id, |d| {
+                d.finding_outcomes.extend(outcomes);
+                true
+            })?
+            .ok_or_else(|| failure("task_not_found", &params.task_id))?;
+        let open = findings
+            .into_iter()
+            .map(|finding| finding.id)
+            .filter(|id| !updated.finding_outcomes.contains_key(id))
+            .collect();
+        Ok(ResolvedFindings { resolved, open })
+    }
+
+    pub fn hand_review_findings(
+        &self,
+        owner: &str,
+        task_id: &str,
+        ids: Vec<String>,
+    ) -> Result<Vec<String>, EngineError> {
+        let (_, findings) = self.finished_review(owner, task_id)?;
+        if let Some(id) = ids
+            .iter()
+            .find(|id| !findings.iter().any(|finding| &finding.id == *id))
+        {
+            return Err(failure(
+                "unknown_finding",
+                format!("review {task_id} has no finding {id}"),
+            ));
+        }
+        let updated = self
+            .workspace_or_fail()?
+            .update_chat_delegation(task_id, |d| {
+                let before = d.findings_handed.len();
+                d.findings_handed.extend(ids);
+                d.findings_handed.len() != before
+            })?
+            .ok_or_else(|| failure("task_not_found", task_id))?;
+        Ok(updated.findings_handed.into_iter().collect())
+    }
+
+    pub(crate) fn announce_review_findings(&self, owner: &str) -> Vec<(String, Vec<String>)> {
+        let Some(workspace) = self.workspace() else {
+            return Vec::new();
+        };
+        let Ok(chats) = workspace.read_chats() else {
+            return Vec::new();
+        };
+        let mut announced = Vec::new();
+        for child in &chats {
+            let Some(delegation) = owned_by(child, owner)
+                .filter(|d| crate::review::is_review(d))
+                .filter(|d| d.status == DelegationStatus::Completed)
+            else {
+                continue;
+            };
+            let unsaid = |id: &String| {
+                delegation.finding_handed(id)
+                    && !delegation.finding_outcomes.contains_key(id)
+                    && !delegation.findings_announced.contains(id)
+            };
+            // A delivered and read wake already showed every id in task_status.
+            let scan_all = delegation.wake == DelegationWake::Always
+                && !matches!(
+                    delegation.delivery,
+                    Some(DelegationDelivery::Acknowledged | DelegationDelivery::Disposed)
+                );
+            let ids: Vec<String> = if scan_all {
+                self.review_findings(child, delegation)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|finding| finding.id)
+                    .filter(|id| unsaid(id))
+                    .collect()
+            } else {
+                delegation
+                    .findings_handed
+                    .iter()
+                    .filter(|id| unsaid(id))
+                    .cloned()
+                    .collect()
+            };
+            if ids.is_empty() {
+                continue;
+            }
+            let marked = workspace.update_chat_delegation(&child.id, |d| {
+                d.findings_announced.extend(ids.iter().cloned());
+                true
+            });
+            if matches!(marked, Ok(Some(_))) {
+                announced.push((child.id.clone(), ids));
+            }
+        }
+        announced
     }
 
     fn task_queued(&self, chat_id: &str, anchor: &str) -> bool {
@@ -1219,6 +1466,9 @@ mod tests {
             summary: None,
             started_at: Utc::now(),
             completed_at: None,
+            finding_outcomes: Default::default(),
+            findings_handed: Default::default(),
+            findings_announced: Default::default(),
         }
     }
 
