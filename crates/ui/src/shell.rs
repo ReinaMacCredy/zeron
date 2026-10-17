@@ -7006,25 +7006,34 @@ impl Shell {
         }
         let (state, composer) = (self.state.clone(), self.composer.clone());
         let page = cx.new(|cx| crate::inbox::InboxPage::new(state, composer, cx));
-        let events = cx.subscribe(&page, |this, _, event: &crate::inbox::InboxEvent, cx| {
-            this.on_inbox_event(event, cx)
+        let events = cx.subscribe(&page, |this, page, event: &crate::inbox::InboxEvent, cx| {
+            this.on_inbox_event(&page, event, cx)
         });
         self.inbox_page = Some((page.clone(), events));
         page
     }
 
-    fn on_inbox_event(&mut self, event: &crate::inbox::InboxEvent, cx: &mut Context<Self>) {
+    fn on_inbox_event(
+        &mut self,
+        page: &Entity<crate::inbox::InboxPage>,
+        event: &crate::inbox::InboxEvent,
+        cx: &mut Context<Self>,
+    ) {
         match event {
             crate::inbox::InboxEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             crate::inbox::InboxEvent::OpenPullRequests => self.open_pull_requests(cx),
             crate::inbox::InboxEvent::OpenTasks => self.open_tasks(cx),
-            crate::inbox::InboxEvent::CreateTask { title, due_on } => {
+            crate::inbox::InboxEvent::CreateTask {
+                task_id,
+                title,
+                due_on,
+            } => {
                 let space_id = self
                     .state
                     .read(cx)
                     .selected_space_row()
                     .map(|space| space.id.clone());
-                self.create_task(title, space_id, Some(due_on.clone()), cx);
+                self.create_task(task_id, title, space_id, Some(due_on.clone()), cx);
             }
             crate::inbox::InboxEvent::SetTaskCompleted { task_id, completed } => {
                 let patch = zeron_proto::TaskPatch {
@@ -7032,6 +7041,10 @@ impl Shell {
                     ..Default::default()
                 };
                 self.update_task(task_id, patch, cx);
+            }
+            crate::inbox::InboxEvent::Card(event) => {
+                let card = page.read(cx).card().clone();
+                self.on_task_card_event(&card, event, cx);
             }
         }
     }
