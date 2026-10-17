@@ -1,4 +1,5 @@
 //! Device-local browser tabs. GPUI owns chrome; the native host owns pages.
+pub(crate) mod annotate;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -95,6 +96,7 @@ pub enum BrowserEvent {
     Changed,
     NewTab(Option<String>),
     Close,
+    Annotation(annotate::AnnotationCapture),
 }
 
 /// A profile's website data, allocated on first navigation. Default contexts are
@@ -124,6 +126,10 @@ impl BrowserContext {
 pub struct BrowserSurface {
     #[cfg(target_os = "macos")]
     pub(crate) control: automation::Control,
+    #[cfg(target_os = "macos")]
+    annotation: annotate::AnnotationState,
+    #[cfg(target_os = "macos")]
+    annotation_task: Option<gpui::Task<()>>,
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     context: BrowserContext,
     address: Entity<ComposerInput>,
@@ -211,6 +217,10 @@ impl BrowserSurface {
         Self {
             #[cfg(target_os = "macos")]
             control: Default::default(),
+            #[cfg(target_os = "macos")]
+            annotation: Default::default(),
+            #[cfg(target_os = "macos")]
+            annotation_task: None,
             #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             context,
             address,
@@ -301,6 +311,10 @@ impl BrowserSurface {
     pub fn set_presentation(&mut self, presentation: Presentation, cx: &mut Context<Self>) {
         if self.presentation == presentation {
             return;
+        }
+        #[cfg(target_os = "macos")]
+        if presentation == Presentation::Hidden {
+            self.cancel_annotation(cx);
         }
         self.presentation = presentation;
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
@@ -602,7 +616,8 @@ impl BrowserSurface {
                 if page.error.is_some() {
                     page.loading = false;
                 }
-                if page.url != self.page.url || (!self.page.loading && page.loading) {
+                let navigated = page.url != self.page.url || (!self.page.loading && page.loading);
+                if navigated {
                     if let Some(image) = self.favicon.take() {
                         cx.defer(move |cx| gpui::ImageSource::Image(image).evict(None, cx));
                     }
@@ -621,6 +636,10 @@ impl BrowserSurface {
                 native.present(self.presentation);
                 if finished && let Some(url) = &page.url {
                     native.discover_favicon(url.clone());
+                }
+                #[cfg(target_os = "macos")]
+                if navigated {
+                    self.cancel_annotation(cx);
                 }
                 if page != self.page {
                     self.page = page;

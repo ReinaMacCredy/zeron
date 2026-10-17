@@ -4836,6 +4836,15 @@ impl Shell {
                 crate::browser::BrowserEvent::Close => {
                     this.close_right_surface(RightSurface::Browser(id), window, cx)
                 }
+                crate::browser::BrowserEvent::Annotation(capture) => {
+                    let capture = capture.clone();
+                    this.composer.update(cx, |composer, cx| {
+                        composer.stage_annotation(owner.clone(), capture, cx)
+                    });
+                    if this.panel_key(cx) == owner {
+                        window.focus(&this.composer.focus_handle(cx), cx);
+                    }
+                }
             }
         });
         if self.active_chat.is_empty() {
@@ -19266,6 +19275,26 @@ impl Render for Shell {
                     }
                     if terminal && !self.terminal_open(cx) {
                         self.toggle_terminal(window, cx);
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                if matches!(
+                    self.debug_dialog.as_deref(),
+                    Some("annotate" | "annotate-send")
+                ) && self.state.read(cx).focused_id().is_some()
+                {
+                    let send = self.debug_dialog.take().as_deref() == Some("annotate-send");
+                    if let Ok(url) = std::env::var("ZERON_ANNOTATE_DEMO") {
+                        self.set_surfaces_open(true, cx);
+                        if let Some(browser) = self.new_browser_surface(window, cx) {
+                            browser.update(cx, |browser, cx| {
+                                browser.navigate(&url, window, cx);
+                                browser.run_annotate_demo(send, cx);
+                            });
+                        }
+                        if !self.right_pane_open(cx) {
+                            self.toggle_right_pane(cx);
+                        }
                     }
                 }
                 if self.debug_dialog.as_deref() == Some("device")

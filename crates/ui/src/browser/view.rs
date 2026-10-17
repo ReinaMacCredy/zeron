@@ -83,6 +83,12 @@ impl BrowserSurface {
         } else {
             mods.control
         };
+        #[cfg(target_os = "macos")]
+        if key == "escape" && !address_focused && self.annotation.active() {
+            self.cancel_annotation(cx);
+            cx.stop_propagation();
+            return;
+        }
         if address_focused && !primary && !mods.alt {
             match key {
                 "enter" if !mods.shift => self.submit(window, cx),
@@ -650,30 +656,44 @@ impl Render for BrowserSurface {
             .child(open);
 
         #[cfg(target_os = "macos")]
-        let toolbar = toolbar.child(
-            div()
-                .id("browser-agent-control")
-                .px(px(8.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label(if self.control.paused {
-                    "Resume agent control"
-                } else {
-                    "Take over browser"
+        let toolbar = {
+            let annotating = self.annotation.active();
+            let available = annotating || self.annotation_available();
+            let label = if annotating {
+                "Cancel annotation (Esc)"
+            } else {
+                "Annotate elements, regions, and drawings"
+            };
+            let annotate = crate::files::toolbar_button("browser-annotate", label)
+                .when(!available, |el| el.cursor_default().opacity(0.35))
+                .when(annotating, |el| el.bg(theme.accent_wash))
+                .child(
+                    icons::icon(icons::LUCIDE_PENCIL)
+                        .size(px(surface_chrome::ICON_SIZE))
+                        .text_color(if annotating {
+                            theme.accent
+                        } else {
+                            theme.text_muted
+                        }),
+                )
+                .when(available, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| this.toggle_annotation(cx)))
+                });
+            toolbar
+                .child(annotate)
+                .when(self.control.paused && !annotating, |el| {
+                    el.child(
+                        div()
+                            .id("browser-agent-control")
+                            .px(px(8.0))
+                            .cursor_pointer()
+                            .role(gpui::Role::Button)
+                            .aria_label("Resume agent control")
+                            .child("Resume agent")
+                            .on_click(cx.listener(|this, _, _, cx| this.resume_control(cx))),
+                    )
                 })
-                .child(if self.control.paused {
-                    "Resume agent"
-                } else {
-                    "Take over"
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.control.paused {
-                        this.resume_control(cx);
-                    } else {
-                        this.take_over(cx);
-                    }
-                })),
-        );
+        };
 
         let body = div()
             .id("browser-page")

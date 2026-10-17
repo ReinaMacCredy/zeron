@@ -45,6 +45,19 @@ and `crates/ui/assets/icons/duo-*.svg` reproduce the device pose glyphs
 (`DeviceDuoGlyph.tsx`) from [T3 Code](https://github.com/pingdotgg/t3code), MIT licensed,
 Copyright (c) 2026 T3 Tools Inc.
 
+`crates/ui/src/browser/annotate/overlay.ts` is ported from T3 Code's preview
+annotation overlay (`apps/desktop/src/preview/PickPreload.ts`), and
+`crates/ui/src/browser/annotate/styles.generated.ts` is T3 Code's generated
+annotation stylesheet (which embeds Tailwind CSS v4, MIT licensed), same license
+and copyright.
+
+## react-grab
+
+`crates/ui/src/browser/annotate/annotate.generated.js` bundles
+[react-grab](https://github.com/aidenybai/react-grab) 0.1.32 and its dependency
+[bippy](https://github.com/aidenybai/bippy) 0.5.43, both MIT licensed,
+Copyright (c) 2024-2025 Aiden Bai.
+
 ## Bundled theme palette adaptations
 
 Zeron includes manually curated palette adaptations derived from the projects

@@ -7902,6 +7902,43 @@ impl Composer {
         true
     }
 
+    pub(crate) fn stage_annotation(
+        &mut self,
+        key: String,
+        capture: crate::browser::annotate::AnnotationCapture,
+        cx: &mut Context<Self>,
+    ) {
+        match capture.appshot {
+            Some(appshot) => {
+                if !self.stage_appshot_for(key.clone(), appshot, cx) {
+                    return;
+                }
+            }
+            None => self.show_error(
+                "Couldn't capture the annotated area. Your comment was added without a screenshot.",
+                cx,
+            ),
+        }
+        let draft = capture.draft.trim();
+        if !draft.is_empty() {
+            let join = |prompt: &str| match prompt.trim_end() {
+                "" => draft.to_string(),
+                prompt => format!("{prompt}\n\n{draft}"),
+            };
+            if key == self.current_key {
+                let text = join(self.input.read(cx).text());
+                self.seed_text(text, cx);
+            } else {
+                let mut entry = crate::draft_store::entry(&key, cx);
+                entry.prompt = join(&entry.prompt);
+                crate::draft_store::set(&key, entry, cx);
+            }
+        }
+        if capture.send && key == self.current_key {
+            self.submit(false, cx);
+        }
+    }
+
     pub fn show_appshot_error(&mut self, message: String, cx: &mut Context<Self>) {
         self.show_error(message, cx);
     }
