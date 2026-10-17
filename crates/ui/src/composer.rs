@@ -6251,15 +6251,10 @@ fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
     zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
 
-/// The pill names the sidechat once: the engine titles a sidechat
-/// `Sidechat: <source>`, and the pill's own prefix would double it.
-fn sidechat_pill_label(title: Option<&str>) -> String {
-    let title = title.unwrap_or_default().trim();
-    let body = title.strip_prefix("Sidechat:").unwrap_or(title).trim();
-    if body.is_empty() {
-        "Sidechat".to_string()
-    } else {
-        format!("Sidechat: {body}")
+fn sidechat_tab_label(live: usize) -> String {
+    match live {
+        0 => "New sidechat (btw)".to_string(),
+        count => format!("Sidechats (btw) \u{b7} {count}"),
     }
 }
 
@@ -7032,6 +7027,7 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     pr_chat: bool,
+    btw: bool,
     pr_context: Option<String>,
     pr_chips: Vec<(crate::pull_request_detail::ContextChip, SharedString)>,
     pr_chip_remove: Option<PrChipRemove>,
@@ -7515,6 +7511,7 @@ impl Composer {
             context_ring,
             side_chat: false,
             pr_chat: false,
+            btw: false,
             pr_context: None,
             pr_chips: Vec::new(),
             pr_chip_remove: None,
@@ -7894,6 +7891,17 @@ impl Composer {
     /// the context ring (no checkout/ref footer, no plan usage).
     pub(crate) fn set_side_chat(&mut self, cx: &mut Context<Self>) {
         self.side_chat = true;
+        cx.notify();
+    }
+
+    pub(crate) fn set_btw(&mut self, cx: &mut Context<Self>) {
+        const PLACEHOLDER: &str = "Ask a side question \u{b7} /btw opens a new tab";
+        self.btw = true;
+        self.idle_placeholder = PLACEHOLDER.into();
+        if self.wizard.is_none() {
+            self.input
+                .update(cx, |input, cx| input.set_placeholder(PLACEHOLDER, cx));
+        }
         cx.notify();
     }
 
@@ -10362,7 +10370,7 @@ impl Composer {
         }
     }
 
-    /// Expired sidechats are left to the sidecar, so they read as "New sidechat" here.
+    /// Expired sidechats are left to the sidecar, so they are not counted here.
     fn render_sidechat_tab(
         &self,
         trays: usize,
@@ -10377,8 +10385,11 @@ impl Composer {
             return None;
         }
         let state = self.state.read(cx);
-        let sidechat = state.latest_sidechat_of(&chat.id);
-        let open = sidechat.is_some_and(|s| state.open_sidechat_tabs.contains(&s.id));
+        let sidechats = state.live_sidechats_of(&chat.id, chrono::Utc::now());
+        let sidechat = sidechats.last().copied();
+        let open = sidechats
+            .iter()
+            .any(|s| state.open_sidechat_tabs.contains(&s.id));
         let dot = sidechat
             .and_then(|s| state.session_for(&s.id))
             .and_then(|session| match session.status {
@@ -10387,10 +10398,7 @@ impl Composer {
                 zeron_proto::SessionStatus::Errored => Some(theme.danger),
                 zeron_proto::SessionStatus::Idle => None,
             });
-        let label: SharedString = match sidechat {
-            Some(s) => sidechat_pill_label(s.title.as_deref()).into(),
-            None => "New sidechat".into(),
-        };
+        let label: SharedString = sidechat_tab_label(sidechats.len()).into();
         let icon = if sidechat.is_some() {
             crate::icons::CHAT_ROUND_LINE
         } else {
@@ -14129,7 +14137,7 @@ impl Render for Composer {
                 el.border_color(gpui::transparent_black())
             })
             .when(!self.pr_chat, |el| {
-                el.border_color(pill_border)
+                el.border_color(if self.btw { theme.accent } else { pill_border })
                     .bg(theme.composer_surface_bg())
                     .when(!theme.is_frost(), |el| el.shadow_lg())
             });
@@ -18555,17 +18563,9 @@ mod tests {
     }
 
     #[test]
-    fn the_pill_names_the_sidechat_once() {
-        assert_eq!(
-            sidechat_pill_label(Some("Sidechat: Fix the parser")),
-            "Sidechat: Fix the parser"
-        );
-        assert_eq!(
-            sidechat_pill_label(Some("Fix the parser")),
-            "Sidechat: Fix the parser"
-        );
-        assert_eq!(sidechat_pill_label(None), "Sidechat");
-        assert_eq!(sidechat_pill_label(Some("Sidechat:")), "Sidechat");
+    fn the_tab_counts_the_live_sidechats() {
+        assert_eq!(sidechat_tab_label(0), "New sidechat (btw)");
+        assert_eq!(sidechat_tab_label(2), "Sidechats (btw) \u{b7} 2");
     }
 
     #[gpui::test]

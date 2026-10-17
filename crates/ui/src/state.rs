@@ -2767,18 +2767,41 @@ impl AppState {
             .map(|config| config.harness)
     }
 
-    /// The newest unexpired sidechat of `chat_id`, if any. Newest by
-    /// creation, not by activity: the pill and slash command both reopen the
-    /// most recently STARTED side conversation.
-    pub fn latest_sidechat_of(&self, chat_id: &str) -> Option<&Chat> {
-        self.chats
+    /// The btw tabs of `chat_id`: its unarchived, unexpired sidechats, oldest
+    /// first by creation, not by activity.
+    pub fn live_sidechats_of(&self, chat_id: &str, now: DateTime<Utc>) -> Vec<&Chat> {
+        let mut sidechats: Vec<&Chat> = self
+            .chats
             .iter()
             .filter(|c| {
                 c.sidechat_source_chat_id.as_deref() == Some(chat_id)
                     && !c.archived
-                    && !c.sidechat_expired(Utc::now())
+                    && !c.sidechat_expired(now)
             })
-            .max_by_key(|c| c.created_at)
+            .collect();
+        sidechats.sort_by_key(|c| c.created_at);
+        sidechats
+    }
+
+    /// The first prompt sent into `chat_id`, from its watched doc or the
+    /// optimistic echo of a send still in flight.
+    pub fn first_prompt_of(&self, chat_id: &str) -> Option<String> {
+        self.sub_transcript(chat_id)
+            .iter()
+            .chain(self.echoes.get(chat_id).into_iter().flatten())
+            .find(|entry| entry.role == zeron_doc::MessageRole::User)
+            .map(|entry| {
+                let text: Vec<&str> = entry
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                crate::attachments::user_message_rail_text(&text.join("\n\n"))
+            })
+            .filter(|text| !text.trim().is_empty())
     }
 
     /// The chat the Archive session shortcut acts on: the selected one, unless
@@ -4840,20 +4863,36 @@ mod tests {
     }
 
     #[test]
-    fn expired_sidechat_is_not_reopened_by_the_pill_or_slash_command() {
+    fn expired_or_archived_sidechats_are_not_btw_tabs() {
         let mut state = AppState::new();
         let mut expired = chat("expired", 0, None);
         expired.sidechat_source_chat_id = Some("parent".into());
         expired.created_at = Utc::now() - TimeDelta::hours(24);
         state.chats.push(expired.clone());
-        assert!(state.latest_sidechat_of("parent").is_none());
-        let mut fresh = expired;
-        fresh.id = "fresh".into();
-        fresh.created_at = Utc::now();
-        state.chats.push(fresh);
-        assert_eq!(state.latest_sidechat_of("parent").unwrap().id, "fresh");
-        state.chats.last_mut().unwrap().archived = true;
-        assert!(state.latest_sidechat_of("parent").is_none());
+        let ids = |state: &AppState| -> Vec<String> {
+            state
+                .live_sidechats_of("parent", Utc::now())
+                .iter()
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        assert!(ids(&state).is_empty());
+        let mut newer = expired.clone();
+        newer.id = "newer".into();
+        newer.created_at = Utc::now();
+        let mut older = expired;
+        older.id = "older".into();
+        older.created_at = Utc::now() - TimeDelta::hours(1);
+        state.chats.push(newer);
+        state.chats.push(older);
+        assert_eq!(ids(&state), ["older", "newer"]);
+        state
+            .chats
+            .iter_mut()
+            .find(|c| c.id == "newer")
+            .unwrap()
+            .archived = true;
+        assert_eq!(ids(&state), ["older"]);
     }
 
     fn space(id: &str, device_id: &str, path: &str, created_min: i64) -> Space {

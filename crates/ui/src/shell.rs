@@ -2201,6 +2201,49 @@ struct SidechatTab {
     _composer_events: Subscription,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidechatSurface {
+    RightPane,
+    Btw,
+}
+
+#[derive(Default)]
+struct BtwView {
+    open: bool,
+    active: Option<String>,
+}
+
+struct BtwTab {
+    transcript: Entity<Transcript>,
+    composer: Entity<Composer>,
+    _events: Subscription,
+    _composer_events: Subscription,
+}
+
+const BTW_THREAD_MAX_HEIGHT: f32 = 360.0;
+const BTW_PANEL_RADIUS: f32 = 14.0;
+
+fn btw_tab_title(
+    state: &AppState,
+    chat: &zeron_proto::Chat,
+    now: chrono::DateTime<Utc>,
+) -> SharedString {
+    let title = state
+        .first_prompt_of(&chat.id)
+        .or_else(|| {
+            (!state.unstarted_sidechat(chat, now))
+                .then(|| chat.last_message_preview.clone())
+                .flatten()
+        })
+        .and_then(|text| {
+            text.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string)
+        });
+    title.unwrap_or_else(|| "New btw".to_string()).into()
+}
+
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
@@ -2402,6 +2445,8 @@ pub struct Shell {
     /// `CreateSidechat` in flight for this source chat. A second click while
     /// it is out would mint a second sidechat (the id is client-minted).
     sidechat_create: Option<(String, Task<()>)>,
+    btw: std::collections::HashMap<String, BtwView>,
+    btw_tabs: std::collections::HashMap<String, BtwTab>,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
@@ -3111,6 +3156,8 @@ impl Shell {
             sidechat_tabs: std::collections::HashMap::new(),
             sidechat_seq: 0,
             sidechat_create: None,
+            btw: std::collections::HashMap::new(),
+            btw_tabs: std::collections::HashMap::new(),
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
@@ -5202,6 +5249,12 @@ impl Shell {
             .find(|tab| &tab.transcript == transcript)
             .map(|tab| tab.composer.clone())
             .or_else(|| {
+                self.btw_tabs
+                    .values()
+                    .find(|tab| &tab.transcript == transcript)
+                    .map(|tab| tab.composer.clone())
+            })
+            .or_else(|| {
                 self.split
                     .as_ref()
                     .and_then(|split| split.composer_for(transcript))
@@ -5535,10 +5588,10 @@ impl Shell {
             .then(|| chat.id.clone())
     }
 
-    /// The composer's sidechat tab and `/sidechat` reopen the newest side conversation,
-    /// creating one only when none exists. Explicit New sidechat actions
-    /// call `create_sidechat` directly.
-    /// `prompt` starts the sidechat's first turn once its tab exists.
+    /// The main composer's sidechat tab, `/btw` and `/sidechat` open the
+    /// source chat's btw mode. Bare reopens its last tab (else the newest,
+    /// else a fresh one); `prompt` always asks in a new tab. Explicit New
+    /// sidechat actions call `create_sidechat` directly.
     fn open_sidechat(
         &mut self,
         source_chat_id: String,
@@ -5546,20 +5599,216 @@ impl Shell {
         staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
-        if let Some(chat) = self
-            .state
-            .read(cx)
-            .latest_sidechat_of(&source_chat_id)
-            .cloned()
-        {
-            let id = self.add_sidechat_surface(&chat, cx);
-            self.send_into_sidechat(id, prompt, staged, cx);
+        // A sidechat selected as the main chat has no btw slot of its own.
+        if self.sidechat_source_chat(cx).as_deref() != Some(source_chat_id.as_str()) {
+            self.create_sidechat(source_chat_id, prompt, staged, cx);
             return;
         }
-        self.create_sidechat(source_chat_id, prompt, staged, cx);
+        let reopen = prompt
+            .is_none()
+            .then(|| self.btw_reopen_target(&source_chat_id, cx))
+            .flatten();
+        match reopen {
+            Some(chat_id) => {
+                if let Some(composer) = self.show_btw_tab(&source_chat_id, chat_id, cx) {
+                    Self::send_into_sidechat(composer, None, staged, cx);
+                }
+            }
+            None => {
+                self.create_sidechat_on(SidechatSurface::Btw, source_chat_id, prompt, staged, cx)
+            }
+        }
+    }
+
+    fn btw_reopen_target(&self, source: &str, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        let live = state.live_sidechats_of(source, Utc::now());
+        let active = self.btw.get(source).and_then(|view| view.active.as_deref());
+        live.iter()
+            .find(|chat| Some(chat.id.as_str()) == active)
+            .or(live.last())
+            .map(|chat| chat.id.clone())
+    }
+
+    fn open_btw_source(&self, cx: &App) -> Option<String> {
+        let source = self.sidechat_source_chat(cx)?;
+        self.btw
+            .get(&source)
+            .is_some_and(|view| view.open)
+            .then_some(source)
+    }
+
+    fn active_btw_composer(&self, cx: &App) -> Option<Entity<Composer>> {
+        let source = self.open_btw_source(cx)?;
+        let active = self.btw.get(&source)?.active.as_deref()?;
+        self.btw_tabs.get(active).map(|tab| tab.composer.clone())
+    }
+
+    fn chat_composer(&self, cx: &App) -> Entity<Composer> {
+        self.active_btw_composer(cx)
+            .unwrap_or_else(|| self.composer.clone())
+    }
+
+    fn show_btw_tab(
+        &mut self,
+        source: &str,
+        chat_id: String,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Composer>> {
+        let live: Vec<String> = self
+            .state
+            .read(cx)
+            .live_sidechats_of(source, Utc::now())
+            .iter()
+            .map(|chat| chat.id.clone())
+            .collect();
+        if !live.contains(&chat_id) {
+            return None;
+        }
+        for id in live {
+            self.ensure_btw_tab(id, cx);
+        }
+        let composer = self.btw_tabs.get(&chat_id)?.composer.clone();
+        let view = self.btw.entry(source.to_string()).or_default();
+        view.open = true;
+        view.active = Some(chat_id);
+        composer.update(cx, |composer, cx| {
+            composer.focus_pending = true;
+            cx.notify();
+        });
+        cx.notify();
+        Some(composer)
+    }
+
+    fn ensure_btw_tab(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.btw_tabs.contains_key(&chat_id) {
+            return;
+        }
+        let (transcript, composer, events, composer_events) =
+            self.sidechat_entities(chat_id.clone(), SidechatSurface::Btw, cx);
+        composer.update(cx, |composer, cx| composer.set_btw(cx));
+        self.btw_tabs.insert(
+            chat_id,
+            BtwTab {
+                transcript,
+                composer,
+                _events: events,
+                _composer_events: composer_events,
+            },
+        );
+    }
+
+    fn close_btw(&mut self, source: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.btw.get_mut(source) else {
+            return;
+        };
+        view.open = false;
+        let unstarted = view.active.clone().filter(|active| {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == *active)
+                .is_some_and(|chat| state.unstarted_sidechat(chat, Utc::now()))
+        });
+        if let Some(active) = unstarted {
+            self.archive_btw_tab(source, &active, cx);
+        }
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    fn close_btw_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
+            return false;
+        }
+        let (Some(source), Some(composer)) =
+            (self.open_btw_source(cx), self.active_btw_composer(cx))
+        else {
+            return false;
+        };
+        if !composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)) {
+            self.close_btw(&source, cx);
+        }
+        true
+    }
+
+    fn archive_btw_tab(&mut self, source: &str, chat_id: &str, cx: &mut Context<Self>) {
+        let live: Vec<String> = self
+            .state
+            .read(cx)
+            .live_sidechats_of(source, Utc::now())
+            .iter()
+            .map(|chat| chat.id.clone())
+            .collect();
+        let neighbour = live.iter().position(|id| id == chat_id).and_then(|ix| {
+            live.get(ix + 1)
+                .or_else(|| ix.checked_sub(1).and_then(|ix| live.get(ix)))
+                .cloned()
+        });
+        // The tab strip is derived from the rows; the archive frame lands later.
+        self.state.update(cx, |state, cx| {
+            if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == chat_id) {
+                chat.archived = true;
+            }
+            cx.notify();
+        });
+        self.set_chat_archived(chat_id.to_string(), true, cx);
+        self.btw_tabs.remove(chat_id);
+        self.release_sidechat_doc(chat_id, cx);
+        let view = self.btw.entry(source.to_string()).or_default();
+        if view.active.as_deref() != Some(chat_id) {
+            return;
+        }
+        view.active = neighbour.clone();
+        let open = view.open;
+        match neighbour {
+            Some(next) if open => {
+                self.show_btw_tab(source, next, cx);
+            }
+            None if open => {
+                view.open = false;
+                self.focus_composer(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn expand_btw(&mut self, source: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.btw.get_mut(source) else {
+            return;
+        };
+        view.open = false;
+        let Some(active) = view.active.clone() else {
+            return;
+        };
+        let Some(chat) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == active)
+            .cloned()
+        else {
+            return;
+        };
+        self.open_sidechat_in_right_pane(&chat, None, SidechatStaged::default(), cx);
+        self.btw_tabs.remove(&active);
+        self.release_sidechat_doc(&active, cx);
+        cx.notify();
+    }
+
+    fn release_sidechat_doc(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        // The right pane and btw mode share one doc watch per sidechat.
+        let held = self.btw_tabs.contains_key(chat_id)
+            || self
+                .sidechat_tabs
+                .values()
+                .any(|tab| tab.chat_id == chat_id);
+        if !held {
+            self.state
+                .update(cx, |state, _| state.unwatch_subagent_doc(chat_id));
+        }
     }
 
     pub fn continue_in_new_thread(
@@ -5633,6 +5882,23 @@ impl Shell {
         staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
+        self.create_sidechat_on(
+            SidechatSurface::RightPane,
+            source_chat_id,
+            prompt,
+            staged,
+            cx,
+        );
+    }
+
+    fn create_sidechat_on(
+        &mut self,
+        surface: SidechatSurface,
+        source_chat_id: String,
+        prompt: Option<String>,
+        staged: SidechatStaged,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .sidechat_create
             .as_ref()
@@ -5681,8 +5947,18 @@ impl Shell {
                                 cx.notify();
                             }
                         });
-                        let id = shell.add_sidechat_surface(&chat, cx);
-                        shell.send_into_sidechat(id, prompt, staged, cx);
+                        match surface {
+                            SidechatSurface::RightPane => {
+                                shell.open_sidechat_in_right_pane(&chat, prompt, staged, cx)
+                            }
+                            SidechatSurface::Btw => {
+                                if let Some(composer) =
+                                    shell.show_btw_tab(&source_chat_id, chat.id.clone(), cx)
+                                {
+                                    Self::send_into_sidechat(composer, prompt, staged, cx);
+                                }
+                            }
+                        }
                     }
                     Err(err) => tracing::warn!(%err, "CreateSidechat failed"),
                 }
@@ -5711,60 +5987,8 @@ impl Shell {
         self.sidechat_seq += 1;
         let id = self.sidechat_seq;
         let chat_id = chat.id.clone();
-        let transcript =
-            cx.new(|cx| Transcript::for_doc(self.state.clone(), chat_id.clone(), true, cx));
-        let links = Self::session_links(Some(self.active_chat.clone()), cx);
-        transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(links)
-        });
-        let events = cx.subscribe(&transcript, Self::on_transcript_event);
-        self.state
-            .update(cx, |s, cx| s.watch_subagent_doc(chat_id.clone(), cx));
-        let composer = cx.new(|cx| Composer::for_chat(self.state.clone(), chat_id.clone(), cx));
-        let composer_events = cx.subscribe(&composer, {
-            let transcript = transcript.clone();
-            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Sent {
-                    chat_id,
-                    message_id,
-                } => transcript.update(cx, |t, cx| {
-                    t.on_own_send(chat_id.clone(), message_id.clone(), cx)
-                }),
-                ComposerEvent::Queued {
-                    chat_id,
-                    message_id,
-                } => transcript.update(cx, |t, cx| {
-                    t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
-                }),
-                // A sidechat cannot spawn one, and it has no new-thread route.
-                // Workspace commands act on the main composer's chat, not
-                // this one, so a sidechat's are dropped.
-                ComposerEvent::OpenSidechat { .. }
-                | ComposerEvent::NewThreadTransitionStarted
-                | ComposerEvent::BackgroundStarted
-                | ComposerEvent::WorkspaceCommand(_)
-                | ComposerEvent::WorktreeSetup { .. }
-                | ComposerEvent::OpenChat(_)
-                | ComposerEvent::OpenChanges => {}
-                ComposerEvent::OpenSubagent {
-                    chat_id,
-                    doc_id,
-                    title,
-                    frozen,
-                } => _this.add_subagent_surface(
-                    chat_id.clone(),
-                    doc_id.clone(),
-                    title.clone(),
-                    *frozen,
-                    cx,
-                ),
-                ComposerEvent::UnsentChanged => cx.notify(),
-                ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
-                ComposerEvent::OpenComputerSetup { missing } => {
-                    _this.open_computer_permission_guide(missing.clone(), cx)
-                }
-            }
-        });
+        let (transcript, composer, events, composer_events) =
+            self.sidechat_entities(chat_id.clone(), SidechatSurface::RightPane, cx);
         let source_title = chat
             .sidechat_source_chat_id
             .as_deref()
@@ -5802,18 +6026,320 @@ impl Shell {
         id
     }
 
-    /// The first turn of a `/sidechat <prompt>`: the tab's own composer sends
-    /// it, so the Run is built from the SIDECHAT's row, not the source's.
-    fn send_into_sidechat(
+    fn render_btw(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let source = self.open_btw_source(cx)?;
+        let active = self.btw.get(&source)?.active.clone()?;
+        let tab = self.btw_tabs.get(&active)?;
+        let (transcript, composer) = (tab.transcript.clone(), tab.composer.clone());
+        let now = Utc::now();
+        let tabs: Vec<(String, SharedString)> = {
+            let state = self.state.read(cx);
+            state
+                .live_sidechats_of(&source, now)
+                .into_iter()
+                .map(|chat| (chat.id.clone(), btw_tab_title(state, chat, now)))
+                .collect()
+        };
+        if !tabs.iter().any(|(id, _)| *id == active) {
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let draft = self
+            .composer
+            .read(cx)
+            .input
+            .read(cx)
+            .text()
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| SharedString::from(format!("Draft: {line}")));
+        let thread_height = (self.viewport_height * 0.4).min(BTW_THREAD_MAX_HEIGHT);
+        let icon_button = |id: &'static str, glyph: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex_none()
+                .size(px(22.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .tooltip(crate::settings::widgets::text_tooltip(label))
+                .hover(|s| s.bg(theme.element_hover))
+                .child(icon(glyph).size(px(13.0)).text_color(theme.text_faint))
+        };
+        let tab_chips = tabs.into_iter().enumerate().map(|(ix, (id, title))| {
+            let group: SharedString = format!("btw-tab-{ix}").into();
+            let selected = id == active;
+            let (open_source, close_source, close_id) =
+                (source.clone(), source.clone(), id.clone());
+            div()
+                .id(("btw-tab", ix))
+                .debug_selector(move || format!("btw-tab-{ix}"))
+                .group(group.clone())
+                .flex_none()
+                .min_w_0()
+                .max_w(px(160.0))
+                .h(px(22.0))
+                .pl(px(8.0))
+                .pr(px(2.0))
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .when(selected, |el| el.bg(theme.element_active))
+                .when(!selected, |el| el.hover(|s| s.bg(theme.element_hover)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_btw_tab(&open_source, id.clone(), cx);
+                }))
+                .child(div().min_w_0().truncate().child(title))
+                .child(
+                    div()
+                        .id(("btw-tab-close", ix))
+                        .debug_selector(move || format!("btw-tab-close-{ix}"))
+                        .flex_none()
+                        .size(px(16.0))
+                        .rounded(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .role(gpui::Role::Button)
+                        .aria_label("Archive sidechat")
+                        .opacity(0.0)
+                        .group_hover(group, |s| s.opacity(1.0))
+                        .hover(|s| s.bg(crate::theme::wash(0.12)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.archive_btw_tab(&close_source, &close_id, cx);
+                        }))
+                        .child(
+                            icon(icons::CLOSE)
+                                .size(px(10.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+        });
+        let (new_source, expand_source, close_source) =
+            (source.clone(), source.clone(), source.clone());
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(7.0))
+                    .rounded_full()
+                    .bg(theme.accent_wash)
+                    .text_color(theme.accent)
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("btw"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .children(tab_chips)
+                    .child(
+                        icon_button("btw-new-tab", icons::PLUS, "New btw tab").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.create_sidechat_on(
+                                    SidechatSurface::Btw,
+                                    new_source.clone(),
+                                    None,
+                                    SidechatStaged::default(),
+                                    cx,
+                                )
+                            }),
+                        ),
+                    ),
+            )
+            .children(draft.map(|draft| {
+                div()
+                    .flex_none()
+                    .min_w_0()
+                    .max_w(px(180.0))
+                    .truncate()
+                    .px(px(7.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme.border_strong)
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(draft)
+            }))
+            .child(
+                icon_button("btw-expand", icons::LUCIDE_MAXIMIZE_2, "Open in side pane").on_click(
+                    cx.listener(move |this, _, _, cx| this.expand_btw(&expand_source, cx)),
+                ),
+            )
+            .child(
+                div()
+                    .id("btw-close")
+                    .debug_selector(|| "btw-close".into())
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.close_btw(&close_source, cx)))
+                    .child(popover::kbd_hint(&theme, "Esc")),
+            );
+        let panel = crate::queue::queue_panel_surface(&theme, cx.has_active_drag())
+            .rounded(px(BTW_PANEL_RADIUS))
+            .border_color(theme.accent.opacity(0.55))
+            .pb(px(8.0))
+            .gap(px(6.0))
+            .child(header)
+            .child(
+                div()
+                    .h(px(thread_height))
+                    .overflow_hidden()
+                    .child(transcript),
+            );
+        Some(
+            div()
+                .id("btw")
+                .debug_selector(|| "btw".into())
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(Theme::SPACE_SM))
+                .child(div().mx(px(Theme::SPACE_LG)).child(crate::frost::frosted(
+                    BTW_PANEL_RADIUS,
+                    crate::frost::MENU_BLUR,
+                    panel,
+                )))
+                .child(composer)
+                .into_any_element(),
+        )
+    }
+
+    fn sidechat_entities(
         &mut self,
-        id: u64,
+        chat_id: String,
+        surface: SidechatSurface,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<Transcript>,
+        Entity<Composer>,
+        Subscription,
+        Subscription,
+    ) {
+        let transcript =
+            cx.new(|cx| Transcript::for_doc(self.state.clone(), chat_id.clone(), true, cx));
+        let links = Self::session_links(Some(self.active_chat.clone()), cx);
+        transcript.update(cx, |transcript, _| {
+            transcript.set_workspace_link_handler(links)
+        });
+        let events = cx.subscribe(&transcript, Self::on_transcript_event);
+        self.state
+            .update(cx, |s, cx| s.watch_subagent_doc(chat_id.clone(), cx));
+        let composer = cx.new(|cx| Composer::for_chat(self.state.clone(), chat_id, cx));
+        let composer_events = cx.subscribe(&composer, {
+            let transcript = transcript.clone();
+            move |this: &mut Shell, _, event: &ComposerEvent, cx| {
+                this.on_sidechat_composer_event(&transcript, surface, event, cx)
+            }
+        });
+        (transcript, composer, events, composer_events)
+    }
+
+    fn on_sidechat_composer_event(
+        &mut self,
+        transcript: &Entity<Transcript>,
+        surface: SidechatSurface,
+        event: &ComposerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Sent {
+                chat_id,
+                message_id,
+            } => transcript.update(cx, |t, cx| {
+                t.on_own_send(chat_id.clone(), message_id.clone(), cx)
+            }),
+            ComposerEvent::Queued {
+                chat_id,
+                message_id,
+            } => transcript.update(cx, |t, cx| {
+                t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
+            }),
+            ComposerEvent::OpenSidechat {
+                source_chat_id,
+                prompt,
+                staged,
+            } => self.create_sidechat_on(
+                surface,
+                source_chat_id.clone(),
+                prompt.clone(),
+                staged.clone(),
+                cx,
+            ),
+            // A sidechat has no new-thread route. Workspace commands act on
+            // the main composer's chat, not this one, so a sidechat's are
+            // dropped.
+            ComposerEvent::NewThreadTransitionStarted
+            | ComposerEvent::BackgroundStarted
+            | ComposerEvent::WorkspaceCommand(_)
+            | ComposerEvent::WorktreeSetup { .. }
+            | ComposerEvent::OpenChat(_)
+            | ComposerEvent::OpenChanges => {}
+            ComposerEvent::OpenSubagent {
+                chat_id,
+                doc_id,
+                title,
+                frozen,
+            } => self.add_subagent_surface(
+                chat_id.clone(),
+                doc_id.clone(),
+                title.clone(),
+                *frozen,
+                cx,
+            ),
+            ComposerEvent::UnsentChanged => cx.notify(),
+            ComposerEvent::ThreadMentionDropped => self.accept_command_palette_drop(),
+            ComposerEvent::OpenComputerSetup { missing } => {
+                self.open_computer_permission_guide(missing.clone(), cx)
+            }
+        }
+    }
+
+    fn open_sidechat_in_right_pane(
+        &mut self,
+        chat: &zeron_proto::Chat,
         prompt: Option<String>,
         staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
-        let Some(composer) = self.sidechat_tabs.get(&id).map(|tab| tab.composer.clone()) else {
-            return;
-        };
+        let id = self.add_sidechat_surface(chat, cx);
+        if let Some(composer) = self.sidechat_tabs.get(&id).map(|tab| tab.composer.clone()) {
+            Self::send_into_sidechat(composer, prompt, staged, cx);
+        }
+    }
+
+    /// The first turn of a `/btw <prompt>`: the tab's own composer sends
+    /// it, so the Run is built from the SIDECHAT's row, not the source's.
+    fn send_into_sidechat(
+        composer: Entity<Composer>,
+        prompt: Option<String>,
+        staged: SidechatStaged,
+        cx: &mut App,
+    ) {
         composer.update(cx, |composer, cx| {
             composer.stage_carried(staged, cx);
             if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
@@ -5993,7 +6519,6 @@ impl Shell {
                 // so the tab mints a fresh one instead of reopening it.
                 if let Some(tab) = self.sidechat_tabs.remove(&id) {
                     let unstarted = self.state.update(cx, |s, cx| {
-                        s.unwatch_subagent_doc(&tab.chat_id);
                         s.open_sidechat_tabs.remove(&tab.chat_id);
                         cx.notify();
                         s.chats
@@ -6001,7 +6526,8 @@ impl Shell {
                             .find(|chat| chat.id == tab.chat_id)
                             .is_some_and(|chat| s.unstarted_sidechat(chat, Utc::now()))
                     });
-                    if unstarted {
+                    self.release_sidechat_doc(&tab.chat_id, cx);
+                    if unstarted && !self.btw_tabs.contains_key(&tab.chat_id) {
                         self.set_chat_archived(tab.chat_id, true, cx);
                     }
                 }
@@ -8116,7 +8642,7 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
             return;
         }
-        let pickers = self.composer.read(cx).pickers().clone();
+        let pickers = self.chat_composer(cx).read(cx).pickers().clone();
         pickers.update(cx, |pickers, cx| pickers.step_effort(delta, cx));
     }
 
@@ -8144,7 +8670,7 @@ impl Shell {
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
             || self.add_space.is_some()
-            || self.composer.read(cx).pickers().read(cx).is_open()
+            || self.chat_composer(cx).read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
     }
 
@@ -13979,6 +14505,10 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key == "escape" && self.close_btw_on_escape(cx) {
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key == "escape" && self.pr_chat_expanded(cx) {
             self.fold_pr_chat(cx);
             cx.stop_propagation();
@@ -14108,7 +14638,7 @@ impl Shell {
             }
             _ => None,
         };
-        let composer = side_chat.unwrap_or_else(|| self.composer.clone());
+        let composer = side_chat.unwrap_or_else(|| self.chat_composer(cx));
         self.shortcut_focus
             .contains(&composer.focus_handle(cx), window)
             .then_some(composer)
@@ -14924,6 +15454,11 @@ impl Shell {
         self.composer.update(cx, |composer, cx| {
             composer.set_available_width(composer_width, cx)
         });
+        if let Some(composer) = self.active_btw_composer(cx) {
+            composer.update(cx, |composer, cx| {
+                composer.set_available_width(composer_width, cx)
+            });
+        }
         let terminal_geometry =
             std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
                 self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
@@ -15259,7 +15794,11 @@ impl Shell {
                                 .w(px(composer_width))
                                 .opacity(composer_opacity)
                                 .mx_auto()
-                                .child(self.composer.clone())
+                                .child(
+                                    self.render_btw(cx).unwrap_or_else(|| {
+                                        self.composer.clone().into_any_element()
+                                    }),
+                                )
                                 .children(if has_selection {
                                     self.render_jump_to_bottom(cx)
                                 } else {
@@ -17925,7 +18464,7 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
-                    let pickers = this.composer.read(cx).pickers().clone();
+                    let pickers = this.chat_composer(cx).read(cx).pickers().clone();
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                 }
             }))
@@ -22735,7 +23274,7 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
-    fn an_existing_sidechat_opens_one_tab_and_closing_it_releases_the_chat(
+    fn an_existing_sidechat_opens_as_a_btw_tab_and_expands_into_one_right_pane_tab(
         cx: &mut TestAppContext,
     ) {
         let (shell, cx) = setup(cx);
@@ -22770,18 +23309,47 @@ mod right_tab_mouse_regressions {
                 side.id = "side".into();
                 side.title = Some("Sidechat: Parent".into());
                 side.sidechat_source_chat_id = Some("parent".into());
+                side.last_message_at = Some(chrono::Utc::now());
                 source.title = Some("Parent".into());
                 state.chats = vec![source, side];
                 state.selected_chat = Some("parent".into());
             });
+            shell.composer.update(cx, |composer, cx| {
+                composer.seed_text("keep my draft".into(), cx)
+            });
             shell.open_sidechat("parent".into(), None, Default::default(), cx);
+            assert_eq!(shell.open_btw_source(cx).as_deref(), Some("parent"));
+            assert_eq!(shell.btw["parent"].active.as_deref(), Some("side"));
+            assert_eq!(shell.btw_tabs.len(), 1);
+            let composer = shell.btw_tabs["side"].composer.clone();
+            assert_eq!(shell.chat_composer(cx), composer);
+            assert!(composer.read(cx).focus_pending);
+            assert_eq!(composer.read(cx).bound_chat_id(cx).as_deref(), Some("side"));
+            assert!(shell.sidechat_tabs.is_empty());
+            assert!(!shell.state.read(cx).open_sidechat_tabs.contains("side"));
+            assert!(shell.render_btw(cx).is_some());
+            assert!(shell.close_btw_on_escape(cx));
+            assert!(shell.open_btw_source(cx).is_none());
+            assert!(shell.render_btw(cx).is_none());
+            assert_eq!(
+                shell.composer.read(cx).input.read(cx).text(),
+                "keep my draft"
+            );
+            assert_eq!(shell.chat_composer(cx), shell.composer);
+            // Reopening returns to the same tab instead of minting another.
+            shell.open_sidechat("parent".into(), None, Default::default(), cx);
+            assert_eq!(shell.btw["parent"].active.as_deref(), Some("side"));
+            assert_eq!(shell.btw_tabs.len(), 1);
+            shell.expand_btw("parent", cx);
+            assert!(shell.open_btw_source(cx).is_none());
+            assert!(shell.btw_tabs.is_empty());
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
             assert_eq!(shell.sidechat_tabs.len(), 1);
             assert!(shell.state.read(cx).open_sidechat_tabs.contains("side"));
             assert!(shell.sidechat_tabs[&1].composer.read(cx).focus_pending);
-            // A second ask reuses the tab instead of opening another, and its
-            // prompt is handed to the TAB's composer (which, with no engine
-            // here, fails on its own chat rather than building a Run).
+            // A second expand reuses the right-pane tab, and a prompt handed
+            // to it is sent by the TAB's composer (which, with no engine here,
+            // fails on its own chat rather than building a Run).
             let staged = SidechatStaged {
                 attachments: vec![crate::attachments::StagedAttachment {
                     id: "shot".into(),
@@ -22793,7 +23361,8 @@ mod right_tab_mouse_regressions {
                 }],
                 appshots: Vec::new(),
             };
-            shell.open_sidechat("parent".into(), Some("compare".into()), staged, cx);
+            let chat = shell.state.read(cx).chats[1].clone();
+            shell.open_sidechat_in_right_pane(&chat, Some("compare".into()), staged, cx);
             assert_eq!(shell.sidechat_tabs.len(), 1);
             let composer = shell.sidechat_tabs[&1].composer.clone();
             composer.read_with(cx, |composer, cx| {
