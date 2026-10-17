@@ -411,28 +411,63 @@ pub fn ensure_ax_action_enabled(element_ptr: usize, action: &str) -> anyhow::Res
 /// Perform an AX action on a cached element.
 pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()> {
     let ax_action = map_action(action);
+    let element = element_ptr as AXUIElementRef;
     dispatch_ax_action_with(
         ax_action,
         || {
             ensure_ax_action_enabled(element_ptr, ax_action)?;
             crate::input::cancellation::gate().ensure_active()
         },
-        || unsafe { perform_action(element_ptr as AXUIElementRef, ax_action) },
+        || unsafe { perform_action(element, ax_action) },
+        || unsafe {
+            Some(OwnState {
+                role: copy_string_attr(element, "AXRole")?,
+                value: copy_stringish_attr(element, "AXValue").map(|value| value.state_value),
+                actions: copy_action_names(element),
+            })
+        },
     )
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct OwnState {
+    role: String,
+    value: Option<String>,
+    actions: Vec<String>,
+}
+
+const OWN_STATE_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+const OWN_STATE_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 fn dispatch_ax_action_with(
     action: &str,
     before_dispatch: impl FnOnce() -> anyhow::Result<()>,
     dispatch: impl FnOnce() -> AXError,
+    own_state: impl Fn() -> Option<OwnState>,
 ) -> anyhow::Result<()> {
     before_dispatch().map_err(AxActionFailure::before_dispatch)?;
+    let before = own_state();
     let err = dispatch();
     if err == kAXErrorSuccess {
-        Ok(())
-    } else {
-        Err(AxActionFailure::from_ax_error(action, err).into())
+        return Ok(());
     }
+    // Some apps (Little Snitch's custom outline actions) act and still return an AX error.
+    if let Some(before) = before {
+        let deadline = std::time::Instant::now() + OWN_STATE_READBACK_TIMEOUT;
+        loop {
+            if own_state().is_some_and(|after| {
+                after.role == before.role
+                    && (after.value != before.value || after.actions != before.actions)
+            }) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(OWN_STATE_READBACK_POLL);
+        }
+    }
+    Err(AxActionFailure::from_ax_error(action, err).into())
 }
 
 pub(crate) fn map_action(action: &str) -> &str {
@@ -619,23 +654,69 @@ mod tests {
         assert_eq!(outcome, SelectionOutcome::NotAttempted);
     }
 
+    fn triangle_state(value: &str, action: &str) -> OwnState {
+        OwnState {
+            role: "AXDisclosureTriangle".to_owned(),
+            value: Some(value.to_owned()),
+            actions: vec![action.to_owned()],
+        }
+    }
+
     #[test]
     fn ax_dispatch_errors_are_uncertain_after_exactly_one_attempt() {
         for code in [kAXErrorFailure, kAXErrorInvalidUIElement, -25204] {
-            let dispatches = Cell::new(0);
-            let error = dispatch_ax_action_with(
-                "AXPress",
-                || Ok(()),
-                || {
-                    dispatches.set(dispatches.get() + 1);
-                    code
-                },
-            )
-            .unwrap_err();
-            assert_eq!(dispatches.get(), 1);
-            assert!(error.downcast_ref::<AxActionFailure>().unwrap().attempted);
-            assert!(error.to_string().contains("do not replay"));
+            for after in ["unchanged", "gone", "replaced"] {
+                let dispatches = Cell::new(0);
+                let reads = Cell::new(0);
+                let error = dispatch_ax_action_with(
+                    "AXPress",
+                    || Ok(()),
+                    || {
+                        dispatches.set(dispatches.get() + 1);
+                        code
+                    },
+                    || {
+                        reads.set(reads.get() + 1);
+                        match (reads.get(), after) {
+                            (1, _) | (_, "unchanged") => Some(triangle_state("1", "_collapse")),
+                            (_, "gone") => None,
+                            _ => Some(OwnState {
+                                role: "AXRow".to_owned(),
+                                ..triangle_state("0", "_expand")
+                            }),
+                        }
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(dispatches.get(), 1);
+                assert!(error.downcast_ref::<AxActionFailure>().unwrap().attempted);
+                assert!(error.to_string().contains("do not replay"));
+            }
         }
+    }
+
+    #[test]
+    fn an_ax_error_after_the_target_itself_changed_is_a_performed_action() {
+        let dispatches = Cell::new(0);
+        let reads = Cell::new(0);
+        dispatch_ax_action_with(
+            "_collapse",
+            || Ok(()),
+            || {
+                dispatches.set(dispatches.get() + 1);
+                -25205
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Some(if reads.get() == 1 {
+                    triangle_state("1", "_collapse")
+                } else {
+                    triangle_state("0", "_expand")
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(dispatches.get(), 1);
     }
 
     #[test]
@@ -644,6 +725,7 @@ mod tests {
             "AXPress",
             || anyhow::bail!("target is disabled"),
             || panic!("refused AXPress was submitted"),
+            || -> Option<OwnState> { panic!("refused AXPress read its target") },
         )
         .unwrap_err();
         assert!(!error.downcast_ref::<AxActionFailure>().unwrap().attempted);
