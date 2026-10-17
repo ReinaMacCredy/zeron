@@ -212,8 +212,7 @@ impl AddProviderDialog {
             "manual" => self.enter_manual(cx),
             "signin" => {
                 if let Some(id) = instance {
-                    self.pending_sign_in = Some(id);
-                    self.try_pending_sign_in(cx);
+                    self.sign_in_to(id, cx);
                 }
             }
             _ => {}
@@ -412,6 +411,11 @@ impl AddProviderDialog {
             env,
             icon_path,
         })
+    }
+
+    pub fn sign_in_to(&mut self, instance_id: String, cx: &mut Context<Self>) {
+        self.pending_sign_in = Some(instance_id);
+        self.try_pending_sign_in(cx);
     }
 
     pub(super) fn try_pending_sign_in(&mut self, cx: &mut Context<Self>) {
@@ -1331,7 +1335,7 @@ impl AddProviderDialog {
                     .svg(theme.text_muted)
                     .size(px(16.0)),
             );
-        div()
+        let card = div()
             .p(px(14.0))
             .rounded(px(10.0))
             .bg(ink(0.03))
@@ -1369,6 +1373,19 @@ impl AddProviderDialog {
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.danger)
                         .child(SharedString::from(error)),
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .child(card)
+            .when(!sign_in.signed_in, |el| {
+                el.child(
+                    div()
+                        .mt(px(10.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_faint)
+                        .child("You can sign in later from Settings › Providers."),
                 )
             })
             .into_any_element()

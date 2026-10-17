@@ -391,6 +391,13 @@ impl HarnessesPage {
         cx.notify();
     }
 
+    fn sign_in_acp(&mut self, instance_id: String, cx: &mut Context<Self>) {
+        self.open_wizard(None, cx);
+        if let Some((wizard, _)) = &self.wizard {
+            wizard.update(cx, |wizard, cx| wizard.sign_in_to(instance_id, cx));
+        }
+    }
+
     fn instance_row(
         &self,
         instance: &ProviderInstance,
@@ -408,7 +415,13 @@ impl HarnessesPage {
         let native = matches!(instance.config, InstanceConfig::Native { .. });
         let editable = native || instance.driver == HarnessId::Acp;
         let status = match accounts {
-            Some(accounts) => Some(div().min_w_0().max_w(px(240.0)).child(accounts)),
+            Some(accounts) => Some(
+                div()
+                    .min_w_0()
+                    .max_w(px(240.0))
+                    .child(accounts)
+                    .into_any_element(),
+            ),
             None if native && accounts::signs_in(instance.driver) => Some(
                 div()
                     .min_w_0()
@@ -418,8 +431,26 @@ impl HarnessesPage {
                     .child(SharedString::from(format!(
                         "Uses the default {} login",
                         add_provider::driver_name(instance.driver)
-                    ))),
+                    )))
+                    .into_any_element(),
             ),
+            None if matches!(instance.config, InstanceConfig::Acp { .. }) => {
+                let instance_id = id.clone();
+                Some(
+                    widgets::text_action(theme, widgets::ActionTone::Outlined, "Sign in")
+                        .id(SharedString::from(format!(
+                            "provider-instance-sign-in-{id}"
+                        )))
+                        .flex_none()
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            page.sign_in_acp(instance_id.clone(), cx)
+                        }))
+                        .into_any_element(),
+                )
+            }
             None => None,
         };
         let accent = provider_instances::instance_accent(instance);
