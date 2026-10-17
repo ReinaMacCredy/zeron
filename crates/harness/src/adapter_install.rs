@@ -27,24 +27,24 @@ use crate::HarnessError;
 use crate::process::Stdio;
 
 /// A pinned npm package: `"@scope/name@1.2.3"` → name + version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NpmPin {
-    pub name: &'static str,
-    pub version: &'static str,
+    pub name: String,
+    pub version: String,
 }
 
 impl NpmPin {
     /// Split a `name@version` pin at the LAST `@` (scoped names carry a
     /// leading one).
-    pub(crate) fn parse(pin: &'static str) -> Self {
+    pub(crate) fn parse(pin: &str) -> Self {
         match pin.rfind('@') {
             Some(at) if at > 0 => Self {
-                name: &pin[..at],
-                version: &pin[at + 1..],
+                name: pin[..at].to_owned(),
+                version: pin[at + 1..].to_owned(),
             },
             _ => Self {
-                name: pin,
-                version: "latest",
+                name: pin.to_owned(),
+                version: "latest".to_owned(),
             },
         }
     }
@@ -105,7 +105,7 @@ fn adapters_root_with(
 }
 
 fn install_dir_in(root: &Path, pin: &NpmPin) -> PathBuf {
-    root.join(pin.dir_name()).join(pin.version)
+    root.join(pin.dir_name()).join(&pin.version)
 }
 
 fn install_dir(pin: &NpmPin) -> Option<PathBuf> {
@@ -115,7 +115,7 @@ fn install_dir(pin: &NpmPin) -> Option<PathBuf> {
 /// The package's bin entry inside an install dir, from its own package.json
 /// (`bin` as a string, or a map preferring `bin_name`).
 fn bin_entry(dir: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathBuf> {
-    let pkg_dir = dir.join("node_modules").join(pin.name);
+    let pkg_dir = dir.join("node_modules").join(&pin.name);
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(pkg_dir.join("package.json")).ok()?).ok()?;
     let rel = match manifest.get("bin")? {
@@ -294,18 +294,18 @@ fn launch_for_entry_with_node(
     Ok((node, vec![entry.display().to_string()]))
 }
 
-pub fn installed_npm_tool(pin: &'static str, bin_name: &str) -> Option<PathBuf> {
+pub fn installed_npm_tool(pin: &str, bin_name: &str) -> Option<PathBuf> {
     installed_entry(&NpmPin::parse(pin), bin_name)
 }
 
-pub fn installed_npm_versions(pin: &'static str) -> Vec<String> {
+pub fn installed_npm_versions(pin: &str) -> Vec<String> {
     adapters_root()
         .map(|root| installed_versions_in(&root, &NpmPin::parse(pin)))
         .unwrap_or_default()
 }
 
 pub async fn ensure_npm_tool(
-    pin: &'static str,
+    pin: &str,
     bin_name: &str,
     display_name: &str,
 ) -> Result<PathBuf, HarnessError> {
@@ -385,7 +385,7 @@ pub(crate) async fn ensure_installed(
             pin.spec()
         )));
     }
-    std::fs::write(tmp_dir.join(OK_MARKER), pin.version)?;
+    std::fs::write(tmp_dir.join(OK_MARKER), &pin.version)?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -486,7 +486,7 @@ pub(crate) async fn ensure_installed_shim(
         return Err(e);
     }
     materialize_shim(&tmp_dir, shim_name, contents)?;
-    std::fs::write(tmp_dir.join(OK_MARKER), pin.version)?;
+    std::fs::write(tmp_dir.join(OK_MARKER), &pin.version)?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -719,7 +719,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(installed_entry_in(&root, &pin, "tool"), None);
-        std::fs::write(installed.join(OK_MARKER), pin.version).unwrap();
+        std::fs::write(installed.join(OK_MARKER), &pin.version).unwrap();
         assert_eq!(
             installed_entry_in(&root, &pin, "tool"),
             Some(installed_pkg.join("dist.js"))

@@ -75,18 +75,18 @@ const ANTIGRAVITY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
     id: HarnessId,
-    display_name: &'static str,
+    display_name: String,
     /// Binary name searched on PATH (and platform install dirs).
-    executable: &'static str,
+    executable: String,
     /// Env var overriding executable resolution (tests, custom installs).
-    env_override: &'static str,
+    env_override: Option<String>,
     /// Arguments that put the binary in ACP-serving mode.
-    args: &'static [&'static str],
+    args: Vec<String>,
     /// Pinned npm package (`name@version`) installed ONCE into the managed
     /// adapters dir when the binary isn't already present — the launch then
     /// spawns `node <entry>` directly, keeping npm (and every way a user's
     /// npm state can break) out of chat turns. See [`crate::adapter_install`].
-    npm_package: Option<&'static str>,
+    npm_package: Option<String>,
     /// pinned release archive for this platform, installed once into the
     /// managed adapters dir when the binary isn't already present. See
     /// [`crate::archive_install`].
@@ -98,16 +98,16 @@ struct AcpAgentSpec {
     /// wraps the CLI (third-party ACP adapters), and the npx
     /// fallback deliberately doesn't count: npx can fetch an adapter on
     /// demand, but an absent CLI still means no logins/config to drive.
-    cli_executable: &'static str,
+    cli_executable: String,
     /// Extra install locations probed for [`Self::cli_executable`].
     cli_extra_paths: fn() -> Vec<PathBuf>,
     /// Search summary + install hint for the NotInstalled error.
-    install_hint: &'static str,
+    install_hint: String,
     models: fn() -> Vec<Model>,
     steering_mode: SteeringMode,
     /// Effort ladder surfaced in the picker; applied per session via the
     /// `thought_level` config option (must mirror the registry descriptor).
-    reasoning_levels: &'static [ReasoningLevel],
+    reasoning_levels: Vec<ReasoningLevel>,
     /// Transform applied to the initial prompt and every steer — Claude's
     /// Ultrathink is a prompt-prefix convention, not an effort flag.
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
@@ -117,7 +117,7 @@ struct AcpAgentSpec {
     effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
     /// Levels appended to a DISCOVERED model's non-empty ladder: modes the
     /// wire can't advertise because they aren't `thought_level` values.
-    ladder_extras: &'static [ReasoningLevel],
+    ladder_extras: Vec<ReasoningLevel>,
     /// The agent emits `_x.ai/session/prompt_complete` (Grok): treat it as
     /// the AUTHORITATIVE turn end — grok's `session/prompt` RPC can hang
     /// silently after the turn really finished (field reports: total silent
@@ -133,22 +133,26 @@ struct AcpAgentSpec {
     prompt_stall: Option<Duration>,
     /// Agent-specific advice appended to the stall error chip: what a wedge
     /// usually means for THIS agent and what the user can check.
-    stall_hint: &'static str,
+    stall_hint: String,
     /// the agent advertises every effort as its own model id (`…-low`,
     /// `…-high`) instead of a `thought_level` option: discovered variants fold
     /// into one row with a ladder, and a run sends the variant for its level.
     effort_in_model_id: bool,
     /// auth method to sign in with when `session/new` answers auth_required —
     /// for agents that expect the client to pick one before the first session.
-    auth_method: Option<&'static str>,
+    auth_method: Option<String>,
     /// folders of `<skill>/SKILL.md` the agent loads itself but never
     /// advertises, listed as slash commands alongside its own.
     skill_dirs: fn() -> Vec<PathBuf>,
     /// advertised commands the picker leaves out.
-    hidden_commands: &'static [&'static str],
+    hidden_commands: Vec<String>,
     /// A prompt cancelled before it produced anything vanishes from the
     /// agent's history (Grok, verified live); preemption re-sends its text.
     drops_unstarted_cancelled_prompt: bool,
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| value.to_string()).collect()
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
@@ -208,9 +212,9 @@ fn grok_install_paths() -> Vec<PathBuf> {
 fn grok_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Grok,
-        display_name: "Grok",
-        executable: "grok",
-        env_override: "GROK_EXECUTABLE",
+        display_name: "Grok".into(),
+        executable: "grok".into(),
+        env_override: Some("GROK_EXECUTABLE".into()),
         // Flag placement verified against grok 1.0.4: `--no-auto-update` is
         // TOP-LEVEL (before the subcommand) and kills the launch-time update
         // check (a silent multi-second network stall); `--no-leader` lives on
@@ -218,17 +222,18 @@ fn grok_spec() -> AcpAgentSpec {
         // `[cli] use_leader` is set — leader mode ATTACHES `agent stdio` to a
         // shared process via ~/.grok/leader.sock, so a wedged/stale leader
         // (the user's TUI) reads as total silent non-response in zeron.
-        args: &["--no-auto-update", "agent", "--no-leader", "stdio"],
-        npm_package: Some("@xai-official/grok@1.0.4"),
+        args: strings(&["--no-auto-update", "agent", "--no-leader", "stdio"]),
+        npm_package: Some("@xai-official/grok@1.0.4".into()),
         archive: None,
         extra_paths: grok_install_paths,
-        cli_executable: "grok",
+        cli_executable: "grok".into(),
         cli_extra_paths: grok_install_paths,
         install_hint: "grok (searched PATH, the login shell's PATH, ~/.local/bin, \
              ~/.grok/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
              fnm/nvm/volta/pnpm/bun install dirs; install with \
              `curl -fsSL https://x.ai/cli/install.sh | bash` or \
-             `npm install -g @xai-official/grok`; set GROK_EXECUTABLE to override)",
+             `npm install -g @xai-official/grok`; set GROK_EXECUTABLE to override)"
+            .into(),
         models: || {
             vec![Model {
                 id: "grok-4.5".into(),
@@ -248,25 +253,26 @@ fn grok_spec() -> AcpAgentSpec {
         steering_mode: SteeringMode::StepBoundary,
         // Grok Build's advertised efforts (default high); applied through the
         // session's `thought_level` config option.
-        reasoning_levels: &[
+        reasoning_levels: vec![
             ReasoningLevel::Low,
             ReasoningLevel::Medium,
             ReasoningLevel::High,
         ],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
-        ladder_extras: &[],
+        ladder_extras: Vec::new(),
         // Verified live (1.0.4): the notification fires with the echoed
         // `_meta.promptId`, just ahead of the RPC response.
         prompt_complete_extension: true,
         prompt_stall: Some(Duration::from_secs(30)),
         stall_hint: "The agent process is likely wedged — a stale shared leader \
              process or a hung startup check; zeron launches it with --no-leader \
-             and --no-auto-update to avoid both.",
+             and --no-auto-update to avoid both."
+            .into(),
         effort_in_model_id: false,
         auth_method: None,
         skill_dirs: Vec::new,
-        hidden_commands: &[],
+        hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: true,
     }
 }
@@ -286,21 +292,22 @@ fn devin_install_paths() -> Vec<PathBuf> {
 fn devin_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Devin,
-        display_name: "Devin",
-        executable: "devin",
-        env_override: "DEVIN_EXECUTABLE",
-        args: &["acp"],
+        display_name: "Devin".into(),
+        executable: "devin".into(),
+        env_override: Some("DEVIN_EXECUTABLE".into()),
+        args: strings(&["acp"]),
         // Native ACP server — no adapter package in between.
         npm_package: None,
         archive: None,
         extra_paths: devin_install_paths,
-        cli_executable: "devin",
+        cli_executable: "devin".into(),
         cli_extra_paths: devin_install_paths,
         install_hint: "devin (searched PATH, the login shell's PATH, ~/.local/bin, \
              /opt/homebrew/bin, and /usr/local/bin; install with \
              `curl -fsSL https://cli.devin.ai/install.sh | bash` or \
              `brew install --cask devin-cli`, then `devin auth login`; set \
-             DEVIN_EXECUTABLE to override)",
+             DEVIN_EXECUTABLE to override)"
+            .into(),
         // Fallback metadata only: discovery uses `devin models list`, grouped
         // into one model per family with effort levels (see `devin_models`).
         models: || {
@@ -334,17 +341,17 @@ fn devin_spec() -> AcpAgentSpec {
         steering_mode: SteeringMode::StepBoundary,
         // Effort levels are per model (catalog groups, see `devin_models`)
         // and applied through the session's `thought_level` option.
-        reasoning_levels: &[],
+        reasoning_levels: Vec::new(),
         prompt_transform: identity_transform,
         effort_values: devin_effort_values,
-        ladder_extras: &[],
+        ladder_extras: Vec::new(),
         prompt_complete_extension: false,
         prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        stall_hint: "The agent process is likely wedged.".into(),
         effort_in_model_id: false,
         auth_method: None,
         skill_dirs: Vec::new,
-        hidden_commands: &[],
+        hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
     }
 }
@@ -363,22 +370,23 @@ fn hermes_install_paths() -> Vec<PathBuf> {
 fn hermes_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Hermes,
-        display_name: "Hermes",
-        executable: "hermes",
-        env_override: "HERMES_EXECUTABLE",
-        args: &["acp"],
+        display_name: "Hermes".into(),
+        executable: "hermes".into(),
+        env_override: Some("HERMES_EXECUTABLE".into()),
+        args: strings(&["acp"]),
         // Python/uv install — no npm fallback exists.
         npm_package: None,
         archive: None,
         extra_paths: hermes_install_paths,
-        cli_executable: "hermes",
+        cli_executable: "hermes".into(),
         cli_extra_paths: hermes_install_paths,
         install_hint: "hermes (searched PATH, the login shell's PATH, ~/.local/bin, \
              ~/.hermes/bin, /opt/homebrew/bin, /usr/local/bin, and fnm/nvm/volta/pnpm/bun \
              install dirs; install with \
              `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`, then \
              `cd ~/.hermes/hermes-agent && uv pip install -e '.[acp]'` for the ACP \
-             server; set HERMES_EXECUTABLE to override)",
+             server; set HERMES_EXECUTABLE to override)"
+            .into(),
         // Hermes derives its model list from the providers the user has
         // authenticated (`hermes model`); these are the Nous flagships every
         // portal account gets. Ids the agent doesn't advertise are skipped by
@@ -405,17 +413,17 @@ fn hermes_spec() -> AcpAgentSpec {
         steering_mode: SteeringMode::TurnBoundary,
         // Hermes exposes no effort config over ACP today (hybrid reasoning is
         // model-internal); revisit when the adapter advertises a ladder.
-        reasoning_levels: &[],
+        reasoning_levels: Vec::new(),
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
-        ladder_extras: &[],
+        ladder_extras: Vec::new(),
         prompt_complete_extension: false,
         prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        stall_hint: "The agent process is likely wedged.".into(),
         effort_in_model_id: false,
         auth_method: None,
         skill_dirs: Vec::new,
-        hidden_commands: &[],
+        hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
     }
 }
@@ -1075,20 +1083,22 @@ const ANTIGRAVITY_LINUX_ARGS: &[&str] = &["--uid="];
 fn antigravity_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Antigravity,
-        display_name: "Antigravity",
-        executable: "agy_acp_server",
-        env_override: "ANTIGRAVITY_ACP_EXECUTABLE",
+        display_name: "Antigravity".into(),
+        executable: "agy_acp_server".into(),
+        env_override: Some("ANTIGRAVITY_ACP_EXECUTABLE".into()),
         args: if cfg!(target_os = "linux") {
-            ANTIGRAVITY_LINUX_ARGS
+            strings(ANTIGRAVITY_LINUX_ARGS)
         } else {
-            &[]
+            Vec::new()
         },
         npm_package: None,
         archive: antigravity_archive(),
         extra_paths: Vec::new,
-        cli_executable: "agy_acp_server",
+        cli_executable: "agy_acp_server".into(),
         cli_extra_paths: Vec::new,
-        install_hint: "Install Antigravity to enable, or set ANTIGRAVITY_ACP_EXECUTABLE to its ACP server",
+        install_hint:
+            "Install Antigravity to enable, or set ANTIGRAVITY_ACP_EXECUTABLE to its ACP server"
+                .into(),
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -1112,19 +1122,19 @@ fn antigravity_spec() -> AcpAgentSpec {
         // later one) when a cancel lands as it starts replying after a tool
         // (verified on the wire). Steers wait for the turn end instead.
         steering_mode: SteeringMode::TurnBoundary,
-        reasoning_levels: &[],
+        reasoning_levels: Vec::new(),
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
-        ladder_extras: &[],
+        ladder_extras: Vec::new(),
         prompt_complete_extension: false,
         prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        stall_hint: "The agent process is likely wedged.".into(),
         effort_in_model_id: true,
         // the personal oauth method is only the first-run default; sign-in
         // preserves any method already selected in antigravity's settings.
-        auth_method: Some("oauth-personal"),
+        auth_method: Some("oauth-personal".into()),
         skill_dirs: antigravity_skill_dirs,
-        hidden_commands: &[],
+        hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
     }
 }
@@ -1187,20 +1197,25 @@ pub fn prewarm_managed_adapters() {
     // The PATH probes wait on the login-shell snapshot; engine boot must not.
     handle.clone().spawn_blocking(move || {
         for spec in [grok_spec()] {
-            let Some(pkg) = spec.npm_package else {
+            let Some(pkg) = &spec.npm_package else {
                 continue;
             };
             let pin = crate::adapter_install::NpmPin::parse(pkg);
-            if find_on_paths(spec.executable, (spec.extra_paths)()).is_some()
-                || crate::adapter_install::installed_entry(&pin, spec.executable).is_some()
-                || find_on_paths(spec.cli_executable, (spec.cli_extra_paths)()).is_none()
+            if find_on_paths(&spec.executable, (spec.extra_paths)()).is_some()
+                || crate::adapter_install::installed_entry(&pin, &spec.executable).is_some()
+                || find_on_paths(&spec.cli_executable, (spec.cli_extra_paths)()).is_none()
                 || crate::adapter_install::find_npm().is_none()
             {
                 continue;
             }
-            let (bin_name, display_name) = (spec.executable, spec.display_name);
+            let AcpAgentSpec {
+                executable: bin_name,
+                display_name,
+                ..
+            } = spec;
             handle.spawn(async move {
-                match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
+                match crate::adapter_install::ensure_installed(pin, &bin_name, &display_name).await
+                {
                     Ok(entry) => tracing::info!(
                         target: "zeron_harness::adapter_install",
                         adapter = %entry.display(),
@@ -1222,7 +1237,7 @@ enum Launch {
     Program(PathBuf, Vec<String>),
     Managed {
         pin: crate::adapter_install::NpmPin,
-        bin_name: &'static str,
+        bin_name: String,
         args: Vec<String>,
     },
     Archive {
@@ -1336,7 +1351,7 @@ impl AcpHarness {
             Ok(outcome) => outcome.map(|_| ()),
             Err(_) => Err(HarnessError::Protocol(format!(
                 "{} sign-out did not finish within {}s",
-                self.spec.display_name,
+                &self.spec.display_name,
                 SIGN_OUT_TIMEOUT.as_secs()
             ))),
         }
@@ -1374,8 +1389,8 @@ impl AcpHarness {
             env,
             url_filter,
         } = options;
-        let display_name = self.spec.display_name;
-        let Some(default_method) = method.as_deref().or(self.spec.auth_method) else {
+        let display_name = &self.spec.display_name;
+        let Some(default_method) = method.as_deref().or(self.spec.auth_method.as_deref()) else {
             return Err(HarnessError::Protocol(format!(
                 "{display_name} has no sign-in flow"
             )));
@@ -1530,10 +1545,10 @@ impl AcpHarness {
         match self.resolve_launch()? {
             Launch::Program(program, _) => Ok(program),
             Launch::Managed { pin, bin_name, .. } => {
-                match crate::adapter_install::installed_entry(&pin, bin_name) {
+                match crate::adapter_install::installed_entry(&pin, &bin_name) {
                     Some(entry) => Ok(entry),
                     None => crate::adapter_install::find_npm()
-                        .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.into())),
+                        .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.clone())),
                 }
             }
             Launch::Archive { entry, .. } => Ok(entry),
@@ -1544,7 +1559,7 @@ impl AcpHarness {
     /// managed install of the spec's pinned npm package. `NotInstalled` only
     /// when neither the binary nor the machinery to install it (npm) exists.
     fn find_server(&self) -> Option<PathBuf> {
-        find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
+        find_on_paths(&self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
             if self.spec.id == HarnessId::Antigravity {
                 ["agy_acp_server.par", "agy_acp_server.exe"]
                     .into_iter()
@@ -1563,28 +1578,26 @@ impl AcpHarness {
     }
 
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
-        let spec_args: Vec<String> = self.spec.args.iter().map(|a| a.to_string()).collect();
+        let spec_args = self.spec.args.clone();
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p)
                 .map(|program| Launch::Program(program, spec_args));
         }
-        if let Some(p) = std::env::var_os(self.spec.env_override)
-            && !p.is_empty()
-        {
+        if let Some(p) = self.env_override_value() {
             return crate::executable::validate_native_override(&PathBuf::from(p))
                 .map(|program| Launch::Program(program, spec_args));
         }
         if let Some(found) = self.find_server() {
             return Ok(Launch::Program(found, spec_args));
         }
-        if let Some(pkg) = self.spec.npm_package {
+        if let Some(pkg) = &self.spec.npm_package {
             let pin = crate::adapter_install::NpmPin::parse(pkg);
-            if crate::adapter_install::installed_entry(&pin, self.spec.executable).is_some()
+            if crate::adapter_install::installed_entry(&pin, &self.spec.executable).is_some()
                 || crate::adapter_install::find_npm().is_some()
             {
                 return Ok(Launch::Managed {
                     pin,
-                    bin_name: self.spec.executable,
+                    bin_name: self.spec.executable.clone(),
                     args: spec_args,
                 });
             }
@@ -1592,13 +1605,17 @@ impl AcpHarness {
         if self.spec.archive.is_some() {
             let entry = self
                 .installed_archive_entry()
-                .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.into()))?;
+                .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.clone()))?;
             return Ok(Launch::Archive {
                 entry,
                 args: spec_args,
             });
         }
-        Err(HarnessError::NotInstalled(self.spec.install_hint.into()))
+        Err(HarnessError::NotInstalled(self.spec.install_hint.clone()))
+    }
+
+    fn env_override_value(&self) -> Option<std::ffi::OsString> {
+        std::env::var_os(self.spec.env_override.as_ref()?).filter(|value| !value.is_empty())
     }
 
     /// Resolve to a concrete (program, args), running the managed install if
@@ -1619,23 +1636,23 @@ impl AcpHarness {
                 bin_name,
                 args,
             } => {
-                let entry = match crate::adapter_install::installed_entry(&pin, bin_name) {
+                let entry = match crate::adapter_install::installed_entry(&pin, &bin_name) {
                     Some(entry) => entry,
                     None if block_on_install => {
                         crate::adapter_install::ensure_installed(
                             pin,
-                            bin_name,
-                            self.spec.display_name,
+                            &bin_name,
+                            &self.spec.display_name,
                         )
                         .await?
                     }
                     None => {
-                        let display_name = self.spec.display_name;
+                        let display_name = self.spec.display_name.clone();
                         tokio::spawn(async move {
                             if let Err(e) = crate::adapter_install::ensure_installed(
                                 pin,
-                                bin_name,
-                                display_name,
+                                &bin_name,
+                                &display_name,
                             )
                             .await
                             {
@@ -1688,7 +1705,7 @@ impl AcpHarness {
 
     fn adapter_scratch(&self) -> Result<Option<ScratchDir>, HarnessError> {
         Ok(matches!(self.resolve_launch()?, Launch::Archive { .. })
-            .then(|| ScratchDir::new(self.spec.executable))
+            .then(|| ScratchDir::new(&self.spec.executable))
             .transpose()?)
     }
 
@@ -1834,7 +1851,7 @@ impl AcpHarness {
             Ok::<Vec<SlashCommand>, HarnessError>(commands)
         };
         let discovery =
-            unless_sign_in_prompted(discovery, &sign_in_prompted, self.spec.display_name);
+            unless_sign_in_prompted(discovery, &sign_in_prompted, &self.spec.display_name);
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
         child.shutdown(self.kill_grace).await;
         match result {
@@ -1874,7 +1891,7 @@ impl AcpHarness {
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
                 if !model.reasoning_levels.is_empty() {
-                    for extra in self.spec.ladder_extras {
+                    for extra in &self.spec.ladder_extras {
                         if !model.reasoning_levels.contains(extra) {
                             model.reasoning_levels.push(*extra);
                         }
@@ -1887,7 +1904,7 @@ impl AcpHarness {
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let discovery =
-            unless_sign_in_prompted(discovery, &sign_in_prompted, self.spec.display_name);
+            unless_sign_in_prompted(discovery, &sign_in_prompted, &self.spec.display_name);
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
         child.shutdown(self.kill_grace).await;
         match result {
@@ -2158,7 +2175,7 @@ impl Harness for AcpHarness {
         self.spec.id
     }
     fn display_name(&self) -> &str {
-        self.spec.display_name
+        &self.spec.display_name
     }
     fn authoritative_prompt_end(&self) -> bool {
         // ACP session/prompt owns the turn until its response. The engine's
@@ -2215,7 +2232,7 @@ impl Harness for AcpHarness {
         !matches!(self.spec.id, HarnessId::Pi | HarnessId::Antigravity)
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        self.spec.reasoning_levels
+        &self.spec.reasoning_levels
     }
 
     /// ACP has no compaction call: the agent compacts only if it advertises
@@ -2243,9 +2260,7 @@ impl Harness for AcpHarness {
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p).is_ok();
         }
-        if let Some(p) = std::env::var_os(self.spec.env_override)
-            && !p.is_empty()
-        {
+        if let Some(p) = self.env_override_value() {
             return crate::executable::validate_native_override(&PathBuf::from(p)).is_ok();
         }
         if self.installed_archive_entry().is_some() {
@@ -2254,7 +2269,7 @@ impl Harness for AcpHarness {
         if self.spec.id == HarnessId::Antigravity {
             self.find_server().is_some()
         } else {
-            find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
+            find_on_paths(&self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
         }
     }
 
@@ -2271,11 +2286,11 @@ impl Harness for AcpHarness {
             if let Some(path) = &self.executable {
                 return Some(path.clone());
             }
-            if let Some(path) = std::env::var_os(self.spec.env_override).filter(|p| !p.is_empty()) {
+            if let Some(path) = self.env_override_value() {
                 return Some(PathBuf::from(path));
             }
         }
-        find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)())
+        find_on_paths(&self.spec.cli_executable, (self.spec.cli_extra_paths)())
     }
 
     /// Devin refreshes through its native catalog command on each request.
@@ -2285,7 +2300,7 @@ impl Harness for AcpHarness {
         let binary = match self.resolve_launch()? {
             Launch::Program(path, _) => path,
             Launch::Managed { pin, bin_name, .. } => {
-                crate::adapter_install::installed_entry(&pin, bin_name)
+                crate::adapter_install::installed_entry(&pin, &bin_name)
                     .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version)))
             }
             Launch::Archive { entry, .. } => entry,
@@ -2369,7 +2384,7 @@ impl Harness for AcpHarness {
             Err(_) if !skills.is_empty() => Vec::new(),
             Err(error) => return Err(error),
         };
-        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name.as_str()));
+        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name));
         for skill in skills {
             if !commands.iter().any(|command| command.name == skill.name) {
                 commands.push(skill);
@@ -2389,7 +2404,7 @@ impl Harness for AcpHarness {
             Err(_) if !skills.is_empty() => Vec::new(),
             Err(error) => return Err(error),
         };
-        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name.as_str()));
+        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name));
         for skill in skills {
             if !commands.iter().any(|command| command.name == skill.name) {
                 commands.push(skill);
@@ -2463,7 +2478,7 @@ impl Harness for AcpHarness {
             request,
             skills,
             harness: self.spec.id,
-            agent_name: self.spec.display_name,
+            agent_name: self.spec.display_name.clone(),
             prompt_transform: self.spec.prompt_transform,
             effort_values: self.spec.effort_values,
             prompt_complete_extension: self.spec.prompt_complete_extension,
@@ -2472,9 +2487,9 @@ impl Harness for AcpHarness {
             devin_catalog,
             resend_unstarted: self.spec.drops_unstarted_cancelled_prompt,
             prompt_stall: self.spec.prompt_stall,
-            stall_hint: self.spec.stall_hint,
+            stall_hint: self.spec.stall_hint.clone(),
             effort_in_model_id: self.spec.effort_in_model_id,
-            auth_method: self.spec.auth_method,
+            signs_in_from_settings: self.spec.auth_method.is_some(),
             sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -2511,7 +2526,7 @@ struct Session {
     /// Skill names the `$name` rewrite recognizes (the spec's `SKILL.md` dirs).
     skills: Vec<String>,
     harness: HarnessId,
-    agent_name: &'static str,
+    agent_name: String,
     prompt_complete_extension: bool,
     /// Steers preempt the generation (descriptor: mid-turn steering).
     preempt_steers: bool,
@@ -2522,9 +2537,9 @@ struct Session {
     /// See `AcpAgentSpec::drops_unstarted_cancelled_prompt`.
     resend_unstarted: bool,
     prompt_stall: Option<Duration>,
-    stall_hint: &'static str,
+    stall_hint: String,
     effort_in_model_id: bool,
-    auth_method: Option<&'static str>,
+    signs_in_from_settings: bool,
     /// Sessions-root override for the subagent transcript tail (tests).
     sessions_root: Option<PathBuf>,
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
@@ -3852,7 +3867,7 @@ async fn run_session(session: Session) {
         prompt_stall,
         stall_hint,
         effort_in_model_id,
-        auth_method,
+        signs_in_from_settings,
         sessions_root,
         prompt_transform,
         effort_values,
@@ -3915,8 +3930,8 @@ async fn run_session(session: Session) {
             load["sessionId"] = Value::String(resume.clone());
             match request_draining(&client, &mut incoming, "session/load", load).await {
                 Ok(resp) => (resume.clone(), resp),
-                Err(e) if auth_method.is_some() && is_auth_required(&e) => {
-                    return Err(HarnessError::Protocol(not_signed_in(agent_name)));
+                Err(e) if signs_in_from_settings && is_auth_required(&e) => {
+                    return Err(HarnessError::Protocol(not_signed_in(&agent_name)));
                 }
                 // A missing/foreign session falls back to a fresh one.
                 Err(e) => {
@@ -3931,8 +3946,8 @@ async fn run_session(session: Session) {
                         &client,
                         &mut incoming,
                         session_params.clone(),
-                        agent_name,
-                        auth_method.is_some(),
+                        &agent_name,
+                        signs_in_from_settings,
                     )
                     .await?;
                     (
@@ -3949,8 +3964,8 @@ async fn run_session(session: Session) {
                 &client,
                 &mut incoming,
                 session_params,
-                agent_name,
-                auth_method.is_some(),
+                &agent_name,
+                signs_in_from_settings,
             )
             .await?;
             (
@@ -3989,7 +4004,7 @@ async fn run_session(session: Session) {
             session_options,
         ))
     };
-    let setup = unless_sign_in_prompted(setup, &sign_in_prompted, agent_name);
+    let setup = unless_sign_in_prompted(setup, &sign_in_prompted, &agent_name);
     let (session_id, steer_ext, init_commands, mut session_options) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
@@ -4020,7 +4035,7 @@ async fn run_session(session: Session) {
                             tokio::time::sleep(Duration::from_millis(200)).await;
                             format!(
                                 "{e}; {}",
-                                crate::crash_message(agent_name, Some(status), &stderr_tail)
+                                crate::crash_message(&agent_name, Some(status), &stderr_tail)
                             )
                         }
                         _ => match stderr_tail.snapshot() {
@@ -4241,7 +4256,7 @@ async fn run_session(session: Session) {
                     let _ = send(&event_tx, AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
-                        error: Some(not_signed_in(agent_name)),
+                        error: Some(not_signed_in(&agent_name)),
                         session_id: Some(session_id.clone()),
                     }).await;
                 }
@@ -4396,10 +4411,10 @@ async fn run_session(session: Session) {
                 if !preempted {
                     let (status, mut error) = stop_outcome(&res, interrupted || stopped);
                     if !interrupted
-                        && auth_method.is_some()
+                        && signs_in_from_settings
                         && res.as_ref().is_err_and(is_auth_required)
                     {
-                        error = Some(not_signed_in(agent_name));
+                        error = Some(not_signed_in(&agent_name));
                     }
                     done_current = true;
                     if interrupted {
@@ -5228,7 +5243,7 @@ async fn run_session(session: Session) {
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
-                    error: Some(crate::crash_message(agent_name, status, &stderr_tail)),
+                    error: Some(crate::crash_message(&agent_name, status, &stderr_tail)),
                     session_id: Some(session_id.clone()),
                 }))
                 .await;
