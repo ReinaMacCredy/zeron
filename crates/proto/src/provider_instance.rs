@@ -117,7 +117,6 @@ impl AcpAuthMethod {
     }
 }
 
-/// A row of `SearchAcpRegistry`: an agent this device can run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpRegistryAgent {
@@ -137,7 +136,6 @@ pub struct AcpRegistryAgent {
     pub installed: bool,
 }
 
-/// What `PrepareAcpAgent` installed, ready for an `AcpSource::Registry` instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPreparedAgent {

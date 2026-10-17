@@ -48,13 +48,10 @@ pub struct VerifiedRelease<'a> {
     pub marker: &'a str,
 }
 
-/// an ACP Registry `binary` target, installed under
-/// `<adapters_root>/<name>/<version>`.
 pub struct RegistryBinary<'a> {
     pub name: &'a str,
     pub version: &'a str,
     pub url: &'a str,
-    /// the registry's `cmd`, relative to the archive root.
     pub cmd: &'a str,
     pub sha256: Option<&'a str>,
 }
@@ -204,9 +201,6 @@ where
     install(Source::from(release), display_name, verify).await
 }
 
-/// install a registry binary target: an archive (zip, tar, tar.gz, tar.bz2)
-/// or a raw executable, picked by the URL's suffix. The sha256 is checked when
-/// the registry lists one; without it the install is unverified.
 pub async fn install_registry_binary(
     binary: &RegistryBinary<'_>,
     display_name: &str,
@@ -233,8 +227,6 @@ pub async fn install_registry_binary(
     install(source, display_name, |_| async { Ok(()) }).await
 }
 
-/// the registry `cmd` as a path inside the install dir: a leading `./` is
-/// dropped, `..` and absolute paths are refused.
 pub fn registry_entry(cmd: &str) -> Result<PathBuf, HarnessError> {
     safe_relative(Path::new(cmd.strip_prefix("./").unwrap_or(cmd)))
         .filter(|path| path.components().next().is_some())
@@ -528,8 +520,7 @@ async fn extract_tar(kind: ArchiveKind, archive: &Path, dest: &Path) -> Result<(
         })?
 }
 
-/// counts what the decompressor yields, so a small archive cannot expand past
-/// the extraction limit.
+/// counts decompressed bytes, so a small archive cannot expand past the limit.
 struct Capped<R> {
     inner: R,
     remaining: u64,
@@ -966,8 +957,7 @@ mod tests {
         }
     }
 
-    /// runs in a child process, since installs resolve through the
-    /// process-wide `ZERON_ADAPTERS_DIR`.
+    /// a child process, since installs read the process-wide `ZERON_ADAPTERS_DIR`.
     #[test]
     fn registry_binaries_check_sha256_and_install_archives_or_raw_files() {
         if std::env::var_os("ZERON_TEST_REGISTRY_INSTALL").is_none() {

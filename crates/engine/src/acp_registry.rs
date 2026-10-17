@@ -190,8 +190,6 @@ async fn fetch_index(url: &str, etag: Option<&str>) -> Result<Fetched, String> {
     Ok(Fetched::Body { body, etag })
 }
 
-/// The index, from a cache younger than five minutes, else revalidated by etag;
-/// an unreachable registry serves whatever was cached last.
 async fn load_index(data_dir: &Path, url: &str) -> Result<Vec<Agent>, EngineError> {
     let path = registry_dir(data_dir).join("index.json");
     let cached = std::fs::read(&path)
@@ -414,8 +412,6 @@ pub(crate) struct PreparedLaunch {
     pub env: BTreeMap<String, String>,
 }
 
-/// The launch a prepare recorded; `None` when this agent, version and
-/// distribution were never prepared here or the install is gone.
 pub(crate) fn prepared_launch(
     data_dir: &Path,
     agent_id: &str,
@@ -610,7 +606,6 @@ async fn install(
     }
 }
 
-/// The bin a package most likely names itself by: its unscoped name.
 fn npm_bin_name(package: &str) -> &str {
     let name = match package.rfind('@') {
         Some(at) if at > 0 => &package[..at],

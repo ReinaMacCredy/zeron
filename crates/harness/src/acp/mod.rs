@@ -541,7 +541,6 @@ fn antigravity_entry() -> &'static str {
     }
 }
 
-/// this build's key in an ACP Registry `distribution.binary` map.
 pub fn registry_platform() -> Option<&'static str> {
     Some(if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "darwin-aarch64"
@@ -886,8 +885,6 @@ pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
     Ok(())
 }
 
-/// `uvx`, which runs the ACP Registry's `uvx` agents, on PATH or the login
-/// shell's PATH.
 pub fn find_uvx() -> Option<PathBuf> {
     crate::executable::find_on_paths("uvx", Vec::new())
 }
