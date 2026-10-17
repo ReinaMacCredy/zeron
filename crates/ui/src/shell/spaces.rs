@@ -3350,7 +3350,6 @@ impl Shell {
         if self.settings.space_filter.is_some() {
             self.settings.space_filter = Some(space_id.clone());
         }
-        self.nav.push(NavEntry::Chat(String::new()));
         self.settings.last_space_id = Some(space_id.clone());
         self.state.update(cx, |s, cx| {
             // Draft first, so the space records onto the canvas draft and
@@ -3359,6 +3358,8 @@ impl Shell {
             s.new_draft(cx);
             s.select_space(Some(space_id), cx);
         });
+        let entry = self.focus_nav_entry(cx);
+        self.record_nav_focus(entry, cx);
         self.freeze_draft_row(cx);
         self.schedule_save(cx);
         cx.notify();
@@ -5462,15 +5463,16 @@ impl Shell {
         visible
     }
 
-    /// Draft rows (t3code SidebarDraftRow): every unsent draft the user has
-    /// invested content in, space-filtered like sessions, two lines — target,
-    /// then the typed prompt — with a discard ✕ on hover. The open draft
-    /// renders its frozen snapshot (or nothing, if it never had one).
-    pub(super) fn render_draft_rows(
+    /// The Drafts disclosure (t3code SidebarDraftRow rows): every unsent draft
+    /// the user has invested content in, space-filtered like sessions, two
+    /// lines — target, then the typed prompt — with a discard ✕ on hover. The
+    /// open draft renders its frozen snapshot (or nothing, if it never had
+    /// one). `None` when no draft has a row.
+    pub(super) fn render_drafts_section(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> Vec<(String, f32, AnyElement)> {
+    ) -> Option<(String, f32, AnyElement)> {
         let filter = self.settings.space_filter.clone();
         let rows: Vec<(String, String, String)> = {
             let state = self.state.read(cx);
@@ -5501,15 +5503,73 @@ impl Shell {
             .read(cx)
             .focused_id()
             .filter(|_| !matches!(self.route, Route::PullRequests));
-        rows.into_iter()
+        if rows.is_empty() {
+            return None;
+        }
+        let row_height = super::chat_row_height(true);
+        let row_count = rows.len();
+        let rows: Vec<AnyElement> = rows
+            .into_iter()
             .map(|(id, target, prompt)| {
                 let selected = focused.as_deref() == Some(id.as_str());
-                let height = super::chat_row_height(true);
-                let element =
-                    self.render_draft_row(id.clone(), target, prompt, selected, theme, cx);
-                (format!("d:{id}"), height, element)
+                self.render_draft_row(id, target, prompt, selected, theme, cx)
             })
-            .collect()
+            .collect();
+        let key = "drafts";
+        let motion_key = format!("group:{key}");
+        let collapsed = self.sidebar_collapsed_groups.contains(key);
+        let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
+            + row_height * row_count as f32
+            + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
+        self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
+        let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
+        let toggle_motion_key = motion_key.clone();
+        let header = sidebar_disclosure_header(
+            theme,
+            None,
+            "Drafts".into(),
+            collapsed.then_some(row_count),
+            None,
+            chevron,
+        )
+        .id("sidebar-group-drafts")
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let was_open = !this.sidebar_collapsed_groups.contains(key);
+            this.begin_sidebar_disclosure_motion(
+                &toggle_motion_key,
+                if was_open { body_height } else { 0.0 },
+                if was_open { 0.0 } else { body_height },
+            );
+            if was_open {
+                this.sidebar_collapsed_groups.insert(key.to_owned());
+            } else {
+                this.sidebar_collapsed_groups.remove(key);
+            }
+            cx.notify();
+        }));
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
+            .gap(px(SIDEBAR_LIST_GAP))
+            .children(rows);
+        let body = self.render_sidebar_disclosure_body(
+            &motion_key,
+            !collapsed,
+            body_height,
+            body.into_any_element(),
+        );
+        let height = SIDEBAR_DISCLOSURE_SECTION_HEIGHT + if collapsed { 0.0 } else { body_height };
+        let element = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .pt(px(SIDEBAR_SECTION_GAP))
+            .child(header)
+            .child(body)
+            .into_any_element();
+        Some((format!("g:{key}"), height, element))
     }
 
     fn render_draft_row(

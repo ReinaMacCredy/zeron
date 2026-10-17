@@ -1119,6 +1119,9 @@ impl SessionPanels {
 pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
+    /// An unsent draft on the canvas, by draft id. Walking back to one that
+    /// was discarded meanwhile lands on the canvas's current draft.
+    Draft(String),
     PullRequests,
     /// One pull request's detail view over the board, and the device whose
     /// `gh` reads it (`None` = this device).
@@ -2593,6 +2596,7 @@ pub struct Shell {
     settings_return_route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
+    nav_focus: Option<NavEntry>,
     swipe: swipe_nav::SwipeNav,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
@@ -3285,6 +3289,7 @@ impl Shell {
             settings_restore_pending: false,
             settings_return_route: Route::Chat,
             nav,
+            nav_focus: None,
             swipe: swipe_nav::SwipeNav::default(),
             pull_requests_page: None,
             usage_page: None,
@@ -3993,6 +3998,11 @@ impl Shell {
         // every change: a draft-to-draft switch never moves `selected_chat`.
         let focused = state.read(cx).focused_id();
         self.reconcile_split_with_selection(focused.as_deref(), cx);
+        let focus_entry = self.focus_nav_entry(cx);
+        if self.nav_focus.as_ref() != Some(&focus_entry) {
+            self.nav_focus = Some(focus_entry.clone());
+            self.record_nav_focus(focus_entry, cx);
+        }
         if selected != self.active_chat {
             self.appshot_last_interaction = Some((selected.clone(), std::time::Instant::now()));
         }
@@ -4007,19 +4017,6 @@ impl Shell {
                     .update(&self.active_chat, |panels| panels.right_expanded = expanded);
             }
             self.active_chat = selected.clone();
-            // Route history: a chat switch is a navigation. The very first
-            // selection off the untouched boot canvas REPLACES that entry —
-            // zeron's `/` route redirected into the last-used chat, leaving no
-            // dead Back target. Walking history lands here too, but the
-            // destination already equals `current()`, so the push dedups.
-            if matches!(self.route, Route::Chat) {
-                let entry = NavEntry::Chat(self.active_chat.clone());
-                if self.nav.len() == 1 && *self.nav.current() == NavEntry::Chat(String::new()) {
-                    self.nav.replace(entry);
-                } else {
-                    self.nav.push(entry);
-                }
-            }
             self.clear_panel_transitions();
             self.terminal_tween = None;
             self.fit_exits = [None; 3];
@@ -8333,6 +8330,39 @@ impl Shell {
 
     // ---- back/forward (route history) ----
 
+    /// The history entry for what the chat route shows: the selected chat,
+    /// else the canvas draft (the bare canvas only before boot mints one).
+    fn focus_nav_entry(&self, cx: &App) -> NavEntry {
+        let state = self.state.read(cx);
+        match (&state.selected_chat, &state.active_draft) {
+            (Some(chat), _) => NavEntry::Chat(chat.clone()),
+            (None, Some(draft)) => NavEntry::Draft(draft.clone()),
+            (None, None) => NavEntry::Chat(String::new()),
+        }
+    }
+
+    /// A chat-route focus change is a navigation. It replaces instead of
+    /// stacking when the current entry is the bare canvas (zeron's `/` boot
+    /// redirect leaves no dead Back target) or a draft that is gone: sent
+    /// (promoted into the chat now shown) or left empty and discarded.
+    /// Walking history lands here too, but the entry already equals
+    /// `current()`.
+    fn record_nav_focus(&mut self, entry: NavEntry, cx: &App) {
+        if !matches!(self.route, Route::Chat) || *self.nav.current() == entry {
+            return;
+        }
+        let stale = match self.nav.current() {
+            NavEntry::Chat(id) => id.is_empty(),
+            NavEntry::Draft(id) => !self.state.read(cx).is_draft(id),
+            _ => false,
+        };
+        if stale {
+            self.nav.replace(entry);
+        } else {
+            self.nav.push(entry);
+        }
+    }
+
     fn navigate_back(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = self.nav.back() {
             self.apply_nav(entry, cx);
@@ -8360,6 +8390,23 @@ impl Shell {
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
                 }
+            }
+            NavEntry::Draft(draft_id) => {
+                self.settings_search
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.set_route(Route::Chat, cx);
+                self.focus_composer(cx);
+                self.state.update(cx, |s, cx| {
+                    if s.focused_id().as_deref() == Some(draft_id.as_str()) {
+                        return;
+                    }
+                    if s.is_draft(&draft_id) {
+                        s.open_draft(draft_id, cx);
+                    } else {
+                        s.select_chat(None, cx);
+                    }
+                });
+                self.freeze_draft_row(cx);
             }
             NavEntry::PullRequests => {
                 self.enter_pull_requests_route(cx);
@@ -13045,14 +13092,14 @@ impl Shell {
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
-        let custom_count = session_rows.custom_count;
-        let regular_start = pinned_count + custom_count;
         let mut keyed = session_rows.rows;
-        // Invested drafts sit above every attention bucket (d21), below the
-        // pinned shelf and the custom sections.
-        let draft_rows = self.render_draft_rows(theme, cx);
-        let regular_count = session_rows.regular_count + draft_rows.len();
-        keyed.splice(regular_start..regular_start, draft_rows);
+        // Invested drafts get their own section right under Pinned, so a
+        // draft row never reads as part of the pinned shelf.
+        let drafts_section = self.render_drafts_section(theme, cx);
+        let custom_count = session_rows.custom_count + usize::from(drafts_section.is_some());
+        keyed.splice(pinned_count..pinned_count, drafts_section);
+        let regular_start = pinned_count + custom_count;
+        let regular_count = session_rows.regular_count;
         let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
@@ -13816,14 +13863,9 @@ impl Shell {
             self.settings_focus_pending = false;
             self.settings_restore_pending = true;
         }
-        let chat = self
-            .state
-            .read(cx)
-            .selected_chat
-            .clone()
-            .unwrap_or_default();
         self.set_route(Route::Chat, cx);
-        self.nav.push(NavEntry::Chat(chat));
+        let entry = self.focus_nav_entry(cx);
+        self.record_nav_focus(entry, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         if !from_settings {
