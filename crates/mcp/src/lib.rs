@@ -95,7 +95,7 @@ pub fn tool_list() -> Value {
 fn compact_tool() -> Value {
     json!({
         "name": "compact",
-        "description": "Compact this chat's own context: the conversation so far is replaced by a summary, so later turns are cheaper and the context window has room again. Use it at a natural boundary (a slice done and verified, before the next phase), not in the middle of an edit. It cannot run under the turn that asks for it: it is queued and runs once this turn ends and no sub-agents or background shells are running, so finish your reply after calling it. `focus` tells the summary what to keep: the plan, files being changed, open failures, decisions. `continueWith` is sent to you as your next message once the compaction is done, so the work goes on without the person; leave it out to stop and wait for them.",
+        "description": "Compact this chat's own context: the conversation so far is replaced by a summary, so later turns are cheaper and the context window has room again. Use it at a natural boundary (a slice done and verified, before the next phase), not in the middle of an edit. It cannot run under the turn that asks for it: it is queued and runs once this turn ends and no sub-agents or background shells are running, so finish your reply after calling it. Any message that reaches you before it runs (from the person, another thread, or a finished task) cancels it; call it again then if it still fits. `focus` tells the summary what to keep: the plan, files being changed, open failures, decisions. `continueWith` is sent to you as your next message once the compaction is done, so the work goes on without the person; leave it out to stop and wait for them.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1973,18 +1973,38 @@ impl ThreadTools {
     }
 
     pub async fn compact(&self, args: &Value) -> Result<Value, String> {
-        self.call_engine(
-            methods::REQUEST_COMPACT,
-            json!({
-                "chatId": self.chat_id,
-                "focus": args["focus"].as_str(),
-                "continueWith": args["continueWith"].as_str(),
-            }),
-        )
-        .await?;
+        let queued = self
+            .call_engine(
+                methods::REQUEST_COMPACT,
+                json!({
+                    "chatId": self.chat_id,
+                    "focus": args["focus"].as_str(),
+                    "continueWith": args["continueWith"].as_str(),
+                }),
+            )
+            .await?;
+        let count = |key: &str, one: &str, many: &str| match queued[key].as_u64().unwrap_or(0) {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            n => Some(format!("{n} {many}")),
+        };
+        let waits: Vec<String> = [
+            count("backgroundTasks", "background task", "background tasks"),
+            count("runningSubagents", "sub-agent", "sub-agents"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let runs = if waits.is_empty() {
+            "when this turn ends".to_string()
+        } else {
+            format!("after this turn ends and {} finish", waits.join(" and "))
+        };
         Ok(json!({
             "queued": true,
-            "runs": "when this turn ends",
+            "runs": runs,
+            "replacedEarlierRequest": queued["replaced"].as_bool().unwrap_or(false),
+            "cancelledBy": "any message that reaches you before it runs",
             "continueWith": args["continueWith"].as_str().is_some_and(|text| !text.trim().is_empty()),
         }))
     }

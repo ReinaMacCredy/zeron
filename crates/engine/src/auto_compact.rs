@@ -72,12 +72,21 @@ fn run_agent_compaction(
     );
     tokio::spawn(async move {
         match sessions.compact_for_agent(&chat_id).await {
-            Ok(Some((outcome, continue_with))) => {
+            Ok(Some((outcome, request))) => {
                 tracing::info!(chat = %chat_id, compacted = outcome.compacted, "agent compaction ran");
-                if let Some(text) = continue_with
-                    && let Err(err) = host.queue_auto_continue(&chat_id, &text).await
-                {
-                    tracing::warn!(chat = %chat_id, error = %err, "agent auto-continue not sent");
+                if let Some(text) = request.continue_with {
+                    match host
+                        .queue_auto_continue(&chat_id, &text, request.after_user.as_deref())
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::info!(chat = %chat_id, "agent auto-continue dropped: a newer message reached the chat")
+                        }
+                        Err(err) => {
+                            tracing::warn!(chat = %chat_id, error = %err, "agent auto-continue not sent")
+                        }
+                    }
                 }
             }
             Ok(None) => {}

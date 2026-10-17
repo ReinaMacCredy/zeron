@@ -498,6 +498,81 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
     assert_eq!(plan(), None);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_before_the_agent_compaction_cancels_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *harness.gate.lock().unwrap() = Some(gate);
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue second run");
+    wait_for(|| core.sessions.turn_in_flight(CHAT), "second turn starts").await;
+
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let request = || {
+        client.call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "wait for task X, then merge" }),
+        )
+    };
+    let first = request().await.expect("request compact");
+    assert_eq!(first["replaced"], false);
+    assert_eq!(request().await.expect("again")["replaced"], true);
+    core.doc_host
+        .queue_message(CHAT, "task X is done, merge it now", Vec::new())
+        .expect("the person writes");
+    let _ = release.send(());
+
+    let prompts = || -> Vec<String> {
+        requests.lock().unwrap().iter().map(|r| r.prompt.clone()).collect()
+    };
+    wait_for(|| prompts().len() == 3, "the person's message").await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "its turn settles").await;
+    assert!(prompts()[2].starts_with(
+        "task X is done, merge it now\n\n<system-reminder>\nYour queued compaction was cancelled"
+    ));
+    assert_eq!(
+        core.sessions.session_status(CHAT).and_then(|s| s.compact_plan),
+        None
+    );
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    assert_eq!(prompts().len(), 3, "no compaction and no stale follow-up: {:?}", prompts());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_during_the_agent_compaction_drops_its_continue_with() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *harness.gate.lock().unwrap() = Some(gate);
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "go on" }),
+        )
+        .await
+        .expect("request compact");
+    let prompts = || -> Vec<String> {
+        requests.lock().unwrap().iter().map(|r| r.prompt.clone()).collect()
+    };
+    wait_for(|| prompts().iter().any(|p| p == "/compact"), "the compaction starts").await;
+    core.doc_host
+        .queue_message(CHAT, "a new question", Vec::new())
+        .expect("the person writes");
+    let _ = release.send(());
+
+    wait_for(|| prompts().iter().any(|p| p == "a new question"), "the person's message").await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "its turn settles").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(prompts()[1..], ["/compact", "a new question"]);
+    assert!(
+        entries(&core)
+            .iter()
+            .any(|e| e.role == MessageRole::System && entry_text(e).starts_with("Agent compacted"))
+    );
+}
+
 /// A parked run can open its own turn (a finished background shell); interrupting it loses that turn.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_compaction_queues_into_the_parked_run() {
@@ -566,10 +641,13 @@ async fn a_stopped_auto_continue_keeps_its_caption() {
         .expect("queue second run");
     wait_for(|| core.sessions.turn_in_flight(CHAT), "second turn starts").await;
 
-    core.doc_host
-        .queue_auto_continue(CHAT, "go on")
-        .await
-        .expect("queue auto-continue");
+    let last_user = core.doc_host.last_user_entry(CHAT).unwrap();
+    assert!(
+        core.doc_host
+            .queue_auto_continue(CHAT, "go on", last_user.as_deref())
+            .await
+            .expect("queue auto-continue")
+    );
     let row = core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap()[0].id.clone();
     assert!(core.doc_host.steer_queued_now(CHAT, &row).await.expect("steer"));
     core.doc_host

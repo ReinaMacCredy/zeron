@@ -57,6 +57,16 @@ pub struct JournaledEvent {
 pub(crate) struct AgentCompact {
     pub focus: Option<String>,
     pub continue_with: Option<String>,
+    #[serde(default)]
+    pub after_user: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactQueued {
+    pub replaced: bool,
+    pub background_tasks: usize,
+    pub running_subagents: u32,
 }
 
 /// Result of a manual context compaction — also the RPC result shape.
@@ -1932,7 +1942,7 @@ impl SessionsEngine {
         chat_id: &str,
         focus: Option<String>,
         continue_with: Option<String>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<CompactQueued, EngineError> {
         let (harness_id, _) = self.compaction_request(chat_id)?;
         let harness = self.inner.registry.resolve(harness_id)?;
         if harness.compaction() == Compaction::None {
@@ -1945,18 +1955,34 @@ impl SessionsEngine {
             text.map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
         };
-        self.inner.edit_agent_compacts(|compacts| {
+        let after_user = last_user_entry(self.doc_handle(chat_id)?.doc());
+        let replaced = self.inner.edit_agent_compacts(|compacts| {
             compacts.insert(
                 chat_id.to_string(),
                 AgentCompact {
                     focus: trimmed(focus),
                     continue_with: trimmed(continue_with),
+                    after_user,
                 },
             )
         });
         self.inner
             .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
-        Ok(())
+        let session = self.session_status(chat_id);
+        Ok(CompactQueued {
+            replaced: replaced.is_some(),
+            background_tasks: session.as_ref().map_or(0, |s| s.background_tasks.len()),
+            running_subagents: session.map_or(0, |s| s.running_subagents),
+        })
+    }
+
+    async fn agent_compact_fresh(&self, chat_id: &str, request: &AgentCompact) -> bool {
+        let Some(host) = self.inner.doc_host() else {
+            return false;
+        };
+        host.untouched_since(chat_id, request.after_user.as_deref())
+            .await
+            .unwrap_or(false)
     }
 
     /// After a restart: a chat whose agent asked for a compaction that never
@@ -1979,7 +2005,7 @@ impl SessionsEngine {
     pub(crate) async fn compact_for_agent(
         &self,
         chat_id: &str,
-    ) -> Result<Option<(CompactOutcome, Option<String>)>, EngineError> {
+    ) -> Result<Option<(CompactOutcome, AgentCompact)>, EngineError> {
         let Some(request) = lock(&self.inner.agent_compacts).get(chat_id).cloned() else {
             return Ok(None);
         };
@@ -1987,6 +2013,13 @@ impl SessionsEngine {
             sessions.turn_in_flight(chat_id) || lock(&sessions.inner.compacting).contains(chat_id)
         };
         if busy(self) {
+            return Ok(None);
+        }
+        if !self.agent_compact_fresh(chat_id, &request).await {
+            self.inner
+                .edit_agent_compacts(|compacts| compacts.remove(chat_id));
+            self.inner.set_compact_plan(chat_id, None);
+            tracing::info!(chat = %chat_id, "agent compaction dropped: a newer message reached the chat");
             return Ok(None);
         }
         match self
@@ -2002,7 +2035,7 @@ impl SessionsEngine {
                     self.inner.set_compact_plan(chat_id, None);
                 }
                 lock(&self.inner.agent_compacted).insert(chat_id.to_string());
-                Ok(Some((outcome, request.continue_with)))
+                Ok(Some((outcome, request)))
             }
             Err(_) if busy(self) => Ok(None),
             Err(err) => {
@@ -3205,18 +3238,44 @@ impl Inner {
 
     /// Slash commands go out untouched: the note would become their arguments.
     fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+        let cancelled = self.cancel_agent_compact(chat_id);
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
         if lock(&self.agent_compacted).remove(chat_id) {
             return None;
         }
-        let tokens = self.nudge_tokens(chat_id, harness_id)?;
-        lock(&self.nudged_at).insert(chat_id.to_string(), tokens);
-        Some(format!(
-            "<system-reminder>\nContext {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>",
-            format_tokens(tokens),
-        ))
+        let reminder = self.nudge_tokens(chat_id, harness_id).map(|tokens| {
+            lock(&self.nudged_at).insert(chat_id.to_string(), tokens);
+            format!(
+                "Context {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.",
+                format_tokens(tokens),
+            )
+        });
+        let lines: Vec<&str> = [
+            cancelled.then_some(COMPACT_CANCELLED_NOTE),
+            reminder.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!lines.is_empty()).then(|| {
+            format!(
+                "<system-reminder>\n{}\n</system-reminder>",
+                lines.join("\n")
+            )
+        })
+    }
+
+    fn cancel_agent_compact(&self, chat_id: &str) -> bool {
+        if !lock(&self.agent_compacts).contains_key(chat_id)
+            || lock(&self.compacting).contains(chat_id)
+        {
+            return false;
+        }
+        self.edit_agent_compacts(|compacts| compacts.remove(chat_id));
+        self.set_compact_plan(chat_id, None);
+        true
     }
 
     /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
@@ -4154,6 +4213,7 @@ fn record_compaction(
 const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
 const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
+const COMPACT_CANCELLED_NOTE: &str = "Your queued compaction was cancelled: this message reached you before it ran. Call compact again if it still fits, with a continueWith that accounts for this message.";
 
 fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
     match (pre_tokens, post_tokens) {
@@ -6481,6 +6541,7 @@ mod tests {
         let request = AgentCompact {
             focus: Some("keep the plan".into()),
             continue_with: Some("go on".into()),
+            after_user: Some("msg-1".into()),
         };
         engine()
             .inner

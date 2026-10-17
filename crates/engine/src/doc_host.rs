@@ -3762,8 +3762,39 @@ impl DocHost {
         Ok(true)
     }
 
-    pub async fn queue_auto_continue(&self, chat_id: &str, text: &str) -> Result<(), EngineError> {
+    pub(crate) async fn untouched_since(
+        &self,
+        chat_id: &str,
+        after_user: Option<&str>,
+    ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
+        let _drain = handle.drain_lock.lock().await;
+        self.quiet_since(&handle, after_user)
+    }
+
+    /// Call under the drain lock: a drain takes a row before it writes its user entry.
+    fn quiet_since(
+        &self,
+        handle: &ChatDocHandle,
+        after_user: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        Ok(
+            self.last_user_entry(&handle.chat_id)?.as_deref() == after_user
+                && handle.doc.read_queue()?.is_empty(),
+        )
+    }
+
+    pub async fn queue_auto_continue(
+        &self,
+        chat_id: &str,
+        text: &str,
+        after_user: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        let drain = handle.drain_lock.lock().await;
+        if !self.quiet_since(&handle, after_user)? {
+            return Ok(false);
+        }
         handle.doc.push_queued(&QueuedMessage {
             id: new_id(),
             text: text.to_string(),
@@ -3778,9 +3809,10 @@ impl DocHost {
             delegated_tasks: Vec::new(),
             input_request: None,
         })?;
+        drop(drain);
         handle.publish_queue();
         self.drain_queue(&handle).await;
-        Ok(())
+        Ok(true)
     }
 
     /// Thread tools: the inter-thread rows waiting on `chat_id`, moved into

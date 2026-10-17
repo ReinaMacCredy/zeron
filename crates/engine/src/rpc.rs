@@ -3093,10 +3093,11 @@ impl RpcService for EngineRpc {
             }
             methods::REQUEST_COMPACT => {
                 let p: RequestCompactParams = parse_params(params)?;
-                self.sessions
+                let queued = self
+                    .sessions
                     .request_compact(&p.chat_id, p.focus, p.continue_with)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({}))
+                RpcReply::value(&queued)
             }
             methods::FORK_CHAT => {
                 let p: ForkChatParams = parse_params(params)?;
