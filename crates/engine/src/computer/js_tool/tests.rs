@@ -17,6 +17,7 @@ struct FakeHost {
     type_warning: bool,
     native_error: Option<&'static str>,
     launch_reason: Option<&'static str>,
+    minimized_window: bool,
     delay: Duration,
 }
 
@@ -202,6 +203,10 @@ impl JsHost for FakeHost {
                 {
                     windows.push(json!({ "id": "cua:40:7", "title": "Rules", "appName": "Little Snitch", "pid": 40,
                       "visible": true, "bounds": { "x": 5, "y": 74, "width": 1502, "height": 903 }, "stackingIndex": 10 }));
+                }
+                if self.minimized_window {
+                    windows.push(json!({ "id": "cua:40:8", "title": "Rules", "appName": "Little Snitch", "pid": 40,
+                      "visible": false, "minimized": true, "bounds": { "x": 5, "y": 74, "width": 1502, "height": 903 } }));
                 }
                 if self.dialog {
                     windows.push(json!({ "id": "cua:7:9", "title": "ttgshop.vn says", "appName": "Calculator", "pid": 7,
@@ -467,6 +472,24 @@ async fn get_app_waits_for_a_window_that_opens_after_launch_but_not_for_a_hidden
         "{error}"
     );
     assert_eq!(hidden.windows_listed_since_launch(), 1);
+
+    let minimized = Arc::new(FakeHost {
+        launch_reason: Some("hidden"),
+        minimized_window: true,
+        ..FakeHost::default()
+    });
+    let refused = exec(
+        "js-minimized-launch",
+        &minimized,
+        "await cua.getApp(\"Little Snitch\");",
+    )
+    .await;
+    let error = refused.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("only \"cua:40:8\" (minimized, \"Rules\")")
+            && error.contains("cua.getApp({ windowId: \"cua:40:8\" })"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
