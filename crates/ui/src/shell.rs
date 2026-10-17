@@ -300,7 +300,7 @@ const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 /// Chrome layers that paint full-bleed at a window edge round their own
 /// backgrounds with it — see [`Shell::window_corner_radius`].
 pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
-const CARD_INSET: f32 = 8.0;
+const CARD_INSET: f32 = 3.0;
 /// The terminal dock rounds its card corners with the window radius.
 const CARD_RADIUS: f32 = LINUX_WINDOW_CORNER_RADIUS;
 const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
@@ -9730,7 +9730,7 @@ impl Shell {
 
     /// A corner radius is clamped to the element's own size, so the collapsed
     /// ~1px sliver is inset vertically to where the curve begins instead.
-    fn sidebar_tone(width: f32, corner: f32, theme: &Theme) -> gpui::Div {
+    fn sidebar_tone(width: f32, corner: f32, fill: gpui::Hsla, seam: gpui::Hsla) -> gpui::Div {
         div()
             .absolute()
             .top_0()
@@ -9744,12 +9744,9 @@ impl Shell {
                     el.top(px(corner)).bottom(px(corner))
                 }
             })
-            .bg(gpui::Hsla {
-                a: 1.0,
-                ..theme.surface
-            })
+            .bg(fill)
             .border_r_1()
-            .border_color(theme.border)
+            .border_color(seam)
     }
 
     /// Settings takes over the window: the section list stands where the
@@ -13003,6 +13000,7 @@ impl Shell {
                 .child(div().absolute().inset_0().child(content))
                 .into_any_element();
         }
+        let tones = theme.inset_tones();
         let card = || {
             div()
                 .absolute()
@@ -13012,8 +13010,22 @@ impl Shell {
                 .top(px(Theme::TITLEBAR_HEIGHT))
         };
         frame
-            .child(card().rounded(px(CARD_RADIUS)).bg(theme.panel_bg()))
-            .child(card().child(Self::sidebar_tone(tone_width, CARD_RADIUS, theme)))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(-self.content_left()))
+                    .right(px(-inset))
+                    .bottom(px(-inset))
+                    .bg(tones.shell_lift),
+            )
+            .child(card().rounded(px(CARD_RADIUS)).bg(tones.body))
+            .child(card().child(Self::sidebar_tone(
+                tone_width,
+                CARD_RADIUS,
+                tones.panel,
+                tones.edge,
+            )))
             .child(
                 card().overflow_hidden().child(
                     div()
@@ -13025,21 +13037,24 @@ impl Shell {
                         .child(content),
                 ),
             )
-            .child(
-                card()
-                    .rounded(px(CARD_RADIUS))
-                    .border_1()
-                    .border_color(theme.border),
-            )
+            .child(crate::theme::half_point_border(
+                card().rounded(px(CARD_RADIUS)),
+                tones.edge,
+            ))
             .into_any_element()
     }
 
     fn flush_tone(&self, sidebar_width: f32, window: &Window, cx: &App) -> Option<gpui::Div> {
         (!self.settings.inset_shell).then(|| {
+            let theme = Theme::of(cx);
             Self::sidebar_tone(
                 self.content_left() + sidebar_width,
                 Self::window_corner_radius(window),
-                Theme::of(cx),
+                gpui::Hsla {
+                    a: 1.0,
+                    ..theme.surface
+                },
+                theme.border,
             )
         })
     }

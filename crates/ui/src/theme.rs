@@ -916,6 +916,44 @@ impl Theme {
         }
     }
 
+    /// Synara's rail-layout planes for the inset shell: the shell band is the
+    /// lightest plane in dark (the window's own tone lifted by white) and a
+    /// step darker than the card in light. The card body is opaque so the
+    /// shell lift never reaches it, and a selected titlebar tab wears it.
+    /// Edges run at the seam's weight: Synara's 9% read brighter than the
+    /// seam once the shell is lifted.
+    pub fn inset_tones(&self) -> InsetTones {
+        let ink = |alpha: f32| match self.appearance {
+            Appearance::Dark => hsla(0.0, 0.0, 1.0, alpha),
+            Appearance::Light => hsla(0.0, 0.0, 0.0, alpha),
+        };
+        match self.appearance {
+            Appearance::Dark => {
+                let body = Hsla {
+                    a: 1.0,
+                    ..self.surface
+                };
+                InsetTones {
+                    body,
+                    panel: flatten(ink(0.017), body),
+                    shell_lift: ink(0.05),
+                    edge: ink(0.05),
+                    wash: ink(0.04),
+                }
+            }
+            Appearance::Light => {
+                let body = Hsla { a: 1.0, ..self.bg };
+                InsetTones {
+                    body,
+                    panel: body,
+                    shell_lift: ink(0.0),
+                    edge: ink(0.05),
+                    wash: ink(0.03),
+                }
+            }
+        }
+    }
+
     /// Whether FLOATING surfaces (popovers, the composer pill) paint their
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on
@@ -1873,6 +1911,26 @@ pub fn card_selected_shadows() -> Vec<gpui::BoxShadow> {
         spread_radius: gpui::px(1.0),
         inset: true,
     }]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InsetTones {
+    pub body: Hsla,
+    pub panel: Hsla,
+    pub shell_lift: Hsla,
+    pub edge: Hsla,
+    pub wash: Hsla,
+}
+
+/// A half-point border: one device pixel at 2x, like Synara's 0.5px CSS edge.
+pub fn half_point_border<E: gpui::Styled>(mut el: E, color: Hsla) -> E {
+    let width = gpui::px(0.5);
+    let edges = &mut el.style().border_widths;
+    edges.top = Some(width.into());
+    edges.right = Some(width.into());
+    edges.bottom = Some(width.into());
+    edges.left = Some(width.into());
+    el.border_color(color)
 }
 
 /// An exact achromatic tone from an 8-bit channel value (`grey(13)` ≡ `#0d0d0d`)
