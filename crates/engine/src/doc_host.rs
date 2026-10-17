@@ -506,6 +506,13 @@ fn queue_text_hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Since {
+    Quiet,
+    Queued,
+    Newer,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(
     tag = "outcome",
@@ -3752,47 +3759,54 @@ impl DocHost {
             return Ok(false);
         }
         let handle = self.open(chat_id)?;
-        if self.last_user_entry(chat_id)? != continuation.after_user
-            || !handle.doc.read_queue()?.is_empty()
-        {
+        let drain = handle.drain_lock.lock().await;
+        if self.since_user_locked(&handle, continuation.after_user.as_deref())? != Since::Quiet {
             return Ok(false);
         }
         self.queue_message(chat_id, zeron_proto::RESUME_PROMPT, Vec::new())?;
+        drop(drain);
         self.drain_queue(&handle).await;
         Ok(true)
     }
 
-    pub(crate) async fn untouched_since(
+    pub(crate) async fn since_user(
         &self,
         chat_id: &str,
         after_user: Option<&str>,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Since, EngineError> {
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
-        self.quiet_since(&handle, after_user)
+        self.since_user_locked(&handle, after_user)
     }
 
     /// Call under the drain lock: a drain takes a row before it writes its user entry.
-    fn quiet_since(
+    fn since_user_locked(
         &self,
         handle: &ChatDocHandle,
         after_user: Option<&str>,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Since, EngineError> {
         Ok(
-            self.last_user_entry(&handle.chat_id)?.as_deref() == after_user
-                && handle.doc.read_queue()?.is_empty(),
+            if self.last_user_entry(&handle.chat_id)?.as_deref() != after_user {
+                Since::Newer
+            } else if !handle.doc.read_queue()?.is_empty() {
+                Since::Queued
+            } else {
+                Since::Quiet
+            },
         )
     }
 
+    /// `owed` is asked under the drain lock, once nothing newer is in the chat.
     pub async fn queue_auto_continue(
         &self,
         chat_id: &str,
         text: &str,
         after_user: Option<&str>,
+        owed: impl FnOnce() -> bool,
     ) -> Result<bool, EngineError> {
         let handle = self.open(chat_id)?;
         let drain = handle.drain_lock.lock().await;
-        if !self.quiet_since(&handle, after_user)? {
+        if self.since_user_locked(&handle, after_user)? != Since::Quiet || !owed() {
             return Ok(false);
         }
         handle.doc.push_queued(&QueuedMessage {

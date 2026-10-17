@@ -40,7 +40,7 @@ use zeron_proto::{
 
 use crate::computer::runtime::ComputerRuntime;
 
-use crate::doc_host::{ChatDocHandle, DocHost};
+use crate::doc_host::{ChatDocHandle, DocHost, Since};
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -589,6 +589,7 @@ struct Inner {
     agent_compacts: Mutex<HashMap<String, AgentCompact>>,
     /// Skips one reminder so a summary still over the floor cannot re-compact on its own continuation.
     agent_compacted: Mutex<std::collections::HashSet<String>>,
+    compact_owed: Mutex<HashMap<String, String>>,
     /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
     nudged_at: Mutex<HashMap<String, u64>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
@@ -798,6 +799,7 @@ impl SessionsEngine {
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 agent_compacts: Mutex::new(agent_compacts),
                 agent_compacted: Mutex::new(std::collections::HashSet::new()),
+                compact_owed: Mutex::new(HashMap::new()),
                 nudged_at: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
@@ -1955,7 +1957,12 @@ impl SessionsEngine {
             text.map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
         };
-        let after_user = last_user_entry(self.doc_handle(chat_id)?.doc());
+        let after_user = self
+            .inner
+            .doc_host()
+            .ok_or_else(|| EngineError::Other("doc host not ready".into()))?
+            .last_user_entry(chat_id)?;
+        lock(&self.inner.compact_owed).remove(chat_id);
         let replaced = self.inner.edit_agent_compacts(|compacts| {
             compacts.insert(
                 chat_id.to_string(),
@@ -1976,14 +1983,6 @@ impl SessionsEngine {
         })
     }
 
-    async fn agent_compact_fresh(&self, chat_id: &str, request: &AgentCompact) -> bool {
-        let Some(host) = self.inner.doc_host() else {
-            return false;
-        };
-        host.untouched_since(chat_id, request.after_user.as_deref())
-            .await
-            .unwrap_or(false)
-    }
 
     /// After a restart: a chat whose agent asked for a compaction that never
     /// ran has no status row yet, and auto_compact only sees settled rows.
@@ -1996,6 +1995,10 @@ impl SessionsEngine {
             self.inner
                 .set_compact_plan(&chat_id, Some(zeron_proto::CompactPlan::Agent));
         }
+    }
+
+    pub(crate) fn take_unsent_continue(&self, chat_id: &str) -> bool {
+        lock(&self.inner.compact_owed).remove(chat_id).is_some()
     }
 
     pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {
@@ -2015,17 +2018,33 @@ impl SessionsEngine {
         if busy(self) {
             return Ok(None);
         }
-        if !self.agent_compact_fresh(chat_id, &request).await {
-            self.inner
-                .edit_agent_compacts(|compacts| compacts.remove(chat_id));
-            self.inner.set_compact_plan(chat_id, None);
-            tracing::info!(chat = %chat_id, "agent compaction dropped: a newer message reached the chat");
-            return Ok(None);
+        let since = match self.inner.doc_host() {
+            Some(host) => host
+                .since_user(chat_id, request.after_user.as_deref())
+                .await
+                .unwrap_or(Since::Newer),
+            None => Since::Newer,
+        };
+        match since {
+            Since::Quiet => {}
+            // Its dispatch cancels the request and tells the agent.
+            Since::Queued => return Ok(None),
+            Since::Newer => {
+                self.inner.drop_agent_compact(chat_id, &request);
+                tracing::info!(chat = %chat_id, "agent compaction dropped: a newer message reached the chat");
+                return Ok(None);
+            }
         }
-        match self
+        if let Some(text) = &request.continue_with {
+            lock(&self.inner.compact_owed).insert(chat_id.to_string(), unsent_note(text));
+        }
+        let ran = self
             .compact_noting(chat_id, request.focus.clone(), COMPACTED_AGENT_NOTE)
-            .await
-        {
+            .await;
+        if ran.is_err() {
+            lock(&self.inner.compact_owed).remove(chat_id);
+        }
+        match ran {
             Ok(outcome) => {
                 if self
                     .inner
@@ -3238,27 +3257,31 @@ impl Inner {
 
     /// Slash commands go out untouched: the note would become their arguments.
     fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
-        let cancelled = self.cancel_agent_compact(chat_id);
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
-        if lock(&self.agent_compacted).remove(chat_id) {
-            return None;
+        let pending = lock(&self.agent_compacts).get(chat_id).cloned();
+        if let Some(request) = pending
+            && !lock(&self.compacting).contains(chat_id)
+        {
+            self.drop_agent_compact(chat_id, &request);
         }
-        let reminder = self.nudge_tokens(chat_id, harness_id).map(|tokens| {
-            lock(&self.nudged_at).insert(chat_id.to_string(), tokens);
-            format!(
-                "Context {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.",
-                format_tokens(tokens),
-            )
-        });
-        let lines: Vec<&str> = [
-            cancelled.then_some(COMPACT_CANCELLED_NOTE),
-            reminder.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let owed = lock(&self.compact_owed).remove(chat_id);
+        let reminder = if lock(&self.agent_compacted).remove(chat_id) {
+            None
+        } else {
+            self.nudge_tokens(chat_id, harness_id).map(|tokens| {
+                lock(&self.nudged_at).insert(chat_id.to_string(), tokens);
+                format!(
+                    "Context {}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.",
+                    format_tokens(tokens),
+                )
+            })
+        };
+        let lines: Vec<&str> = [owed.as_deref(), reminder.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
         (!lines.is_empty()).then(|| {
             format!(
                 "<system-reminder>\n{}\n</system-reminder>",
@@ -3267,16 +3290,16 @@ impl Inner {
         })
     }
 
-    fn cancel_agent_compact(&self, chat_id: &str) -> bool {
-        if !lock(&self.agent_compacts).contains_key(chat_id)
-            || lock(&self.compacting).contains(chat_id)
-        {
-            return false;
-        }
+    fn drop_agent_compact(&self, chat_id: &str, request: &AgentCompact) {
         self.edit_agent_compacts(|compacts| compacts.remove(chat_id));
         self.set_compact_plan(chat_id, None);
-        true
+        let mut note = "Your queued compaction was cancelled: a newer message reached you before it ran. Call compact again if it still fits.".to_string();
+        if let Some(text) = &request.continue_with {
+            note.push_str(&format!(" Its continueWith was: {text}"));
+        }
+        lock(&self.compact_owed).insert(chat_id.to_string(), note);
     }
+
 
     /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
     /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.
@@ -4213,7 +4236,12 @@ fn record_compaction(
 const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
 const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
-const COMPACT_CANCELLED_NOTE: &str = "Your queued compaction was cancelled: this message reached you before it ran. Call compact again if it still fits, with a continueWith that accounts for this message.";
+
+fn unsent_note(continue_with: &str) -> String {
+    format!(
+        "Your compaction's continueWith was not sent because this message reached you first. It was: {continue_with}"
+    )
+}
 
 fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
     match (pre_tokens, post_tokens) {
