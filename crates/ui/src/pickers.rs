@@ -5053,7 +5053,7 @@ impl Pickers {
         kind: PickerKind,
         label: SharedString,
         set: bool,
-        chip_icon: Option<(&'static str, Option<gpui::Hsla>)>,
+        chip_icon: Option<InstanceIcon>,
         // The chip never collapses while identity resolves (user report):
         // `icon_loading` swaps the brand slot for the pixel-glyph loader
         // (harness unknown), `label_loading` swaps the text for a ghost bar
@@ -5097,12 +5097,7 @@ impl Pickers {
                     .into_any_element(),
             )
         } else {
-            chip_icon.map(|(path, tint)| {
-                crate::icons::icon(path)
-                    .size(px(16.0))
-                    .text_color(tint.unwrap_or(theme.text_muted))
-                    .into_any_element()
-            })
+            chip_icon.map(|icon| icon.svg(theme.text_muted).size(px(16.0)).into_any_element())
         };
         let label = if label_loading {
             // Nothing is named on screen: the label rolls in from empty.
@@ -5821,6 +5816,10 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let message = match kind {
+            PickerKind::HarnessModel => catalog_error_text(message),
+            _ => message,
+        };
         popover::error_row(theme, message)
             .child(
                 div()
@@ -8853,6 +8852,19 @@ pub(crate) fn curated_model_label(harness: HarnessId, id: &str) -> Option<String
 /// not the wire's terse "Opus" alias — user request). Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
+fn catalog_error_text(message: &str) -> &str {
+    message
+        .strip_prefix("model discovery ")
+        .and_then(|rest| rest.split_once(": "))
+        .filter(|(code, _)| {
+            matches!(
+                *code,
+                "timeout" | "failed" | "missing_executable" | "auth_required"
+            )
+        })
+        .map_or(message, |(_, text)| text)
+}
+
 pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Vec<Model> {
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
@@ -9389,11 +9401,20 @@ impl Render for Pickers {
             Some(title) => title.harness,
             None => self.effective_harness(cx),
         };
-        let harness_icon: (&'static str, Option<gpui::Hsla>) = match chip_harness {
-            Some(harness) => harness_brand_icon(harness),
-            None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
-            None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
-            None => (
+        let chip_instance = self
+            .title
+            .is_none()
+            .then(|| self.effective_instance(cx))
+            .flatten();
+        let harness_icon = match chip_harness {
+            Some(harness) => self.row_icon(harness, chip_instance.as_deref()),
+            None if self.title.is_some() => {
+                InstanceIcon::Brand(crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted))
+            }
+            None if no_agents => {
+                InstanceIcon::Brand(crate::icons::TERMINAL, Some(theme.text_muted))
+            }
+            None => InstanceIcon::Brand(
                 crate::icons::CLAUDE_MARK,
                 Some(crate::icons::claude_brand()),
             ),
