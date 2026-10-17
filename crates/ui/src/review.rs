@@ -1,19 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use serde::Deserialize;
 use zeron_engine::registry::HarnessDescriptor;
+use zeron_engine::review::{FindingSide, ReviewFinding};
 pub use zeron_engine::review::{
-    REQUEST_PREFIX, ReviewScope, ReviewSettings, ReviewerChoice, ReviewerOptions, parse_request,
-    resolve_reviewer,
+    REQUEST_PREFIX, ReviewScope, ReviewSettings, ReviewerChoice, ReviewerOptions, is_review,
+    parse_request, resolve_reviewer,
 };
-use zeron_proto::{HarnessId, Model, ReasoningLevel};
+use zeron_proto::{
+    Delegation, FindingOutcome, FindingOutcomeKind, HarnessId, Model, ReasoningLevel,
+};
 use zeron_rpc::methods;
 
 use crate::changes::{FileDiff, line_anchor};
 use crate::comments::{CommentSide, ReviewComment};
 
 pub const CARD_PREFIX: &str = "review-finding:";
-const FENCE: &str = "```zeron-review";
 const REANCHOR_WINDOW: u32 = 40;
 
 pub fn brand(
@@ -80,7 +81,11 @@ impl ChatReview {
         self.run
             .iter()
             .filter(|run| run.status == RunStatus::Done)
-            .flat_map(|run| &run.findings)
+            .flat_map(|run| {
+                run.findings
+                    .iter()
+                    .filter(|finding| run.outcome(&finding.id).is_none())
+            })
             .filter(|finding| finding.placement == Placement::Fresh)
             .map(Finding::card)
             .collect()
@@ -98,10 +103,21 @@ impl ChatReview {
         let Some(run) = self.run.as_mut() else {
             return Vec::new();
         };
-        let (staged, kept): (Vec<_>, Vec<_>) = run.findings.drain(..).partition(|finding| {
-            finding.placement != Placement::Outdated && only.is_none_or(|id| finding.id == id)
-        });
-        run.findings = kept;
+        let staged: Vec<Finding> = match only {
+            None => run.fixable().cloned().collect(),
+            Some(id) => run
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.id == id
+                        && finding.placement != Placement::Outdated
+                        && run.outcome(id).is_none()
+                })
+                .cloned()
+                .collect(),
+        };
+        run.handed_here
+            .extend(staged.iter().map(|finding| finding.id.clone()));
         staged.iter().map(Finding::comment).collect()
     }
 
@@ -178,7 +194,31 @@ pub fn read_outcome(status: &str, summary: &str) -> ReadOutcome {
     match status {
         "cancelled" | "interrupted" => ReadOutcome::Stopped,
         "failed" => ReadOutcome::Failed(summary.to_string()),
-        _ => ReadOutcome::Read(parse_findings(summary)),
+        _ => ReadOutcome::Read(
+            zeron_engine::review::parse_findings(summary)
+                .map(|findings| findings.into_iter().map(Finding::from).collect()),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingState {
+    Open,
+    AgentOnIt,
+    Fixed,
+    Skipped,
+    NoChange,
+}
+
+impl FindingState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::AgentOnIt => "Agent on it",
+            Self::Fixed => "Fixed",
+            Self::Skipped => "Skipped",
+            Self::NoChange => "No change",
+        }
     }
 }
 
@@ -194,6 +234,9 @@ pub struct ReviewRun {
     pub choice: Option<ReviewerChoice>,
     pub retry_error: Option<String>,
     pub commit: Option<String>,
+    pub delegation: Option<Delegation>,
+    pub owner_working: bool,
+    pub handed_here: BTreeSet<String>,
 }
 
 impl ReviewRun {
@@ -209,7 +252,54 @@ impl ReviewRun {
             choice: None,
             retry_error: None,
             commit: None,
+            delegation: None,
+            owner_working: false,
+            handed_here: BTreeSet::new(),
         }
+    }
+
+    pub fn outcome(&self, id: &str) -> Option<&FindingOutcome> {
+        self.delegation.as_ref()?.finding_outcomes.get(id)
+    }
+
+    pub fn state(&self, id: &str) -> FindingState {
+        let handed = self.handed_here.contains(id)
+            || self
+                .delegation
+                .as_ref()
+                .is_some_and(|d| d.finding_handed(id));
+        match self.outcome(id).map(|outcome| outcome.outcome) {
+            Some(FindingOutcomeKind::Fixed) => FindingState::Fixed,
+            Some(FindingOutcomeKind::Skipped) => FindingState::Skipped,
+            Some(FindingOutcomeKind::NoChange) => FindingState::NoChange,
+            None if handed && self.owner_working => FindingState::AgentOnIt,
+            None => FindingState::Open,
+        }
+    }
+
+    pub fn fixable(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|finding| {
+            finding.placement != Placement::Outdated
+                && self.state(&finding.id) == FindingState::Open
+                && !self.handed_here.contains(&finding.id)
+                && !self
+                    .delegation
+                    .as_ref()
+                    .is_some_and(|d| d.findings_handed.contains(&finding.id))
+        })
+    }
+
+    pub fn unsent_hands(&self) -> Vec<String> {
+        self.handed_here
+            .iter()
+            .filter(|id| {
+                !self
+                    .delegation
+                    .as_ref()
+                    .is_some_and(|d| d.findings_handed.contains(*id))
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn busy(&self) -> bool {
@@ -222,17 +312,28 @@ impl ReviewRun {
     pub fn outdated(&self) -> usize {
         self.findings
             .iter()
-            .filter(|finding| finding.placement == Placement::Outdated)
+            .filter(|finding| {
+                finding.placement == Placement::Outdated && self.outcome(&finding.id).is_none()
+            })
             .count()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Bug,
     Risk,
     Nit,
+}
+
+impl From<zeron_engine::review::Severity> for Severity {
+    fn from(severity: zeron_engine::review::Severity) -> Self {
+        match severity {
+            zeron_engine::review::Severity::Bug => Self::Bug,
+            zeron_engine::review::Severity::Risk => Self::Risk,
+            zeron_engine::review::Severity::Nit => Self::Nit,
+        }
+    }
 }
 
 impl Severity {
@@ -304,7 +405,12 @@ impl Finding {
     }
 
     pub fn comment(&self) -> ReviewComment {
-        let mut body = format!("{}: {}", self.severity.word(), self.title.trim());
+        let mut body = format!(
+            "{}: [{}] {}",
+            self.severity.word(),
+            self.id,
+            self.title.trim()
+        );
         if !self.body.trim().is_empty() {
             body.push('\n');
             body.push_str(self.body.trim());
@@ -320,69 +426,23 @@ impl Finding {
     }
 }
 
-#[derive(Deserialize)]
-struct RawFinding {
-    path: String,
-    #[serde(default)]
-    side: Option<String>,
-    line: serde_json::Value,
-    #[serde(default)]
-    text: Option<String>,
-    severity: String,
-    title: String,
-    #[serde(default)]
-    body: String,
-}
-
-fn raw_finding(value: serde_json::Value) -> Option<RawFinding> {
-    serde_json::from_value(value).ok()
-}
-
-fn finding_from(ix: usize, raw: RawFinding) -> Option<Finding> {
-    let line = match &raw.line {
-        serde_json::Value::Number(n) => u32::try_from(n.as_u64()?).ok()?,
-        serde_json::Value::String(s) => s.trim().parse().ok()?,
-        _ => return None,
-    };
-    let severity = match raw.severity.trim().to_ascii_lowercase().as_str() {
-        "bug" => Severity::Bug,
-        "risk" => Severity::Risk,
-        "nit" => Severity::Nit,
-        _ => return None,
-    };
-    Some(Finding {
-        id: format!("finding-{ix}"),
-        path: raw.path.trim().trim_start_matches("./").to_string(),
-        side: match raw.side.as_deref().map(str::trim) {
-            Some("L" | "l" | "old") => CommentSide::Old,
-            _ => CommentSide::New,
-        },
-        line,
-        text: raw.text.filter(|text| !text.trim().is_empty()),
-        severity,
-        title: raw.title,
-        body: raw.body,
-        placement: Placement::Fresh,
-    })
-}
-
-pub fn parse_findings(result: &str) -> Option<Vec<Finding>> {
-    let start = result.rfind(FENCE)? + FENCE.len();
-    let rest = result[start..].split_once('\n')?.1;
-    let end = if rest.starts_with("```") {
-        0
-    } else {
-        rest.find("\n```")?
-    };
-    let items: Vec<serde_json::Value> = serde_json::from_str(rest[..end].trim()).ok()?;
-    let total = items.len();
-    let findings: Vec<Finding> = items
-        .into_iter()
-        .filter_map(raw_finding)
-        .enumerate()
-        .filter_map(|(ix, raw)| finding_from(ix, raw))
-        .collect();
-    (total == 0 || !findings.is_empty()).then_some(findings)
+impl From<ReviewFinding> for Finding {
+    fn from(finding: ReviewFinding) -> Self {
+        Self {
+            id: finding.id,
+            path: finding.path,
+            side: match finding.side {
+                FindingSide::Old => CommentSide::Old,
+                FindingSide::New => CommentSide::New,
+            },
+            line: finding.line,
+            text: finding.text,
+            severity: finding.severity.into(),
+            title: finding.title,
+            body: finding.body,
+            placement: Placement::Fresh,
+        }
+    }
 }
 
 fn same_text(a: &str, b: &str) -> bool {
@@ -476,7 +536,10 @@ mod tests {
     }
 
     fn one(json: &str) -> Finding {
-        parse_findings(&reply(json)).unwrap().remove(0)
+        match read_outcome("completed", &reply(json)) {
+            ReadOutcome::Read(Some(mut findings)) => findings.remove(0),
+            other => panic!("unread: {other:?}"),
+        }
     }
 
     #[test]
@@ -489,46 +552,6 @@ mod tests {
             read_outcome("failed", "boom"),
             ReadOutcome::Failed("boom".to_string())
         );
-    }
-
-    #[test]
-    fn parses_the_last_block_and_an_empty_array_means_clean() {
-        let text = format!(
-            "{}\nSecond pass:\n{}",
-            reply("[{\"path\":\"a\",\"line\":1,\"severity\":\"nit\",\"title\":\"x\"}]"),
-            reply("[]")
-        );
-        assert_eq!(parse_findings(&text), Some(Vec::new()));
-        let found = one(
-            "[{\"path\":\"./src/a.rs\",\"side\":\"L\",\"line\":3,\"severity\":\"bug\",\"title\":\"t\",\"body\":\"b\"}]",
-        );
-        assert_eq!(found.path, "src/a.rs");
-        assert_eq!(found.side, CommentSide::Old);
-        assert_eq!(found.severity, Severity::Bug);
-    }
-
-    #[test]
-    fn one_bad_item_does_not_sink_the_block() {
-        let found = parse_findings(&reply(
-            "[{\"path\":\"a\",\"line\":\"4\",\"severity\":\"Bug\",\"title\":\"x\",\"text\":\"/// ```rust\"},\
-             {\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"y\"}]",
-        ))
-        .unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!((found[0].line, found[0].severity), (4, Severity::Bug));
-        assert_eq!(
-            parse_findings(&reply(
-                "[{\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"y\"}]"
-            )),
-            None
-        );
-    }
-
-    #[test]
-    fn a_missing_or_garbled_block_is_unreadable_not_clean() {
-        assert_eq!(parse_findings("No issues found."), None);
-        assert_eq!(parse_findings(&reply("[{\"path\": ")), None);
-        assert_eq!(parse_findings("```zeron-review\n[]"), None);
     }
 
     #[test]
@@ -565,6 +588,7 @@ mod tests {
                 "[{\"path\":\"src/session.rs\",\"line\":41,\"text\":\"let run = snapshot.run.clone().unwrap_or_default();\",\"severity\":\"risk\",\"title\":\"t\"}]",
             ),
         ];
+        findings[1].id = "F2".into();
         place_new(&mut findings, &parse_patch(PATCH));
         let edited = PATCH
             .replace(
@@ -592,9 +616,82 @@ mod tests {
         let staged = review.take_fixable(None);
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].location(), "src/session.rs:42");
+        assert!(
+            review.take_fixable(None).is_empty(),
+            "a handed row stays put"
+        );
+        let run = review.run.unwrap();
+        assert_eq!(run.findings.len(), 2);
+        assert_eq!(run.findings[0].placement, Placement::Outdated);
+        assert_eq!(run.unsent_hands(), ["F2"]);
+    }
+
+    fn outcome(kind: FindingOutcomeKind) -> FindingOutcome {
+        FindingOutcome {
+            outcome: kind,
+            note: Some("why".into()),
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn outcomes_set_each_row_and_only_open_rows_stay_fixable() {
+        let mut findings = vec![
+            one("[{\"path\":\"a\",\"line\":1,\"severity\":\"bug\",\"title\":\"t\"}]"),
+            one("[{\"path\":\"b\",\"line\":2,\"severity\":\"risk\",\"title\":\"t\"}]"),
+            one("[{\"path\":\"c\",\"line\":3,\"severity\":\"nit\",\"title\":\"t\"}]"),
+        ];
+        for (ix, finding) in findings.iter_mut().enumerate() {
+            finding.id = format!("F{}", ix + 1);
+        }
+        let mut delegation: Delegation = serde_json::from_value(serde_json::json!({
+            "delegatedByChatId": "owner",
+            "depth": 1,
+            "anchor": "task",
+            "clientRequestId": "zeron-review:uncommitted:n",
+            "wake": "always",
+            "status": "completed",
+            "startedAt": "2026-10-17T10:00:00Z",
+        }))
+        .unwrap();
+        delegation
+            .finding_outcomes
+            .insert("F1".into(), outcome(FindingOutcomeKind::Fixed));
+        delegation
+            .finding_outcomes
+            .insert("F2".into(), outcome(FindingOutcomeKind::Skipped));
+        let mut run = ReviewRun::new(ReviewScope::Uncommitted);
+        run.status = RunStatus::Done;
+        run.findings = findings;
+        run.delegation = Some(delegation);
+        let states = |run: &ReviewRun| -> Vec<FindingState> {
+            run.findings.iter().map(|f| run.state(&f.id)).collect()
+        };
         assert_eq!(
-            review.run.unwrap().findings[0].placement,
-            Placement::Outdated
+            states(&run),
+            [
+                FindingState::Fixed,
+                FindingState::Skipped,
+                FindingState::Open
+            ]
+        );
+        run.owner_working = true;
+        assert_eq!(states(&run)[2], FindingState::AgentOnIt);
+        assert_eq!(run.fixable().count(), 0, "the agent is on it");
+        run.owner_working = false;
+        let mut review = ChatReview {
+            run: Some(run),
+            ..ChatReview::default()
+        };
+        let cards = review.cards();
+        assert_eq!(cards.len(), 1, "resolved findings leave Changes");
+        assert!(cards[0].id.ends_with("F3"));
+        let staged = review.take_fixable(None);
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].body.starts_with("Nit: [F3] "));
+        assert!(
+            review.take_fixable(Some("F1")).is_empty(),
+            "a fixed row is done"
         );
     }
 
@@ -604,7 +701,8 @@ mod tests {
             "[{\"path\":\"src/a.rs\",\"line\":7,\"severity\":\"risk\",\"title\":\"Leaks\",\"body\":\"Close it.\"}]",
         );
         let comment = finding.comment();
-        assert_eq!(comment.body, "Risk: Leaks\nClose it.");
+        assert_eq!(comment.body, "Risk: [F1] Leaks\nClose it.");
+        assert_eq!(split_finding(&comment.body).1, "[F1] Leaks");
         assert_eq!(comment.location(), "src/a.rs:7");
     }
 }
