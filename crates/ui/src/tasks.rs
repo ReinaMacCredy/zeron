@@ -17,7 +17,7 @@ use crate::typography::ui_rems;
 mod card;
 mod logic;
 
-pub use card::{TaskCard, TaskCardEvent};
+pub use card::{CardFocus, TaskCard, TaskCardEvent};
 use logic::COLUMNS;
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
@@ -166,8 +166,9 @@ impl TasksPage {
         };
         if let Some(id) = first {
             self.open_first_card = false;
-            self.card
-                .update(cx, |card, cx| card.open(id, None, false, None, cx));
+            self.card.update(cx, |card, cx| {
+                card.open(id, None, CardFocus::Title, None, cx)
+            });
         }
     }
 
@@ -198,7 +199,7 @@ impl TasksPage {
         });
         if open_card {
             self.card.update(cx, |card, cx| {
-                card.open(task_id, Some(title), true, window, cx)
+                card.open(task_id, Some(title), CardFocus::Notes, window, cx)
             });
         }
         true
@@ -444,7 +445,7 @@ impl TasksPage {
             )
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
                 page.card.update(cx, |card, cx| {
-                    card.open(open_id.clone(), None, false, Some(window), cx)
+                    card.open(open_id.clone(), None, CardFocus::Title, Some(window), cx)
                 });
             }))
             .when(!done, |el| {
@@ -693,7 +694,7 @@ impl TasksPage {
             .child(footer)
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
                 page.card.update(cx, |card, cx| {
-                    card.open(open_id.clone(), None, false, Some(window), cx)
+                    card.open(open_id.clone(), None, CardFocus::Title, Some(window), cx)
                 });
             }))
             .on_drag(drag, |drag, _, _, cx| {

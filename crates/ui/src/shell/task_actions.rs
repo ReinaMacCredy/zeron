@@ -81,6 +81,7 @@ impl Shell {
         card: &Entity<crate::tasks::TaskCard>,
         task_id: &str,
         patch: Option<TaskPatch>,
+        space_id: Option<String>,
         harness: Option<HarnessId>,
         model: Option<String>,
         cx: &mut Context<Self>,
@@ -100,7 +101,7 @@ impl Shell {
         );
         let start = serde_json::json!({
             "op": "startTask", "taskId": task_id, "chatId": chat_id,
-            "harness": harness, "model": model,
+            "spaceId": space_id, "harness": harness, "model": model,
         });
         let (card, task_id) = (card.clone(), task_id.to_string());
         cx.spawn(async move |this, cx| {
@@ -201,9 +202,29 @@ impl Shell {
             TaskCardEvent::Start {
                 task_id,
                 patch,
+                space_id,
                 harness,
                 model,
-            } => self.start_task(card, task_id, patch.clone(), *harness, model.clone(), cx),
+            } => self.start_task(
+                card,
+                task_id,
+                patch.clone(),
+                space_id.clone(),
+                *harness,
+                model.clone(),
+                cx,
+            ),
+            TaskCardEvent::CreateSpace {
+                space_id,
+                device_id,
+                path,
+            } => self.mutate_task_row(
+                serde_json::json!({
+                    "op": "createSpace", "spaceId": space_id, "deviceId": device_id,
+                    "path": path, "gitDetected": false,
+                }),
+                cx,
+            ),
             TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);
