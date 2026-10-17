@@ -3865,7 +3865,7 @@ impl Pickers {
         self.close(cx);
     }
 
-    fn pick_no_project(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn pick_no_project(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             // A late opening chats frame must not auto-open an old session
             // after the user has explicitly chosen the new-session target.
@@ -3874,6 +3874,18 @@ impl Pickers {
         });
         self.remember_target(cx);
         self.close(cx);
+    }
+
+    pub(crate) fn pick_work(&mut self, cx: &mut Context<Self>) -> bool {
+        let picked = self.state.update(cx, |s, cx| {
+            s.auto_selected = true;
+            s.select_work(cx)
+        });
+        if picked {
+            self.remember_target(cx);
+            self.close(cx);
+        }
+        picked
     }
 
     fn pick_device(&mut self, device_id: String, cx: &mut Context<Self>) {

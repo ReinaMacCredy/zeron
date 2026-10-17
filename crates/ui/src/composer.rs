@@ -7683,7 +7683,14 @@ impl Composer {
             return;
         }
         let prediction = self.active_prediction(cx);
-        let idle = self.idle_placeholder.clone();
+        let idle = if !self.side_chat
+            && self.bound_chat_id(cx).is_none()
+            && self.state.read(cx).no_project
+        {
+            "What's on your mind?".into()
+        } else {
+            self.idle_placeholder.clone()
+        };
         self.input.update(cx, |input, cx| {
             let (placeholder, ghost) =
                 prediction_display(prediction.as_deref(), input.text(), idle);
