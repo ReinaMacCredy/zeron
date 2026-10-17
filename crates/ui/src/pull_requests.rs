@@ -4702,10 +4702,11 @@ mod tests {
         let input = cx.debug_bounds("pr-repository-load").unwrap();
         scroll.set_offset(gpui::point(px(0.0), -scroll.max_offset().y));
         cx.update(|window, cx| window.draw(cx).clear());
-        assert_eq!(
-            cx.debug_bounds("pr-repository-load").unwrap(),
-            input,
-            "the input stays above the scroll region"
+        let after = cx.debug_bounds("pr-repository-load").unwrap();
+        // The menu's 140ms entrance slide (motion::menu_in, 2px) may still be running.
+        assert!(
+            (after.origin.y - input.origin.y).abs() <= px(2.0) && after.size == input.size,
+            "the input stays above the scroll region: {input:?} -> {after:?}"
         );
         page.update(cx, |page, cx| {
             page.state.update(cx, |state, cx| {
