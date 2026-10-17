@@ -1051,10 +1051,19 @@ fn thread_params(
         p.insert("baseInstructions".into(), instructions.into());
         p.insert("developerInstructions".into(), instructions.into());
         p.insert("ephemeral".into(), true.into());
+        p.insert("environments".into(), json!([]));
         p.insert(
             "config".into(),
             json!({
                 "project_doc_max_bytes": 0,
+                "skills.include_instructions": false,
+                "include_permissions_instructions": false,
+                "include_collaboration_mode_instructions": false,
+                "include_environment_context": false,
+                "features.plugins": false,
+                "features.goals": false,
+                "features.sleep_tool": false,
+                "tools.experimental_request_user_input.enabled": false,
                 "web_search": "disabled",
                 "features.shell_tool": false,
                 "features.apply_patch_freeform": false,
