@@ -89,6 +89,7 @@ use sha2::{Digest, Sha256};
 use zeron_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentExtraUsage,
     AgentLoginMode, AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
+    HomeDir, InstanceConfig, ProviderInstance,
 };
 
 use crate::repos::home_dir;
@@ -248,6 +249,33 @@ impl AgentAccountsConfig {
             pi_agent_dir: root.join("pi"),
             hermes_home: root.join("hermes"),
         }
+    }
+
+    fn for_instance(&self, id: &str, driver: HarnessId, home: &Path) -> Self {
+        let root = self.instance_root(id);
+        let mut config = Self {
+            data_dir: root.clone(),
+            antigravity_home: None,
+            ..Self::isolated(&root.join("unused"))
+        };
+        match driver {
+            HarnessId::ClaudeCode => {
+                config.claude_config_dir = home.to_path_buf();
+                config.claude_config_file = home.join(".claude.json");
+                config.claude_keychain_service = self
+                    .claude_keychain_service
+                    .is_some()
+                    .then(|| claude_keychain_service(Some(home)));
+            }
+            HarnessId::Codex => config.codex_home = home.to_path_buf(),
+            HarnessId::Pi => config.pi_agent_dir = home.to_path_buf(),
+            _ => {}
+        }
+        config
+    }
+
+    fn instance_root(&self, id: &str) -> PathBuf {
+        self.root_dir().join("instances").join(id)
     }
 
     fn claude_creds_file(&self) -> PathBuf {
@@ -740,6 +768,8 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    instance_launch: Option<zeron_harness::LaunchOverrides>,
+    instances: Mutex<HashMap<String, (ProviderInstance, AgentAccounts)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -792,6 +822,15 @@ impl AgentAccounts {
         endpoints: ProbeEndpoints,
         callback_routes: zeron_preview::login::CallbackRoutes,
     ) -> Self {
+        Self::build(config, endpoints, callback_routes, None)
+    }
+
+    fn build(
+        config: AgentAccountsConfig,
+        endpoints: ProbeEndpoints,
+        callback_routes: zeron_preview::login::CallbackRoutes,
+        instance_launch: Option<zeron_harness::LaunchOverrides>,
+    ) -> Self {
         // Startup sweep: a previous process that crashed mid-login leaves
         // `.login-<uuid>` throwaway CODEX_HOME dirs — each may hold live OAuth
         // tokens — with no owner to clean them. Reclaim them at boot.
@@ -835,7 +874,82 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                instance_launch,
+                instances: Mutex::new(HashMap::new()),
             }),
+        }
+    }
+
+    pub fn for_instance(&self, instance: &ProviderInstance) -> Result<AgentAccounts, EngineError> {
+        let mut instances = lock(&self.inner.instances);
+        if let Some((cached, accounts)) = instances.get(&instance.id)
+            && cached == instance
+        {
+            return Ok(accounts.clone());
+        }
+        let id = &instance.id;
+        let driver = instance.driver;
+        if !matches!(
+            driver,
+            HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi
+        ) {
+            return Err(EngineError::Other(format!(
+                "Provider instance '{id}' runs on {}, which has no sign-in of its own",
+                driver.display_name()
+            )));
+        }
+        let launch =
+            crate::provider_instances::launch_overrides(instance, &self.inner.config.data_dir)?;
+        let Some(home) = launch.home.clone() else {
+            return Err(EngineError::Other(format!(
+                "Provider instance '{id}' has no home directory of its own, so it uses the default {} login",
+                driver.display_name()
+            )));
+        };
+        let config = self.inner.config.for_instance(id, driver, &home);
+        let accounts = Self::build(
+            config,
+            self.inner.endpoints.clone(),
+            self.inner.callback_routes.clone(),
+            Some(launch),
+        );
+        if let Some((_, replaced)) =
+            instances.insert(id.clone(), (instance.clone(), accounts.clone()))
+        {
+            replaced.shutdown();
+        }
+        Ok(accounts)
+    }
+
+    pub async fn remove_instance(&self, instance: &ProviderInstance) {
+        if let Some((_, accounts)) = lock(&self.inner.instances).remove(&instance.id) {
+            accounts.shutdown();
+        }
+        let config = &self.inner.config;
+        let managed = matches!(
+            &instance.config,
+            InstanceConfig::Native {
+                home_dir: Some(HomeDir::Managed),
+                ..
+            }
+        );
+        let mut dirs = vec![config.instance_root(&instance.id)];
+        if managed {
+            let home = crate::provider_instances::managed_home(&instance.id, &config.data_dir);
+            #[cfg(target_os = "macos")]
+            if instance.driver == HarnessId::ClaudeCode && config.claude_keychain_service.is_some()
+            {
+                keychain::delete_credentials(&claude_keychain_service(Some(&home))).await;
+            }
+            dirs.push(home);
+        }
+        for dir in dirs {
+            match std::fs::remove_dir_all(&dir) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    tracing::warn!(dir = %dir.display(), %error, "could not remove a deleted provider instance's files");
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1241,7 +1355,10 @@ impl AgentAccounts {
             HarnessId::Cursor => self.cursor_live_usable(),
             _ => live.is_some() || self.has_live_entry(slot.harness, store_key),
         };
-        if usable && live.as_deref() != Some(slot.account_key.as_str()) {
+        if self.inner.instance_launch.is_none()
+            && usable
+            && live.as_deref() != Some(slot.account_key.as_str())
+        {
             return Ok(());
         }
         match slot.harness {
@@ -1258,6 +1375,14 @@ impl AgentAccounts {
             _ => {}
         }
         *lock(&self.inner.claude_credentials) = None;
+        if self.inner.instance_launch.is_some() {
+            let dir = self.slots_dir(slot.harness)?;
+            for other in self.read_slots(slot.harness) {
+                if other.id != slot.id && other.store_key == slot.store_key {
+                    remove_if_exists(&dir.join(format!("{}.json", other.id)))?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1733,7 +1858,7 @@ impl AgentAccounts {
         // login-shell snapshot, install dirs — the Windows npm payload
         // included) and compose the same child PATH a chat run gets, so
         // account login never diverges from what the harness can launch.
-        let mut command = match zeron_harness::codex::login_command(&home) {
+        let mut command = match self.codex_login_command(&home) {
             Ok(command) => command,
             Err(err) => {
                 let _ = std::fs::remove_dir_all(&home);
@@ -1774,6 +1899,15 @@ impl AgentAccounts {
             requester,
         )
         .await
+    }
+
+    fn codex_login_command(
+        &self,
+        home: &Path,
+    ) -> Result<zeron_harness::process::Command, zeron_harness::HarnessError> {
+        zeron_harness::CodexHarness::new()
+            .with_launch(self.inner.instance_launch.clone().unwrap_or_default())
+            .login_command(home)
     }
 
     /// Antigravity: its ACP server's own Google sign-in. The start replies at
@@ -2275,6 +2409,13 @@ impl AgentAccounts {
         let ids: Vec<String> = lock(&self.inner.flows).keys().cloned().collect();
         for id in ids {
             self.cancel_login(&id);
+        }
+        let instances: Vec<AgentAccounts> = lock(&self.inner.instances)
+            .values()
+            .map(|(_, accounts)| accounts.clone())
+            .collect();
+        for accounts in instances {
+            accounts.shutdown();
         }
     }
 
@@ -2988,6 +3129,10 @@ pub(crate) mod keychain {
 
     pub(crate) async fn delete_secret(service: &str, account: &str) {
         exec(&["delete-generic-password", "-a", account, "-s", service]).await;
+    }
+
+    pub(super) async fn delete_credentials(service: &str) {
+        delete_secret(service, &account()).await;
     }
 
     /// Whether the item exists (metadata only — needs no authorization).
@@ -5352,5 +5497,82 @@ mod login_tests {
         assert!(routes.is_registered(&remote.login_id));
         accounts.cancel_login(&remote.login_id);
         assert!(!routes.is_registered(&remote.login_id));
+    }
+
+    #[tokio::test]
+    async fn an_instance_claude_login_goes_live_in_its_own_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (token_url, _server) = token_server().await;
+        let parent = loopback_accounts(root, token_url);
+        let instance = super::provider_tests::native_instance(
+            "claude_work",
+            HarnessId::ClaudeCode,
+            HomeDir::Managed,
+            None,
+        );
+        let accounts = parent.for_instance(&instance).unwrap();
+        let home = root.join("data").join("provider-homes").join("claude_work");
+        write(
+            &home.join(".claude.json"),
+            &serde_json::json!({
+                "oauthAccount": { "accountUuid": "acct-bob", "emailAddress": "bob@example.com" },
+            })
+            .to_string(),
+        );
+        write(
+            &home.join(".credentials.json"),
+            &serde_json::json!({
+                "claudeAiOauth": { "accessToken": "bob-token", "refreshToken": "rt", "expiresAt": 1 },
+                "mcpOAuth": { "server": "keep" },
+            })
+            .to_string(),
+        );
+        accounts.list(false).await.unwrap();
+
+        sign_in_new_account(&accounts).await;
+
+        let creds = read_json(&home.join(".credentials.json")).unwrap();
+        assert_eq!(creds["claudeAiOauth"]["accessToken"], "access");
+        assert_eq!(creds["mcpOAuth"]["server"], "keep");
+        let identity = read_json(&home.join(".claude.json")).unwrap();
+        assert_eq!(identity["oauthAccount"]["emailAddress"], "new@example.com");
+        let snapshot = accounts.list(false).await.unwrap();
+        let rows: Vec<_> = snapshot
+            .accounts
+            .iter()
+            .filter(|a| a.harness == HarnessId::ClaudeCode)
+            .collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].active);
+        assert_eq!(rows[0].email.as_deref(), Some("new@example.com"));
+        let instance_root = root.join("data/agent-accounts/instances/claude_work");
+        assert_eq!(
+            instance_root
+                .join("agent-accounts/claude-code")
+                .read_dir()
+                .unwrap()
+                .count(),
+            1
+        );
+
+        let defaults = config(root);
+        assert!(!defaults.claude_creds_file().exists());
+        assert!(!defaults.claude_config_file.exists());
+        let parent_rows = parent.list(false).await.unwrap().accounts;
+        assert!(
+            parent_rows
+                .iter()
+                .all(|a| a.harness != HarnessId::ClaudeCode),
+            "{parent_rows:?}"
+        );
+
+        parent.remove_instance(&instance).await;
+        assert!(!home.exists());
+        assert!(!instance_root.exists());
+        assert!(
+            parent.for_instance(&instance).is_ok(),
+            "a re-added instance builds fresh"
+        );
     }
 }

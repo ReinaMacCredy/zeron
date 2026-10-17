@@ -1906,3 +1906,160 @@ async fn a_failed_sign_ins_output_is_redacted_before_the_ui_sees_it() {
         "failed at https://auth.x.ai/device?… with code [code] token=[redacted]"
     );
 }
+
+// ── Provider instances ──────────────────────────────────────────────────────
+
+pub(super) fn native_instance(
+    id: &str,
+    driver: HarnessId,
+    home_dir: HomeDir,
+    executable: Option<String>,
+) -> ProviderInstance {
+    ProviderInstance {
+        id: id.into(),
+        driver,
+        label: "Work".into(),
+        accent: None,
+        config: InstanceConfig::Native {
+            executable,
+            home_dir: Some(home_dir),
+            launch_args: Vec::new(),
+            env: Default::default(),
+        },
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_instance_signs_in_with_its_own_executable_into_its_own_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let parent = AgentAccounts::new(AgentAccountsConfig::isolated(root));
+    let fixture = root.join("fixture-auth.json");
+    write(
+        &fixture,
+        &serde_json::json!({
+            "tokens": {
+                "id_token": jwt(serde_json::json!({
+                    "email": "work@example.com",
+                    "https://api.openai.com/auth": { "chatgpt_account_id": "acct-work" },
+                })),
+                "access_token": "at-work",
+                "account_id": "acct-work",
+            }
+        })
+        .to_string(),
+    );
+    let exe = script(
+        root,
+        "codex-work",
+        &format!(
+            "#!/bin/sh\ncp '{}' \"$CODEX_HOME/auth.json\"\n\
+             echo 'open https://auth.openai.com/oauth/authorize?probe=work'\nsleep 30\n",
+            fixture.display()
+        ),
+    );
+    let instance = native_instance(
+        "codex_work",
+        HarnessId::Codex,
+        HomeDir::Managed,
+        Some(exe.display().to_string()),
+    );
+    let accounts = parent.for_instance(&instance).unwrap();
+    assert!(Arc::ptr_eq(
+        &accounts.inner,
+        &parent.for_instance(&instance).unwrap().inner
+    ));
+    let program = |accounts: &AgentAccounts| {
+        accounts
+            .codex_login_command(root)
+            .map(|command| PathBuf::from(command.as_std().get_program()))
+    };
+    assert_eq!(program(&accounts).unwrap(), exe);
+    assert_ne!(program(&parent).ok(), Some(exe.clone()));
+
+    let start = accounts.start_login(HarnessId::Codex).await.unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+
+    let home = root.join("data").join("provider-homes").join("codex_work");
+    let live = read_json(&home.join("auth.json")).expect("instance auth.json");
+    assert_eq!(live["tokens"]["account_id"], "acct-work");
+    let slots = root
+        .join("data/agent-accounts/instances/codex_work/agent-accounts/codex")
+        .read_dir()
+        .unwrap()
+        .count();
+    assert_eq!(slots, 1);
+    let mine = rows(&accounts.list(false).await.unwrap(), HarnessId::Codex);
+    assert_eq!(mine.len(), 1);
+    assert!(mine[0].active);
+    assert_eq!(mine[0].email.as_deref(), Some("work@example.com"));
+
+    assert!(!parent.config().codex_auth_file().exists());
+    assert!(rows(&parent.list(false).await.unwrap(), HarnessId::Codex).is_empty());
+    assert!(parent.read_slots(HarnessId::Codex).is_empty());
+}
+
+#[tokio::test]
+async fn a_pi_instance_signs_in_to_its_own_agent_dir_and_keeps_its_custom_home_on_removal() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("POST", "/oauth/token") => (
+            200,
+            serde_json::json!({
+                "access_token": chatgpt_access("a@example.com", "acct-a", "pro"),
+                "refresh_token": "refresh-a",
+                "expires_in": 3600,
+            })
+            .to_string(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let (parent, config) = accounts_with(root, mocked(&server.base));
+    let home = root.join("pi-work");
+    let instance = native_instance(
+        "pi_work",
+        HarnessId::Pi,
+        HomeDir::Custom {
+            path: home.display().to_string(),
+        },
+        None,
+    );
+    let accounts = parent.for_instance(&instance).unwrap();
+
+    let start = accounts.start_login(HarnessId::Pi).await.unwrap();
+    let port = start.callback_port.unwrap();
+    let state = query_param(&start.url, "state");
+    let reply = browser_get(port, &format!("/auth/callback?code=c&state={state}")).await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(polls.last().unwrap().status, AgentLoginStatus::Done);
+
+    let live = read_json(&home.join("auth.json")).expect("instance auth.json");
+    assert_eq!(live["openai-codex"]["accountId"], "acct-a");
+    let instance_root = root.join("data/agent-accounts/instances/pi_work");
+    assert_eq!(
+        instance_root
+            .join("agent-accounts/pi")
+            .read_dir()
+            .unwrap()
+            .count(),
+        1
+    );
+    let mine = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    assert_eq!(mine.len(), 1);
+    assert!(mine[0].active);
+    assert!(!config.pi_agent_dir.join("auth.json").exists());
+    assert!(rows(&parent.list(false).await.unwrap(), HarnessId::Pi).is_empty());
+
+    parent.remove_instance(&instance).await;
+    assert!(home.join("auth.json").is_file());
+    assert!(!instance_root.exists());
+}

@@ -3564,7 +3564,10 @@ impl Inner {
             }
             let result = if let Some((uploads, allowed_root)) = self.generated_images.get() {
                 let uploads = uploads.clone();
-                let root = allowed_root.clone();
+                let root = self
+                    .instance_codex_home(chat_id)
+                    .map(|home| home.join("generated_images"))
+                    .unwrap_or_else(|| allowed_root.clone());
                 let stable_key = key.clone();
                 tokio::task::spawn_blocking(move || {
                     uploads.import_generated_image(std::path::Path::new(&path), &root, &stable_key)
@@ -3895,6 +3898,12 @@ impl Inner {
             .and_then(|ws| ws.chat_config(chat_id))
             .filter(|config| config.harness == harness_id)
             .and_then(|config| config.instance_id)
+    }
+
+    fn instance_codex_home(&self, chat_id: &str) -> Option<std::path::PathBuf> {
+        let id = self.chat_instance(chat_id, HarnessId::Codex)?;
+        let store = self.provider_instances.get()?;
+        store.launch_overrides(&id).ok()?.home
     }
 
     fn resolve_for_chat(

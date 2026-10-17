@@ -714,6 +714,8 @@ struct ResizeTerminalParams {
 struct ListAgentAccountsParams {
     #[serde(default)]
     force_usage: Option<bool>,
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -721,6 +723,8 @@ struct ListAgentAccountsParams {
 struct AgentAccountParams {
     harness: HarnessId,
     account_id: String,
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -736,12 +740,16 @@ struct StartAgentLoginParams {
     /// Hermes): which provider to sign in to; `None` = the agent's default.
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginIdParams {
     login_id: String,
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -749,6 +757,8 @@ struct LoginIdParams {
 struct CompleteAgentLoginParams {
     login_id: String,
     code: String,
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1456,6 +1466,36 @@ impl EngineRpc {
         self.provider_instances
             .clone()
             .ok_or_else(|| RpcError::Failed("provider instances are not available".into()))
+    }
+
+    fn agent_accounts_for(
+        &self,
+        instance_id: Option<&str>,
+        harness: Option<HarnessId>,
+    ) -> Result<(AgentAccounts, Option<HarnessId>), RpcError> {
+        let Some(id) = instance_id else {
+            return Ok((self.agent_accounts.clone(), None));
+        };
+        let instance = self
+            .provider_instances_store()?
+            .instance(id)
+            .ok_or_else(|| {
+                RpcError::Failed(format!(
+                    "Provider instance '{id}' is not set up on this device"
+                ))
+            })?;
+        if let Some(harness) = harness.filter(|harness| *harness != instance.driver) {
+            return Err(RpcError::Failed(format!(
+                "Provider instance '{id}' runs on {}, not {}",
+                instance.driver.display_name(),
+                harness.display_name()
+            )));
+        }
+        let accounts = self
+            .agent_accounts
+            .for_instance(&instance)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        Ok((accounts, Some(instance.driver)))
     }
 
     fn local_project_action_space(&self, space_id: &str) -> Result<Space, RpcError> {
@@ -5259,7 +5299,11 @@ impl RpcService for EngineRpc {
             methods::DELETE_PROVIDER_INSTANCE => {
                 let p: DeleteProviderInstanceParams = parse_params(params)?;
                 let store = self.provider_instances_store()?;
+                let deleted = store.instance(&p.instance_id);
                 let snapshot = blocking(move || store.delete(&p.instance_id)).await?;
+                if let Some(instance) = deleted {
+                    self.agent_accounts.remove_instance(&instance).await;
+                }
                 RpcReply::value(&snapshot)
             }
             methods::LIST_PROJECT_ACTIONS => {
@@ -5485,18 +5529,23 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_AGENT_ACCOUNTS => {
                 let p: ListAgentAccountsParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
+                let (accounts, driver) = self.agent_accounts_for(p.instance_id.as_deref(), None)?;
+                let mut snapshot = accounts
                     .list(p.force_usage.unwrap_or(false))
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(driver) = driver {
+                    snapshot.accounts.retain(|account| account.harness == driver);
+                    snapshot.warnings.retain(|warning| warning.harness == driver);
+                }
                 RpcReply::value(&snapshot)
             }
             methods::ACTIVATE_AGENT_ACCOUNT => {
                 self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
+                let (accounts, _) =
+                    self.agent_accounts_for(p.instance_id.as_deref(), Some(p.harness))?;
+                let snapshot = accounts
                     .activate(p.harness, &p.account_id)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5505,8 +5554,9 @@ impl RpcService for EngineRpc {
             methods::FORGET_AGENT_ACCOUNT => {
                 self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
+                let (accounts, _) =
+                    self.agent_accounts_for(p.instance_id.as_deref(), Some(p.harness))?;
+                let snapshot = accounts
                     .forget(p.harness, &p.account_id)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5522,8 +5572,9 @@ impl RpcService for EngineRpc {
                     .requester_device_id
                     .as_deref()
                     .filter(|requester| !requester.is_empty() && *requester != own_id);
-                let start = self
-                    .agent_accounts
+                let (accounts, _) =
+                    self.agent_accounts_for(p.instance_id.as_deref(), Some(p.harness))?;
+                let start = accounts
                     .start_login_with(p.harness, p.provider.as_deref(), requester)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5531,8 +5582,8 @@ impl RpcService for EngineRpc {
             }
             methods::COMPLETE_AGENT_LOGIN => {
                 let p: CompleteAgentLoginParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
+                let (accounts, _) = self.agent_accounts_for(p.instance_id.as_deref(), None)?;
+                let snapshot = accounts
                     .complete_login(&p.login_id, &p.code)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5540,8 +5591,8 @@ impl RpcService for EngineRpc {
             }
             methods::POLL_AGENT_LOGIN => {
                 let p: LoginIdParams = parse_params(params)?;
-                let poll = self
-                    .agent_accounts
+                let (accounts, _) = self.agent_accounts_for(p.instance_id.as_deref(), None)?;
+                let poll = accounts
                     .poll_login(&p.login_id)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -5549,7 +5600,8 @@ impl RpcService for EngineRpc {
             }
             methods::CANCEL_AGENT_LOGIN => {
                 let p: LoginIdParams = parse_params(params)?;
-                self.agent_accounts.cancel_login(&p.login_id);
+                let (accounts, _) = self.agent_accounts_for(p.instance_id.as_deref(), None)?;
+                accounts.cancel_login(&p.login_id);
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::UPLOAD_CHUNK => {

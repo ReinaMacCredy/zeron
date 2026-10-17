@@ -117,17 +117,6 @@ fn plain_executable(path: PathBuf) -> PathBuf {
     path
 }
 
-/// A ready-to-spawn `codex login` command for the engine's account flow.
-///
-/// Shares the harness's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell
-/// snapshot, install locations — including the Windows npm payload layout) and
-/// its child-PATH composition, so "Add account" launches exactly the binary
-/// the harness itself would run. `CODEX_HOME` isolates the login from the live
-/// `~/.codex` session; the caller owns stdio wiring and cancellation.
-pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessError> {
-    CodexHarness::new().login_command(codex_home)
-}
-
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
 /// fake app server with [`CodexHarness::with_executable`].
 pub struct CodexHarness {
@@ -166,6 +155,13 @@ impl CodexHarness {
         self
     }
 
+    /// A ready-to-spawn `codex login` command for the engine's account flow.
+    ///
+    /// Shares the harness's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell
+    /// snapshot, install locations — including the Windows npm payload layout) and
+    /// its child-PATH composition, so "Add account" launches exactly the binary
+    /// the harness itself would run. `CODEX_HOME` isolates the login from the live
+    /// `~/.codex` session; the caller owns stdio wiring and cancellation.
     pub fn login_command(&self, codex_home: &std::path::Path) -> Result<Command, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);

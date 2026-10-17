@@ -86,8 +86,20 @@ impl ProviderInstancesStore {
                 driver.display_name()
             )));
         }
-        let data_dir = self.inner.path.parent().unwrap_or(Path::new("."));
-        registry.resolve_instance(&instance, data_dir)
+        registry.resolve_instance(&instance, self.data_dir())
+    }
+
+    pub(crate) fn launch_overrides(&self, id: &str) -> Result<LaunchOverrides, EngineError> {
+        let instance = self.instance(id).ok_or_else(|| {
+            EngineError::Other(format!(
+                "Provider instance '{id}' is not set up on this device"
+            ))
+        })?;
+        launch_overrides(&instance, self.data_dir())
+    }
+
+    fn data_dir(&self) -> &Path {
+        self.inner.path.parent().unwrap_or(Path::new("."))
     }
 
     pub fn upsert(
@@ -207,7 +219,7 @@ pub(crate) fn provider_home(
         ))),
         HomeDir::Custom { path } => expand(path),
         HomeDir::Managed => {
-            let dir = data_dir.join("provider-homes").join(id);
+            let dir = managed_home(id, data_dir);
             let mut builder = std::fs::DirBuilder::new();
             builder.recursive(true);
             #[cfg(unix)]
@@ -216,6 +228,10 @@ pub(crate) fn provider_home(
             Ok(dir)
         }
     }
+}
+
+pub(crate) fn managed_home(id: &str, data_dir: &Path) -> PathBuf {
+    data_dir.join("provider-homes").join(id)
 }
 
 fn expand(path: &str) -> Result<PathBuf, EngineError> {

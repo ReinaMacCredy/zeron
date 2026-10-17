@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_proto::{AgentProfilesSnapshot, ProviderInstancesSnapshot};
+use zeron_proto::{
+    AgentAccountsSnapshot, AgentProfilesSnapshot, HarnessId, ProviderInstancesSnapshot,
+};
 use zeron_rpc::methods;
 
 fn ids(snapshot: &AgentProfilesSnapshot) -> Vec<&str> {
@@ -197,12 +201,90 @@ async fn provider_instances_live_in_the_device_data_dir_and_survive_a_restart() 
         .await
         .unwrap();
     assert_eq!(reloaded, saved);
-    let emptied: ProviderInstancesSnapshot = client
+
+    let work_home = data.join("provider-homes").join("codex_work");
+    let work_slots = data.join("agent-accounts/instances/codex_work");
+    let claims = URL_SAFE_NO_PAD.encode(
+        json!({"email": "work@example.com",
+               "https://api.openai.com/auth": {"chatgpt_account_id": "acct-work"}})
+        .to_string(),
+    );
+    std::fs::create_dir_all(&work_home).unwrap();
+    std::fs::write(
+        work_home.join("auth.json"),
+        json!({"tokens": {"id_token": format!("e30.{claims}.x"), "access_token": "at"}})
+            .to_string(),
+    )
+    .unwrap();
+    let listed: AgentAccountsSnapshot = client
         .call_as(
+            methods::LIST_AGENT_ACCOUNTS,
+            json!({"instanceId": "codex_work"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.accounts.len(), 1, "{listed:?}");
+    assert_eq!(listed.accounts[0].harness, HarnessId::Codex);
+    assert_eq!(
+        listed.accounts[0].email.as_deref(),
+        Some("work@example.com")
+    );
+    assert!(listed.accounts[0].active);
+    assert!(work_slots.is_dir());
+    let unknown = client
+        .call(
+            methods::LIST_AGENT_ACCOUNTS,
+            json!({"instanceId": "codex_gone"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(unknown.to_string().contains("'codex_gone'"), "{unknown}");
+    let mismatch = client
+        .call(
+            methods::START_AGENT_LOGIN,
+            json!({"harness": "claude-code", "instanceId": "codex_work"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(mismatch.to_string().contains("runs on Codex"), "{mismatch}");
+
+    let custom_home = tmp.path().join("custom-codex");
+    std::fs::create_dir_all(&custom_home).unwrap();
+    std::fs::write(custom_home.join("auth.json"), b"{}").unwrap();
+    client
+        .call(
+            methods::UPSERT_PROVIDER_INSTANCE,
+            json!({"instance": {"id": "codex_custom", "driver": "codex", "label": "Custom",
+                   "config": {"kind": "native",
+                              "homeDir": {"kind": "custom", "path": custom_home}}}}),
+        )
+        .await
+        .unwrap();
+    client
+        .call(
+            methods::LIST_AGENT_ACCOUNTS,
+            json!({"instanceId": "codex_custom"}),
+        )
+        .await
+        .unwrap();
+
+    client
+        .call(
             methods::DELETE_PROVIDER_INSTANCE,
             json!({"instanceId": "codex_work"}),
         )
         .await
         .unwrap();
+    assert!(!work_home.exists());
+    assert!(!work_slots.exists());
+    let emptied: ProviderInstancesSnapshot = client
+        .call_as(
+            methods::DELETE_PROVIDER_INSTANCE,
+            json!({"instanceId": "codex_custom"}),
+        )
+        .await
+        .unwrap();
     assert!(emptied.instances.is_empty());
+    assert!(custom_home.join("auth.json").is_file());
+    assert!(!data.join("agent-accounts/instances/codex_custom").exists());
 }
