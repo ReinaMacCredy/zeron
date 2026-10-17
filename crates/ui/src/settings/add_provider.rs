@@ -913,7 +913,7 @@ impl AddProviderDialog {
             ));
         }
         let env = div()
-            .w(px(300.0))
+            .w(px(240.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
@@ -925,7 +925,7 @@ impl AddProviderDialog {
                     .gap(px(6.0))
                     .child(
                         div()
-                            .w(px(110.0))
+                            .w(px(90.0))
                             .flex_none()
                             .child(field(theme, &row.key, false)),
                     )

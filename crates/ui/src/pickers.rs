@@ -1142,6 +1142,8 @@ pub struct Pickers {
     setting_hover: popover::HoverIntent<ModelSetting>,
     setting_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     setting_scroll: gpui::ScrollHandle,
+    model_tabs_scroll: gpui::ScrollHandle,
+    revealed_model_tab: Option<String>,
     /// Effort card: the thumb's glide to the last picked stop (as a 0..1
     /// fraction of the rail), the pressed disc's scale, whether a drag is
     /// live, and the track's last painted bounds (pointer → stop math).
@@ -1560,6 +1562,8 @@ impl Pickers {
             setting_hover: popover::HoverIntent::default(),
             setting_bounds: None,
             setting_scroll: gpui::ScrollHandle::new(),
+            model_tabs_scroll: gpui::ScrollHandle::new(),
+            revealed_model_tab: None,
             effort_snap: None,
             effort_press: None,
             effort_dragging: false,
@@ -2242,6 +2246,7 @@ impl Pickers {
         self.profile_edit = None;
         self.viewed_harness = None;
         self.viewed_instance = None;
+        self.revealed_model_tab = None;
         self.setting_menu = None;
         self.setting_bounds = None;
         self.effort_dragging = false;
@@ -6212,20 +6217,25 @@ impl Pickers {
         //    viewed tab wears a 2px accent bar sitting on the row's bottom
         //    hairline. Tabs never hide: a live search only filters the
         //    viewed tab's list, so switching tabs re-scopes the same query.
-        let mut tabs = div()
-            .flex_none()
-            .h(px(40.0))
-            .px(px(popover::CARD_INSET))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
+        let mut strip = div()
+            .id("model-tabs-scroll")
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(2.0));
-        tabs = tabs.child(
+            .gap(px(2.0))
+            .overflow_x_scroll()
+            .track_scroll(&self.model_tabs_scroll)
+            .on_scroll_wheel(crate::swipe::claim_scrollable(&self.model_tabs_scroll));
+        let mut tab_count = 1;
+        let mut selected_tab = favorites_view.then(|| ("favorites".to_string(), 0));
+        strip = strip.child(
             div()
                 .id("model-tab-favorites")
                 .relative()
+                .flex_none()
                 .w(px(32.0))
                 .h(px(32.0))
                 .rounded(px(popover::MENU_ITEM_RADIUS))
@@ -6269,10 +6279,15 @@ impl Pickers {
                     theme.warning
                 }
             });
-            tabs = tabs.child(
+            if profiles_view {
+                selected_tab = Some(("profiles".to_string(), tab_count));
+            }
+            tab_count += 1;
+            strip = strip.child(
                 div()
                     .id("model-tab-profiles")
                     .relative()
+                    .flex_none()
                     .w(px(32.0))
                     .h(px(32.0))
                     .rounded(px(popover::MENU_ITEM_RADIUS))
@@ -6316,11 +6331,16 @@ impl Pickers {
                 && viewed == Some(harness)
                 && viewed_instance.is_none();
             let (icon_path, tint) = harness_brand_icon(harness);
-            tabs =
-                tabs.child(
+            if is_viewed {
+                selected_tab = Some((format!("harness:{ix}"), tab_count));
+            }
+            tab_count += 1;
+            strip =
+                strip.child(
                     div()
                         .id(("harness-tab", ix))
                         .relative()
+                        .flex_none()
                         .w(px(32.0))
                         .h(px(32.0))
                         .rounded(px(popover::MENU_ITEM_RADIUS))
@@ -6353,18 +6373,32 @@ impl Pickers {
                     && viewed == Some(harness)
                     && viewed_instance.as_deref() == Some(instance.id.as_str());
                 let id = instance.id.clone();
-                tabs = tabs.child(
+                if is_viewed {
+                    selected_tab = Some((format!("instance:{id}"), tab_count));
+                }
+                tab_count += 1;
+                let label = SharedString::from(instance.label.clone());
+                let accent = crate::provider_instances::instance_accent(instance);
+                strip = strip.child(
                     div()
                         .id(SharedString::from(format!("instance-tab-{id}")))
                         .relative()
                         .flex_none()
                         .h(px(32.0))
-                        .px(px(8.0))
                         .rounded(px(popover::MENU_ITEM_RADIUS))
                         .flex()
                         .items_center()
-                        .gap(px(6.0))
                         .cursor_pointer()
+                        .aria_label(label.clone())
+                        .map(|el| {
+                            if is_viewed {
+                                el.px(px(8.0)).gap(px(6.0))
+                            } else {
+                                el.w(px(32.0))
+                                    .justify_center()
+                                    .tooltip(crate::settings::widgets::text_tooltip(label.clone()))
+                            }
+                        })
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(if is_viewed {
                             theme.text
@@ -6381,32 +6415,68 @@ impl Pickers {
                             this.pick_instance(harness, Some(id.clone()), cx);
                             cx.notify();
                         }))
-                        .child(crate::icons::icon(icon_path).size(px(14.0)).text_color(
-                            tint.unwrap_or(if is_viewed {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            }),
-                        ))
-                        .child(SharedString::from(instance.label.clone()))
-                        .when_some(
-                            crate::provider_instances::instance_accent(instance),
-                            |el, accent| {
-                                el.child(div().flex_none().size(px(6.0)).rounded_full().bg(accent))
-                            },
+                        .child(
+                            crate::icons::icon(icon_path)
+                                .size(px(if is_viewed { 14.0 } else { 16.0 }))
+                                .text_color(tint.unwrap_or(if is_viewed {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })),
                         )
-                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
+                        .when(is_viewed, |el| {
+                            el.child(label)
+                                .when_some(accent, |el, accent| {
+                                    el.child(
+                                        div().flex_none().size(px(6.0)).rounded_full().bg(accent),
+                                    )
+                                })
+                                .child(tab_indicator(theme.accent))
+                        })
+                        .when(!is_viewed, |el| {
+                            el.child(
+                                div()
+                                    .absolute()
+                                    .top(px(6.0))
+                                    .right(px(5.0))
+                                    .size(px(5.0))
+                                    .rounded_full()
+                                    .bg(accent.unwrap_or(theme.text_faint)),
+                            )
+                        }),
                 );
             }
         }
 
-        if compact {
-            tabs = self.compact_model_back_header(cx);
-        } else if self.title.is_none() {
-            tabs = tabs
-                .child(div().flex_1())
-                .child(self.compact_layout_toggle(false, &theme, cx).h(px(32.0)));
+        if let Some((key, ix)) = selected_tab
+            && self.revealed_model_tab.as_ref() != Some(&key)
+        {
+            self.model_tabs_scroll.scroll_to_item(ix);
+            // gpui drops the request on the strip's first frame, before its overflow is known.
+            if self.model_tabs_scroll.bounds_for_item(ix).is_some() {
+                self.revealed_model_tab = Some(key);
+            } else {
+                window.request_animation_frame();
+            }
         }
+        let tabs = if compact {
+            self.compact_model_back_header(cx)
+        } else {
+            div()
+                .flex_none()
+                .h(px(40.0))
+                .px(px(popover::CARD_INSET))
+                .border_b_1()
+                .border_color(crate::theme::hairline(0.08))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(strip)
+                .when(self.title.is_none(), |row| {
+                    row.child(self.compact_layout_toggle(false, &theme, cx).h(px(32.0)))
+                })
+        };
 
         // ── search row: icon + borderless input over a full-bleed hairline.
         //    The placeholder names the scope — the query never leaves the
