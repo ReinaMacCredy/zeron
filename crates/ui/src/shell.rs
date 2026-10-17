@@ -179,6 +179,7 @@ actions!(
         AddSpacePalette,
         ToggleCommandPalette,
         OpenModelPicker,
+        ToggleBtw,
         NewSession,
         OpenSettings,
         NextSession,
@@ -562,6 +563,11 @@ pub fn apply_keymap(
         KeyBinding::new(
             &valid_or_default(&keymap.open_model_picker, "mod-/"),
             OpenModelPicker,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.toggle_btw, ShortcutId::ToggleBtw.default_combo()),
+            ToggleBtw,
             None,
         ),
     ]);
@@ -5647,6 +5653,17 @@ impl Shell {
     fn chat_composer(&self, cx: &App) -> Entity<Composer> {
         self.active_btw_composer(cx)
             .unwrap_or_else(|| self.composer.clone())
+    }
+
+    fn toggle_btw(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.sidechat_source_chat(cx) else {
+            return;
+        };
+        if self.open_btw_source(cx).is_some() {
+            self.close_btw(&source, cx);
+        } else {
+            self.open_sidechat(source, None, SidechatStaged::default(), cx);
+        }
     }
 
     fn show_btw_tab(
@@ -18466,6 +18483,11 @@ impl Render for Shell {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
                     let pickers = this.chat_composer(cx).read(cx).pickers().clone();
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleBtw, _, cx| {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                    this.toggle_btw(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &IncreaseReasoning, _, cx| {
