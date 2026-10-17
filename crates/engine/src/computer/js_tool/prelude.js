@@ -204,6 +204,17 @@
     );
   };
 
+  // Little Snitch opens its first window about 12 s after launch, past launch_app's own wait.
+  const LATE_WINDOW_MS = 10000;
+  const lateWindows = async (appName, launched) => {
+    const deadline = Date.now() + (launched.windowReason === "no_window" ? LATE_WINDOW_MS : 0);
+    for (;;) {
+      const windows = windowsFor(appName, launched.pid);
+      if (windows.length || Date.now() >= deadline) return windows;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  };
+
   const inside = (inner, outer) =>
     inner &&
     outer &&
@@ -706,7 +717,7 @@
       return windows;
     },
 
-    getApp(target) {
+    async getApp(target) {
       let window;
       let appName;
       if (target && typeof target === "object" && target.windowId !== undefined) {
@@ -729,7 +740,7 @@
               throw new Error(`Launching ${info.bundleId || info.name} opened ${(opened && opened.launchPath) || "another copy"}, not ${target}. Use ${PICK_WINDOW}.`);
           }
           if (launched.window && launched.window.id) windows = [launched.window];
-          else windows = windowsFor(appName, launched.pid);
+          else windows = await lateWindows(appName, launched);
         }
         window = windows[0];
         if (!window) throw new Error(`"${appName}" has no usable window. Open one, then call cua.getApp again, or use ${PICK_WINDOW}.`);

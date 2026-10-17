@@ -16,6 +16,7 @@ struct FakeHost {
     dialog: bool,
     type_warning: bool,
     native_error: Option<&'static str>,
+    launch_reason: Option<&'static str>,
     delay: Duration,
 }
 
@@ -27,6 +28,15 @@ impl FakeHost {
             .iter()
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    fn windows_listed_since_launch(&self) -> usize {
+        let names = self.names();
+        names
+            .iter()
+            .skip_while(|name| *name != "computer_launch_app")
+            .filter(|name| *name == "computer_list_windows")
+            .count()
     }
 
     fn args(&self, tool: &str) -> Vec<Value> {
@@ -161,6 +171,13 @@ impl JsHost for FakeHost {
             "computer_browser_navigate" => {
                 json_result(json!({ "target_id": "bt-1", "tab_id": "tab-new", "opened_tab": true }))
             }
+            "computer_launch_app" if self.launch_reason.is_some() => json_result(json!({
+                "app": "Little Snitch",
+                "pid": 40,
+                "windowStatus": "no_usable_window",
+                "windowReason": self.launch_reason,
+                "window": null
+            })),
             "computer_list_windows" => {
                 let mut windows = vec![
                     json!({ "id": "cua:9:4", "title": "Allow remote debugging?", "appName": "Google Chrome", "pid": 9, "visible": true,
@@ -180,6 +197,12 @@ impl JsHost for FakeHost {
                     json!({ "id": "cua:31:2", "title": "", "appName": "Zeron Dev", "pid": 31, "visible": true,
                       "bounds": { "x": 0, "y": 0, "width": 1200, "height": 800 }, "stackingIndex": 9 }),
                 ];
+                if self.launch_reason == Some("no_window")
+                    && self.windows_listed_since_launch() >= 3
+                {
+                    windows.push(json!({ "id": "cua:40:7", "title": "Rules", "appName": "Little Snitch", "pid": 40,
+                      "visible": true, "bounds": { "x": 5, "y": 74, "width": 1502, "height": 903 }, "stackingIndex": 10 }));
+                }
                 if self.dialog {
                     windows.push(json!({ "id": "cua:7:9", "title": "ttgshop.vn says", "appName": "Calculator", "pid": 7,
                       "visible": true, "bounds": { "x": 40, "y": 40, "width": 150, "height": 100 }, "stackingIndex": 9 }));
@@ -411,6 +434,39 @@ async fn get_app_by_path_binds_the_running_copy_at_that_path_and_never_launches_
             .iter()
             .any(|name| name == "computer_launch_app")
     );
+}
+
+#[tokio::test]
+async fn get_app_waits_for_a_window_that_opens_after_launch_but_not_for_a_hidden_app() {
+    let late = Arc::new(FakeHost {
+        launch_reason: Some("no_window"),
+        ..FakeHost::default()
+    });
+    let bound = exec(
+        "js-late-window",
+        &late,
+        "var ls = await cua.getApp(\"Little Snitch\"); ls.windowId",
+    )
+    .await;
+    assert_eq!(bound.error, None, "{}", texts(&bound));
+    assert!(texts(&bound).ends_with("cua:40:7"), "{}", texts(&bound));
+
+    let hidden = Arc::new(FakeHost {
+        launch_reason: Some("hidden"),
+        ..FakeHost::default()
+    });
+    let refused = exec(
+        "js-hidden-launch",
+        &hidden,
+        "await cua.getApp(\"Little Snitch\");",
+    )
+    .await;
+    let error = refused.error.clone().unwrap_or_default();
+    assert!(
+        error.contains("\"Little Snitch\" has no usable window"),
+        "{error}"
+    );
+    assert_eq!(hidden.windows_listed_since_launch(), 1);
 }
 
 #[tokio::test]
