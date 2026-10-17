@@ -144,8 +144,12 @@ fn discover_at(
         .collect();
     match harness {
         HarnessId::Antigravity => {
+            let instance_home = launch
+                .home
+                .clone()
+                .or_else(|| launch.env.get("GEMINI_HOME").map(PathBuf::from));
             roots.extend(
-                crate::acp::antigravity_skill_dirs()
+                crate::acp::antigravity_skill_dirs_in(instance_home.as_deref())
                     .into_iter()
                     .map(|path| (path, String::new())),
             );
@@ -747,6 +751,44 @@ mod tests {
             assert!(
                 skills.iter().any(|skill| skill.name == "portable"),
                 "{harness:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_antigravity_instance_lists_its_own_home_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let instance_home = temp.path().join("instance");
+        write(
+            &instance_home,
+            "config/skills/mine/SKILL.md",
+            "---\nname: mine\n---\nBody",
+        );
+        let by_home = crate::LaunchOverrides {
+            home: Some(instance_home.clone()),
+            ..Default::default()
+        };
+        let by_env = crate::LaunchOverrides {
+            env: [(
+                "GEMINI_HOME".to_owned(),
+                instance_home.display().to_string(),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        for launch in [by_home, by_env] {
+            let skills = discover_at(
+                HarnessId::Antigravity,
+                &repo,
+                &temp.path().join("home"),
+                &launch,
+            )
+            .unwrap();
+            assert!(
+                skills.iter().any(|skill| skill.name == "mine"),
+                "{launch:?}"
             );
         }
     }

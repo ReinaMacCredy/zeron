@@ -888,11 +888,7 @@ pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
 /// User-global skill folders the server loads (`resolve_skills_paths`).
 /// Shared discovery adds project `.gemini/skills` and `.agents/skills` using
 /// the selected session's cwd.
-pub(crate) fn antigravity_skill_dirs() -> Vec<PathBuf> {
-    antigravity_skill_dirs_in(None)
-}
-
-fn antigravity_skill_dirs_in(home: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn antigravity_skill_dirs_in(home: Option<&Path>) -> Vec<PathBuf> {
     home.map(Path::to_path_buf)
         .map_or_else(antigravity_paths::home, Ok)
         .map(|home| {
