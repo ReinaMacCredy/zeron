@@ -50,6 +50,8 @@ pub struct UsagePage {
     task: Option<Task<()>>,
     hover: Option<usize>,
     plot: Rc<Cell<Option<Bounds<Pixels>>>>,
+    details_open: std::collections::HashSet<String>,
+    _accounts: gpui::Subscription,
 }
 
 impl UsagePage {
@@ -64,6 +66,10 @@ impl UsagePage {
             task: None,
             hover: None,
             plot: Rc::default(),
+            details_open: Default::default(),
+            _accounts: cx.observe_global::<crate::settings::accounts::AccountsSnapshotCache>(
+                |_, cx| cx.notify(),
+            ),
         };
         page.load(cx);
         page
@@ -438,7 +444,7 @@ impl UsagePage {
             .items_center()
             .justify_between()
             .gap(px(12.0))
-            .child(widgets::page_header(theme, "Usage", None))
+            .child(heading(theme, "Token usage"))
             .child(
                 div()
                     .flex()
@@ -1095,13 +1101,168 @@ impl UsagePage {
     }
 }
 
+impl UsagePage {
+    fn render_plan_limits(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let snapshot = crate::account_usage::local_snapshot(cx)?;
+        let accounts: Vec<zeron_proto::AgentAccount> =
+            crate::settings::accounts::sidebar_accounts(snapshot)
+                .into_iter()
+                .filter(|account| crate::settings::accounts::reports_usage(account.harness))
+                .cloned()
+                .collect();
+        if accounts.is_empty() {
+            return None;
+        }
+        let now = chrono::Utc::now();
+        let updated = accounts
+            .iter()
+            .filter_map(|account| account.usage_fetched_at)
+            .max()
+            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+            .map(|at| crate::pull_requests::relative_time(at, now));
+        let note = match updated {
+            Some(when) => format!("Updated {when} · refreshes after each turn"),
+            None => "Refreshes after each turn".to_owned(),
+        };
+        let mut cards: Vec<AnyElement> = accounts
+            .iter()
+            .enumerate()
+            .map(|(ix, account)| self.plan_card(ix, account, now, theme, cx))
+            .collect();
+        if cards.len() % 2 == 1 {
+            cards.push(div().flex_1().min_w_0().into_any_element());
+        }
+        let mut rows = Vec::new();
+        let mut cards = cards.into_iter();
+        while let (Some(left), Some(right)) = (cards.next(), cards.next()) {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(16.0))
+                    .child(left)
+                    .child(right),
+            );
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(heading(theme, "Plan limits"))
+                        .child(muted(theme, 12.0, note)),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn plan_card(
+        &self,
+        ix: usize,
+        account: &zeron_proto::AgentAccount,
+        now: chrono::DateTime<chrono::Utc>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = account.id.clone();
+        let open = self.details_open.contains(&id);
+        let toggle = cx.listener(move |this, _, _, cx| {
+            if !this.details_open.remove(&id) {
+                this.details_open.insert(id.clone());
+            }
+            cx.notify();
+        });
+        div()
+            .flex_1()
+            .min_w_0()
+            .p(px(14.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.text.opacity(0.08))
+            .bg(crate::theme::wash(0.03))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .text_size(crate::typography::ui_rems(11.5))
+            .line_height(px(16.0))
+            .text_color(theme.text)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(provider_mark(account.harness, 14.0, theme))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(crate::settings::accounts::provider_name(account.harness)),
+                    )
+                    .children(account.plan_label.clone().map(|plan| {
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(plan))
+                    }))
+                    .children(account.email.clone().map(|email| {
+                        div()
+                            .ml_auto()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(email))
+                    })),
+            )
+            .children(account.usage_error.clone().map(|error| {
+                div()
+                    .text_color(theme.warning)
+                    .child(SharedString::from(error))
+            }))
+            .children(crate::app_rail::usage_blocks(account, now, theme))
+            .child(crate::app_rail::details_fold(
+                ("usage-plan-details", ix).into(),
+                format!("usage-plan-details-{ix}"),
+                account,
+                open,
+                toggle,
+                now,
+                theme,
+            ))
+            .into_any_element()
+    }
+}
+
 impl Render for UsagePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let header = self.render_header(&theme, window, cx);
+        let plan_limits = self.render_plan_limits(&theme, cx);
         let mut column = widgets::page_column()
             .max_w(px(1080.0))
             .gap(px(28.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(widgets::page_header(&theme, "Usage", None))
+                    .child(widgets::page_subtitle(
+                        &theme,
+                        "Plan limits from your agent accounts, then token spend from chats on this device.",
+                    )),
+            )
+            .children(plan_limits)
             .child(header);
         match (&self.summary, &self.error) {
             (_, Some(error)) => {

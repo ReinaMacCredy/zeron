@@ -6983,6 +6983,7 @@ impl Shell {
         if let Some(page) = &self.usage_page {
             page.update(cx, |page, cx| page.load(cx));
         }
+        self.refresh_device_accounts(cx);
         cx.notify();
     }
 
