@@ -10397,6 +10397,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13748,7 +13758,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "bzip2",
  "deser-hjson",
+ "flate2",
  "futures",
  "libc",
  "reqwest",
@@ -13757,6 +13769,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
