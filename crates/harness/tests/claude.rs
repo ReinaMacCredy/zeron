@@ -1112,16 +1112,16 @@ fn steer_msg(prompt: &str) -> SteerMessage {
     }
 }
 
-/// The premature-"done" bug: a `now` steer aborts the streaming turn, whose
-/// result was held for the steer — and released by a 5s quiet timer while
-/// the steered turn ran a long tool. The engine read that stale Done as the
+/// The premature-"done" bug: the streaming turn's result was held for the
+/// steer queued behind it — and released by a 5s quiet timer while the
+/// steered turn ran a long tool. The engine read that stale Done as the
 /// steered turn completing (sound, notification, parked mid-turn).
 #[tokio::test]
 async fn a_steered_turn_running_a_long_tool_is_not_marked_done() {
     let (controls, steer, _token) = controls("A");
     steer.send(steer_msg("stop and sleep")).await.unwrap();
     let stream = harness()
-        .run(request("scenario:lifecycle-now-steer"), controls)
+        .run(request("scenario:lifecycle-next-steer"), controls)
         .await
         .expect("run starts");
     let events = tokio::time::timeout(

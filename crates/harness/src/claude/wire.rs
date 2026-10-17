@@ -41,8 +41,7 @@ pub(crate) struct ControlResponseBody {
 /// every stdin user message carrying a `uuid` (verified live against CLI
 /// 2.1.286): `queued` when read, `started` when a turn takes it up (a `next`
 /// steer starts mid-turn, at the step boundary it folds into), then
-/// `completed` or `cancelled` (its turn was aborted by a later `now` steer
-/// or an interrupt). Background-task wake turns carry no command at all.
+/// `completed` or `cancelled` (its turn was aborted by an interrupt). Background-task wake turns carry no command at all.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct CommandLifecycleFrame {
     #[serde(default)]
@@ -331,16 +330,13 @@ pub(crate) fn user_message_line(text: &str) -> String {
     .to_string()
 }
 
-/// Fold this input into the next model step without aborting tools or tasks.
-/// A steer line. `immediate` → `priority: "now"`: streaming text/thinking
-/// stops at once and the steer is answered next (verified against CLI
-/// 2.1.280). But `now` also aborts an in-flight MCP tool call ("The tool call
-/// was interrupted before a result was received"), so while any tool is open
-/// the steer goes as `next`: the tool finishes and the steer lands right after
-/// its result, in the same turn. An interrupted turn still emits a `result`.
+/// A steer line, always `priority: "next"`: the CLI lets the streaming text
+/// or running tool finish and folds the steer in at its next step boundary,
+/// or starts it as the next turn. `now` would cut the streaming answer off
+/// mid-sentence and abort an in-flight MCP tool call.
 #[cfg(test)]
-pub(crate) fn steer_message_line(text: &str, id: &str, immediate: bool) -> String {
-    steer_message_line_with_images(text, id, immediate, &[])
+pub(crate) fn steer_message_line(text: &str, id: &str) -> String {
+    steer_message_line_with_images(text, id, &[])
 }
 
 /// [`steer_message_line`] carrying inline images ahead of the text, in the
@@ -348,7 +344,6 @@ pub(crate) fn steer_message_line(text: &str, id: &str, immediate: bool) -> Strin
 pub(crate) fn steer_message_line_with_images(
     text: &str,
     id: &str,
-    immediate: bool,
     images: &[ImageBlock],
 ) -> String {
     let content = if images.is_empty() {
@@ -356,7 +351,7 @@ pub(crate) fn steer_message_line_with_images(
     } else {
         Value::Array(content_blocks(text, images))
     };
-    serde_json::json!({"type":"user", "uuid":id, "priority": if immediate { "now" } else { "next" },
+    serde_json::json!({"type":"user", "uuid":id, "priority": "next",
         "message":{"role":"user","content":content}, "parent_tool_use_id":null})
     .to_string()
 }
@@ -514,12 +509,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn steer_priority_follows_tool_state() {
-        let now: serde_json::Value =
-            serde_json::from_str(&steer_message_line("hi", "u1", true)).unwrap();
+    fn steer_never_interrupts_the_streaming_step() {
         let next: serde_json::Value =
-            serde_json::from_str(&steer_message_line("hi", "u2", false)).unwrap();
-        assert_eq!(now["priority"], "now");
+            serde_json::from_str(&steer_message_line("hi", "u2")).unwrap();
         assert_eq!(next["priority"], "next");
         assert_eq!(next["uuid"], "u2");
     }

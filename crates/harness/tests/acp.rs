@@ -2308,24 +2308,14 @@ async fn acp_boundary_steer(scenario: &str, trigger_on_done: bool) {
         .iter()
         .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
         .unwrap();
-    if trigger_on_done {
-        // Idle between turns: the steer is simply the next turn.
-        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
-        let first_done = events
-            .iter()
-            .position(|e| matches!(e, AgentEvent::Done { .. }))
-            .unwrap();
-        assert!(first_done < second_text);
-    } else {
-        // Mid-turn: the steer preempts (here the turn ended first anyway) and
-        // continues the run behind a Steered boundary — one run, one Done.
-        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
-        let steered = events
-            .iter()
-            .position(|e| matches!(e, AgentEvent::Steered { .. }))
-            .expect("steer boundary");
-        assert!(steered < second_text);
-    }
+    // Idle between turns the steer is simply the next turn; mid-answer it
+    // waits for the turn's end, then runs as the next turn.
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
+    let first_done = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Done { .. }))
+        .unwrap();
+    assert!(first_done < second_text);
 }
 
 #[tokio::test]

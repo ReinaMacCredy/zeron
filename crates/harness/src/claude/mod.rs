@@ -29,8 +29,8 @@
 //!   around phantom tool calls).
 //! - A `result` that is not a turn's end: every stdin user line carries a
 //!   uuid, and the CLI reports each one's `command_lifecycle`. A result
-//!   while one of ours is still written/queued is a boundary (a `now` steer
-//!   aborting the turn, resume settling dead background tasks) — that
+//!   while one of ours is still written/queued is a boundary (a message
+//!   queued behind the turn, resume settling dead background tasks) — that
 //!   message's turn ends with its own result. See [`Commands`].
 //! - Steering: queued [`SteerMessage`]s are written to stdin as user lines at
 //!   any time, their attachments inlined like a first turn's; the CLI folds
@@ -1038,9 +1038,6 @@ async fn run_session(session: Session) {
 
     let mut pending_steers = std::collections::VecDeque::new();
     let mut reconfigures = 0u64;
-    // Top-level tool calls in flight: a steer must not abort them (see
-    // `wire::steer_message_line`).
-    let mut open_tools = std::collections::HashSet::new();
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -1192,21 +1189,10 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     for ev in norm.normalize(frame, interrupted || stopping.is_some()) {
-                        match &ev {
-                            AgentEvent::ToolCall { id, .. } => {
-                                open_tools.insert(id.clone());
-                            }
-                            AgentEvent::ToolResult { id, .. } => {
-                                open_tools.remove(id);
-                            }
-                            AgentEvent::Done { .. } => open_tools.clear(),
-                            _ => {}
-                        }
                         let is_done = matches!(ev, AgentEvent::Done { .. });
-                        // A `now` steer ends the turn it interrupts with a
-                        // result frame, and a message queued behind a turn
-                        // that just ended starts another: either way that
-                        // result is a steer boundary, not the end of the turn.
+                        // A message queued behind a turn that just ended
+                        // starts another: that result is a steer boundary,
+                        // not the end of the turn.
                         let boundary = if commands.reported {
                             commands.waiting()
                         } else {
@@ -1306,7 +1292,6 @@ async fn run_session(session: Session) {
                             &crate::skill_mentions_as_slash(&msg.prompt, &skills),
                         ),
                         &id,
-                        open_tools.is_empty(),
                         &images,
                     );
                     pending_steers.push_back(id.clone());
@@ -1324,8 +1309,7 @@ async fn run_session(session: Session) {
             command = turn.compact_requested(), if steering_open && !interrupted => {
                 active_since_stop = true;
                 let id = uuid::Uuid::new_v4().to_string();
-                // `now` would abort a wake turn the CLI already opened (CLI 2.1.300).
-                let line = wire::steer_message_line_with_images(&command, &id, false, &[]);
+                let line = wire::steer_message_line_with_images(&command, &id, &[]);
                 pending_steers.push_back(id.clone());
                 commands.written(id);
                 if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
@@ -1469,8 +1453,8 @@ async fn run_session(session: Session) {
 /// How far the CLI has taken each stdin user message we wrote, by the uuid
 /// it was written with. A `result` frame ends the TURN only when no message
 /// is still waiting to be taken up. A waiting one makes the result a steer
-/// boundary — a `now` steer aborting the turn it interrupts, or a message
-/// queued behind a turn that just finished — and that message's own turn
+/// boundary — a message queued behind a turn that just finished — and that
+/// message's own turn
 /// ends with its own result. Deciding this from the CLI's own lifecycle
 /// rather than from quiet time: a held result released by a quiet timer
 /// marked the steered turn done mid-way through any long tool call.

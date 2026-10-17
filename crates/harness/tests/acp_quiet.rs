@@ -200,17 +200,18 @@ async fn delayed_turn(scenario: &str) {
             .iter()
             .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second\n\nthird"))
     };
-    if scenario == "open-tool" {
-        // A running tool is never preempted: the prompt keeps its outcome,
-        // then both steers continue together as the next prompt.
+    if scenario != "tools" {
+        // A running tool or a streaming answer is never preempted: the
+        // prompt keeps its outcome, then both steers continue together as
+        // the next prompt.
         assert!(finished(&first), "premature Done: {first:?}");
         let next = collect_until_done(&mut stream).await;
         assert_done(&next, DoneStatus::Completed);
         assert_eq!(steered(&next), 2, "{next:?}");
         assert!(together(&next), "{next:?}");
     } else {
-        // Silence is not completion, but steers preempt the generation
-        // immediately and continue the same run together — one Done.
+        // Right after a tool result (a step boundary) steers preempt the
+        // generation and continue the same run together — one Done.
         assert!(!finished(&first), "steers must preempt: {first:?}");
         assert_eq!(steered(&first), 2, "{first:?}");
         assert!(together(&first), "{first:?}");

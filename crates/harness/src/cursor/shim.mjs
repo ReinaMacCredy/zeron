@@ -464,41 +464,8 @@ function steerableNow() {
 const steerDeliveries = new Set();
 let steerPump = null;
 let turnActive = false;
-// Immediate steering: Cursor's native steer lands only at a step boundary, so
-// a plain text answer would run to completion first. With no tool running, a
-// steer cancels the streaming run and continues as the follow-up turn (the
-// way Codex turn/steer behaves). A running tool is never cancelled: the
-// native steer injects at its boundary instead.
-let preempting = false;
-// The run a steer cancelled: its late stream updates must not leak into the
-// steer's reply.
-let preemptedRun = null;
-// Tests of the native SDK steering path disable preemption.
-const NATIVE_STEER_ONLY = process.env.ZERON_CURSOR_NATIVE_STEER_ONLY === "1";
-function preemptForSteer() {
-  if (NATIVE_STEER_ONLY) return false;
-  if (!turnActive || !run || activeTools.size || preempting || interrupted || stopping || closing) return false;
-  preempting = true;
-  preemptedRun = run;
-  run.cancel().catch(() => {});
-  return true;
-}
-// The preempted run ended: its steers continue the conversation as one turn.
-async function continueAfterPreempt() {
-  preempting = false;
-  activeTools.clear();
-  await Promise.all(steerDeliveries);
-  run = null;
-  turnActive = false;
-  if (!pendingSteers.length) {
-    out({ ev: "turn", status: "finished" });
-    return;
-  }
-  chain = chain.then(followupSteers).catch(fatal);
-}
 function pumpSteers() {
   if (steerPump) return steerPump;
-  if (preempting) return Promise.resolve();
   if (!run || !pendingSteers.length || activeTools.size) return Promise.resolve();
   const target = run;
   steerPump = (async () => {
@@ -561,7 +528,7 @@ function acceptSteer(message) {
   if (message.reconfigure) message.selection = modelSelection(message);
   pendingSteers.push(message);
   if (turnActive) {
-    if (!preemptForSteer()) void pumpSteers().catch(fatal);
+    void pumpSteers().catch(fatal);
   } else {
     chain = chain.then(followupSteers).catch(fatal);
   }
@@ -580,11 +547,9 @@ async function runTurn(prompt, ready, accepted) {
       return;
     }
     accepted?.();
-    let thisRun = null;
-    run = thisRun = await agent.send(prompt, {
+    run = await agent.send(prompt, {
       ...(modelChanged ? { model: currentModel } : {}),
       onDelta: ({ update }) => {
-        if (thisRun && thisRun === preemptedRun) return;
         try {
           mapUpdate(update);
         } catch {
@@ -598,15 +563,14 @@ async function runTurn(prompt, ready, accepted) {
     turnActive = false;
     return;
   }
-  // A steer that arrived while send() was creating the run preempts now.
-  if (!pendingSteers.length || !preemptForSteer()) void pumpSteers().catch(fatal);
+  // A steer that arrived while send() was creating the run is injected now.
+  void pumpSteers().catch(fatal);
   // Interrupt may arrive while send() is still creating the run.
   if (interrupted || stopping || closing) await run.cancel().catch(() => {});
   let result;
   try {
     result = await run.wait();
   } catch (e) {
-    if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
     const stopped = stopping;
     stopping = false;
     if (stopped) {
@@ -622,7 +586,6 @@ async function runTurn(prompt, ready, accepted) {
     });
     return;
   }
-  if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
   activeTools.clear();
   await pumpSteers();
   await Promise.all(steerDeliveries);

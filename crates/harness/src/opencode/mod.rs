@@ -358,8 +358,8 @@ impl Harness for OpencodeHarness {
     /// Steers queue and deliver as the next prompt when the live turn goes
     /// idle — opencode has no mid-turn injection on this wire.
     fn steering_mode(&self) -> SteeringMode {
-        // Steers preempt the generation (never a running tool) and continue
-        // the turn immediately; see `maybe_preempt!`.
+        // Steers preempt the generation between steps (never a running tool
+        // or a streaming answer) and continue the turn; see `maybe_preempt!`.
         SteeringMode::StepBoundary
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
@@ -1560,6 +1560,8 @@ struct TurnState {
     stall_deadline: Option<tokio::time::Instant>,
     /// Main-session tool calls started and not yet finished.
     open_tools: std::collections::HashSet<String>,
+    /// Text or reasoning has streamed since the last tool call or result.
+    streaming: bool,
     /// Aborted to deliver a steer immediately: its idle/interrupted frame is
     /// a steer boundary, not the end of the run.
     preempted: bool,
@@ -1615,6 +1617,7 @@ impl TurnState {
             aborted_for_retry: false,
             stall_deadline: stall.map(|d| tokio::time::Instant::now() + d),
             open_tools: Default::default(),
+            streaming: false,
             preempted: false,
         }
     }
@@ -2034,9 +2037,11 @@ async fn run_session(session: Session) {
         }};
     }
 
-    // Immediate steering: a queued steer aborts the current generation as
-    // soon as no tool is running (a running tool is never killed), and the
-    // abort's idle promotes the steer — the way Codex `turn/steer` behaves.
+    // Step-boundary steering: a queued steer aborts the current generation
+    // only between steps — no tool running and no text or reasoning streamed
+    // since the last tool — so neither a tool nor an answer is cut off. A
+    // steer that arrives mid-answer waits for the next tool result or the
+    // turn's end; the abort's idle promotes the steer.
     macro_rules! maybe_preempt {
         () => {{
             if turn.active
@@ -2045,6 +2050,7 @@ async fn run_session(session: Session) {
                 && !stopping
                 && !queued_steers.is_empty()
                 && turn.open_tools.is_empty()
+                && !turn.streaming
             {
                 turn.preempted = true;
                 turn.idle_ready = true;
@@ -3534,9 +3540,16 @@ fn mark_content(turn: &mut TurnState, events: &[AgentEvent]) {
         match ev {
             AgentEvent::ToolCall { id, .. } => {
                 turn.open_tools.insert(id.clone());
+                turn.streaming = false;
             }
             AgentEvent::ToolResult { id, .. } => {
                 turn.open_tools.remove(id);
+                turn.streaming = false;
+            }
+            AgentEvent::TextDelta { text } | AgentEvent::ReasoningDelta { text }
+                if !text.is_empty() =>
+            {
+                turn.streaming = true;
             }
             _ => {}
         }

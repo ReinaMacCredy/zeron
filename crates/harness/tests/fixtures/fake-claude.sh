@@ -194,9 +194,9 @@ case "$first" in
 *scenario:steer*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-steer"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'
-  # The queued steering user line, applied at "the step boundary" (here: now).
+  # The queued steering user line, applied at "the step boundary" (here: next).
   read -r steer || exit 1
-  case "$steer" in *'"priority":"now"'*) ;; *) exit 9 ;; esac
+  case "$steer" in *'"priority":"next"'*) ;; *) exit 9 ;; esac
   # Old output continues until Claude actually consumes the input.
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"-still-first"}}}'
   emit "$steer"
@@ -205,13 +205,12 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"steered","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-steer"}'
   ;;
 
-*scenario:lifecycle-now-steer*)
-  # CLI 2.1.286, captured live: every uuid-tagged user line gets
-  # `command_lifecycle` frames. A `now` steer aborts the streaming turn
-  # (result, terminal_reason aborted_streaming), the first command is
-  # cancelled and the steer's own turn starts. That turn then runs a tool
-  # for longer than any quiet-time heuristic: no Done may land before the
-  # steered turn's own result.
+*scenario:lifecycle-next-steer*)
+  # CLI 2.1.286 lifecycle shape: every uuid-tagged user line gets
+  # `command_lifecycle` frames. A `next` steer waits for the streaming turn
+  # to finish, then starts its own turn. That turn runs a tool for longer
+  # than any quiet-time heuristic: no Done may land before the steered
+  # turn's own result.
   fid=$(uuid_of "$first")
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"queued\"}"
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"started\"}"
@@ -219,11 +218,12 @@ case "$first" in
   emit "$first"
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"essay"}}}'
   read -r steer || exit 1
-  case "$steer" in *'"priority":"now"'*) ;; *) exit 9 ;; esac
+  case "$steer" in *'"priority":"next"'*) ;; *) exit 9 ;; esac
   sid=$(uuid_of "$steer")
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"queued\"}"
-  emit '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming","result":"essay","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-lc"}'
-  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"cancelled\"}"
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" ends"}}}'
+  emit '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"essay ends","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-lc"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"completed\"}"
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"started\"}"
   emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-lc"}'
   emit "$steer"

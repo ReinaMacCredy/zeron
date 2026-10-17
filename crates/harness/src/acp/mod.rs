@@ -243,7 +243,8 @@ fn grok_spec() -> AcpAgentSpec {
             }]
         },
         // No `_session/steering` extension: a steer preempts the generation
-        // (waiting out running tools) and continues the turn — immediate.
+        // at the next step boundary (never a running tool or a streaming
+        // answer) and continues the turn.
         steering_mode: SteeringMode::StepBoundary,
         // Grok Build's advertised efforts (default high); applied through the
         // session's `thought_level` config option.
@@ -328,7 +329,8 @@ fn devin_spec() -> AcpAgentSpec {
             ]
         },
         // No `_session/steering` extension: a steer preempts the generation
-        // (waiting out running tools) and continues the turn — immediate.
+        // at the next step boundary (never a running tool or a streaming
+        // answer) and continues the turn.
         steering_mode: SteeringMode::StepBoundary,
         // Effort levels are per model (catalog groups, see `devin_models`)
         // and applied through the session's `thought_level` option.
@@ -3618,14 +3620,26 @@ fn prompt_like_request(
     Box::pin(async move { client.request(method, params).await })
 }
 
-/// Track tools to avoid prompting into an unowned self-continued turn.
-fn track_open_tools(ev: &AgentEvent, open_tools: &mut std::collections::HashSet<String>) {
+/// Track tools to avoid prompting into an unowned self-continued turn, and
+/// whether text or reasoning has streamed since the last tool event.
+fn track_open_tools(
+    ev: &AgentEvent,
+    open_tools: &mut std::collections::HashSet<String>,
+    streaming: &mut bool,
+) {
     match ev {
         AgentEvent::ToolCall { id, .. } => {
             open_tools.insert(id.clone());
+            *streaming = false;
         }
         AgentEvent::ToolResult { id, .. } => {
             open_tools.remove(id);
+            *streaming = false;
+        }
+        AgentEvent::TextDelta { text } | AgentEvent::ReasoningDelta { text }
+            if !text.is_empty() =>
+        {
+            *streaming = true;
         }
         _ => {}
     }
@@ -4135,10 +4149,12 @@ async fn run_session(session: Session) {
     let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
     let mut steer_backlog: VecDeque<String> = VecDeque::new();
     let mut steering_open = true;
-    // Immediate steering for agents without a mid-turn steering extension:
-    // a steer cancels the current generation (never a running tool — it
-    // waits for open tools to finish) and the cancelled turn continues as the
-    // steer's prompt in the same session, the way Codex `turn/steer` behaves.
+    // Step-boundary steering for agents without a mid-turn steering
+    // extension: a steer cancels the current generation only between steps
+    // (no tool open, no text or reasoning streamed since the last tool) and
+    // the cancelled turn continues as the steer's prompt in the same session.
+    // A steer that arrives mid-answer waits for the next tool result or the
+    // turn's end, so it never cuts a running tool or a streaming answer.
     let mut preempt_pending = false;
     let mut preempt_sent = false;
     // The prompt (`prompt_seq`) that last showed progress (text, thought,
@@ -4175,6 +4191,7 @@ async fn run_session(session: Session) {
     // ZERON_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
     let mut last_update_at = tokio::time::Instant::now();
     let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut streaming = false;
     // PREVENTION, ahead of all the recovery above: never send a
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
@@ -4250,6 +4267,7 @@ async fn run_session(session: Session) {
                 // The settled prompt's tool calls are over with it; a tool
                 // still reported open would read as an unowned turn.
                 open_tools.clear();
+                streaming = false;
                 starve_deadline = None;
                 prompt_stall_deadline = None;
                 if let Some(id) = current_prompt_id.take() {
@@ -4430,6 +4448,7 @@ async fn run_session(session: Session) {
                     }
                     done_current = false;
                     open_tools.clear();
+                    streaming = false;
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4535,17 +4554,17 @@ async fn run_session(session: Session) {
                     let events =
                         session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
-                        track_open_tools(&ev, &mut open_tools);
+                        track_open_tools(&ev, &mut open_tools, &mut streaming);
                         if !send(&event_tx, ev).await {
                             break 'main;
                         }
                     }
-                    // A waiting steer preempts once no tool is open and the
-                    // agent is generating again.
+                    // A waiting steer preempts at the next step boundary.
                     if preempt_pending
                         && !preempt_sent
                         && turn.is_some()
                         && open_tools.is_empty()
+                        && !streaming
                     {
                         client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                         preempt_sent = true;
@@ -4745,6 +4764,7 @@ async fn run_session(session: Session) {
                     }
                     done_current = false;
                     open_tools.clear();
+                    streaming = false;
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4795,6 +4815,7 @@ async fn run_session(session: Session) {
                     }
                     done_current = false;
                     open_tools.clear();
+                    streaming = false;
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -4872,6 +4893,7 @@ async fn run_session(session: Session) {
                     }
                     done_current = false;
                     open_tools.clear();
+                    streaming = false;
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
@@ -5003,6 +5025,7 @@ async fn run_session(session: Session) {
                         }
                         done_current = false;
                         open_tools.clear();
+                        streaming = false;
                         last_update_at = tokio::time::Instant::now();
                         prompt_seq += 1;
                     current_prompt_id =
@@ -5035,6 +5058,7 @@ async fn run_session(session: Session) {
                         if preempt_pending
                             && !preempt_sent
                             && open_tools.is_empty()
+                            && !streaming
                         {
                             client.notify(
                                 "session/cancel",

@@ -834,6 +834,36 @@ async fn images_sent_mid_turn_ride_the_queued_prompt() {
     assert_eq!(images, ["file:///tmp/one.png", "file:///tmp/two.png"]);
 }
 
+#[tokio::test]
+async fn a_steer_never_cuts_the_streaming_answer() {
+    let fake = FakeOpencode::start().await;
+    let (controls, steer, _token) = controls();
+    let mut stream = harness(&fake)
+        .run(request("hi"), controls)
+        .await
+        .expect("run starts");
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+    assistant_message(&fake, "ses_test", "msg_1");
+    fake.emit(json!({
+        "type": "message.part.updated",
+        "properties": { "part": {
+            "id": "prt_text", "messageID": "msg_1", "sessionID": "ses_test",
+            "type": "text", "text": "half an answer",
+        }},
+    }));
+    let _ = next_event(&mut stream).await;
+    steer.send(SteerMessage::text("then this")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        fake.posts_to("/session/ses_test/abort").is_empty(),
+        "a steer must not abort a streaming answer"
+    );
+    idle(&fake, "ses_test");
+    let prompts = wait_posts(&fake, "/session/ses_test/prompt_async", 2).await;
+    assert_eq!(prompts[1]["parts"][0]["text"], "then this");
+}
+
 /// A model switch reaches the live server: from the next prompt between
 /// turns, and mid-turn from the prompt of the message it was sent with —
 /// never merged into a prompt sent with the previous model.
