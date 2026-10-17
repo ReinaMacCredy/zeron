@@ -1344,6 +1344,10 @@ pub struct AcpHarness {
 }
 
 impl AcpHarness {
+    fn signs_in_from_settings(&self) -> bool {
+        self.spec.auth_method.is_some() || self.spec.id == HarnessId::Acp
+    }
+
     fn note_load_session(&self, init: &Value) {
         *self
             .load_session
@@ -2044,7 +2048,18 @@ impl AcpHarness {
             let cwd = crate::executable::home_or_current_dir();
             let session = client
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
-                .await?;
+                .await
+                .map_err(|error| {
+                    if self.signs_in_from_settings() && is_auth_required(&error) {
+                        crate::catalog_failure::CatalogFailure {
+                            code: crate::catalog_failure::CatalogFailureCode::AuthRequired,
+                            message: not_signed_in(&self.spec.display_name),
+                        }
+                        .into()
+                    } else {
+                        error
+                    }
+                })?;
             let mut models = models_from_session(&session, &(self.spec.models)());
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
@@ -2649,8 +2664,7 @@ impl Harness for AcpHarness {
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint.clone(),
             effort_in_model_id: self.spec.effort_in_model_id,
-            signs_in_from_settings: self.spec.auth_method.is_some()
-                || self.spec.id == HarnessId::Acp,
+            signs_in_from_settings: self.signs_in_from_settings(),
             sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,

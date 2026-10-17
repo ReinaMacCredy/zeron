@@ -1164,6 +1164,49 @@ async fn antigravity_stale_login_stops_background_probes_and_runs() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_signed_out_registry_agent_points_model_discovery_at_settings() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("signed-out-acp");
+    std::fs::write(
+        &server,
+        r#"#!/bin/sh
+while read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{"protocolVersion":1}}\n' "$id" ;;
+    *'"method":"session/new"'*) printf '{"id":%s,"error":{"code":-32000,"message":"Authentication required"}}\n' "$id" ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::generic(zeron_harness::acp::AcpLaunch {
+        display_name: "Kimchi".into(),
+        program: server,
+        args: Vec::new(),
+        env: Default::default(),
+    })
+    .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(10), harness.models())
+        .await
+        .expect("discovery answered")
+        .expect_err("a signed-out agent has no models");
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "Kimchi isn't signed in. Open Settings → Providers → Kimchi and connect an account."
+        ),
+        "{message}"
+    );
+    assert!(!message.contains("-32000"), "{message}");
+}
+
 #[test]
 fn antigravity_descriptor_surface_matches_registry_expectations() {
     let antigravity = AcpHarness::antigravity();
