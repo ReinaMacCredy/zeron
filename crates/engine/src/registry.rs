@@ -849,10 +849,24 @@ impl HarnessRegistry {
         {
             return Ok(harness.clone());
         }
-        let launch = crate::provider_instances::launch_overrides(instance, data_dir)?;
-        let harness = native_instance(instance.driver, launch).map_err(|reason| {
-            crate::EngineError::Other(format!("Provider instance '{}': {reason}", instance.id))
-        })?;
+        let harness: Arc<dyn Harness> = match instance.driver {
+            HarnessId::Acp
+            | HarnessId::Devin
+            | HarnessId::Grok
+            | HarnessId::Hermes
+            | HarnessId::Antigravity => {
+                Arc::new(crate::provider_instances::acp_harness(instance, data_dir)?)
+            }
+            driver => {
+                let launch = crate::provider_instances::launch_overrides(instance, data_dir)?;
+                native_instance(driver, launch).map_err(|reason| {
+                    crate::EngineError::Other(format!(
+                        "Provider instance '{}': {reason}",
+                        instance.id
+                    ))
+                })?
+            }
+        };
         instances.insert(instance.id.clone(), (instance.clone(), harness.clone()));
         Ok(harness)
     }

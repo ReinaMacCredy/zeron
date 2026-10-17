@@ -694,7 +694,7 @@ pub(crate) fn crash_message(
     }
 }
 
-pub use acp::AcpHarness;
+pub use acp::{AcpHarness, AcpLaunch};
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;

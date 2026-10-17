@@ -60,7 +60,8 @@ pub(crate) use crate::process::owned as child;
 use crate::process::{Command, Stdio};
 use crate::scratch::ScratchDir;
 use crate::{
-    CancellationToken, Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child,
+    CancellationToken, Harness, HarnessError, LaunchOverrides, RunControls, Signal, send_signal,
+    shutdown_child,
 };
 use child::Child;
 use normalize::{map_update, parse_commands, preferred_allow_option};
@@ -143,7 +144,7 @@ struct AcpAgentSpec {
     auth_method: Option<String>,
     /// folders of `<skill>/SKILL.md` the agent loads itself but never
     /// advertises, listed as slash commands alongside its own.
-    skill_dirs: fn() -> Vec<PathBuf>,
+    skill_dirs: fn(Option<&Path>) -> Vec<PathBuf>,
     /// advertised commands the picker leaves out.
     hidden_commands: Vec<String>,
     /// A prompt cancelled before it produced anything vanishes from the
@@ -271,7 +272,7 @@ fn grok_spec() -> AcpAgentSpec {
             .into(),
         effort_in_model_id: false,
         auth_method: None,
-        skill_dirs: Vec::new,
+        skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: true,
     }
@@ -350,7 +351,7 @@ fn devin_spec() -> AcpAgentSpec {
         stall_hint: "The agent process is likely wedged.".into(),
         effort_in_model_id: false,
         auth_method: None,
-        skill_dirs: Vec::new,
+        skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
     }
@@ -422,7 +423,7 @@ fn hermes_spec() -> AcpAgentSpec {
         stall_hint: "The agent process is likely wedged.".into(),
         effort_in_model_id: false,
         auth_method: None,
-        skill_dirs: Vec::new,
+        skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
     }
@@ -888,7 +889,12 @@ pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
 /// Shared discovery adds project `.gemini/skills` and `.agents/skills` using
 /// the selected session's cwd.
 pub(crate) fn antigravity_skill_dirs() -> Vec<PathBuf> {
-    antigravity_paths::home()
+    antigravity_skill_dirs_in(None)
+}
+
+fn antigravity_skill_dirs_in(home: Option<&Path>) -> Vec<PathBuf> {
+    home.map(Path::to_path_buf)
+        .map_or_else(antigravity_paths::home, Ok)
         .map(|home| {
             vec![
                 home.join("config").join("skills"),
@@ -1133,7 +1139,48 @@ fn antigravity_spec() -> AcpAgentSpec {
         // the personal oauth method is only the first-run default; sign-in
         // preserves any method already selected in antigravity's settings.
         auth_method: Some("oauth-personal".into()),
-        skill_dirs: antigravity_skill_dirs,
+        skill_dirs: antigravity_skill_dirs_in,
+        hidden_commands: Vec::new(),
+        drops_unstarted_cancelled_prompt: false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpLaunch {
+    pub display_name: String,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+fn generic_spec(display_name: String, executable: String, args: Vec<String>) -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Acp,
+        install_hint: format!(
+            "{executable} (searched PATH and the login shell's PATH; install it or give \
+             the provider's command as an absolute path)"
+        ),
+        display_name,
+        cli_executable: executable.clone(),
+        executable,
+        env_override: None,
+        args,
+        npm_package: None,
+        archive: None,
+        extra_paths: Vec::new,
+        cli_extra_paths: Vec::new,
+        models: Vec::new,
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: Vec::new(),
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: Vec::new(),
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.".into(),
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
     }
@@ -1250,7 +1297,7 @@ enum Launch {
 /// fake agent with [`AcpHarness::with_executable`].
 pub struct AcpHarness {
     spec: AcpAgentSpec,
-    executable: Option<PathBuf>,
+    launch: LaunchOverrides,
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
     sessions_root: Option<PathBuf>,
@@ -1286,7 +1333,7 @@ impl AcpHarness {
     fn with_spec(spec: AcpAgentSpec) -> Self {
         Self {
             spec,
-            executable: None,
+            launch: LaunchOverrides::default(),
             sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
@@ -1324,12 +1371,49 @@ impl AcpHarness {
             .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
     }
 
+    pub fn generic(launch: AcpLaunch) -> Result<Self, HarnessError> {
+        let AcpLaunch {
+            display_name,
+            program,
+            args,
+            env,
+        } = launch;
+        let overrides = LaunchOverrides {
+            env,
+            ..Default::default()
+        };
+        if program.is_absolute() {
+            let executable = program
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return Ok(
+                Self::with_spec(generic_spec(display_name, executable, args)).with_launch(
+                    LaunchOverrides {
+                        executable: Some(program),
+                        ..overrides
+                    },
+                ),
+            );
+        }
+        match program.to_str() {
+            Some(name) if !name.is_empty() && program.components().count() == 1 => Ok(
+                Self::with_spec(generic_spec(display_name, name.to_owned(), args))
+                    .with_launch(overrides),
+            ),
+            _ => Err(HarnessError::NotInstalled(format!(
+                "{display_name}'s command {} is neither a command name on PATH nor an absolute path",
+                program.display()
+            ))),
+        }
+    }
+
     /// sign the agent out with acp `logout`, clearing the credentials its
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
         let (_scratch, mut child, _stderr, sign_in_prompted) =
-            self.spawn_agent(home.as_deref(), false, &[], None).await?;
+            self.spawn_agent(home.as_deref(), false, None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -1398,7 +1482,7 @@ impl AcpHarness {
         let accept_url = move |url: &str| url_filter.is_none_or(|accept| accept(url));
         let (exe, args) = self.resolve_program(false).await?;
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
-            .then(antigravity_paths::home)
+            .then(|| self.gemini_home())
             .transpose()?;
         let configured_method = gemini_home
             .as_ref()
@@ -1409,8 +1493,10 @@ impl AcpHarness {
             .flatten();
         let mut cmd = Command::new(&exe);
         cmd.args(args);
+        cmd.args(&self.launch.args);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
+        self.launch.apply(&mut cmd, None);
         if let Some(home) = std::env::var_os("HOME") {
             cmd.current_dir(home);
         }
@@ -1504,8 +1590,20 @@ impl AcpHarness {
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
-        self.executable = Some(path.into());
+        self.launch.executable = Some(path.into());
         self
+    }
+
+    pub fn with_launch(mut self, launch: LaunchOverrides) -> Self {
+        self.launch = launch;
+        self
+    }
+
+    fn gemini_home(&self) -> Result<PathBuf, HarnessError> {
+        match &self.launch.home {
+            Some(home) => Ok(home.clone()),
+            None => antigravity_paths::home(),
+        }
     }
 
     /// Test seam: tail subagent transcripts from this sessions root instead
@@ -1579,7 +1677,7 @@ impl AcpHarness {
 
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
         let spec_args = self.spec.args.clone();
-        if let Some(p) = &self.executable {
+        if let Some(p) = &self.launch.executable {
             return crate::executable::validate_native_override(p)
                 .map(|program| Launch::Program(program, spec_args));
         }
@@ -1713,7 +1811,6 @@ impl AcpHarness {
         &self,
         cwd: Option<&str>,
         block_on_install: bool,
-        extra_args: &[String],
         _mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<
         (
@@ -1727,15 +1824,16 @@ impl AcpHarness {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
-        cmd.args(extra_args);
+        cmd.args(&self.launch.args);
         child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
+        self.launch.apply(&mut cmd, None);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
         if self.spec.id == HarnessId::Antigravity {
-            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+            cmd.env("GEMINI_HOME", self.gemini_home()?);
             match noop_browser() {
                 Ok(browser) => {
                     cmd.env("BROWSER", browser);
@@ -1794,7 +1892,7 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr, sign_in_prompted) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -1867,7 +1965,7 @@ impl AcpHarness {
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let (_scratch, mut child, stderr_tail, sign_in_prompted) =
-            self.spawn_agent(None, false, &[], None).await?;
+            self.spawn_agent(None, false, None).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -2257,7 +2355,7 @@ impl Harness for AcpHarness {
         // Overrides go through the same validation as `resolve_launch`, so an
         // override that points at nothing reports not-installed instead of an
         // agent that shows up in the composer and then fails to launch.
-        if let Some(p) = &self.executable {
+        if let Some(p) = &self.launch.executable {
             return crate::executable::validate_native_override(p).is_ok();
         }
         if let Some(p) = self.env_override_value() {
@@ -2283,7 +2381,7 @@ impl Harness for AcpHarness {
         }
         // Version checks and updates target the agent CLI when its transport differs.
         if self.spec.executable == self.spec.cli_executable {
-            if let Some(path) = &self.executable {
+            if let Some(path) = &self.launch.executable {
                 return Some(path.clone());
             }
             if let Some(path) = self.env_override_value() {
@@ -2306,7 +2404,7 @@ impl Harness for AcpHarness {
             Launch::Archive { entry, .. } => entry,
         };
         let extra = if self.id() == HarnessId::Antigravity {
-            let root = antigravity_paths::home()?.join("antigravity-acp");
+            let root = self.gemini_home()?.join("antigravity-acp");
             vec![
                 root.join("settings.json"),
                 root.join("oauth_creds.json"),
@@ -2317,7 +2415,7 @@ impl Harness for AcpHarness {
         } else {
             vec![]
         };
-        crate::model_context::context(self.id(), &binary, &extra, &Default::default()).map(Some)
+        crate::model_context::context(self.id(), &binary, &extra, &self.launch).map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
         (self.spec.models)()
@@ -2364,7 +2462,7 @@ impl Harness for AcpHarness {
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
         let (mut skills, commands) = tokio::try_join!(
-            crate::skills::discover(self.id(), cwd, &Default::default()),
+            crate::skills::discover(self.id(), cwd, &self.launch),
             self.workspace_commands
                 .get(cwd, self.discover_commands(Some(cwd))),
         )?;
@@ -2378,7 +2476,7 @@ impl Harness for AcpHarness {
             .get_or_try_init(|| self.discover_commands(None))
             .await
             .cloned();
-        let skills = skill_commands(&(self.spec.skill_dirs)());
+        let skills = skill_commands(&(self.spec.skill_dirs)(self.launch.home.as_deref()));
         let mut commands = match discovered {
             Ok(commands) => commands,
             Err(_) if !skills.is_empty() => Vec::new(),
@@ -2398,7 +2496,7 @@ impl Harness for AcpHarness {
             .workspace_commands
             .get(cwd, self.discover_commands(Some(cwd)))
             .await;
-        let skills = skill_commands(&(self.spec.skill_dirs)());
+        let skills = skill_commands(&(self.spec.skill_dirs)(self.launch.home.as_deref()));
         let mut commands = match discovered {
             Ok(commands) => commands,
             Err(_) if !skills.is_empty() => Vec::new(),
@@ -2419,7 +2517,7 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(Some(&request.cwd), true, &[], request.mcp.as_ref())
+            .spawn_agent(Some(&request.cwd), true, request.mcp.as_ref())
             .await?;
         let stdin = child
             .stdin
@@ -2432,10 +2530,11 @@ impl Harness for AcpHarness {
         let (client, incoming) =
             client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
-        let skills: Vec<String> = skill_commands(&(self.spec.skill_dirs)())
-            .into_iter()
-            .map(|command| command.name)
-            .collect();
+        let skills: Vec<String> =
+            skill_commands(&(self.spec.skill_dirs)(self.launch.home.as_deref()))
+                .into_iter()
+                .map(|command| command.name)
+                .collect();
         let devin_catalog = if self.spec.id == HarnessId::Devin {
             let (exe, _) = self.resolve_program(false).await?;
             Some(DevinCatalog {
@@ -2489,7 +2588,8 @@ impl Harness for AcpHarness {
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint.clone(),
             effort_in_model_id: self.spec.effort_in_model_id,
-            signs_in_from_settings: self.spec.auth_method.is_some(),
+            signs_in_from_settings: self.spec.auth_method.is_some()
+                || self.spec.id == HarnessId::Acp,
             sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,

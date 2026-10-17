@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use zeron_harness::{Harness, LaunchOverrides};
+use zeron_harness::{AcpHarness, AcpLaunch, Harness, LaunchOverrides};
 use zeron_proto::{
-    HarnessId, HomeDir, InstanceConfig, ProviderInstance, ProviderInstancesSnapshot,
+    AcpSource, HarnessId, HomeDir, InstanceConfig, ProviderInstance, ProviderInstancesSnapshot,
     validate_instance_id,
 };
 
@@ -189,8 +189,9 @@ pub(crate) fn launch_overrides(
     } = &instance.config
     else {
         return Err(EngineError::Other(format!(
-            "Provider instance '{}' is an ACP agent, which this engine cannot run yet",
-            instance.id
+            "Provider instance '{}' holds an ACP agent's settings, not {}'s",
+            instance.id,
+            instance.driver.display_name()
         )));
     };
     Ok(LaunchOverrides {
@@ -206,6 +207,63 @@ pub(crate) fn launch_overrides(
         args: launch_args.clone(),
         env: env.clone(),
     })
+}
+
+pub(crate) fn acp_launch(
+    instance: &ProviderInstance,
+    _data_dir: &Path,
+) -> Result<AcpLaunch, EngineError> {
+    let id = &instance.id;
+    let InstanceConfig::Acp { source, env, .. } = &instance.config else {
+        return Err(EngineError::Other(format!(
+            "Provider instance '{id}' has no ACP agent settings"
+        )));
+    };
+    let (program, args) = match source {
+        AcpSource::Local { command, .. } if command.trim().is_empty() => {
+            return Err(EngineError::Other(format!(
+                "Provider instance '{id}' has no command to run"
+            )));
+        }
+        AcpSource::Local { command, args } => (expand(command)?, args.clone()),
+        AcpSource::Registry { agent_id, .. } => {
+            return Err(EngineError::Other(format!(
+                "Provider instance '{id}': the ACP Registry agent '{agent_id}' is not prepared on this device yet"
+            )));
+        }
+    };
+    Ok(AcpLaunch {
+        display_name: instance.label.clone(),
+        program,
+        args,
+        env: env.clone(),
+    })
+}
+
+pub(crate) fn acp_harness(
+    instance: &ProviderInstance,
+    data_dir: &Path,
+) -> Result<AcpHarness, EngineError> {
+    let refuse = |reason: String| {
+        EngineError::Other(format!("Provider instance '{}': {reason}", instance.id))
+    };
+    let name = instance.driver.display_name();
+    let builtin = match instance.driver {
+        HarnessId::Acp => {
+            return AcpHarness::generic(acp_launch(instance, data_dir)?)
+                .map_err(|error| refuse(error.to_string()));
+        }
+        HarnessId::Devin => AcpHarness::devin(),
+        HarnessId::Grok => AcpHarness::grok(),
+        HarnessId::Hermes => AcpHarness::hermes(),
+        HarnessId::Antigravity => AcpHarness::antigravity(),
+        _ => return Err(refuse(format!("{name} is not an ACP agent"))),
+    };
+    let launch = launch_overrides(instance, data_dir)?;
+    if launch.home.is_some() && instance.driver != HarnessId::Antigravity {
+        return Err(refuse(format!("{name} instances take no home directory")));
+    }
+    Ok(builtin.with_launch(launch))
 }
 
 pub(crate) fn provider_home(
@@ -377,13 +435,27 @@ mod tests {
     }
 
     #[test]
-    fn drivers_without_native_instances_and_cursor_binaries_are_refused() {
+    fn acp_drivers_refuse_a_home_except_antigravity_and_cursor_refuses_a_binary() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderInstancesStore::open(temp.path()).unwrap();
         let registry = HarnessRegistry::new();
         store
             .upsert(instance("grok_work", HarnessId::Grok))
             .unwrap();
+        store
+            .upsert(instance("devin_work", HarnessId::Devin))
+            .unwrap();
+        store
+            .upsert(instance("antigravity_work", HarnessId::Antigravity))
+            .unwrap();
+        let mut grok_env = instance("grok_env", HarnessId::Grok);
+        grok_env.config = InstanceConfig::Native {
+            executable: None,
+            home_dir: None,
+            launch_args: vec!["--verbose".into()],
+            env: [("GROK_API_KEY".into(), "key".into())].into(),
+        };
+        store.upsert(grok_env).unwrap();
         let mut cursor = instance("cursor_work", HarnessId::Cursor);
         cursor.config = InstanceConfig::Native {
             executable: Some("/usr/local/bin/cursor-agent".into()),
@@ -402,13 +474,125 @@ mod tests {
         store.upsert(cursor_env).unwrap();
         for (driver, id) in [
             (HarnessId::Grok, "grok_work"),
-            (HarnessId::Cursor, "cursor_work"),
+            (HarnessId::Devin, "devin_work"),
         ] {
-            assert!(store.resolve(&registry, driver, id).is_err(), "{id}");
+            let error = store.resolve(&registry, driver, id).err().unwrap();
+            assert!(
+                error.to_string().contains("take no home directory"),
+                "{id}: {error}"
+            );
         }
+        assert!(
+            store
+                .resolve(&registry, HarnessId::Cursor, "cursor_work")
+                .is_err()
+        );
         store
             .resolve(&registry, HarnessId::Cursor, "cursor_env")
             .unwrap();
+        let grok = store
+            .resolve(&registry, HarnessId::Grok, "grok_env")
+            .unwrap();
+        assert_eq!(grok.id(), HarnessId::Grok);
+        store
+            .resolve(&registry, HarnessId::Antigravity, "antigravity_work")
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn fake_acp_agent(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-agent");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf 'args=%s count=%s\n' "$*" "$#" >> "$FAKE_AGENT_RECORD"
+emit() { printf '%s\n' "$1"; }
+rid() { printf '%s' "$1" | sed 's/.*"id":\([0-9]*\).*/\1/'; }
+has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+while read -r line; do
+  has "$line" '"id":' || continue
+  id=$(rid "$line")
+  if has "$line" '"method":"initialize"'; then
+    emit "{\"id\":$id,\"result\":{\"protocolVersion\":1,\"authMethods\":[{\"id\":\"browser\",\"name\":\"Log in\",\"description\":\"Opens a browser\"},{\"id\":\"setup\",\"name\":\"Run setup\",\"type\":\"terminal\",\"args\":[\"--setup\"]}]}}"
+  elif has "$line" '"method":"session/new"'; then
+    emit "{\"id\":$id,\"result\":{\"sessionId\":\"s\",\"configOptions\":[{\"id\":\"model\",\"name\":\"Model\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":\"m1\",\"options\":[{\"value\":\"m1\",\"name\":\"Model One\"}]}]}}"
+  elif has "$line" '"method":"authenticate"'; then
+    printf 'authenticate=%s\n' "$line" >> "$FAKE_AGENT_RECORD"
+    printf 'Visit https://agent.example/login?code=1\n' >&2
+    emit "{\"id\":$id,\"result\":{}}"
+  else
+    emit "{\"id\":$id,\"result\":{}}"
+  fi
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    fn local_acp_instance(id: &str, command: &Path, record: &Path) -> ProviderInstance {
+        ProviderInstance {
+            id: id.into(),
+            driver: HarnessId::Acp,
+            label: "My Agent".into(),
+            accent: None,
+            config: InstanceConfig::Acp {
+                source: AcpSource::Local {
+                    command: command.display().to_string(),
+                    args: vec!["--acp".into(), "two words".into()],
+                },
+                env: [("FAKE_AGENT_RECORD".into(), record.display().to_string())].into(),
+                icon_path: None,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_acp_instance_runs_its_command_with_its_args_and_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderInstancesStore::open(temp.path()).unwrap();
+        let registry = HarnessRegistry::new();
+        let record = temp.path().join("record");
+        let agent = fake_acp_agent(temp.path());
+        store
+            .upsert(local_acp_instance("acp_local", &agent, &record))
+            .unwrap();
+        let harness = store
+            .resolve(&registry, HarnessId::Acp, "acp_local")
+            .unwrap();
+        assert_eq!(harness.id(), HarnessId::Acp);
+        assert_eq!(harness.display_name(), "My Agent");
+        assert!(harness.installed());
+        let models = harness.models().await.unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
+            ["Model One"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            "args=--acp two words count=2\n"
+        );
+
+        let mut registry_agent = local_acp_instance("acp_registry", &agent, &record);
+        registry_agent.config = InstanceConfig::Acp {
+            source: AcpSource::Registry {
+                agent_id: "gemini".into(),
+                version: "0.1.0".into(),
+                distribution: AcpDistribution::Npx,
+            },
+            env: Default::default(),
+            icon_path: None,
+        };
+        store.upsert(registry_agent).unwrap();
+        let error = store
+            .resolve(&registry, HarnessId::Acp, "acp_registry")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("not prepared"), "{error}");
     }
 
     #[test]
