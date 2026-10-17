@@ -1,0 +1,7 @@
+{
+  "name": "zeron-browser-annotate",
+  "private": true,
+  "dependencies": {
+    "react-grab": "0.1.32"
+  }
+}

@@ -67,46 +67,45 @@ mod host {
     use gpui::Context;
     use serde::Deserialize;
 
-    const SPIKE: &str = r#"(() => {
-  const g = globalThis;
-  if (!g.__zeronAnnotate) {
-    let done = null, box = null, off = null;
-    const finish = (value) => { off?.(); off = null; const d = done; done = null; d?.(JSON.stringify(value)); };
-    g.__zeronAnnotate = {
-      start() {
-        finish(null);
-        return new Promise((resolve) => {
-          done = resolve;
-          const down = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const target = document.elementFromPoint(event.clientX, event.clientY);
-            if (!target) return;
-            const r = target.getBoundingClientRect();
-            box = document.createElement("div");
-            box.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;border:2px solid #2563eb;box-sizing:border-box;pointer-events:none;z-index:2147483646`;
-            document.documentElement.appendChild(box);
-            const x = Math.max(0, r.left - 20), y = Math.max(0, r.top - 20);
-            finish({
-              annotation: { pageUrl: location.href, pageTitle: document.title || null, comment: "" },
-              cropRect: { x, y, width: Math.min(innerWidth - x, r.width + 40), height: Math.min(innerHeight - y, r.height + 40) },
-              submission: "attach",
-            });
-          };
-          window.addEventListener("pointerdown", down, true);
-          off = () => window.removeEventListener("pointerdown", down, true);
-        });
-      },
-      cancel() { finish(null); this.teardown(); },
-      teardown() { box?.remove(); box = null; },
-    };
-  }
-  return g.__zeronAnnotate.start();
-})()"#;
-    const CANCEL: &str =
-        "(() => { globalThis.__zeronAnnotate?.cancel(); return JSON.stringify(null); })()";
+    const BUNDLE: &str = include_str!("annotate.generated.js");
     const TEARDOWN: &str =
         "(() => { globalThis.__zeronAnnotate?.teardown(); return JSON.stringify(null); })()";
+
+    fn start_script(theme: &crate::theme::Theme) -> String {
+        let css = |color: gpui::Hsla| {
+            let c = gpui::Rgba::from(color);
+            format!(
+                "rgba({}, {}, {}, {})",
+                (c.r * 255.0).round(),
+                (c.g * 255.0).round(),
+                (c.b * 255.0).round(),
+                c.a
+            )
+        };
+        let opaque = |color: gpui::Hsla| css(gpui::Hsla { a: 1.0, ..color });
+        let theme = serde_json::json!({
+            "colorScheme": if theme.appearance.is_dark() { "dark" } else { "light" },
+            "radius": "10px",
+            "background": opaque(theme.bg),
+            "foreground": css(theme.text),
+            "popover": opaque(theme.surface_dialog),
+            "popoverForeground": css(theme.text),
+            "primary": opaque(theme.accent),
+            "primaryForeground": css(theme.on_accent),
+            "muted": css(theme.element_hover),
+            "mutedForeground": css(theme.text_muted),
+            "accent": css(theme.element_active),
+            "accentForeground": css(theme.text),
+            "border": css(theme.border),
+            "input": css(theme.border_strong),
+            "ring": opaque(theme.accent),
+            "fontSans": "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+            "fontMono": "ui-monospace, \"SF Mono\", Menlo, monospace",
+        });
+        format!(
+            "(() => {{ if (!globalThis.__zeronAnnotate) {{ {BUNDLE} }} return globalThis.__zeronAnnotate.start({theme}); }})()"
+        )
+    }
 
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -159,7 +158,7 @@ mod host {
             let Some(native) = &self.native else {
                 return;
             };
-            let picked = native.automation_eval(SPIKE, true);
+            let picked = native.automation_eval(&start_script(crate::theme::Theme::of(cx)), true);
             native.focus_page();
             let was_paused = self.control.paused;
             self.take_over(cx);
@@ -209,7 +208,7 @@ mod host {
                 return;
             }
             if let Some(native) = &self.native {
-                drop(native.automation_eval(CANCEL, true));
+                drop(native.automation_eval(TEARDOWN, true));
             }
             self.annotation_task = None;
             self.end_annotation(cx);
@@ -274,24 +273,60 @@ mod host {
                 tracing::info!("annotate-demo: idle");
                 wait(6000).await;
                 let _ = this.update(cx, |this, cx| this.start_annotation(cx));
-                wait(1000).await;
-                let _ = this.update(cx, |this, _| {
-                    if let Some(native) = &this.native {
-                        drop(native.automation_eval(DEMO_PICK, true));
-                    }
-                });
-                tracing::info!("annotate-demo: picked");
+                for (label, script) in DEMO_STEPS {
+                    wait(1500).await;
+                    let _ = this.update(cx, |this, _| {
+                        if let Some(native) = &this.native {
+                            drop(native.automation_eval(script, true));
+                        }
+                    });
+                    tracing::info!("annotate-demo: {label}");
+                    wait(6000).await;
+                }
             })
             .detach();
         }
     }
 
-    const DEMO_PICK: &str = r#"(() => {
+    const DEMO_STEPS: [(&str, &str); 3] = [
+        (
+            "overlay",
+            r##"(() => {
   const target = document.querySelector("[data-annotate-demo]");
   const r = target.getBoundingClientRect();
-  target.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true, button: 0, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+  const at = { bubbles: true, composed: true, button: 0, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+  target.dispatchEvent(new PointerEvent("pointermove", at));
+  target.dispatchEvent(new PointerEvent("pointerdown", at));
+  target.dispatchEvent(new PointerEvent("pointerup", at));
+  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
+  const comment = ui.querySelector("textarea");
+  comment.value = "Make this the primary call to action";
+  comment.dispatchEvent(new Event("input", { bubbles: true }));
+  const next = document.querySelector("#share").getBoundingClientRect();
+  document.querySelector("#share").dispatchEvent(new PointerEvent("pointermove", { ...at, clientX: next.left + 10, clientY: next.top + 10 }));
   return JSON.stringify(null);
-})()"#;
+})()"##,
+        ),
+        (
+            "styled",
+            r##"(() => {
+  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
+  ui.querySelector('[aria-label="Expand annotation editor"]').click();
+  const size = [...ui.querySelectorAll("label")].find((label) => label.textContent.startsWith("Font size")).querySelector("input");
+  size.value = "20";
+  size.dispatchEvent(new Event("input", { bubbles: true }));
+  return JSON.stringify(null);
+})()"##,
+        ),
+        (
+            "attached",
+            r##"(() => {
+  const ui = [...document.documentElement.children].find((node) => node.shadowRoot).shadowRoot;
+  [...ui.querySelectorAll("button")].find((button) => button.textContent === "Attach").click();
+  return JSON.stringify(null);
+})()"##,
+        ),
+    ];
 }
 
 #[cfg(test)]
