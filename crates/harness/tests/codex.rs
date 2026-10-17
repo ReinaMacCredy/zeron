@@ -1559,6 +1559,68 @@ async fn compact_that_never_answers_settles_through_the_interrupt() {
     );
 }
 
+async fn retire_writer(harness: &CodexHarness, cwd: &std::path::Path) -> RunRequest {
+    let mut req = request("scenario:writer");
+    req.cwd = cwd.display().to_string();
+    req.resume = Some("writer".into());
+    let (controls, _steer, token) = controls("Yes");
+    let mut stream = harness.run(req.clone(), controls).await.unwrap();
+    let mut settled = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::Done { status, .. } = event.unwrap() {
+                settled.push(status);
+                if settled.len() == 2 {
+                    break;
+                }
+                token.cancel();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(settled, [DoneStatus::Completed, DoneStatus::Interrupted]);
+    req
+}
+
+#[tokio::test]
+async fn a_run_after_a_retired_one_resumes_its_thread_once_the_old_server_exits() {
+    let temp = tempfile::tempdir().unwrap();
+    let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
+    let req = retire_writer(&harness, temp.path()).await;
+    let (controls, _steer, _token) = controls("Yes");
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let started = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let AgentEvent::SessionStarted { session_id, .. } =
+                stream.next().await.unwrap().unwrap()
+            {
+                break session_id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        started, "writer",
+        "the conversation's thread, not a fresh one"
+    );
+}
+
+#[tokio::test]
+async fn compaction_after_a_retired_run_waits_for_the_old_server_to_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
+    let mut req = retire_writer(&harness, temp.path()).await;
+    req.prompt = String::new();
+    let (controls, _steer, _token) = controls("Yes");
+    let events = collect_until_done(harness.compact(req, controls).await.unwrap()).await;
+    assert!(
+        matches!(events.first(), Some(AgentEvent::Compacted { .. })),
+        "{events:?}"
+    );
+}
+
 /// Live smoke against the real CLI: `cargo test -p zeron-harness --test
 /// codex -- --ignored live_skills`.
 #[tokio::test]
