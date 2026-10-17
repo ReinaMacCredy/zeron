@@ -3,8 +3,8 @@ use super::*;
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
 use crate::agent_profiles::{
-    ProfileWrite, brand_badge, char_count, draft_summary, expand_toggle, folded_row, in_pairs,
-    mode_label, summary,
+    ProfileWrite, brand_badge, draft_summary, expand_toggle, folded_row, in_pairs, mode_label,
+    summary, token_count,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1418,7 +1418,7 @@ impl Pickers {
             label("When to use")
                 .flex()
                 .child(div().flex_1())
-                .child(char_count(
+                .child(token_count(
                     notes.read(cx).text(),
                     zeron_engine::agent_profiles::MAX_AGENT_PROFILE_NOTES_CHARS,
                 ))

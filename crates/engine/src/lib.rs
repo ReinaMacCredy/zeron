@@ -93,6 +93,7 @@ pub use source_control::{
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
+pub use token_rate::estimated_tokens;
 pub use uploads::{AttachmentChunk, Uploads};
 pub use workspace_files::WorkspaceFiles;
 pub use workspace_host::{
