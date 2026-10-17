@@ -19,6 +19,7 @@
 use super::terminal_tabs::{is_terminal_tab, keep_terminal_tab};
 use super::*;
 use crate::terminal::panel::{drop_index, reorder_tabs, slide_offset};
+use crate::theme::InsetTones;
 use zeron_proto::ChatIndicator;
 
 const RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH: f32 = 8.0 + 4.0 + 4.0 + 28.0;
@@ -219,6 +220,29 @@ fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
         .into_any_element()
 }
 
+/// On the inset shell a selected tab wears the card body with an inset
+/// half-point edge (Synara); the flush shell keeps the glass ring.
+fn selected_shadows(tones: Option<InsetTones>) -> Vec<gpui::BoxShadow> {
+    let Some(tones) = tones else {
+        return crate::theme::glass_selected_shadows();
+    };
+    vec![gpui::BoxShadow {
+        color: tones.edge,
+        offset: gpui::point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.5),
+        inset: true,
+    }]
+}
+
+fn tab_grip(theme: &Theme) -> AnyElement {
+    icon(icons::DRAG_HANDLE)
+        .size(px(14.0))
+        .flex_none()
+        .text_color(theme.text_muted)
+        .into_any_element()
+}
+
 /// The split's double chip: both sessions in one selected pill, left half
 /// for the left pane. A half clicks, hovers a close, drags (into the drop
 /// zones or along the strip) and middle-closes like a tab; the pane header
@@ -233,6 +257,7 @@ fn split_tab_chip(
     ); 2],
     selected: Option<&str>,
     hovered: Option<&str>,
+    tones: Option<InsetTones>,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<gpui::Div> {
@@ -250,10 +275,13 @@ fn split_tab_chip(
         .rounded(px(8.0))
         .text_size(px(12.0))
         .when(active, |el| {
-            el.bg(crate::theme::glass_selected_bg())
-                .shadow(crate::theme::glass_selected_shadows())
+            el.bg(tones.map_or_else(crate::theme::glass_selected_bg, |tones| tones.body))
+                .shadow(selected_shadows(tones))
         })
-        .when(!active, |el| el.hover(|s| s.bg(theme.glass_hover())))
+        .when(!active, |el| {
+            let wash = tones.map_or_else(|| theme.glass_hover(), |tones| tones.wash);
+            el.hover(move |s| s.bg(wash))
+        })
         .block_mouse_except_scroll()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());
     for (n, (id, title, harness, status)) in halves.into_iter().enumerate() {
@@ -267,14 +295,9 @@ fn split_tab_chip(
             );
         }
         let is_primary = selected == Some(id.as_str());
+        let half_hovered = hovered == Some(id.as_str());
         let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
-        let trailing = tab_trailing(
-            &id,
-            status,
-            is_primary || hovered == Some(id.as_str()),
-            theme,
-            cx,
-        );
+        let trailing = tab_trailing(&id, status, is_primary || half_hovered, theme, cx);
         let select_id = id.clone();
         let middle_id = id.clone();
         let menu_id = id.clone();
@@ -293,12 +316,12 @@ fn split_tab_chip(
                 .pl(px(10.0))
                 .pr(px(4.0))
                 .rounded(px(8.0))
-                .text_color(if is_primary {
+                .text_color(if is_primary || half_hovered {
                     theme.text
                 } else if active {
                     theme.text.opacity(0.7)
                 } else {
-                    theme.text_muted.opacity(0.6)
+                    theme.text_muted
                 })
                 .cursor_pointer()
                 // Per-half hover in Shell state, like a tab's: the trailing
@@ -357,6 +380,7 @@ fn split_tab_chip(
                         None if status == ChatIndicator::Working => {
                             el.child(tab_spinner(&id, theme, cx))
                         }
+                        None if half_hovered && !harness.is_empty() => el.child(tab_grip(theme)),
                         None => el.when(!harness.is_empty(), |el| {
                             let selector = format!("session-tab-harness-{id}");
                             el.child(
@@ -1149,6 +1173,7 @@ impl Shell {
     /// the titlebar row leaves it.
     fn render_session_tabs(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let tones = self.settings.inset_shell.then(|| theme.inset_tones());
         let now = Utc::now();
         // A drag that ended off-strip (no drop event) must not strand the
         // sibling slide offsets.
@@ -1289,6 +1314,7 @@ impl Shell {
                                 }),
                                 selected.as_deref(),
                                 hovered.as_deref(),
+                                tones,
                                 &theme,
                                 cx,
                             );
@@ -1303,28 +1329,16 @@ impl Shell {
                     // Hover state lives in Shell (the trailing slot swaps dot ↔
                     // close), so the wash snaps off it too — gpui allows only one
                     // `on_hover` per element, and the state listener wins.
-                    let terminal = terminals
-                        .get(&id)
-                        .map(|row| (row.launch.brand(), row.exited));
-                    let dim = match terminal {
-                        Some((_, exited)) => exited,
-                        None => !is_draft && status == ChatIndicator::Idle,
+                    let terminal = terminals.get(&id).map(|row| row.launch.brand());
+                    let (text_color, bg) = match (is_selected, is_hovered, tones) {
+                        (true, _, Some(tones)) => (theme.text, tones.body),
+                        (true, _, None) => (theme.text, crate::theme::glass_selected_bg()),
+                        (false, true, Some(tones)) => (theme.text, tones.wash),
+                        (false, true, None) => (theme.text, theme.glass_hover()),
+                        (false, false, _) => (theme.text_muted, crate::theme::wash(0.0)),
                     };
-                    let (text_color, bg) = if is_selected {
-                        (theme.text, crate::theme::glass_selected_bg())
-                    } else if is_hovered {
-                        (theme.text_muted.opacity(0.8), theme.glass_hover())
-                    } else if dim {
-                        (theme.text_muted.opacity(0.35), crate::theme::wash(0.0))
-                    } else {
-                        (theme.text_muted.opacity(0.6), crate::theme::wash(0.0))
-                    };
-                    let glyph_alpha = match (is_selected, dim && !is_hovered) {
-                        (true, _) => 0.9,
-                        (false, true) => 0.35,
-                        (false, false) => 0.6,
-                    };
-                    let brand = terminal.map(|(brand, _)| brand).or_else(|| {
+                    let glyph_alpha = 0.9;
+                    let brand = terminal.or_else(|| {
                         harness
                             .last()
                             .copied()
@@ -1351,9 +1365,7 @@ impl Shell {
                         .text_size(px(12.0))
                         .text_color(text_color)
                         .bg(bg)
-                        .when(is_selected, |el| {
-                            el.shadow(crate::theme::glass_selected_shadows())
-                        })
+                        .when(is_selected, |el| el.shadow(selected_shadows(tones)))
                         .cursor_pointer()
                         // Tabs sit inside the titlebar drag strip — carve them out.
                         // NOT `.occlude()`: a BlockMouse hitbox ends the hit test,
@@ -1409,12 +1421,15 @@ impl Shell {
                                 cx.new(|_| TabGhost { title, brand })
                             },
                         )
-                        .when_some(terminal, |el, ((path, tint), _)| {
+                        .when_some(terminal.filter(|_| !is_hovered), |el, (path, tint)| {
                             el.child(
                                 icon(path).size(px(14.0)).flex_none().text_color(
                                     tint.unwrap_or(theme.text_muted).opacity(glyph_alpha),
                                 ),
                             )
+                        })
+                        .when(terminal.is_some() && is_hovered, |el| {
+                            el.child(tab_grip(&theme))
                         })
                         .when(terminal.is_none(), |el| {
                             el.map(|el| {
@@ -1429,6 +1444,9 @@ impl Shell {
                                     Some(glyph) => el.child(glyph),
                                     None if status == ChatIndicator::Working => {
                                         el.child(tab_spinner(&id, &theme, cx))
+                                    }
+                                    None if is_hovered && !harness.is_empty() => {
+                                        el.child(tab_grip(&theme))
                                     }
                                     None => el.when(!harness.is_empty(), |el| {
                                         let selector = format!("session-tab-harness-{id}");
