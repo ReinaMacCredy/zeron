@@ -470,10 +470,12 @@ impl TaskCard {
         let today = Self::today();
         let due_on = row.and_then(|row| row.task.due_on.clone());
         let pick = logic::due_pick(due_on.as_deref(), today);
-        let calendar = || {
+        let muted = theme.text_muted;
+        let calendar = move || {
             icon(icons::CALENDAR)
                 .size(px(14.0))
                 .flex_none()
+                .text_color(muted)
                 .into_any_element()
         };
         let mut due_options = vec![
@@ -528,10 +530,12 @@ impl TaskCard {
             .iter()
             .map(|space| (space.id.clone(), space.display_name().to_string()))
             .collect();
-        let folder = || {
+        let muted = theme.text_muted;
+        let folder = move || {
             icon(icons::LUCIDE_FOLDER)
                 .size(px(14.0))
                 .flex_none()
+                .text_color(muted)
                 .into_any_element()
         };
         let selected_space = row
@@ -570,7 +574,11 @@ impl TaskCard {
 
         let more = Self::pill(theme, "task-card-more")
             .aria_label("More options")
-            .child(icon(icons::LUCIDE_ELLIPSIS).size(px(14.0)))
+            .child(
+                icon(icons::LUCIDE_ELLIPSIS)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.toggle_more(cx)));
         div()
             .flex()
@@ -615,10 +623,12 @@ impl TaskCard {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or(path)
             });
-        let folder = || {
+        let muted = theme.text_muted;
+        let folder = move || {
             icon(icons::LUCIDE_FOLDER)
                 .size(px(14.0))
                 .flex_none()
+                .text_color(muted)
                 .into_any_element()
         };
         let mut options: Vec<widgets::SelectOption> =
@@ -902,7 +912,11 @@ impl TaskCard {
             .role(gpui::Role::Button)
             .aria_label("Delete task")
             .rounded_full()
-            .child(icon(icons::TRASH_BIN_MINIMALISTIC).size(px(14.0)))
+            .child(
+                icon(icons::TRASH_BIN_MINIMALISTIC)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
             .child("Delete")
             .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
                 if let Some(open) = card.open.as_mut() {
