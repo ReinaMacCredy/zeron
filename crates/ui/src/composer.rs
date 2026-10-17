@@ -11485,6 +11485,7 @@ impl Composer {
             && let Some(config) = self.bound_chat_row(cx).and_then(|chat| chat.config.clone())
         {
             resolved.harness = Some(config.harness);
+            resolved.instance_id = config.instance_id;
             resolved.model = config.model;
             resolved.reasoning = config.reasoning;
             resolved.model_options = config.model_options;

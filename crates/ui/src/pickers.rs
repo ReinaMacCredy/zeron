@@ -31,7 +31,7 @@ use zeron_doc::MessageRole;
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
 use zeron_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, ModelOption, ModelOptionChoice,
-    PermissionMode, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    PermissionMode, ProviderInstance, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
 
@@ -190,6 +190,7 @@ pub fn bump_harness_catalog(cx: &mut App) {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DraftConfig {
     pub harness: Option<HarnessId>,
+    pub instance_id: Option<String>,
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     /// The picked ref (base branch in NewWorktree mode; a worktree's branch
@@ -239,6 +240,7 @@ pub enum CheckoutPlan {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedRunConfig {
     pub harness: Option<HarnessId>,
+    pub instance_id: Option<String>,
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
@@ -260,7 +262,7 @@ impl ResolvedRunConfig {
             permission_mode: self.permission_mode,
             instructions: self.instructions.clone(),
             profile_id: self.profile_id.clone(),
-            instance_id: None,
+            instance_id: self.instance_id.clone(),
             disabled_tools: self.disabled_tools.clone(),
         })
     }
@@ -747,6 +749,8 @@ struct ModelRowsKey {
     rail: ModelRail,
     viewed: Option<HarnessId>,
     effective: Option<HarnessId>,
+    viewed_instance: Option<String>,
+    effective_instance: Option<String>,
     catalog_rev: u64,
     selected: Option<String>,
 }
@@ -757,6 +761,7 @@ struct ModelRowsKey {
 #[derive(Debug, Clone)]
 struct ModelRowData {
     harness: HarnessId,
+    instance: Option<String>,
     harness_name: SharedString,
     model: Model,
     selected_only: bool,
@@ -767,14 +772,13 @@ struct ModelRowData {
 
 /// Flag rows whose label another listed row of the same harness shares.
 fn mark_ambiguous(rows: &mut [ModelRowData]) {
-    let mut labels: HashMap<(HarnessId, String), usize> = HashMap::new();
+    let mut labels: HashMap<(HarnessId, Option<String>, String), usize> = HashMap::new();
+    let key = |row: &ModelRowData| (row.harness, row.instance.clone(), row.model.label.clone());
     for row in rows.iter() {
-        *labels
-            .entry((row.harness, row.model.label.clone()))
-            .or_default() += 1;
+        *labels.entry(key(row)).or_default() += 1;
     }
     for row in rows.iter_mut() {
-        row.ambiguous = labels[&(row.harness, row.model.label.clone())] > 1;
+        row.ambiguous = labels[&key(row)] > 1;
     }
 }
 
@@ -1027,6 +1031,7 @@ struct PendingModelSwitch {
     from: String,
     to: String,
     harness: Option<HarnessId>,
+    instance: Option<String>,
     profile: Option<profiles::ProfilePick>,
 }
 
@@ -1054,18 +1059,14 @@ fn switch_warning(harness: Option<HarnessId>, to: &str) -> String {
 /// The switch-provider dialog's body: the chat's session belongs to the
 /// harness that produced it, so the new one starts fresh with the
 /// conversation handed over as text.
-fn provider_switch_warning(from: HarnessId, to: HarnessId) -> String {
-    let from = harness_display_name(from);
-    let to = harness_display_name(to);
+fn provider_switch_warning(from: &str, to: &str) -> String {
     format!(
         "{to} has never seen this chat. The {from} session is closed; on your next message the conversation so far is handed to {to} as plain text. Tool results, open files and {from}'s cache are not carried over."
     )
 }
 
 /// The transcript divider's hover hint after a provider switch.
-fn provider_switch_hint(from: HarnessId, to: HarnessId) -> String {
-    let from = harness_display_name(from);
-    let to = harness_display_name(to);
+fn provider_switch_hint(from: &str, to: &str) -> String {
     format!(
         "{from} session closed. The messages above were handed to {to} as text on the next turn; {from}'s tool results and file state were not carried."
     )
@@ -1240,6 +1241,11 @@ pub struct Pickers {
     /// The harness tab an existing chat's picker is browsing: only the model
     /// list follows it; the chat's harness changes on a confirmed pick.
     viewed_harness: Option<HarnessId>,
+    viewed_instance: Option<String>,
+    instances: Vec<ProviderInstance>,
+    instance_models: HashMap<String, Loadable<Vec<Model>>>,
+    instances_task: Option<Task<()>>,
+    _instances_observe: Subscription,
     stats_chip: Entity<crate::session_stats::StatsChip>,
     _search_events: Subscription,
     _state_observe: Subscription,
@@ -1443,6 +1449,9 @@ impl Pickers {
                 this.stale_models = this.models.keys().copied().collect();
                 this.revalidating.clear();
                 this.model_refresh_errors.clear();
+                this.instances.clear();
+                this.instance_models.clear();
+                this.instances_task = None;
                 this.catalog_rev += 1;
             }
             cx.notify();
@@ -1454,6 +1463,10 @@ impl Pickers {
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
+        let instances_observe = cx
+            .observe_global::<crate::provider_instances::ProviderInstancesChanged>(
+                |this: &mut Self, cx| this.load_instances(cx),
+            );
         let profiles_observe = cx.observe_global::<crate::agent_profiles::AgentProfilesChanged>(
             |this: &mut Self, cx| {
                 if !matches!(this.profiles, Loadable::Idle) {
@@ -1593,6 +1606,11 @@ impl Pickers {
             mutate_task: None,
             pending_model_switch: None,
             viewed_harness: None,
+            viewed_instance: None,
+            instances: Vec::new(),
+            instance_models: HashMap::new(),
+            instances_task: None,
+            _instances_observe: instances_observe,
             stats_chip: cx.new(crate::session_stats::StatsChip::new),
             _search_events: search_events,
             _state_observe: state_observe,
@@ -1698,6 +1716,140 @@ impl Pickers {
     /// existing chat, else the effective harness.
     fn rail_harness(&self, cx: &App) -> Option<HarnessId> {
         self.viewed_harness.or_else(|| self.effective_harness(cx))
+    }
+
+    fn rail_instance(&self, cx: &App) -> Option<String> {
+        match self.viewed_harness {
+            Some(_) => self.viewed_instance.clone(),
+            None => self.effective_instance(cx),
+        }
+    }
+
+    fn effective_instance(&self, cx: &App) -> Option<String> {
+        if self.config.harness.is_some() {
+            return self.config.instance_id.clone();
+        }
+        if self.title.is_some() {
+            return None;
+        }
+        self.chat_row(cx)
+            .and_then(|chat| chat.config.as_ref())
+            .and_then(|config| config.instance_id.clone())
+    }
+
+    fn catalog(&self, harness: HarnessId, instance: Option<&str>) -> Option<&Loadable<Vec<Model>>> {
+        match instance {
+            Some(id) => self.instance_models.get(id),
+            None => self.models.get(&harness),
+        }
+    }
+
+    fn provider_label(&self, harness: HarnessId, instance: Option<&str>) -> String {
+        instance
+            .and_then(|id| self.instances.iter().find(|i| i.id == id))
+            .map(|instance| instance.label.clone())
+            .unwrap_or_else(|| harness_display_name(harness).to_string())
+    }
+
+    fn instance_sources(&self, cx: &App) -> Vec<ProviderInstance> {
+        if self.title.is_some() {
+            return Vec::new();
+        }
+        let descriptors = self.rail_descriptors(cx);
+        self.instances
+            .iter()
+            .filter(|instance| {
+                matches!(instance.config, zeron_proto::InstanceConfig::Native { .. })
+                    && descriptors.iter().any(|d| d.id == instance.driver)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn load_instances(&mut self, cx: &mut Context<Self>) {
+        if self.title.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let target = self.space_target(cx).map(serde_json::Value::String);
+        let generation = self.target_generation;
+        self.instances_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(instances) = crate::provider_instances::list(&engine, target).await else {
+                return;
+            };
+            this.update(cx, |pickers, cx| {
+                if pickers.target_generation != generation {
+                    return;
+                }
+                let previous = std::mem::take(&mut pickers.instances);
+                pickers.instance_models.retain(|id, _| {
+                    instances
+                        .iter()
+                        .any(|i| &i.id == id && previous.contains(i))
+                });
+                pickers.instances = instances;
+                pickers.catalog_rev += 1;
+                pickers.prefetch_models(false, cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn ensure_instance_models(&mut self, id: &str, force: bool, cx: &mut Context<Self>) {
+        let reload = match self.instance_models.get(id) {
+            None | Some(Loadable::Idle) => true,
+            Some(Loadable::Loading) => false,
+            Some(_) => force,
+        };
+        let Some(harness) = self.instances.iter().find(|i| i.id == id).map(|i| i.driver) else {
+            return;
+        };
+        let Some(engine) = self.engine(cx).filter(|_| reload) else {
+            return;
+        };
+        let target = self.space_target(cx);
+        let generation = self.target_generation;
+        let id = id.to_string();
+        if !matches!(self.instance_models.get(&id), Some(Loadable::Ready(_))) {
+            self.instance_models.insert(id.clone(), Loadable::Loading);
+            self.catalog_rev += 1;
+        }
+        cx.spawn(async move |this, cx| {
+            let mut params =
+                serde_json::json!({ "harness": harness, "instanceId": id, "force": force });
+            if let Some(target) = target {
+                params["targetDeviceId"] = serde_json::Value::String(target);
+            }
+            let result = engine.client().call(methods::LIST_MODELS, params).await;
+            this.update(cx, |pickers, cx| {
+                if pickers.target_generation != generation {
+                    return;
+                }
+                let loaded = match result.map(serde_json::from_value::<ModelCatalog>) {
+                    Ok(Ok(catalog)) => {
+                        Loadable::Ready(normalize_model_rows(harness, catalog.models))
+                    }
+                    Ok(Err(err)) => Loadable::Error(err.to_string()),
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                if matches!(loaded, Loadable::Error(_))
+                    && matches!(pickers.instance_models.get(&id), Some(Loadable::Ready(_)))
+                {
+                    return;
+                }
+                pickers.instance_models.insert(id, loaded);
+                pickers.catalog_rev += 1;
+                if pickers.open_kind() == Some(PickerKind::HarnessModel) {
+                    pickers.active = pickers.selected_model_index(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The harnesses this picker offers: runnable ones for the composer,
@@ -1840,7 +1992,9 @@ impl Pickers {
     /// absent from the live catalog keeps its identity and remembered chip label.
     fn selected_model<'a>(&'a self, cx: &'a App) -> Option<&'a Model> {
         let harness = self.effective_harness(cx)?;
-        let models = self.models.get(&harness)?.ready()?;
+        let models = self
+            .catalog(harness, self.effective_instance(cx).as_deref())?
+            .ready()?;
         let selected = self.effective_model_id(cx);
         // An unset title model means "cheapest", not the catalog default.
         if self.title.is_some() && selected.is_none() {
@@ -1859,9 +2013,10 @@ impl Pickers {
         // A list still from the previous device is loading for this one.
         let catalog_loading = self.harnesses_stale
             || matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
+        let instance = self.effective_instance(cx);
         let models_loading = self.effective_harness(cx).is_some_and(|harness| {
             !matches!(
-                self.models.get(&harness),
+                self.catalog(harness, instance.as_deref()),
                 Some(Loadable::Ready(_)) | Some(Loadable::Error(_))
             )
         });
@@ -1969,6 +2124,7 @@ impl Pickers {
         if harness.is_some_and(|h| self.stale_models.contains(&h)) {
             return ResolvedRunConfig {
                 harness,
+                instance_id: self.effective_instance(cx),
                 model: self.effective_model_id(cx).map(str::to_string),
                 reasoning: self.explicit_reasoning(cx),
                 model_options: self.explicit_options(cx),
@@ -1980,6 +2136,7 @@ impl Pickers {
         }
         ResolvedRunConfig {
             harness,
+            instance_id: self.effective_instance(cx),
             model: self
                 .selected_model(cx)
                 .map(|m| m.id.clone())
@@ -2084,6 +2241,7 @@ impl Pickers {
         self.pending_model_switch = None;
         self.profile_edit = None;
         self.viewed_harness = None;
+        self.viewed_instance = None;
         self.setting_menu = None;
         self.setting_bounds = None;
         self.effort_dragging = false;
@@ -2196,6 +2354,8 @@ impl Pickers {
             // Favorites may have been starred from the other picker.
             self.reload_defaults();
             self.viewed_harness = None;
+            self.viewed_instance = None;
+            self.load_instances(cx);
         }
         if kind == PickerKind::HarnessModel && self.title.is_some() {
             // Each open browses from the saved agent's tab.
@@ -2339,6 +2499,7 @@ impl Pickers {
         if self.harnesses_stale {
             self.harnesses_revalidating = true;
         }
+        self.load_instances(cx);
         let target = self.space_target(cx);
         let generation = self.target_generation;
         if !matches!(self.harnesses, Loadable::Ready(_)) {
@@ -2400,6 +2561,9 @@ impl Pickers {
         }
         for harness in targets {
             self.ensure_models(harness, force, cx);
+        }
+        for instance in self.instance_sources(cx) {
+            self.ensure_instance_models(&instance.id, force, cx);
         }
     }
 
@@ -2783,6 +2947,7 @@ impl Pickers {
             // An existing chat only browses the tab: its harness changes on a
             // confirmed model pick (`pick_foreign_model`), never on a click here.
             self.viewed_harness = Some(harness);
+            self.viewed_instance = None;
             self.model_scroll_base().set_offset(gpui::Point::default());
             self.ensure_models(harness, false, cx);
             self.active = self.selected_model_index(cx);
@@ -2814,6 +2979,7 @@ impl Pickers {
             self.config.reasoning = None;
         }
         self.config.harness = Some(harness);
+        self.config.instance_id = None;
         if self.title.is_none() {
             self.defaults.harness = Some(harness);
             self.save_defaults();
@@ -2821,6 +2987,33 @@ impl Pickers {
         self.model_scroll_base().set_offset(gpui::Point::default());
         self.ensure_models(harness, false, cx);
         // Re-anchor the keyboard highlight onto the new harness's selected row.
+        self.active = self.selected_model_index(cx);
+        cx.notify();
+    }
+
+    fn pick_instance(
+        &mut self,
+        harness: HarnessId,
+        instance: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = instance else {
+            self.pick_harness(harness, cx);
+            return;
+        };
+        let committed = self.harness_is_committed(cx);
+        let changed = self.effective_instance(cx).as_deref() != Some(id.as_str());
+        self.pick_harness(harness, cx);
+        if committed {
+            self.viewed_instance = Some(id.clone());
+        } else {
+            if changed {
+                self.config.model = None;
+                self.config.reasoning = None;
+            }
+            self.config.instance_id = Some(id.clone());
+        }
+        self.ensure_instance_models(&id, false, cx);
         self.active = self.selected_model_index(cx);
         cx.notify();
     }
@@ -2859,9 +3052,10 @@ impl Pickers {
                 .map(|m| m.id.as_str())
                 .or_else(|| self.effective_model_id(cx));
             if needs_switch_warning(has_history, current, &model_id) {
+                let instance = self.effective_instance(cx);
                 let label = |id: &str| {
                     self.effective_harness(cx)
-                        .and_then(|h| self.models.get(&h))
+                        .and_then(|h| self.catalog(h, instance.as_deref()))
                         .and_then(|l| l.ready())
                         .and_then(|models| models.iter().find(|m| m.id == id))
                         .map(|m| m.label.clone())
@@ -2874,6 +3068,7 @@ impl Pickers {
                     from,
                     to,
                     harness: None,
+                    instance: None,
                     profile: None,
                 });
                 cx.notify();
@@ -2905,11 +3100,18 @@ impl Pickers {
     /// A model of another harness picked on an existing chat: a provider
     /// switch. Free on a chat with no history; otherwise parked behind the
     /// dialog, since the new harness starts from a text copy of the chat.
-    fn pick_foreign_model(&mut self, harness: HarnessId, model_id: String, cx: &mut Context<Self>) {
+    fn pick_foreign_model(
+        &mut self,
+        harness: HarnessId,
+        instance: Option<String>,
+        model_id: String,
+        cx: &mut Context<Self>,
+    ) {
         self.setting_menu = None;
         if !self.chat_has_history(cx) {
             self.update_chat_config(cx, None, move |config| {
                 config.harness = harness;
+                config.instance_id = instance;
                 config.model = Some(model_id);
             });
             cx.notify();
@@ -2917,12 +3119,10 @@ impl Pickers {
         }
         let from = self
             .effective_harness(cx)
-            .map(harness_display_name)
-            .unwrap_or_default()
-            .to_string();
+            .map(|from| self.provider_label(from, self.effective_instance(cx).as_deref()))
+            .unwrap_or_default();
         let to = self
-            .models
-            .get(&harness)
+            .catalog(harness, instance.as_deref())
             .and_then(|l| l.ready())
             .and_then(|models| models.iter().find(|m| m.id == model_id))
             .map(|m| m.label.clone())
@@ -2932,6 +3132,7 @@ impl Pickers {
             from,
             to,
             harness: Some(harness),
+            instance,
             profile: None,
         });
         cx.notify();
@@ -2958,32 +3159,37 @@ impl Pickers {
         let Some(pending) = self.pending_model_switch.take() else {
             return;
         };
-        let harness = self.effective_harness(cx);
-        let note = match (harness, pending.harness) {
-            (Some(from), Some(to)) => (
-                format!(
-                    "Provider changed from {} to {}.",
-                    harness_display_name(from),
-                    harness_display_name(to)
-                ),
-                provider_switch_hint(from, to),
-            ),
-            _ => (
-                format!("Model changed from {} to {}.", pending.from, pending.to),
-                switch_hint(harness).to_string(),
-            ),
-        };
+        let note = self.switch_note(&pending, cx);
         self.update_chat_config(cx, Some(note), move |config| match pending.profile {
             Some(pick) => pick.write(config),
             None => {
                 if let Some(harness) = pending.harness {
                     config.harness = harness;
+                    config.instance_id = pending.instance;
                 }
                 config.model = Some(pending.model_id)
             }
         });
         self.animate_close(cx);
         cx.notify();
+    }
+
+    fn switch_note(&self, pending: &PendingModelSwitch, cx: &App) -> (String, String) {
+        let harness = self.effective_harness(cx);
+        match (harness, pending.harness) {
+            (Some(from), Some(to)) => {
+                let from = self.provider_label(from, self.effective_instance(cx).as_deref());
+                let to = self.provider_label(to, pending.instance.as_deref());
+                (
+                    format!("Provider changed from {from} to {to}."),
+                    provider_switch_hint(&from, &to),
+                )
+            }
+            _ => (
+                format!("Model changed from {} to {}.", pending.from, pending.to),
+                switch_hint(harness).to_string(),
+            ),
+        }
     }
 
     fn cancel_model_switch(&mut self, cx: &mut Context<Self>) {
@@ -3362,7 +3568,10 @@ impl Pickers {
         // Reasoning must stay concrete for whatever model the row now names —
         // same ladder resolution as [`Self::trait_ladder`] (model levels, else
         // the harness's advertised ladder).
-        if let Some(models) = self.models.get(&config.harness).and_then(|l| l.ready()) {
+        if let Some(models) = self
+            .catalog(config.harness, config.instance_id.as_deref())
+            .and_then(|l| l.ready())
+        {
             let mut ladder = config
                 .model
                 .as_deref()
@@ -3400,6 +3609,7 @@ impl Pickers {
         // selection observer; left in place they would outrank the row in
         // `effective_harness` and send the next run to the old harness.
         self.config.harness = None;
+        self.config.instance_id = None;
         self.config.model = None;
         self.config.reasoning = None;
         // The first send creates this row. Until then all choices stay local.
@@ -3477,6 +3687,8 @@ impl Pickers {
             rail: self.model_rail,
             viewed: self.rail_harness(cx),
             effective: self.effective_harness(cx),
+            viewed_instance: self.rail_instance(cx),
+            effective_instance: self.effective_instance(cx),
             catalog_rev: self.catalog_rev,
             selected: self.effective_model_id(cx).map(str::to_owned),
         };
@@ -3503,31 +3715,87 @@ impl Pickers {
             .map(|f| (f.harness, f.model.as_str()))
             .collect();
         let query = self.search.read(cx).text().trim().to_string();
-        let mut rows = scoped_model_rows(
-            &query,
-            self.model_rail,
-            viewed,
-            &descriptors,
-            |harness| {
-                self.models
-                    .get(&harness)
-                    .and_then(|l| l.ready())
-                    .map(|models| models.as_slice())
-            },
-            |harness, model| favorites.contains(&(harness, model)),
-        );
+        let viewed_instance = self.rail_instance(cx);
+        let effective_instance = self.effective_instance(cx);
+        let instance_rows = |instance: &ProviderInstance, rail: ModelRail| {
+            let models = self
+                .instance_models
+                .get(&instance.id)
+                .and_then(Loadable::ready)?;
+            let mut descriptor = descriptors
+                .iter()
+                .find(|d| d.id == instance.driver)?
+                .clone();
+            descriptor.name = instance.label.clone();
+            let mut rows = scoped_model_rows(
+                &query,
+                rail,
+                Some(descriptor.id),
+                std::slice::from_ref(&descriptor),
+                |_| Some(models.as_slice()),
+                |_, _| false,
+            );
+            for row in &mut rows {
+                row.instance = Some(instance.id.clone());
+            }
+            Some(rows)
+        };
+        let instances = self.instance_sources(cx);
+        let mut rows = match viewed_instance
+            .as_deref()
+            .filter(|_| self.model_rail == ModelRail::Harness)
+        {
+            Some(id) => instances
+                .iter()
+                .find(|instance| instance.id == id)
+                .and_then(|instance| instance_rows(instance, ModelRail::Harness))
+                .unwrap_or_default(),
+            None => {
+                let mut rows = scoped_model_rows(
+                    &query,
+                    self.model_rail,
+                    viewed,
+                    &descriptors,
+                    |harness| {
+                        self.models
+                            .get(&harness)
+                            .and_then(|l| l.ready())
+                            .map(|models| models.as_slice())
+                    },
+                    |harness, model| favorites.contains(&(harness, model)),
+                );
+                if self.model_rail == ModelRail::All {
+                    for instance in &instances {
+                        let Some(extra) = instance_rows(instance, ModelRail::All) else {
+                            continue;
+                        };
+                        let at = rows
+                            .iter()
+                            .rposition(|row| {
+                                row.harness == instance.driver
+                                    && (row.instance.is_some()
+                                        || !favorites
+                                            .contains(&(row.harness, row.model.id.as_str())))
+                            })
+                            .map_or(rows.len(), |ix| ix + 1);
+                        rows.splice(at..at, extra);
+                    }
+                }
+                rows
+            }
+        };
         // This row belongs only to the current selection. It is never merged
         // into the fresh catalog or made available as a new choice elsewhere.
         if self.model_rail == ModelRail::Harness
             && viewed == effective
+            && viewed_instance == effective_instance
             && let Some(harness) = effective
             && let Some(id) = self.effective_model_id(cx)
             && self
-                .models
-                .get(&harness)
+                .catalog(harness, effective_instance.as_deref())
                 .and_then(Loadable::ready)
                 .is_some_and(|models| !models.iter().any(|m| m.id == id))
-            && let Some(descriptor) = descriptors.iter().find(|d| d.id == harness)
+            && descriptors.iter().any(|d| d.id == harness)
         {
             let label = self
                 .selected_model_label(cx)
@@ -3541,7 +3809,10 @@ impl Pickers {
                     0,
                     ModelRowData {
                         harness,
-                        harness_name: descriptor.name.clone().into(),
+                        instance: effective_instance.clone(),
+                        harness_name: self
+                            .provider_label(harness, effective_instance.as_deref())
+                            .into(),
                         selected_only: true,
                         ambiguous: false,
                         model: Model {
@@ -3569,10 +3840,13 @@ impl Pickers {
             .effective_model_id(cx)
             .or_else(|| self.selected_model(cx).map(|m| m.id.as_str()));
         let effective = self.effective_harness(cx);
+        let instance = self.effective_instance(cx);
         self.model_rows(cx)
             .iter()
             .position(|row| {
-                Some(row.harness) == effective && selected == Some(row.model.id.as_str())
+                Some(row.harness) == effective
+                    && row.instance == instance
+                    && selected == Some(row.model.id.as_str())
             })
             .unwrap_or(0)
     }
@@ -3625,12 +3899,14 @@ impl Pickers {
         if row.selected_only {
             return;
         }
-        if self.effective_harness(cx) != Some(row.harness) {
+        if self.effective_harness(cx) != Some(row.harness)
+            || self.effective_instance(cx) != row.instance
+        {
             if self.harness_is_committed(cx) {
-                self.pick_foreign_model(row.harness, row.model.id, cx);
+                self.pick_foreign_model(row.harness, row.instance, row.model.id, cx);
                 return;
             }
-            self.pick_harness(row.harness, cx);
+            self.pick_instance(row.harness, row.instance.clone(), cx);
         }
         self.pick_model(row.model.id, cx);
         if self.compact_model_picker(cx) {
@@ -4351,7 +4627,9 @@ impl Pickers {
                 && event.keystroke.modifiers.shift
                 && event.keystroke.key.eq_ignore_ascii_case("f")
             {
-                if let Some(row) = self.model_rows(cx).get(self.active).cloned() {
+                if let Some(row) = self.model_rows(cx).get(self.active).cloned()
+                    && row.instance.is_none()
+                {
                     self.toggle_model_favorite(row.harness, &row.model.id, cx);
                 }
                 cx.stop_propagation();
@@ -6029,11 +6307,14 @@ impl Pickers {
                     }),
             );
         }
+        let viewed_instance = self.rail_instance(cx);
+        let instances = self.instance_sources(cx);
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
             let is_viewed = !favorites_view
                 && self.model_rail != ModelRail::Profiles
-                && viewed == Some(harness);
+                && viewed == Some(harness)
+                && viewed_instance.is_none();
             let (icon_path, tint) = harness_brand_icon(harness);
             tabs =
                 tabs.child(
@@ -6066,6 +6347,57 @@ impl Pickers {
                         ))
                         .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
                 );
+            for instance in instances.iter().filter(|i| i.driver == harness) {
+                let is_viewed = !favorites_view
+                    && self.model_rail != ModelRail::Profiles
+                    && viewed == Some(harness)
+                    && viewed_instance.as_deref() == Some(instance.id.as_str());
+                let id = instance.id.clone();
+                tabs = tabs.child(
+                    div()
+                        .id(SharedString::from(format!("instance-tab-{id}")))
+                        .relative()
+                        .flex_none()
+                        .h(px(32.0))
+                        .px(px(8.0))
+                        .rounded(px(popover::MENU_ITEM_RADIUS))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .cursor_pointer()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(if is_viewed {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        })
+                        .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.setting_menu = None;
+                            this.model_rail = ModelRail::Harness;
+                            this.search.update(cx, |input, cx| {
+                                input.set_placeholder("Search models…", cx)
+                            });
+                            this.pick_instance(harness, Some(id.clone()), cx);
+                            cx.notify();
+                        }))
+                        .child(crate::icons::icon(icon_path).size(px(14.0)).text_color(
+                            tint.unwrap_or(if is_viewed {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            }),
+                        ))
+                        .child(SharedString::from(instance.label.clone()))
+                        .when_some(
+                            crate::provider_instances::instance_accent(instance),
+                            |el, accent| {
+                                el.child(div().flex_none().size(px(6.0)).rounded_full().bg(accent))
+                            },
+                        )
+                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
+                );
+            }
         }
 
         if compact {
@@ -6107,7 +6439,8 @@ impl Pickers {
         //    renders, so a 7k-model catalog scrolls as smoothly as seven
         //    (field report: the un-virtualized stack was the picker's lag).
         //    Keyboard nav scrolls via the UniformListScrollHandle.
-        let effective_models = viewed.and_then(|h| self.models.get(&h));
+        let viewed_instance = self.rail_instance(cx);
+        let effective_models = viewed.and_then(|h| self.catalog(h, viewed_instance.as_deref()));
         let model_list: Option<AnyElement> = if !rows.is_empty() {
             let entity = cx.entity();
             let row_data = rows.clone();
@@ -6167,6 +6500,7 @@ impl Pickers {
         };
 
         let refresh_error = viewed
+            .filter(|_| viewed_instance.is_none())
             .and_then(|harness| self.model_refresh_errors.get(&harness))
             .filter(|_| !rows.is_empty())
             .cloned()
@@ -6269,12 +6603,14 @@ impl Pickers {
         let theme = Theme::of(cx).for_popup();
         let effective = self.effective_harness(cx);
         let is_selected = Some(row.harness) == effective
+            && self.effective_instance(cx) == row.instance
             && self
                 .effective_model_id(cx)
                 .or_else(|| self.selected_model(cx).map(|m| m.id.as_str()))
                 == Some(row.model.id.as_str());
         let is_active = ix == self.active;
-        let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
+        let starrable = row.instance.is_none();
+        let is_fav = starrable && self.defaults.is_favorite(row.harness, &row.model.id);
         let is_new = self
             .new_models
             .get(&row.harness)
@@ -6524,9 +6860,12 @@ impl Pickers {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.bg(crate::theme::ink(0.08)))
+                .when(!starrable, |el| el.invisible())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.toggle_model_favorite(harness, &star_model, cx);
+                    if starrable {
+                        this.toggle_model_favorite(harness, &star_model, cx);
+                    }
                 }))
                 .child(
                     crate::icons::icon(if is_fav {
@@ -8257,6 +8596,7 @@ fn scoped_model_rows<'a>(
 ) -> Vec<ModelRowData> {
     let row = |descriptor: &HarnessDescriptor, model: &Model| ModelRowData {
         harness: descriptor.id,
+        instance: None,
         harness_name: SharedString::from(descriptor.name.clone()),
         model: model.clone(),
         selected_only: false,
@@ -8899,8 +9239,15 @@ impl Render for Pickers {
                     .into(),
             }
         } else {
+            let instance = self
+                .effective_instance(cx)
+                .and_then(|id| self.instances.iter().find(|i| i.id == id))
+                .map(|instance| instance.label.clone());
             match &model_name {
-                ModelName::Named(label) => label.clone(),
+                ModelName::Named(label) => match instance {
+                    Some(instance) => format!("{instance} · {label}").into(),
+                    None => label.clone(),
+                },
                 ModelName::None { no_agents: true } => "No agents available".into(),
                 ModelName::Loading | ModelName::None { .. } => SharedString::default(),
             }
@@ -9073,7 +9420,10 @@ impl Pickers {
             .harness
             .and_then(|to| self.effective_harness(cx).map(|from| (from, to)));
         let body = match provider {
-            Some((from, to)) => provider_switch_warning(from, to),
+            Some((from, to)) => provider_switch_warning(
+                &self.provider_label(from, self.effective_instance(cx).as_deref()),
+                &self.provider_label(to, pending.instance.as_deref()),
+            ),
             None => switch_warning(self.effective_harness(cx), &pending.to),
         };
         let (title, lead, yes_detail, no_title) = match provider {
@@ -9216,7 +9566,7 @@ impl Pickers {
         model: String,
         cx: &mut Context<Self>,
     ) {
-        self.pick_foreign_model(harness, model, cx);
+        self.pick_foreign_model(harness, None, model, cx);
     }
 }
 
@@ -12456,15 +12806,18 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(
                     picker.compact_groups(cx),
-                    vec![(Some(HarnessId::Codex), 0), (Some(HarnessId::ClaudeCode), 2)]
+                    vec![
+                        (Some((HarnessId::Codex, None)), 0),
+                        (Some((HarnessId::ClaudeCode, None)), 2)
+                    ]
                 );
                 picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
                 assert_eq!(
                     picker.compact_groups(cx),
                     vec![
                         (None, 0),
-                        (Some(HarnessId::Codex), 1),
-                        (Some(HarnessId::ClaudeCode), 2),
+                        (Some((HarnessId::Codex, None)), 1),
+                        (Some((HarnessId::ClaudeCode, None)), 2),
                     ]
                 );
                 let rows = picker.model_rows(cx);
@@ -13598,6 +13951,66 @@ mod tests {
     }
 
     #[gpui::test]
+    fn an_instance_tab_lists_its_own_models_and_a_pick_writes_its_instance_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.instances = vec![ProviderInstance {
+                    id: "codex_work".into(),
+                    driver: HarnessId::Codex,
+                    label: "Codex Work".into(),
+                    accent: None,
+                    config: Default::default(),
+                }];
+                pickers.instance_models.insert(
+                    "codex_work".into(),
+                    Loadable::Ready(vec![bare_model("gpt-work", "GPT Work")]),
+                );
+                pickers.catalog_rev += 1;
+                pickers.open.open(PickerKind::HarnessModel);
+                pickers.model_rail = ModelRail::Harness;
+
+                pickers.pick_instance(HarnessId::Codex, Some("codex_work".into()), cx);
+                let rows = pickers.model_rows(cx);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].instance.as_deref(), Some("codex_work"));
+                assert_eq!(rows[0].model.id, "gpt-work");
+
+                pickers.activate_model_index(0, cx);
+                let pending = pickers.pending_model_switch.clone().expect("dialog");
+                assert_eq!(pending.instance.as_deref(), Some("codex_work"));
+                assert_eq!(
+                    pickers.switch_note(&pending, cx).0,
+                    "Provider changed from Claude Code to Codex Work."
+                );
+                pickers.confirm_model_switch(cx);
+                let config = pickers.chat_row(cx).unwrap().config.clone().unwrap();
+                assert_eq!(config.harness, HarnessId::Codex);
+                assert_eq!(config.instance_id.as_deref(), Some("codex_work"));
+                assert_eq!(config.model.as_deref(), Some("gpt-work"));
+
+                pickers.open.open(PickerKind::HarnessModel);
+                pickers.model_rail = ModelRail::Harness;
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.model_rows(cx)[0].instance, None);
+                pickers.activate_model_index(0, cx);
+                let pending = pickers.pending_model_switch.clone().expect("dialog");
+                assert_eq!(
+                    pickers.switch_note(&pending, cx).0,
+                    "Provider changed from Codex Work to Codex."
+                );
+                pickers.confirm_model_switch(cx);
+                let config = pickers.chat_row(cx).unwrap().config.clone().unwrap();
+                assert_eq!(config.harness, HarnessId::Codex);
+                assert_eq!(config.instance_id, None);
+                assert_eq!(config.model.as_deref(), Some("gpt"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn a_profile_on_another_harness_switches_behind_the_dialog_and_lands_its_settings(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -13834,10 +14247,10 @@ mod tests {
 
     #[test]
     fn provider_switch_copy_names_both_harnesses() {
-        let body = provider_switch_warning(HarnessId::ClaudeCode, HarnessId::Codex);
+        let body = provider_switch_warning("Claude Code", "Codex");
         assert!(body.contains("Codex has never seen this chat"), "{body}");
         assert!(body.contains("Claude Code session is closed"), "{body}");
-        let hint = provider_switch_hint(HarnessId::ClaudeCode, HarnessId::Codex);
+        let hint = provider_switch_hint("Claude Code", "Codex");
         assert!(hint.contains("handed to Codex as text"), "{hint}");
     }
 

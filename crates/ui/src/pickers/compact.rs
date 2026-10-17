@@ -161,10 +161,12 @@ impl Pickers {
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let selected = self.effective_harness(cx) == Some(row.harness)
+            && self.effective_instance(cx) == row.instance
             && self
                 .selected_model(cx)
                 .is_some_and(|model| model.id == row.model.id);
-        let favorite = self.defaults.is_favorite(row.harness, &row.model.id);
+        let starrable = row.instance.is_none();
+        let favorite = starrable && self.defaults.is_favorite(row.harness, &row.model.id);
         let (icon, tint) = harness_brand_icon(row.harness);
         let harness = row.harness;
         let model = row.model.id.clone();
@@ -288,9 +290,12 @@ impl Pickers {
                     // Quiet until the row is hovered or the model is starred.
                     .when(!favorite && !hovered, |el| el.opacity(0.0))
                     .hover(|s| s.bg(crate::theme::ink(0.08)))
+                    .when(!starrable, |el| el.invisible())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.toggle_model_favorite(harness, &model, cx);
+                        if starrable {
+                            this.toggle_model_favorite(harness, &model, cx);
+                        }
                     }))
                     .child(
                         crate::icons::icon(if favorite {
@@ -469,12 +474,16 @@ impl Pickers {
 
     /// Where each provider's group starts in the unsearched list: starred
     /// models first, then one run per provider.
-    pub(super) fn compact_groups(&self, cx: &App) -> Vec<(Option<HarnessId>, usize)> {
+    pub(super) fn compact_groups(
+        &self,
+        cx: &App,
+    ) -> Vec<(Option<(HarnessId, Option<String>)>, usize)> {
         let rows = self.model_rows(cx);
-        let mut groups: Vec<(Option<HarnessId>, usize)> = Vec::new();
+        let mut groups: Vec<(Option<(HarnessId, Option<String>)>, usize)> = Vec::new();
         for (ix, row) in rows.iter().enumerate() {
-            let group =
-                (!self.defaults.is_favorite(row.harness, &row.model.id)).then_some(row.harness);
+            let group = (row.instance.is_some()
+                || !self.defaults.is_favorite(row.harness, &row.model.id))
+            .then(|| (row.harness, row.instance.clone()));
             if groups.last().is_none_or(|(last, _)| *last != group) {
                 groups.push((group, ix));
             }
@@ -503,10 +512,12 @@ impl Pickers {
             .iter()
             .rev()
             .find(|(_, start)| *start <= top)
-            .map(|(group, _)| *group);
+            .map(|(group, _)| group.clone());
         // Many providers overflow the strip: keep the viewed tab in sight
         // as the list scrolls, without fighting a manual sideways scroll.
-        let viewed_ix = groups.iter().position(|(group, _)| current == Some(*group));
+        let viewed_ix = groups
+            .iter()
+            .position(|(group, _)| current.as_ref() == Some(group));
         if viewed_ix != self.compact_strip_viewed {
             self.compact_strip_viewed = viewed_ix;
             if let Some(ix) = viewed_ix {
@@ -525,11 +536,24 @@ impl Pickers {
                 .overflow_x_scroll()
                 .track_scroll(&self.compact_strip_scroll)
                 .children(groups.into_iter().map(|(group, start)| {
-                    let viewed = current == Some(group);
+                    let viewed = current.as_ref() == Some(&group);
+                    let accent = group
+                        .as_ref()
+                        .and_then(|(_, instance)| instance.as_deref())
+                        .and_then(|id| self.instances.iter().find(|i| i.id == id))
+                        .and_then(crate::provider_instances::instance_accent);
                     let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
                         match group {
                             None => (crate::icons::STAR_BOLD, None, "Starred".into()),
-                            Some(harness) => {
+                            Some((harness, Some(instance))) => {
+                                let (icon, tint) = harness_brand_icon(harness);
+                                (
+                                    icon,
+                                    tint,
+                                    self.provider_label(harness, Some(&instance)).into(),
+                                )
+                            }
+                            Some((harness, None)) => {
                                 let (icon, tint) = harness_brand_icon(harness);
                                 let name = self
                                     .rail_descriptors(cx)
@@ -567,9 +591,21 @@ impl Pickers {
                                 .scroll_to_item_strict(start, gpui::ScrollStrategy::Top);
                             cx.notify();
                         }))
+                        .relative()
                         .child(crate::icons::icon(icon).size(px(14.0)).text_color(
                             tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
                         ))
+                        .when_some(accent, |el, accent| {
+                            el.child(
+                                div()
+                                    .absolute()
+                                    .top(px(5.0))
+                                    .right(px(5.0))
+                                    .size(px(6.0))
+                                    .rounded_full()
+                                    .bg(accent),
+                            )
+                        })
                 }));
             // Each side fades over the tabs hidden past it, up to one tab
             // pitch, reaching zero exactly at the clip edge.

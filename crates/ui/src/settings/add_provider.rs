@@ -95,7 +95,6 @@ impl Step {
     }
 }
 
-/// T3 `resolveWizardNavigation`: an invalid instance id holds the wizard on Identity.
 fn resolve_step(target: Step, editing: bool, id_error: bool) -> Step {
     let target = target.max(if editing {
         Step::Identity
@@ -514,8 +513,7 @@ impl AddProviderDialog {
         self.upsert(instance, false, cx);
     }
 
-    /// D1: the managed instance exists before its login starts, since an
-    /// upsert during a login kills it.
+    /// D1: upsert before the login starts, since an upsert during a login kills it.
     fn sign_in(&mut self, cx: &mut Context<Self>) {
         if self.saving {
             return;

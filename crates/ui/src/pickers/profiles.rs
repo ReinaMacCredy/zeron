@@ -428,6 +428,7 @@ impl Pickers {
                     from,
                     to,
                     harness: harness_changes.then_some(pick.harness),
+                    instance: None,
                     profile: Some(pick),
                 });
                 cx.notify();
@@ -1687,6 +1688,7 @@ mod tests {
             .unwrap();
         let mut current = ResolvedRunConfig {
             harness: Some(HarnessId::ClaudeCode),
+            instance_id: None,
             model: Some("opus".into()),
             reasoning: Some(ReasoningLevel::High),
             model_options: serde_json::json!({ "context": "1m", "fast": "on" })
