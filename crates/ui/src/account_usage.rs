@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use gpui::{App, Context, Entity, SharedString, Task};
+use gpui::{App, Context, Entity, SharedString, Subscription, Task};
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentUsageWindow, HarnessId};
 use zeron_rpc::methods;
 
@@ -15,6 +15,11 @@ use crate::state::AppState;
 const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Background re-probe: usage moves as turns run.
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// A finished turn re-probes once its usage has posted, at most this often:
+/// parallel agents finish turns constantly and Anthropic's usage endpoint 429s.
+const TURN_REFRESH_MIN: Duration = Duration::from_secs(60);
+const TURN_SETTLE: Duration = Duration::from_secs(5);
+const RESET_SETTLE: Duration = Duration::from_secs(3);
 
 /// The binding limit: the most-used window of the account. Pure.
 pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
@@ -124,7 +129,10 @@ pub struct DeviceAccounts {
     load_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     error: Option<SharedString>,
+    turns: std::collections::HashMap<String, Option<String>>,
+    scheduled: Option<(Instant, Task<()>)>,
     _poll: Task<()>,
+    _turns: Subscription,
 }
 
 impl DeviceAccounts {
@@ -137,14 +145,101 @@ impl DeviceAccounts {
                 }
             }
         });
+        let turns = cx.observe(&state, |accounts: &mut Self, state, cx| {
+            if accounts.note_turns(&state, cx) {
+                let at = Instant::now() + TURN_SETTLE;
+                let at = accounts
+                    .last_forced
+                    .map_or(at, |forced| at.max(forced + TURN_REFRESH_MIN));
+                accounts.schedule(at, cx);
+            }
+        });
         Self {
             state,
             last_forced: None,
             load_task: None,
             action_task: None,
             error: None,
+            turns: Default::default(),
+            scheduled: None,
             _poll: poll,
+            _turns: turns,
         }
+    }
+
+    /// A session first seen is only recorded: launch and reattach are not turn ends.
+    fn note_turns(&mut self, state: &Entity<AppState>, cx: &App) -> bool {
+        let state = state.read(cx);
+        let local = state.local_device_id.as_deref();
+        let mut ended = false;
+        let mut seen = 0;
+        for session in state
+            .sessions
+            .iter()
+            .filter(|session| local.is_none_or(|id| id == session.device_id))
+        {
+            seen += 1;
+            match self.turns.get_mut(&session.chat_id) {
+                Some(turn) if *turn != session.last_completed_turn => {
+                    ended |= session.last_completed_turn.is_some();
+                    turn.clone_from(&session.last_completed_turn);
+                }
+                Some(_) => {}
+                None => {
+                    self.turns
+                        .insert(session.chat_id.clone(), session.last_completed_turn.clone());
+                }
+            }
+        }
+        if self.turns.len() > seen {
+            self.turns.retain(|chat, _| {
+                state
+                    .sessions
+                    .iter()
+                    .any(|session| session.chat_id == *chat)
+            });
+        }
+        ended
+    }
+
+    fn schedule(&mut self, at: Instant, cx: &mut Context<Self>) {
+        if self
+            .scheduled
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending <= at)
+        {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(at.saturating_duration_since(Instant::now()))
+                .await;
+            this.update(cx, |accounts, cx| {
+                accounts.scheduled = None;
+                accounts.load(cx);
+            })
+            .ok();
+        });
+        self.scheduled = Some((at, task));
+    }
+
+    fn schedule_next_reset(&mut self, cx: &mut Context<Self>) {
+        let now = chrono::Utc::now();
+        let Some(next) = local_snapshot(cx)
+            .into_iter()
+            .flat_map(|snapshot| &snapshot.accounts)
+            .filter(|account| account.active)
+            .flat_map(|account| &account.usage_windows)
+            .filter_map(|window| (window.resets_at? - now).to_std().ok())
+            .min()
+        else {
+            return;
+        };
+        let at = Instant::now() + next + RESET_SETTLE;
+        let at = self
+            .last_forced
+            .map_or(at, |forced| at.max(forced + FORCE_MIN_INTERVAL));
+        self.schedule(at, cx);
     }
 
     pub fn loading(&self) -> bool {
@@ -258,6 +353,7 @@ impl DeviceAccounts {
                         .0
                         .insert(None, snapshot);
                 }
+                accounts.schedule_next_reset(cx);
                 cx.notify();
             })
             .ok();
@@ -359,6 +455,44 @@ mod tests {
             Some("Codex-true")
         );
         assert!(active_account(&snapshot, HarnessId::Cursor).is_none());
+    }
+
+    #[gpui::test]
+    fn a_finished_turn_schedules_a_probe_but_a_first_sighting_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support as fixture;
+        use gpui::AppContext;
+        fixture::init(cx);
+        let state = cx.update(|cx| fixture::state(cx, None));
+        let accounts = cx.new(|cx| DeviceAccounts::new(state.clone(), cx));
+        let session = |chat: &str, turn: Option<&str>| zeron_proto::Session {
+            last_completed_turn: turn.map(str::to_owned),
+            chat_id: chat.into(),
+            device_id: "dev".into(),
+            status: zeron_proto::SessionStatus::Idle,
+            held_by_subagents: false,
+            compacting: false,
+            background_tasks: Vec::new(),
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            running_subagents: 0,
+            compact_plan: None,
+        };
+        let set = |sessions: Vec<zeron_proto::Session>, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, cx| {
+                state.apply_sessions(sessions);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            accounts.read_with(cx, |accounts, _| accounts.scheduled.is_some())
+        };
+        assert!(!set(vec![session("a", Some("t0")), session("b", None)], cx));
+        assert!(!set(vec![session("a", Some("t0")), session("b", None)], cx));
+        assert!(set(
+            vec![session("a", Some("t0")), session("b", Some("t1"))],
+            cx
+        ));
     }
 
     #[gpui::test]
