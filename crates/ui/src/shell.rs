@@ -6983,6 +6983,7 @@ impl Shell {
         if let Some(page) = &self.usage_page {
             page.update(cx, |page, cx| page.load(cx));
         }
+        self.refresh_device_accounts(cx);
         cx.notify();
     }
 
@@ -13410,6 +13411,12 @@ impl Shell {
                         .usage_windows
                         .iter()
                         .map(|window| accounts::compact_usage_meter(window, theme, now)),
+                )
+                .children(
+                    account
+                        .extra_usage
+                        .as_ref()
+                        .map(|extra| accounts::compact_extra_usage(extra, theme)),
                 )
         });
         div()

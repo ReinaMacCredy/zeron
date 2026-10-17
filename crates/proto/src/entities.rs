@@ -1607,6 +1607,9 @@ pub struct AgentAccount {
     /// most one of them is in use. `None` for single-login agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Kept apart from `usage_windows` so it never becomes the binding limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_usage: Option<AgentExtraUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1691,6 +1694,19 @@ pub struct AgentUsageWindow {
     /// 0.0..=1.0
     pub used_fraction: f32,
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// Claude's usage credits, spent past the plan limits; amounts in `currency` units.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExtraUsage {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
