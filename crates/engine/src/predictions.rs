@@ -400,7 +400,7 @@ impl Predictions {
         )
         .await
         {
-            Ok(text) => Some(text),
+            Ok(reply) => Some(reply.text),
             Err(err) => {
                 tracing::debug!(error = %err, "composer prediction skipped");
                 None

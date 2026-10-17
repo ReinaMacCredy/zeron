@@ -269,7 +269,8 @@ pub(crate) async fn generate(
         },
         clean_message,
     )
-    .await?;
+    .await?
+    .text;
     Ok(GeneratedCommitMessage {
         message,
         harness: choice.harness,

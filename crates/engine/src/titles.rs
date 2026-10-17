@@ -180,6 +180,7 @@ impl TitleGenerator {
         )
         .await
         .ok()
+        .map(|reply| reply.text)
     }
 }
 
@@ -250,12 +251,18 @@ pub(crate) struct OneShot {
     pub retry_delays_ms: &'static [u64],
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct OneShotReply {
+    pub text: String,
+    pub usage: Option<(u64, u64)>,
+}
+
 pub(crate) async fn run_one_shot(
     harness: &dyn zeron_harness::Harness,
     execution_lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     run: OneShot,
     clean: fn(&str) -> String,
-) -> Result<String, EngineError> {
+) -> Result<OneShotReply, EngineError> {
     // No repository instructions, files, or active coding-session context.
     let scratch = tempfile::tempdir().map_err(|error| EngineError::Other(error.to_string()))?;
     let mut last_error = EngineError::Other("the model returned no text".into());
@@ -296,9 +303,12 @@ pub(crate) async fn run_one_shot(
             )))
         }) {
             Ok(raw) => {
-                let candidate = clean(&raw);
+                let candidate = clean(&raw.text);
                 if !candidate.is_empty() {
-                    return Ok(candidate);
+                    return Ok(OneShotReply {
+                        text: candidate,
+                        usage: raw.usage,
+                    });
                 }
                 last_error = EngineError::Other("the model returned no text".into());
             }
@@ -361,7 +371,7 @@ pub(crate) async fn collect_text(
     request: RunRequest,
     execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     instructions: &'static str,
-) -> Result<String, EngineError> {
+) -> Result<OneShotReply, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
     let _cancel_on_drop = interrupt.clone().drop_guard();
@@ -382,11 +392,15 @@ pub(crate) async fn collect_text(
     let mut stream = harness
         .run_one_shot(request, controls, instructions)
         .await?;
-    let mut text = String::new();
+    let mut reply = OneShotReply::default();
     let mut completed = false;
     while let Some(event) = stream.next().await {
         match event? {
-            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::TextDelta { text: delta } => reply.text.push_str(&delta),
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => reply.usage = Some((input_tokens, output_tokens)),
             AgentEvent::ToolCall { .. } => {
                 return Err(EngineError::Other(
                     "the model attempted to use a tool".into(),
@@ -410,7 +424,7 @@ pub(crate) async fn collect_text(
     }
     drop(steer_tx); // keep the mailbox open for the run's whole lifetime
     if completed {
-        Ok(text)
+        Ok(reply)
     } else {
         Err(EngineError::Other(
             "the run ended without completing".into(),

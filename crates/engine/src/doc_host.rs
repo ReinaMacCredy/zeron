@@ -976,6 +976,41 @@ impl ChatDocHandle {
         self.write_system_note_with(message_id, text, hint, None, created_at)
     }
 
+    pub fn write_classifier_record(
+        &self,
+        message_id: &str,
+        record: zeron_doc::ClassifierRecord,
+        created_at: i64,
+    ) -> Result<(), DocError> {
+        let label = match record.verdict {
+            zeron_doc::ClassifierVerdict::New => "Classifier: new task",
+            zeron_doc::ClassifierVerdict::Continue => "Classifier: same task",
+            zeron_doc::ClassifierVerdict::Failed => "Classifier: no answer",
+        };
+        self.doc.push_message(&SessionMessageEntry {
+            id: message_id.to_string(),
+            role: MessageRole::System,
+            parts: vec![
+                MessagePart::Text {
+                    id: "t0".into(),
+                    text: label.into(),
+                },
+                MessagePart::Classifier {
+                    id: format!("{message_id}-classifier"),
+                    record,
+                },
+            ],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        })
+    }
+
     /// [`Self::write_system_note`] carrying the provider-switch packet: the
     /// conversation as text that the next harness will receive on its first
     /// turn, shown under the divider from the moment of the switch.

@@ -1978,7 +1978,7 @@ impl SessionsEngine {
             .inner
             .workspace()
             .and_then(|workspace| workspace.chat_config(chat_id));
-        let Some(tokens) = self.inner.past_floor(chat_id, harness_id, config.as_ref()) else {
+        let Some(tokens) = self.inner.past_floor(chat_id, config.as_ref()) else {
             return false;
         };
         let Some(mut entries) = self
@@ -1995,16 +1995,52 @@ impl SessionsEngine {
             entries.truncate(at);
         }
         let input = crate::compact_boundary::classifier_input(&entries, prompt);
-        if !crate::compact_boundary::starts_new_task(
+        let Some(target) = crate::compact_boundary::classifier_target(
             &self.inner.registry,
             settings.classifier,
             harness_id,
-            input,
         )
         .await
+        else {
+            return false;
+        };
+        self.inner.set_classifying(
+            chat_id,
+            Some(zeron_proto::Classifying {
+                harness: target.harness_id,
+                model: target.model.clone(),
+            }),
+        );
+        let mut record = crate::compact_boundary::classify(target, input).await;
+        self.inner.set_classifying(chat_id, None);
+        record.context_tokens = tokens;
+        let new_task = record.verdict == zeron_doc::ClassifierVerdict::New;
+        if let Err(err) = self
+            .doc_handle(chat_id)
+            .and_then(|handle| Ok(handle.write_classifier_record(&new_id(), record, now_ms())?))
         {
+            tracing::warn!(chat = %chat_id, error = %err, "classifier record write failed");
+        }
+        if !new_task {
             lock(&self.inner.nudged_at).insert(chat_id.to_string(), tokens);
             return false;
+        }
+        let compaction = self
+            .inner
+            .registry
+            .resolve(harness_id)
+            .map(|harness| harness.compaction());
+        if matches!(compaction, Ok(Compaction::None)) {
+            return match self
+                .start_fresh_session(chat_id, harness_id, &entries)
+                .await
+            {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "fresh session skipped");
+                    false
+                }
+            };
         }
         let focus = format!(
             "The next message starts a new task. Keep only what it may need from this conversation. The message: {}",
@@ -2020,6 +2056,42 @@ impl SessionsEngine {
                 false
             }
         }
+    }
+
+    async fn start_fresh_session(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        entries: &[SessionMessageEntry],
+    ) -> Result<(), EngineError> {
+        let history = bounded_source_copy(entries, FRESH_SESSION_BUDGET_CHARS);
+        self.interrupt(chat_id).await?;
+        let cwd = self
+            .inner
+            .stored_harness_session(chat_id)
+            .map(|(_, cwd)| cwd)
+            .unwrap_or_else(|| self.chat_cwd(chat_id));
+        self.inner.tombstone_harness_session(chat_id, &cwd);
+        let handle = self.doc_handle(chat_id)?;
+        let packet = (!history.is_empty()).then(|| fresh_session_context(&history));
+        handle.write_system_note_with(
+            &new_id(),
+            FRESH_SESSION_NOTE,
+            Some("This agent cannot compact its own context, so it started a new session. The earlier conversation goes along as text; tool results and file contents do not."),
+            packet.as_deref().map(|packet| {
+                (
+                    harness_id,
+                    packet,
+                    zeron_doc::HandoffRoute {
+                        from_harness: Some(harness_id),
+                        ..Default::default()
+                    },
+                )
+            }),
+            now_ms(),
+        )?;
+        let _ = handle.doc().clear_context_usage();
+        Ok(())
     }
 
     /// The reminder a Claude Code PostToolUse hook hands the running turn, if one is due.
@@ -3149,6 +3221,7 @@ const SIDECHAT_BOUNDARY_INSTRUCTION: &str = "You are in a sidechat. Treat all pr
 
 /// How much of the source transcript a sidechat's first turn carries.
 const SIDECHAT_CONTEXT_BUDGET_CHARS: usize = 48_000;
+const FRESH_SESSION_BUDGET_CHARS: usize = 24_000;
 
 fn sidechat_prompt(typed: &str, source_copy: &str) -> String {
     let mut prompt =
@@ -3263,6 +3336,12 @@ struct Anchors {
 /// What a harness receives ahead of the typed message on the first turn after
 /// a provider switch: the conversation so far as text. Recorded on the user
 /// entry verbatim, so the transcript shows exactly what crossed.
+fn fresh_session_context(history: &str) -> String {
+    format!(
+        "<fresh_session>\nThis chat started a new session before a new task because the agent cannot compact its own context. The earlier conversation is below as plain text for reference; its tool results and file contents were not carried over.\n</fresh_session>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
+    )
+}
+
 fn provider_switch_context(history: &str) -> String {
     format!(
         "<provider_switch>\nThis chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.\n</provider_switch>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
@@ -3343,21 +3422,18 @@ impl Inner {
         let config = self
             .workspace()
             .and_then(|workspace| workspace.chat_config(chat_id));
-        if self.tool_disabled(config.as_ref(), "compact") {
+        if self.tool_disabled(config.as_ref(), "compact")
+            || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None
+        {
             return None;
         }
-        self.past_floor(chat_id, harness_id, config.as_ref())
+        self.past_floor(chat_id, config.as_ref())
     }
 
-    /// Context tokens once past `nudgeTokens`, on a harness that can compact.
-    fn past_floor(
-        &self,
-        chat_id: &str,
-        harness_id: HarnessId,
-        config: Option<&zeron_proto::ChatConfig>,
-    ) -> Option<u64> {
+    /// Context tokens once past `nudgeTokens`.
+    fn past_floor(&self, chat_id: &str, config: Option<&zeron_proto::ChatConfig>) -> Option<u64> {
         let floor = self.registry.compaction_settings().nudge_tokens;
-        if floor == 0 || self.registry.resolve(harness_id).ok()?.compaction() == Compaction::None {
+        if floor == 0 {
             return None;
         }
         let usage = self.doc_host()?.open(chat_id).ok()?.doc().context_usage()?;
@@ -3813,6 +3889,7 @@ impl Inner {
                     updated_at: now,
                     running_subagents: 0,
                     compact_plan: None,
+                    classifying: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3877,6 +3954,21 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn set_classifying(&self, chat_id: &str, model: Option<zeron_proto::Classifying>) {
+        let mut statuses = lock(&self.statuses);
+        let Some(entry) = statuses.get_mut(chat_id) else {
+            return;
+        };
+        if entry.classifying == model {
+            return;
+        }
+        entry.classifying = model;
+        entry.updated_at = Utc::now();
+        let mut list: Vec<Session> = statuses.values().cloned().collect();
+        list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        self.sessions_tx.send_replace(list);
     }
 
     fn set_compact_plan(&self, chat_id: &str, plan: Option<zeron_proto::CompactPlan>) {
@@ -4386,6 +4478,7 @@ const COMPACTED_NOTE: &str = "Context compacted";
 const COMPACTED_IDLE_NOTE: &str = "Compacted while idle, before the prompt cache expired";
 const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
 const COMPACTED_BOUNDARY_NOTE: &str = "Compacted before a new task";
+const FRESH_SESSION_NOTE: &str = "Fresh session before a new task";
 
 fn unsent_note(continue_with: &str) -> String {
     format!(

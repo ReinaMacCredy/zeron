@@ -619,6 +619,8 @@ pub struct Session {
     pub held_by_subagents: bool,
     #[serde(default)]
     pub compacting: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifying: Option<Classifying>,
     /// The run's live background tasks; independent of `status`, which
     /// they never hold Working.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -633,6 +635,14 @@ pub struct Session {
     /// Host-local, never mirrored into the workspace doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_plan: Option<CompactPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Classifying {
+    pub harness: crate::HarnessId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

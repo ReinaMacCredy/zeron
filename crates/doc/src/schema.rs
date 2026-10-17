@@ -154,6 +154,8 @@ struct DocPartJson {
     to_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    classifier: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -208,6 +210,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_chat_id: route.source_chat_id.clone(),
             source_title: route.source_title.clone(),
             handoff_kind: (route.kind == HandoffKind::Pointer).then(|| "pointer".into()),
+            ..Default::default()
+        },
+        MessagePart::Classifier { id, record } => DocPartJson {
+            id: id.clone(),
+            kind: "classifier".into(),
+            classifier: Some(serde_json::to_value(record)?),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -362,6 +370,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     },
                 },
             },
+            None => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
+        },
+        "classifier" => match p.classifier.and_then(|c| serde_json::from_value(c).ok()) {
+            Some(record) => MessagePart::Classifier { id: p.id, record },
             None => MessagePart::Text {
                 id: p.id,
                 text: String::new(),
@@ -1191,6 +1206,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(html_render) = &doc_part.html_render {
         map.insert("htmlRender", loro_value_from_json(html_render))?;
     }
+    if let Some(classifier) = &doc_part.classifier {
+        map.insert("classifier", loro_value_from_json(classifier))?;
+    }
     Ok(())
 }
 
@@ -1724,18 +1742,34 @@ mod tests {
     use crate::parts::fold_event_into_parts;
 
     #[test]
-    fn fork_seam_round_trips_through_the_doc() {
+    fn system_parts_round_trip_through_the_doc() {
         let doc = SessionDoc::init("fork").unwrap();
-        let seam = MessagePart::Fork {
-            id: "fork:side".into(),
-            source_chat_id: "main".into(),
-            source_title: "Main conversation".into(),
-        };
+        let seam = vec![
+            MessagePart::Fork {
+                id: "fork:side".into(),
+                source_chat_id: "main".into(),
+                source_title: "Main conversation".into(),
+            },
+            MessagePart::Classifier {
+                id: "classifier".into(),
+                record: crate::parts::ClassifierRecord {
+                    harness: Some(HarnessId::ClaudeCode),
+                    model: Some("sonnet".into()),
+                    verdict: crate::parts::ClassifierVerdict::New,
+                    duration_ms: 3400,
+                    context_tokens: 136_000,
+                    input: "Recent conversation:".into(),
+                    reply: "NEW".into(),
+                    input_tokens: Some(2100),
+                    output_tokens: Some(2),
+                },
+            },
+        ];
         doc.push_message(&SessionMessageEntry {
             duration_ms: None,
             id: "fork:side".into(),
             role: MessageRole::System,
-            parts: vec![seam.clone()],
+            parts: seam.clone(),
             created_at: 1,
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
@@ -1748,7 +1782,7 @@ mod tests {
         let entries = doc.read_entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
-        assert_eq!(entries[0].parts, vec![seam]);
+        assert_eq!(entries[0].parts, seam);
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

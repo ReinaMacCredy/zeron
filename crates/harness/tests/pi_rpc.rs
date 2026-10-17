@@ -377,6 +377,18 @@ async fn rpc_control_commands_finish_without_waiting_for_agent_settled() {
             1,
             "{command}: {events:?}"
         );
+        if command == "/compact" {
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AgentEvent::Compacted {
+                        pre_tokens: Some(120000),
+                        post_tokens: Some(9000)
+                    }
+                )),
+                "{events:?}"
+            );
+        }
     }
 }
 

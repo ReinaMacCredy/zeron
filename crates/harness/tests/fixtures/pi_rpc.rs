@@ -272,6 +272,13 @@ fn main() {
                     response(&prompt, json!({}));
                 }
             }
+            "compact" => {
+                emit(json!({"type":"compaction_start","reason":"manual"}));
+                emit(
+                    json!({"type":"compaction_end","reason":"manual","result":{"tokensBefore":120000,"estimatedTokensAfter":9000}}),
+                );
+                response(&v, json!({"tokensBefore":120000}));
+            }
             _ => response(&v, json!({})),
         }
     }

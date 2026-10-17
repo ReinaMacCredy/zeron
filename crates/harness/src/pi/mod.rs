@@ -7,7 +7,7 @@ mod sessions;
 mod ui;
 
 use crate::{
-    Harness, HarnessError, RunControls,
+    Compaction, Harness, HarnessError, RunControls,
     process::{Command, Stdio, owned::Child},
 };
 use async_trait::async_trait;
@@ -272,6 +272,9 @@ impl Harness for PiHarness {
     }
     fn deterministic_turn_end(&self) -> bool {
         true
+    }
+    fn compaction(&self) -> Compaction {
+        Compaction::SlashText("/compact".into())
     }
     /// `set_model` and `set_thinking_level` change the live process. Clearing
     /// either back to the default cannot be expressed that way.

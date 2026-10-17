@@ -376,7 +376,9 @@ pub(crate) fn raw_blocks(entries: &[SessionMessageEntry], hide_thinking: bool) -
                     &serde_json::to_string(questions).unwrap_or_default(),
                 ),
                 MessagePart::Error { message, .. } => push(RawRole::Error, message),
-                MessagePart::Fork { .. } | MessagePart::Visual { .. } => {}
+                MessagePart::Fork { .. }
+                | MessagePart::Visual { .. }
+                | MessagePart::Classifier { .. } => {}
             }
         }
     }
@@ -2055,6 +2057,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             running_subagents: 0,
             compact_plan: None,
+            classifying: None,
         }
     }
 

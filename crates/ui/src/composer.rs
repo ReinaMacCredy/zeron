@@ -15931,6 +15931,7 @@ mod tests {
                 updated_at: updated,
                 running_subagents: 0,
                 compact_plan: None,
+                classifying: None,
             }];
             state.selected_chat = Some("c".into());
             state.watch_clock_transitions(cx);
