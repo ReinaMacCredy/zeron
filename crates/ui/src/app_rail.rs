@@ -171,6 +171,10 @@ pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> Sha
 
 /// Outermost first, like Synara: the week ring around the session ring.
 fn ring_windows(account: &AgentAccount) -> Option<[&AgentUsageWindow; 2]> {
+    let find = |label: &str| account.usage_windows.iter().find(|w| w.label == label);
+    if let (Some(week), Some(session)) = (find("Week"), find("Session")) {
+        return Some([week, session]);
+    }
     match account.usage_windows.as_slice() {
         [first, second] if first.label == "Week" => Some([first, second]),
         [first, second] => Some([second, first]),
@@ -364,6 +368,14 @@ mod tests {
         let mut claude = account(HarnessId::ClaudeCode, true, &[0.3, 0.8]);
         claude.usage_windows[0].label = "Session".into();
         claude.usage_windows[1].label = "Week".into();
+        let labels = ring_windows(&claude).map(|rings| rings.map(|window| window.label.clone()));
+        assert_eq!(labels, Some(["Week".to_string(), "Session".to_string()]));
+        claude.usage_windows.push(AgentUsageWindow {
+            label: "Fable".into(),
+            used_fraction: 0.1,
+            resets_at: None,
+        });
+        claude.usage_windows.swap(0, 1);
         let labels = ring_windows(&claude).map(|rings| rings.map(|window| window.label.clone()));
         assert_eq!(labels, Some(["Week".to_string(), "Session".to_string()]));
         assert!(ring_windows(&account(HarnessId::Cursor, true, &[0.4])).is_none());
