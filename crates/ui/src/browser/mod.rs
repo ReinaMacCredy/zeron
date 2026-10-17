@@ -401,7 +401,10 @@ impl BrowserSurface {
             {
                 self.favicon_generation += 1;
                 self.favicon_task = None;
-                self.file_root = None;
+                #[cfg(target_os = "macos")]
+                {
+                    self.file_root = None;
+                }
             }
             let result = if let Some(native) = &self.native {
                 native.load(&url)
