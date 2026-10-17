@@ -175,6 +175,9 @@ pub struct ClassifierRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub verdict: ClassifierVerdict,
+    /// What the classifier answered, when the engine executed another verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classifier_verdict: Option<ClassifierVerdict>,
     pub decided_by: DecidedBy,
     pub duration_ms: u64,
     pub context_tokens: u64,

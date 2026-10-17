@@ -1791,6 +1791,7 @@ mod tests {
                     harness: Some(HarnessId::ClaudeCode),
                     model: Some("sonnet".into()),
                     verdict: crate::parts::ClassifierVerdict::Carry,
+                    classifier_verdict: None,
                     decided_by: crate::parts::DecidedBy::Stage2,
                     duration_ms: 3400,
                     context_tokens: 136_000,

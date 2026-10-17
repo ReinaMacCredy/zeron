@@ -10312,11 +10312,21 @@ impl Transcript {
         let model = record
             .harness
             .map(|harness| HandoffSide::new(harness, record.model.as_deref(), cx));
-        let (verdict, verdict_color) = match record.verdict {
-            ClassifierVerdict::New => ("New task", theme.accent),
-            ClassifierVerdict::Carry => ("Carry over", theme.success),
-            ClassifierVerdict::Continue => ("Same task", muted),
-            ClassifierVerdict::Failed => ("No answer", theme.warning),
+        let label = |verdict: ClassifierVerdict| match verdict {
+            ClassifierVerdict::New => "New task",
+            ClassifierVerdict::Carry => "Carry over",
+            ClassifierVerdict::Continue => "Same task",
+            ClassifierVerdict::Failed => "No answer",
+        };
+        let verdict_color = match record.verdict {
+            ClassifierVerdict::New => theme.accent,
+            ClassifierVerdict::Carry => theme.success,
+            ClassifierVerdict::Continue => muted,
+            ClassifierVerdict::Failed => theme.warning,
+        };
+        let verdict = match record.classifier_verdict {
+            Some(said) => format!("{} (said {})", label(record.verdict), label(said)),
+            None => label(record.verdict).to_string(),
         };
         let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
         let decided = match record.decided_by {
@@ -10360,7 +10370,7 @@ impl Transcript {
             .child(
                 div()
                     .text_color(verdict_color)
-                    .child(SharedString::from(verdict)),
+                    .child(SharedString::from(verdict.clone())),
             )
             .child(
                 crate::icons::icon(if open {

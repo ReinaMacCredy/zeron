@@ -2,9 +2,9 @@
 
 use zeron_doc::{
     ClassifierRecord, ClassifierVerdict, DecidedBy, MessagePart, MessageRole, MessageStatus,
-    SessionMessageEntry,
+    SessionMessageEntry, SubagentStatus,
 };
-use zeron_proto::HarnessId;
+use zeron_proto::{HarnessId, ToolCall};
 
 use crate::predictions::{entry_text, is_person_prompt, tail};
 use crate::registry::{HarnessRegistry, TitleSettings};
@@ -47,6 +47,8 @@ const TURNS: usize = 4;
 const CLIP_CHARS: usize = 800;
 const CARRY_TURNS: usize = 2;
 const CARRY_CHARS: usize = 8_000;
+const JOB_LINES: usize = 10;
+const JOB_CHARS: usize = 160;
 pub(crate) const STREAK_LIMIT: u32 = 3;
 const STAGE1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const STAGE2_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
@@ -226,6 +228,21 @@ pub(crate) async fn classify(target: OneShotTarget, input: String) -> Classifier
     record
 }
 
+/// A note never starts fresh: prompt wording alone let one through on the bench (carry/prompts.md, A13).
+pub(crate) fn cap_agent_note(record: &mut ClassifierRecord) {
+    if record.verdict == ClassifierVerdict::New {
+        record.classifier_verdict = Some(ClassifierVerdict::New);
+        record.verdict = ClassifierVerdict::Carry;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenJob {
+    pub kind: &'static str,
+    pub id: String,
+    pub what: String,
+}
+
 fn settled_text(entry: &SessionMessageEntry) -> Option<&str> {
     entry
         .parts
@@ -262,7 +279,53 @@ fn clip_start(text: &str, budget: usize) -> String {
     }
 }
 
-pub(crate) fn carry_block(entries: &[SessionMessageEntry], chat_id: &str) -> Option<String> {
+pub(crate) fn running_spawns(entries: &[SessionMessageEntry]) -> Vec<OpenJob> {
+    entries
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match part {
+            MessagePart::Tool {
+                id,
+                call,
+                subagent_status: Some(SubagentStatus::Running),
+                ..
+            } if call.is_subagent_spawn() => {
+                let name = match call {
+                    ToolCall::Unknown { name, .. } => name.as_str(),
+                    ToolCall::Mcp { tool, .. } => tool.as_str(),
+                    _ => "",
+                };
+                Some(OpenJob {
+                    kind: "sub-agent",
+                    id: id.clone(),
+                    what: name.strip_prefix("Agent: ").unwrap_or(name).to_string(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn jobs_section(jobs: &[OpenJob]) -> Option<String> {
+    if jobs.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["Still running when the chat compacted:".to_string()];
+    for job in jobs.iter().take(JOB_LINES) {
+        let what: String = job.what.chars().take(JOB_CHARS).collect();
+        lines.push(format!("- {} {}: {}", job.kind, job.id, what.trim()));
+    }
+    if jobs.len() > JOB_LINES {
+        lines.push(format!("- and {} more", jobs.len() - JOB_LINES));
+    }
+    Some(lines.join("\n"))
+}
+
+pub(crate) fn carry_block(
+    entries: &[SessionMessageEntry],
+    chat_id: &str,
+    jobs: &[OpenJob],
+) -> Option<String> {
     let mut turns: Vec<(&'static str, String, Option<&str>)> = Vec::new();
     for entry in entries {
         if entry.status == Some(MessageStatus::Streaming) {
@@ -302,10 +365,11 @@ pub(crate) fn carry_block(entries: &[SessionMessageEntry], chat_id: &str) -> Opt
         lines.reverse();
         kept.push(lines.join("\n"));
     }
+    kept.reverse();
+    kept.extend(jobs_section(jobs));
     if kept.is_empty() {
         return None;
     }
-    kept.reverse();
     Some(format!(
         "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out.\n\n{}\n</carried_over>",
         kept.join("\n\n")
@@ -452,12 +516,12 @@ mod tests {
             reply,
             streaming,
         ];
-        let block = carry_block(&entries, "chat").expect("a block");
+        let block = carry_block(&entries, "chat", &[]).expect("a block");
         assert_eq!(
             block,
             "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out.\n\nperson: second ask\nagent: old reply\n\nagent note: phase 2 next\nagent: phase 1 merged\n</carried_over>"
         );
-        assert_eq!(carry_block(&[], "chat"), None);
+        assert_eq!(carry_block(&[], "chat", &[]), None);
     }
 
     #[test]
@@ -468,7 +532,7 @@ mod tests {
             id: "late".into(),
             text: "tests green".into(),
         });
-        let block = carry_block(&[entry(MessageRole::User, "test it"), open], "chat").unwrap();
+        let block = carry_block(&[entry(MessageRole::User, "test it"), open], "chat", &[]).unwrap();
         assert!(block.contains("agent: running the tests\n"), "{block}");
         assert!(!block.contains("tests green"));
 
@@ -479,11 +543,90 @@ mod tests {
             entry(MessageRole::User, "newest ask"),
             entry(MessageRole::Assistant, &long),
         ];
-        let block = carry_block(&entries, "chat").unwrap();
+        let block = carry_block(&entries, "chat", &[]).unwrap();
         assert!(block.contains(&format!("agent: ...{}", "y".repeat(8_000))));
         assert!(!block.contains("newest ask") && !block.contains("older"));
         let body = block.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n");
         assert!(body.chars().count() < 8_100, "{}", body.chars().count());
+    }
+
+    #[test]
+    fn running_jobs_ride_the_carry_after_the_turns() {
+        let mut spawn: MessagePart = serde_json::from_value(serde_json::json!({
+            "kind": "tool",
+            "id": "toolu_review",
+            "call": { "kind": "unknown", "name": "Agent: Review the diff" },
+            "resolved": true,
+            "subagentStatus": "running",
+        }))
+        .unwrap();
+        let mut reply = entry(MessageRole::Assistant, "reviewer started");
+        reply.parts.insert(0, spawn.clone());
+        if let MessagePart::Tool {
+            subagent_status, ..
+        } = &mut spawn
+        {
+            *subagent_status = Some(SubagentStatus::Done);
+        }
+        reply.parts.push(spawn);
+        let entries = vec![entry(MessageRole::User, "review it"), reply];
+        let spawns = running_spawns(&entries);
+        assert_eq!(
+            spawns,
+            [OpenJob {
+                kind: "sub-agent",
+                id: "toolu_review".into(),
+                what: "Review the diff".into(),
+            }]
+        );
+        let mut jobs = vec![OpenJob {
+            kind: "background shell",
+            id: "b7wb5vp5o".into(),
+            what: "Sleep for 4 seconds then echo hi".into(),
+        }];
+        jobs.extend(spawns);
+        let block = carry_block(&entries, "chat", &jobs).unwrap();
+        assert!(
+            block.ends_with("person: review it\nagent: reviewer started\n\nStill running when the chat compacted:\n- background shell b7wb5vp5o: Sleep for 4 seconds then echo hi\n- sub-agent toolu_review: Review the diff\n</carried_over>"),
+            "{block}"
+        );
+        let many: Vec<OpenJob> = (0..12)
+            .map(|n| OpenJob {
+                kind: "delegated task",
+                id: format!("t{n}"),
+                what: "x".repeat(300),
+            })
+            .collect();
+        let block = carry_block(&[], "chat", &many).unwrap();
+        assert_eq!(block.matches("- delegated task").count(), 10);
+        assert!(block.contains(&format!("- delegated task t0: {}\n", "x".repeat(160))));
+        assert!(block.contains("- and 2 more\n</carried_over>"));
+    }
+
+    #[test]
+    fn an_agent_note_never_starts_fresh() {
+        let mut record = ClassifierRecord {
+            verdict: ClassifierVerdict::New,
+            reply: "NEW".into(),
+            ..Default::default()
+        };
+        cap_agent_note(&mut record);
+        assert_eq!(
+            (record.verdict, record.classifier_verdict),
+            (ClassifierVerdict::Carry, Some(ClassifierVerdict::New))
+        );
+        for verdict in [
+            ClassifierVerdict::Carry,
+            ClassifierVerdict::Continue,
+            ClassifierVerdict::Failed,
+        ] {
+            let mut record = ClassifierRecord {
+                verdict,
+                ..Default::default()
+            };
+            cap_agent_note(&mut record);
+            assert_eq!((record.verdict, record.classifier_verdict), (verdict, None));
+        }
     }
 
     #[test]

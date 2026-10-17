@@ -47,6 +47,7 @@ struct TestHarness {
     one_shots: Mutex<Vec<String>>,
     first_reading: AtomicU64,
     tokens: AtomicU64,
+    background: Mutex<Vec<zeron_proto::BackgroundTask>>,
 }
 
 impl TestHarness {
@@ -64,6 +65,7 @@ impl TestHarness {
             one_shots: Mutex::new(Vec::new()),
             first_reading: AtomicU64::new(1_000),
             tokens: AtomicU64::new(22_762),
+            background: Mutex::new(Vec::new()),
         }
     }
 }
@@ -160,6 +162,10 @@ impl Harness for TestHarness {
                 }));
             }
         } else {
+            let tasks = self.background.lock().unwrap().clone();
+            if !tasks.is_empty() {
+                events.push(Ok(AgentEvent::BackgroundTasks { tasks }));
+            }
             for tokens in [&self.first_reading, &self.tokens] {
                 events.push(Ok(AgentEvent::ContextUsage {
                     tokens: Some(tokens.load(Ordering::SeqCst)),
@@ -1065,6 +1071,93 @@ async fn a_carry_agent_note_compacts_and_resumes_with_the_last_turns() {
     assert_eq!(
         entry_text(&system[1]),
         "Agent compacted, last turns carried over · 22.8k → 2.3k tokens"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_verdict_on_an_agent_note_runs_as_carry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "phase 2" }),
+        )
+        .await
+        .expect("request compact");
+    wait_for(
+        || prompts(&requests).len() == 3,
+        "compaction, then the note",
+    )
+    .await;
+    assert!(prompts(&requests)[2].starts_with(CARRY_HEAD));
+    let system = system_entries(&core);
+    let record = record_of(&system[0]).expect("classifier record");
+    assert_eq!(
+        (
+            record.verdict,
+            record.classifier_verdict,
+            record.reply.as_str()
+        ),
+        (
+            ClassifierVerdict::Carry,
+            Some(ClassifierVerdict::New),
+            "NEW"
+        )
+    );
+    assert!(entry_text(&system[1]).starts_with("Agent compacted, last turns carried over"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carry_lists_the_jobs_still_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    *harness.background.lock().unwrap() = vec![zeron_proto::BackgroundTask {
+        id: "b7wb5vp5o".into(),
+        kind: zeron_proto::BackgroundTaskKind::Shell,
+        label: "sleep 300 && echo done".into(),
+        started_at: None,
+        output_path: None,
+    }];
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    let delegation: zeron_proto::Delegation = serde_json::from_value(serde_json::json!({
+        "delegatedByChatId": CHAT,
+        "depth": 1,
+        "anchor": "task-message",
+        "wake": "settledOnly",
+        "status": "running",
+        "startedAt": "2026-10-18T00:00:00Z",
+    }))
+    .unwrap();
+    core.workspace
+        .create_delegated_chat(
+            "child-task",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(tmp.path().to_string_lossy().to_string()),
+            delegation,
+        )
+        .expect("delegated chat");
+    core.workspace
+        .rename_chat("child-task", "Audit the parser")
+        .expect("title");
+    classifier_mode(&core);
+    *harness.verdict.lock().unwrap() = Some("CARRY".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(
+        || requests.lock().unwrap().len() == 3,
+        "compaction, then the message",
+    )
+    .await;
+    let sent = prompts(&requests)[2].clone();
+    assert!(
+        sent.contains("agent: ack: hello\n\nStill running when the chat compacted:\n- background shell b7wb5vp5o: sleep 300 && echo done\n- delegated task child-task: Audit the parser\n</carried_over>\n\nhello"),
+        "{sent}"
     );
 }
 

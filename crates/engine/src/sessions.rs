@@ -2047,7 +2047,13 @@ impl SessionsEngine {
             }
         };
         let carry = (verdict == ClassifierVerdict::Carry)
-            .then(|| crate::compact_boundary::carry_block(&entries, chat_id))
+            .then(|| {
+                crate::compact_boundary::carry_block(
+                    &entries,
+                    chat_id,
+                    &self.open_jobs(chat_id, &entries),
+                )
+            })
             .flatten();
         let compaction = self
             .inner
@@ -2107,6 +2113,60 @@ impl SessionsEngine {
         let record = crate::compact_boundary::classify(target, input).await;
         self.inner.set_classifying(chat_id, None);
         Some(record)
+    }
+
+    fn open_jobs(
+        &self,
+        chat_id: &str,
+        entries: &[SessionMessageEntry],
+    ) -> Vec<crate::compact_boundary::OpenJob> {
+        use crate::compact_boundary::OpenJob;
+        use zeron_proto::BackgroundTaskKind;
+        let tasks = self
+            .session_status(chat_id)
+            .map(|session| session.background_tasks)
+            .unwrap_or_default();
+        let mut jobs: Vec<OpenJob> = tasks
+            .iter()
+            .map(|task| OpenJob {
+                kind: match task.kind {
+                    BackgroundTaskKind::Shell => "background shell",
+                    BackgroundTaskKind::Agent => "background agent",
+                    BackgroundTaskKind::Other => "background task",
+                },
+                id: task.id.clone(),
+                what: task.label.clone(),
+            })
+            .collect();
+        // Claude lists a background agent both as a task and as its spawn chip.
+        jobs.extend(
+            crate::compact_boundary::running_spawns(entries)
+                .into_iter()
+                .filter(|spawn| {
+                    !tasks.iter().any(|task| {
+                        task.kind == BackgroundTaskKind::Agent && task.label == spawn.what
+                    })
+                }),
+        );
+        let chats = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.read_chats().ok())
+            .unwrap_or_default();
+        jobs.extend(
+            chats
+                .into_iter()
+                .filter(|chat| {
+                    chat.delegated_by() == Some(chat_id)
+                        && chat.delegation.as_ref().is_some_and(|d| d.is_running())
+                })
+                .map(|chat| OpenJob {
+                    kind: "delegated task",
+                    what: chat.title.clone().unwrap_or_default(),
+                    id: chat.id,
+                }),
+        );
+        jobs
     }
 
     fn write_classifier_record(&self, chat_id: &str, record: zeron_doc::ClassifierRecord) {
@@ -2298,7 +2358,10 @@ impl SessionsEngine {
                 .run_classifier(chat_id, harness_id, settings.classifier, input)
                 .await
             {
-                Some(record) => record,
+                Some(mut record) => {
+                    crate::compact_boundary::cap_agent_note(&mut record);
+                    record
+                }
                 None => return ClassifierVerdict::New,
             }
         };
@@ -2335,7 +2398,13 @@ impl SessionsEngine {
                 self.doc_handle(chat_id)
                     .ok()
                     .and_then(|handle| handle.doc().read_entries().ok())
-                    .and_then(|entries| crate::compact_boundary::carry_block(&entries, chat_id)),
+                    .and_then(|entries| {
+                        crate::compact_boundary::carry_block(
+                            &entries,
+                            chat_id,
+                            &self.open_jobs(chat_id, &entries),
+                        )
+                    }),
             ),
             ClassifierVerdict::Continue | ClassifierVerdict::Failed => {
                 self.inner
