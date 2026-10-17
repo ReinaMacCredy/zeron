@@ -1077,4 +1077,56 @@ impl NativePage {
         }
         rx
     }
+
+    pub(super) fn focus_page(&self) {
+        let _ = self.0.borrow().web.focus();
+    }
+
+    pub(super) fn annotation_snapshot(
+        &self,
+        rect: [f64; 4],
+    ) -> futures::channel::oneshot::Receiver<Result<Vec<u8>, String>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let tx = RefCell::new(Some(tx));
+        let completion = block2::RcBlock::new(
+            move |image: *mut objc2_app_kit::NSImage, error: *mut NSError| {
+                let Some(tx) = tx.borrow_mut().take() else {
+                    return;
+                };
+                let tiff = (|| {
+                    if let Some(error) = unsafe { error.as_ref() } {
+                        return Err(error.localizedDescription().to_string());
+                    }
+                    let image = unsafe { image.as_ref() }.ok_or("Snapshot returned no image")?;
+                    let data = image
+                        .TIFFRepresentation()
+                        .ok_or("Snapshot returned no image data")?;
+                    Ok(unsafe { data.as_bytes_unchecked() }.to_vec())
+                })();
+                std::thread::spawn(move || {
+                    let result = tiff.and_then(|tiff| {
+                        let image = image::load_from_memory(&tiff).map_err(|e| e.to_string())?;
+                        let mut png = std::io::Cursor::new(Vec::new());
+                        image
+                            .write_to(&mut png, image::ImageFormat::Png)
+                            .map_err(|e| e.to_string())?;
+                        Ok(png.into_inner())
+                    });
+                    let _ = tx.send(result);
+                });
+            },
+        );
+        let host = self.0.borrow();
+        let mtm = MainThreadMarker::new().expect("browser runs on main thread");
+        unsafe {
+            let configuration = objc2_web_kit::WKSnapshotConfiguration::new(mtm);
+            configuration.setRect(objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(rect[0], rect[1]),
+                objc2_foundation::NSSize::new(rect[2], rect[3]),
+            ));
+            host.view
+                .takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &completion);
+        }
+        rx
+    }
 }
