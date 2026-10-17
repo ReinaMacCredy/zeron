@@ -169,8 +169,7 @@ pub(crate) fn ring_tooltip(account: Option<&AgentAccount>, loading: bool) -> Sha
     }
 }
 
-/// Outermost first: the week ring around the session ring, like Synara's
-/// weekly-outside, 5h-inside pair.
+/// Outermost first, like Synara: the week ring around the session ring.
 fn ring_windows(account: &AgentAccount) -> Option<[&AgentUsageWindow; 2]> {
     match account.usage_windows.as_slice() {
         [first, second] if first.label == "Week" => Some([first, second]),

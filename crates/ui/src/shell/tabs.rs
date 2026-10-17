@@ -220,8 +220,6 @@ fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
         .into_any_element()
 }
 
-/// On the inset shell a selected tab wears the card body with an inset
-/// half-point edge (Synara); the flush shell keeps the glass ring.
 fn selected_shadows(tones: Option<InsetTones>) -> Vec<gpui::BoxShadow> {
     let Some(tones) = tones else {
         return crate::theme::glass_selected_shadows();

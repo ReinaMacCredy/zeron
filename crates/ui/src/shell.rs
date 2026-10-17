@@ -12413,12 +12413,6 @@ impl Shell {
         cx.notify();
     }
 
-    /// Rail update button: shown whenever this app's release checker
-    /// ([`crate::app_update`]) has found a newer version. Self-updating
-    /// installs show the background download and then "restart to apply";
-    /// installs that can't replace themselves explain why; advisory installs
-    /// point at `zeron update` or the GitHub releases page and dismiss per
-    /// version. The strip label is the tooltip.
     fn render_update_rail_button(
         &mut self,
         theme: &Theme,

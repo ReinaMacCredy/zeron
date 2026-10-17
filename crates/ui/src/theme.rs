@@ -916,12 +916,7 @@ impl Theme {
         }
     }
 
-    /// Synara's rail-layout planes for the inset shell: the shell band is the
-    /// lightest plane in dark (the window's own tone lifted by white) and a
-    /// step darker than the card in light. The card body is opaque so the
-    /// shell lift never reaches it, and a selected titlebar tab wears it.
-    /// Edges run at the seam's weight: Synara's 9% read brighter than the
-    /// seam once the shell is lifted.
+    /// Edges run at the seam's 5%: Synara's 9% reads brighter than the seam on the lifted shell.
     pub fn inset_tones(&self) -> InsetTones {
         let ink = |alpha: f32| match self.appearance {
             Appearance::Dark => hsla(0.0, 0.0, 1.0, alpha),
