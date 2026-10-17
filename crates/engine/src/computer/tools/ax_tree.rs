@@ -510,7 +510,7 @@ fn role_words(role: &str, role_description: Option<&str>) -> String {
     split_words(bare).replace('-', " ")
 }
 
-fn action_words(action: &str) -> String {
+pub(crate) fn action_words(action: &str) -> String {
     if let Some(named) = action.strip_prefix("Name:") {
         return named.lines().next().unwrap_or_default().trim().to_owned();
     }

@@ -212,6 +212,13 @@ async fn dispatches_named_secondary_actions_through_the_click_element_recipe() {
             "element_token": "menu-token",
             "actions": ["AXPress", "AXShowMenu", "AXPick", "AXConfirm", "AXCancel"],
         }),
+        json!({
+            "role": "AXDisclosureTriangle",
+            "label": "Rule Groups",
+            "frame": { "x": -250, "y": 30, "width": 20, "height": 20 },
+            "element_token": "group-token",
+            "actions": ["AXRaise", "_collapse", "Name:Move previous\nTarget:0x0\nSelector:(null)"],
+        }),
     ]);
     let root = f
         .backend
@@ -222,6 +229,25 @@ async fn dispatches_named_secondary_actions_through_the_click_element_recipe() {
         .unwrap();
     let open = resolved("Document.txt", &root.children[0]);
     let menu = resolved("Menu", &root.children[1]);
+    let group = resolved("Rule Groups", &root.children[2]);
+    for (listed, raw) in [
+        ("Collapse", "_collapse"),
+        ("_collapse", "_collapse"),
+        (
+            "move previous",
+            "Name:Move previous\nTarget:0x0\nSelector:(null)",
+        ),
+        ("Raise", "AXRaise"),
+        ("axraise", "AXRaise"),
+    ] {
+        assert!(f.backend.supports_action(&group, listed), "{listed}");
+        f.backend.perform_action(&group, listed).await.unwrap();
+        assert_subset(
+            &f.last_args("click"),
+            json!({ "element_token": "group-token", "action": raw }),
+        );
+    }
+    f.clear_calls();
     assert!(f.backend.supports_action(&open, "open"));
     assert!(!f.backend.supports_action(&open, "show_menu"));
     assert!(f.backend.supports_action(&menu, "menu"));

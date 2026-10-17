@@ -58,6 +58,7 @@ use super::still_frame_publisher::{
     StillFramePublisher, StillFramePublisherOptions, resolve_still_interval_ms,
 };
 use super::task_context::{current_computer_task, with_computer_task};
+use super::tools::action_words;
 use super::ui_tree_targeting::{ComputerTargetError, activation_point_for_node};
 use super::utf8_truncation::utf16_len;
 
@@ -89,23 +90,39 @@ const GUI_HOST_REQUIRED: &str =
 const MONITOR_MESSAGE: &str = "Computer control is paused because the Escape and human-input listener could not start. Reopen Zeron, then check Computer settings again.";
 
 struct ElementAction {
-    driver_action: &'static str,
-    ax_action: &'static str,
+    driver_action: String,
+    ax_action: String,
 }
 
-fn cua_element_action(name: &str) -> Option<ElementAction> {
-    let (driver_action, ax_action) = match name.to_lowercase().as_str() {
-        "axpress" | "press" => ("press", "AXPress"),
-        "open" => ("open", "AXOpen"),
-        "show_menu" | "menu" => ("show_menu", "AXShowMenu"),
-        "pick" => ("pick", "AXPick"),
-        "confirm" => ("confirm", "AXConfirm"),
-        "cancel" => ("cancel", "AXCancel"),
-        _ => return None,
+fn cua_element_action(name: &str, advertised: Option<&HashSet<String>>) -> Option<ElementAction> {
+    let known = match name.to_lowercase().as_str() {
+        "axpress" | "press" => Some(("press", "AXPress")),
+        "open" => Some(("open", "AXOpen")),
+        "show_menu" | "menu" => Some(("show_menu", "AXShowMenu")),
+        "pick" => Some(("pick", "AXPick")),
+        "confirm" => Some(("confirm", "AXConfirm")),
+        "cancel" => Some(("cancel", "AXCancel")),
+        _ => None,
     };
+    if let Some((driver_action, ax_action)) = known {
+        return Some(ElementAction {
+            driver_action: driver_action.to_owned(),
+            ax_action: ax_action.to_owned(),
+        });
+    }
+    let advertised = advertised?;
+    let name = name.trim();
+    let raw = advertised.get(name).or_else(|| {
+        let wanted = name.to_lowercase();
+        let mut named = advertised.iter().filter(|raw| {
+            raw.to_lowercase() == wanted || action_words(raw).to_lowercase() == wanted
+        });
+        let only = named.next()?;
+        named.next().is_none().then_some(only)
+    })?;
     Some(ElementAction {
-        driver_action,
-        ax_action,
+        driver_action: raw.clone(),
+        ax_action: raw.clone(),
     })
 }
 
@@ -3395,15 +3412,13 @@ impl CuaInner {
     }
 
     fn supports_action(&self, target: &ComputerResolvedTarget, action: &str) -> bool {
-        let Some(spec) = cua_element_action(action) else {
-            return false;
-        };
         // The driver pointer-clicks web elements that ignore AXPress.
         self.native_element(target).is_some_and(|element| {
-            (element.in_web_content && spec.ax_action == "AXPress")
-                || element
-                    .actions
-                    .is_some_and(|actions| actions.contains(spec.ax_action))
+            let actions = element.actions.as_deref();
+            cua_element_action(action, actions).is_some_and(|spec| {
+                (element.in_web_content && spec.ax_action == "AXPress")
+                    || actions.is_some_and(|actions| actions.contains(&spec.ax_action))
+            })
         })
     }
 
@@ -3412,14 +3427,6 @@ impl CuaInner {
         target: &ComputerResolvedTarget,
         action: &str,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
-        let Some(spec) = cua_element_action(action) else {
-            return Err(CuaActionError::new(
-                format!("Cua does not expose {action} through this integration."),
-                CuaEffect::NotDispatched,
-            )
-            .code("unsupported_operation")
-            .into());
-        };
         let element = self.native_element(target);
         let (Some(element), Some(window_id)) = (element, target.node.window_id.clone()) else {
             return Err(CuaActionError::new(
@@ -3429,11 +3436,19 @@ impl CuaInner {
             .code("stale_target")
             .into());
         };
+        let Some(spec) = cua_element_action(action, element.actions.as_deref()) else {
+            return Err(CuaActionError::new(
+                format!("The element does not list the action {action}; nothing was dispatched."),
+                CuaEffect::NotDispatched,
+            )
+            .code("unsupported_operation")
+            .into());
+        };
         if spec.ax_action != "AXPress"
             && !element
                 .actions
                 .as_ref()
-                .is_some_and(|actions| actions.contains(spec.ax_action))
+                .is_some_and(|actions| actions.contains(&spec.ax_action))
         {
             return Err(CuaActionError::new(
                 format!(

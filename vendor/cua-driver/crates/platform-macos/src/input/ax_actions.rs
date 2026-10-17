@@ -435,7 +435,7 @@ fn dispatch_ax_action_with(
     }
 }
 
-fn map_action(action: &str) -> &'static str {
+pub(crate) fn map_action(action: &str) -> &str {
     match action.to_lowercase().as_str() {
         "press" | "click" | "axpress" => "AXPress",
         "show_menu" | "right_click" | "rightclick" | "axshowmenu" => "AXShowMenu",
@@ -443,7 +443,7 @@ fn map_action(action: &str) -> &'static str {
         "confirm" | "axconfirm" => "AXConfirm",
         "cancel" | "axcancel" => "AXCancel",
         "open" | "axopen" => "AXOpen",
-        _ => "AXPress",
+        _ => action,
     }
 }
 
@@ -658,6 +658,9 @@ mod tests {
             "AXConfirm",
             "AXCancel",
             "AXOpen",
+            "AXIncrement",
+            "_new Rule Group",
+            "Name:Copy\nTarget:0x0\nSelector:(null)",
         ] {
             assert_eq!(map_action(action), action);
         }

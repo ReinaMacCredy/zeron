@@ -1855,7 +1855,7 @@ async fn describes_the_shortcut_form_and_the_semantic_actions_this_desktop_actua
     assert!(mac_hotkey.contains("More than one non-modifier key is refused"));
     let action =
         definition(&mac, "computer_perform_action").input_schema["properties"]["action"].clone();
-    assert_eq!(action["enum"], json!(MAC_ACTIONS));
+    assert!(action.get("enum").is_none());
     assert!(
         action["description"]
             .as_str()

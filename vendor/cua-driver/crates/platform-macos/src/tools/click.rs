@@ -132,7 +132,8 @@ fn def() -> &'static ToolDef {
              AX path: \"right\" maps to AXShowMenu (same surface as the dedicated `right_click` \
              tool); \"middle\" has no AX equivalent and falls back to a pixel middle-click at the \
              element's center.\n\
-             action: press (default), show_menu, pick, confirm, cancel, open.\n\
+             action: press (default), show_menu, pick, confirm, cancel, open, or any \
+             other action name the element advertises, sent verbatim.\n\
              from_zoom: set true after a zoom call to auto-translate zoom-image pixel \
              coordinates to full-window space."
             .into(),
@@ -156,7 +157,7 @@ fn def() -> &'static ToolDef {
                 "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
                 "x":             { "type": "number",  "description": "X in screenshot pixels. A window target uses the get_window_state PNG; a desktop target uses the native get_desktop_state PNG. The driver reverses Retina backing scale and any window-image downscale." },
                 "y":             { "type": "number",  "description": "Y in screenshot pixels from the image selected by target." },
-                "action":        { "type": "string",  "description": "AX action: press, show_menu, pick, confirm, cancel, open." },
+                "action":        { "type": "string",  "description": "AX action: press, show_menu, pick, confirm, cancel, open, or any advertised action name verbatim." },
                 "button":        {
                     "type": "string",
                     "enum": ["left", "right", "middle"],
@@ -1434,7 +1435,7 @@ fn perform_ax_click(
     modifiers: &[String],
     foreground: bool,
 ) -> anyhow::Result<(String, bool, bool, bool, bool)> {
-    let ax_action = map_action(action_str);
+    let ax_action = crate::input::ax_actions::map_action(action_str);
     let element = element_ptr as AXUIElementRef;
 
     // Check the live value immediately before dispatch. Foreground assist can
@@ -1733,18 +1734,6 @@ mod selection_fallback_tests {
         assert!(selection_readback_confirms(true, false, true, true));
         assert!(!selection_readback_confirms(true, true, true, true));
         assert!(!selection_readback_confirms(false, true, true, false));
-    }
-}
-
-fn map_action(action: &str) -> &'static str {
-    match action.to_lowercase().as_str() {
-        "press" | "click" => "AXPress",
-        "show_menu" | "right_click" => "AXShowMenu",
-        "pick" => "AXPick",
-        "confirm" => "AXConfirm",
-        "cancel" => "AXCancel",
-        "open" => "AXOpen",
-        _ => "AXPress",
     }
 }
 
