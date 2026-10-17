@@ -59,7 +59,7 @@ pub(crate) const TOP: [RailEntry; 5] = [
         item: RailItem::Tasks,
         id: "open-tasks",
         label: "Tasks",
-        icon: icons::LUCIDE_LIST_CHECKS,
+        icon: icons::TASKS,
     },
     RailEntry {
         item: RailItem::PullRequests,

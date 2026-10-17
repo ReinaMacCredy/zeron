@@ -277,7 +277,7 @@ icon_assets![
     (LUCIDE_LIST_FILTER, "lucide-list-filter"),
     (LUCIDE_ARROW_DOWN_UP, "lucide-arrow-down-up"),
     (LUCIDE_ARROW_LEFT_RIGHT, "lucide-arrow-left-right"),
-    (LUCIDE_LIST_CHECKS, "lucide-list-checks"),
+    (TASKS, "hugeicons-apple-reminder"),
     (LUCIDE_CLOCK, "lucide-clock"),
     (LUCIDE_CALENDAR_ARROW_DOWN, "lucide-calendar-arrow-down"),
     (LUCIDE_CALENDAR_ARROW_UP, "lucide-calendar-arrow-up"),

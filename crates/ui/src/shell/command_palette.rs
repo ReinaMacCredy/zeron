@@ -290,7 +290,7 @@ impl Command {
             Self::Settings => icons::SETTINGS,
             Self::Inbox => icons::BELL,
             Self::Usage => icons::USAGE_CHART,
-            Self::Tasks => icons::LUCIDE_LIST_CHECKS,
+            Self::Tasks => icons::TASKS,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
         }
