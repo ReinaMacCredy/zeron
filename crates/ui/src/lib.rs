@@ -99,6 +99,7 @@ pub mod typography;
 mod usage;
 pub mod visuals;
 pub mod voice;
+mod whats_new;
 mod workspace_links;
 
 use std::path::PathBuf;

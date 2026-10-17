@@ -1,0 +1,211 @@
+use std::io::Cursor;
+use std::sync::{Arc, OnceLock};
+
+use gpui::{Image, ImageFormat};
+use serde::Deserialize;
+use zeron_update::version_newer;
+
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const SOURCE: &str = include_str!("../whats_new.toml");
+
+const IMAGES: &[(&str, &[u8])] = &[
+    ("inbox.jpg", include_bytes!("../assets/whats_new/inbox.jpg")),
+    (
+        "kanban.jpg",
+        include_bytes!("../assets/whats_new/kanban.jpg"),
+    ),
+    ("usage.jpg", include_bytes!("../assets/whats_new/usage.jpg")),
+];
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Changelog {
+    entry: Vec<Entry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    pub version: String,
+    pub date: String,
+    #[serde(default)]
+    pub hero: Option<String>,
+    pub features: Vec<Feature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Feature {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub details: Option<String>,
+}
+
+pub struct Picture {
+    pub image: Arc<Image>,
+    pub aspect: f32,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Resolution<'a> {
+    Show(&'a Entry),
+    Advance,
+    Noop,
+}
+
+fn parse(source: &str) -> Result<Vec<Entry>, toml::de::Error> {
+    let mut entries = toml::from_str::<Changelog>(source)?.entry;
+    entries.sort_by(|a, b| {
+        if version_newer(&a.version, &b.version) {
+            std::cmp::Ordering::Less
+        } else if version_newer(&b.version, &a.version) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    Ok(entries)
+}
+
+pub fn entries() -> &'static [Entry] {
+    static ENTRIES: OnceLock<Vec<Entry>> = OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        parse(SOURCE).unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "whats_new.toml does not parse");
+            Vec::new()
+        })
+    })
+}
+
+pub fn entry_for<'a>(entries: &'a [Entry], version: &str) -> Option<&'a Entry> {
+    let version = version.trim_start_matches('v');
+    entries
+        .iter()
+        .find(|entry| entry.version.trim_start_matches('v') == version)
+}
+
+pub fn resolve<'a>(entries: &'a [Entry], current: &str, last_seen: Option<&str>) -> Resolution<'a> {
+    let Some(last_seen) = last_seen else {
+        return Resolution::Advance;
+    };
+    if !version_newer(current, last_seen) {
+        return Resolution::Noop;
+    }
+    entry_for(entries, current).map_or(Resolution::Advance, Resolution::Show)
+}
+
+pub fn picture(name: &str) -> Option<&'static Picture> {
+    static PICTURES: OnceLock<Vec<(&'static str, Picture)>> = OnceLock::new();
+    PICTURES
+        .get_or_init(|| {
+            IMAGES
+                .iter()
+                .filter_map(|(name, bytes)| Some((*name, decode(bytes)?)))
+                .collect()
+        })
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, picture)| picture)
+}
+
+fn decode(bytes: &[u8]) -> Option<Picture> {
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let format = match reader.format()? {
+        image::ImageFormat::Jpeg => ImageFormat::Jpeg,
+        image::ImageFormat::WebP => ImageFormat::Webp,
+        image::ImageFormat::Png => ImageFormat::Png,
+        _ => return None,
+    };
+    let (width, height) = reader.into_dimensions().ok()?;
+    (width > 0 && height > 0).then(|| Picture {
+        image: Arc::new(Image::from_bytes(format, bytes.to_vec())),
+        aspect: width as f32 / height as f32,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(version: &str) -> Entry {
+        Entry {
+            version: version.into(),
+            date: "Oct 17".into(),
+            hero: None,
+            features: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fresh_install_records_the_current_version_silently() {
+        let entries = [entry("0.2.113")];
+        assert_eq!(resolve(&entries, "0.2.113", None), Resolution::Advance);
+    }
+
+    #[test]
+    fn same_or_older_version_does_nothing() {
+        let entries = [entry("0.2.113")];
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.2.113")),
+            Resolution::Noop
+        );
+        assert_eq!(
+            resolve(&entries, "0.2.112", Some("0.2.113")),
+            Resolution::Noop
+        );
+    }
+
+    #[test]
+    fn upgrade_with_an_entry_shows_it() {
+        let entries = [entry("0.2.112"), entry("0.2.113")];
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.2.99")),
+            Resolution::Show(&entries[1])
+        );
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.0.0")),
+            Resolution::Show(&entries[1])
+        );
+    }
+
+    #[test]
+    fn upgrade_without_an_entry_advances_silently() {
+        let entries = [entry("0.2.112")];
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.2.112")),
+            Resolution::Advance
+        );
+    }
+
+    #[test]
+    fn bundled_changelog_parses_newest_first_with_every_image() {
+        let entries = parse(SOURCE).unwrap();
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .windows(2)
+                .all(|pair| version_newer(&pair[0].version, &pair[1].version))
+        );
+        for entry in &entries {
+            assert!(
+                !entry.features.is_empty(),
+                "{} has no features",
+                entry.version
+            );
+            let images = entry
+                .hero
+                .iter()
+                .chain(entry.features.iter().filter_map(|f| f.image.as_ref()));
+            for name in images {
+                assert!(picture(name).is_some(), "{name} is not a bundled image");
+            }
+        }
+    }
+}

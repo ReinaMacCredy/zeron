@@ -110,6 +110,7 @@ mod split;
 mod summary;
 mod swipe_nav;
 mod switcher;
+mod whats_new;
 mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
@@ -182,6 +183,7 @@ actions!(
         ToggleBtw,
         NewSession,
         OpenSettings,
+        OpenWhatsNew,
         NextSession,
         PrevSession,
         ArchiveSession,
@@ -2662,6 +2664,8 @@ pub struct Shell {
     /// Synara's one-time AppSnap introduction: shown on desktop until the
     /// user dismisses it or follows it into Settings → Appshots.
     appshot_welcome: bool,
+    whats_new_card: Option<whats_new::WhatsNewCard>,
+    whats_new_dialog: Option<whats_new::WhatsNewDialog>,
     /// The fork/rewind confirmation, centered like the delete dialog.
     branch_modal: Option<BranchModal>,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
@@ -3085,6 +3089,7 @@ impl Shell {
         let appshot_welcome = crate::appshots::welcome_pending()
             || (crate::appshots::is_desktop()
                 && std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("appshot-welcome"));
+        let whats_new_card = whats_new::boot_card(&mut settings, cx);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(
             cx,
@@ -3346,6 +3351,8 @@ impl Shell {
             chat_rename: None,
             delete_confirm: None,
             appshot_welcome,
+            whats_new_card,
+            whats_new_dialog: None,
             branch_modal: None,
             discard_working_tree: None,
             discard_working_tree_task: None,
@@ -13449,6 +13456,7 @@ impl Shell {
         )
         .fade_overflow_y(&self.sidebar_scroll);
 
+        let whats_new_card = self.render_whats_new_card(theme, cx);
         let github_star_banner = self.render_github_star_banner(theme, cx);
 
         div()
@@ -13466,6 +13474,7 @@ impl Shell {
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
                 el.child(pill)
             })
+            .when_some(whats_new_card, |el, card| el.child(card))
             .when_some(github_star_banner, |el, banner| el.child(banner))
             .into_any_element()
     }
@@ -14412,6 +14421,20 @@ impl Shell {
                     };
                     menu.child(row)
                 })
+                .child(
+                    popover::menu_row(theme, false, "user-menu-whats-new")
+                        .id("user-menu-whats-new")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close_user_menu(cx);
+                            this.open_whats_new_changelog(cx);
+                        }))
+                        .child(
+                            icon(icons::SPARK)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("What\u{2019}s new")),
+                )
                 // macOS keeps "Check for Updates…" in the app menu under
                 // About; elsewhere there is no app menu, so it lives here.
                 .when(!cfg!(target_os = "macos"), |menu| {
@@ -14933,6 +14956,10 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
+        if self.whats_new_dialog.is_some() && !self.sync_flow.has_visible_overlay() {
+            self.close_whats_new(cx);
+            return true;
+        }
         if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
             self.acknowledge_appshot_welcome(cx);
             return true;
@@ -15586,6 +15613,9 @@ impl Shell {
                 card,
                 20.0,
             ));
+        }
+        if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, cx) {
+            overlays.push(dialog);
         }
 
         if let Some(flow) = self.discard_working_tree.clone() {
@@ -19008,6 +19038,9 @@ impl Render for Shell {
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenWhatsNew, _, cx| this.open_whats_new_changelog(cx)),
+            )
             .on_action(cx.listener(
                 |this, _: &crate::agent_profiles::OpenAgentProfileEditor, _, cx| {
                     this.open_agent_profile_editor(cx)
@@ -19173,6 +19206,17 @@ impl Render for Shell {
                 {
                     self.debug_dialog = None;
                     self.user_menu.open(());
+                }
+                match self.debug_dialog.as_deref() {
+                    Some("whats-new") => {
+                        self.debug_dialog = None;
+                        self.open_whats_new_highlights(cx);
+                    }
+                    Some("whats-new-changelog") => {
+                        self.debug_dialog = None;
+                        self.open_whats_new_changelog(cx);
+                    }
+                    _ => {}
                 }
                 // `=model-switch` picks a different model on the selected chat
                 // (the switch-model dialog).
