@@ -29,17 +29,15 @@ pub struct PiHarness {
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
     session_store: Option<PathBuf>,
-    agent_dir: Option<PathBuf>,
-    executable: Option<PathBuf>,
+    launch: crate::LaunchOverrides,
     interrupt_grace: Duration,
     kill_grace: Duration,
 }
 impl Default for PiHarness {
     fn default() -> Self {
         Self {
-            executable: None,
             session_store: None,
-            agent_dir: None,
+            launch: crate::LaunchOverrides::default(),
             models_cache: Default::default(),
             workspace_commands: Default::default(),
             interrupt_grace: Duration::from_secs(2),
@@ -52,7 +50,7 @@ impl PiHarness {
         Self::default()
     }
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
-        self.executable = Some(path.into());
+        self.launch.executable = Some(path.into());
         self
     }
     pub fn with_session_store(mut self, path: impl Into<PathBuf>) -> Self {
@@ -62,7 +60,11 @@ impl PiHarness {
     /// Pi's settings/credentials directory (`PI_CODING_AGENT_DIR`) for the
     /// child and for Zeron's own reads of it; defaults to the inherited one.
     pub fn with_agent_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.agent_dir = Some(path.into());
+        self.launch.home = Some(path.into());
+        self
+    }
+    pub fn with_launch(mut self, launch: crate::LaunchOverrides) -> Self {
+        self.launch = launch;
         self
     }
     pub fn with_graces(mut self, interrupt: Duration, kill: Duration) -> Self {
@@ -72,6 +74,7 @@ impl PiHarness {
     }
     pub fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
         if let Some(path) = self
+            .launch
             .executable
             .clone()
             .or_else(|| std::env::var_os("PI_EXECUTABLE").map(PathBuf::from))
@@ -119,7 +122,7 @@ impl PiHarness {
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Process, HarnessError> {
         let exe = self.resolve_executable()?;
-        if self.executable.is_none() {
+        if self.launch.executable.is_none() {
             if let Some(version) = crate::executable::binary_version(&exe) {
                 if version < semver::Version::new(0, 85, 1) {
                     return Err(HarnessError::Protocol(format!(
@@ -132,10 +135,9 @@ impl PiHarness {
         // Process group plus the same env scrubbing the ACP launch applied.
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
-        if let Some(dir) = &self.agent_dir {
-            cmd.env("PI_CODING_AGENT_DIR", dir);
-        }
+        self.launch.apply(&mut cmd, Some("PI_CODING_AGENT_DIR"));
         cmd.args(["--mode", "rpc", "--no-themes"])
+            .args(&self.launch.args)
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -285,11 +287,12 @@ impl Harness for PiHarness {
         Ok(self.model_catalog(false).await?.models)
     }
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
-        let root = sessions::agent_dir(self.agent_dir.clone());
+        let root = sessions::agent_dir(self.launch.home.clone());
         crate::model_context::context(
             HarnessId::Pi,
             &self.resolve_executable()?,
             &[root.join("models.json"), root.join("settings.json")],
+            &self.launch,
         )
         .map(Some)
     }
@@ -323,7 +326,7 @@ impl Harness for PiHarness {
         &self,
         cwd: &Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
-        let mut skills = crate::skills::discover(HarnessId::Pi, cwd).await?;
+        let mut skills = crate::skills::discover(HarnessId::Pi, cwd, &self.launch).await?;
         let commands = self.commands_for(cwd).await?;
         crate::skills::attach_advertised_commands(HarnessId::Pi, &mut skills, &commands);
         Ok(Some(skills))
@@ -343,7 +346,7 @@ impl Harness for PiHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let mut request = request;
-        let store = sessions::Store::new(self.session_store.clone(), self.agent_dir.clone());
+        let store = sessions::Store::new(self.session_store.clone(), self.launch.home.clone());
         let mut lost_context = None;
         let args = match &request.resume {
             Some(id) => match store.resume_args(id, Path::new(&request.cwd)) {

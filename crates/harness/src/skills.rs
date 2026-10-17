@@ -40,12 +40,19 @@ impl CommandDiscovery {
     }
 }
 
-pub(crate) async fn discover(harness: HarnessId, cwd: &Path) -> Result<Vec<Skill>, HarnessError> {
+pub(crate) fn discover(
+    harness: HarnessId,
+    cwd: &Path,
+    launch: &crate::LaunchOverrides,
+) -> impl std::future::Future<Output = Result<Vec<Skill>, HarnessError>> + use<> {
     let cwd = cwd.to_path_buf();
-    let home = crate::executable::home_or_current_dir();
-    tokio::task::spawn_blocking(move || discover_at(harness, &cwd, &home))
-        .await
-        .map_err(|error| HarnessError::Protocol(error.to_string()))?
+    let launch = launch.clone();
+    async move {
+        let home = crate::executable::home_or_current_dir();
+        tokio::task::spawn_blocking(move || discover_at(harness, &cwd, &home, &launch))
+            .await
+            .map_err(|error| HarnessError::Protocol(error.to_string()))?
+    }
 }
 
 /// Shared Agent Skills do not establish a provider-native command identity.
@@ -125,7 +132,12 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
     }
 }
 
-fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>, HarnessError> {
+fn discover_at(
+    harness: HarnessId,
+    cwd: &Path,
+    home: &Path,
+    launch: &crate::LaunchOverrides,
+) -> Result<Vec<Skill>, HarnessError> {
     let mut roots: Vec<(PathBuf, String)> = project_dirs(harness)
         .iter()
         .map(|dir| (home.join(dir), String::new()))
@@ -139,9 +151,8 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
             );
         }
         HarnessId::Pi => roots.push((
-            std::env::var_os("PI_CODING_AGENT_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".pi/agent"))
+            launch
+                .home_or("PI_CODING_AGENT_DIR", home.join(".pi/agent"))
                 .join("skills"),
             String::new(),
         )),
@@ -160,9 +171,7 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
             String::new(),
         )),
         HarnessId::ClaudeCode => {
-            let config = std::env::var_os("CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".claude"));
+            let config = launch.home_or("CLAUDE_CONFIG_DIR", home.join(".claude"));
             roots.push((config.join("commands"), String::new()));
             roots.push((config.join("skills"), String::new()));
             // Only installed plugin locations; never crawl caches or marketplaces.
@@ -461,7 +470,7 @@ mod tests {
         for index in 0..4200 {
             write(&repo, &format!(".pi/skills/skill-{index}.md"), "Body");
         }
-        let skills = discover_at(HarnessId::Pi, &repo, &home).unwrap();
+        let skills = discover_at(HarnessId::Pi, &repo, &home, &Default::default()).unwrap();
         assert_eq!(skills.len(), MAX_DISCOVERY_ENTRIES);
         assert!(skills.iter().any(|skill| skill.name == "global"));
 
@@ -734,7 +743,7 @@ mod tests {
             HarnessId::Antigravity,
             HarnessId::Opencode,
         ] {
-            let skills = discover_at(harness, &repo, &home).unwrap();
+            let skills = discover_at(harness, &repo, &home, &Default::default()).unwrap();
             assert!(
                 skills.iter().any(|skill| skill.name == "portable"),
                 "{harness:?}"
@@ -802,7 +811,7 @@ mod tests {
                 &format!("{native}/skills/review/SKILL.md"),
                 "---\nname: review\ndescription: >-\n  Native multiline\n  description\ndisable-model-invocation: true\n---\nBody",
             );
-            let skills = discover_at(harness, &repo, &home).unwrap();
+            let skills = discover_at(harness, &repo, &home, &Default::default()).unwrap();
             let skill = skills.iter().find(|skill| skill.name == "review").unwrap();
             // Directory traversal uses native separators; the fixture path
             // may contain forward slashes on Windows. Compare path identity.
@@ -820,7 +829,7 @@ mod tests {
             ".agents/skills/broken/SKILL.md",
             "---\nname: [broken\n---\nBody",
         );
-        let skills = discover_at(HarnessId::Devin, &repo, &home).unwrap();
+        let skills = discover_at(HarnessId::Devin, &repo, &home, &Default::default()).unwrap();
         assert_eq!(skills.len(), 2);
         assert!(
             !skills
@@ -853,8 +862,13 @@ mod tests {
             ".claude/commands/team/review.md",
             "---\ndescription: Legacy\n---\nBody",
         );
-        let skills =
-            discover_at(HarnessId::ClaudeCode, &nested, &temp.path().join("home")).unwrap();
+        let skills = discover_at(
+            HarnessId::ClaudeCode,
+            &nested,
+            &temp.path().join("home"),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(skills.iter().any(|skill| skill.name == "root"));
         assert!(skills.iter().any(|skill| skill.name == "team:review"));
         assert!(!skills.iter().any(|skill| skill.name == "outside"));
@@ -878,7 +892,7 @@ mod tests {
         ] {
             std::fs::create_dir_all(&denied).unwrap();
             std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
-            let result = discover_at(HarnessId::Cursor, &repo, &home);
+            let result = discover_at(HarnessId::Cursor, &repo, &home, &Default::default());
             std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o700)).unwrap();
             let skills = result.unwrap();
             assert!(skills.iter().any(|skill| skill.name == "global"));
@@ -918,7 +932,7 @@ mod tests {
         // Root can read mode-000 files; missing and cyclic links still exercise
         // per-file I/O failures on privileged test runners.
         let denied_is_readable = std::fs::File::open(&denied).is_ok();
-        let result = discover_at(HarnessId::Cursor, &repo, &home);
+        let result = discover_at(HarnessId::Cursor, &repo, &home, &Default::default());
         std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o600)).unwrap();
         let skills = result.unwrap();
         let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();

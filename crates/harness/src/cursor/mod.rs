@@ -91,6 +91,7 @@ fn cursor_cli_paths() -> Vec<PathBuf> {
 pub struct CursorHarness {
     /// Test seam: run this program AS the shim instead of node+managed SDK.
     executable: Option<PathBuf>,
+    launch: crate::LaunchOverrides,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Credential-scoped successful catalog, with bounded refresh and backoff.
@@ -101,6 +102,7 @@ impl Default for CursorHarness {
     fn default() -> Self {
         Self {
             executable: None,
+            launch: crate::LaunchOverrides::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             models_cache: catalog::Catalog::default(),
@@ -127,6 +129,12 @@ impl CursorHarness {
         self
     }
 
+    // Only `env` reaches the SDK shim; the engine refuses the other fields for Cursor.
+    pub fn with_launch(mut self, launch: crate::LaunchOverrides) -> Self {
+        self.launch = launch;
+        self
+    }
+
     pub fn with_graces(mut self, interrupt_grace: Duration, kill_grace: Duration) -> Self {
         self.interrupt_grace = interrupt_grace;
         self.kill_grace = kill_grace;
@@ -139,6 +147,7 @@ impl CursorHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
         crate::compose_child_path(&mut cmd, &exe);
+        self.launch.apply(&mut cmd, None);
         cmd.arg("models")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -280,6 +289,9 @@ impl Harness for CursorHarness {
         hash.update(catalog::credential_context()?);
         hash.update(binary.as_os_str().as_encoded_bytes());
         hash.update(Self::sdk_version().as_bytes());
+        for (key, value) in &self.launch.env {
+            hash.update(format!("{key}={value}\0"));
+        }
         if let Ok(metadata) = binary.metadata() {
             hash.update(format!("{:?}:{}", metadata.modified().ok(), metadata.len()));
         }
@@ -324,6 +336,7 @@ impl Harness for CursorHarness {
             cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
         }
         crate::compose_child_path(&mut cmd, &exe);
+        self.launch.apply(&mut cmd, None);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }

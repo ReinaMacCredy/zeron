@@ -2302,7 +2302,7 @@ impl Harness for AcpHarness {
         } else {
             vec![]
         };
-        crate::model_context::context(self.id(), &binary, &extra).map(Some)
+        crate::model_context::context(self.id(), &binary, &extra, &Default::default()).map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
         (self.spec.models)()
@@ -2349,7 +2349,7 @@ impl Harness for AcpHarness {
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
         let (mut skills, commands) = tokio::try_join!(
-            crate::skills::discover(self.id(), cwd),
+            crate::skills::discover(self.id(), cwd, &Default::default()),
             self.workspace_commands
                 .get(cwd, self.discover_commands(Some(cwd))),
         )?;

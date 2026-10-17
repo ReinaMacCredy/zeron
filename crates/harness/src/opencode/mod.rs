@@ -222,7 +222,7 @@ fn free_localhost_port() -> Option<u16> {
 // ---------------------------------------------------------------------------
 
 pub struct OpencodeHarness {
-    executable: Option<PathBuf>,
+    launch: crate::LaunchOverrides,
     /// Test seam: an already-running server (no spawn, no auth unless given).
     base_url: Option<String>,
     interrupt_grace: Duration,
@@ -238,7 +238,7 @@ pub struct OpencodeHarness {
 impl Default for OpencodeHarness {
     fn default() -> Self {
         Self {
-            executable: None,
+            launch: crate::LaunchOverrides::default(),
             base_url: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
@@ -257,7 +257,12 @@ impl OpencodeHarness {
 
     /// Use a fixed binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
-        self.executable = Some(path.into());
+        self.launch.executable = Some(path.into());
+        self
+    }
+
+    pub fn with_launch(mut self, launch: crate::LaunchOverrides) -> Self {
+        self.launch = launch;
         self
     }
 
@@ -274,7 +279,7 @@ impl OpencodeHarness {
     }
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
-        if let Some(exe) = &self.executable {
+        if let Some(exe) = &self.launch.executable {
             return Ok(exe.clone());
         }
         resolve_opencode_executable().ok_or_else(|| HarnessError::NotInstalled(INSTALL_HINT.into()))
@@ -291,7 +296,7 @@ impl OpencodeHarness {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        Server::spawn(&exe, &self.launch, cwd, self.startup_timeout, mcp).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -366,7 +371,7 @@ impl Harness for OpencodeHarness {
         REASONING_LEVELS
     }
     fn installed(&self) -> bool {
-        self.executable.is_some()
+        self.launch.executable.is_some()
             || self.base_url.is_some()
             || resolve_opencode_executable().is_some()
     }
@@ -414,7 +419,7 @@ impl Harness for OpencodeHarness {
         } else {
             self.resolve_executable()?
         };
-        crate::model_context::context(self.id(), &binary, &[]).map(Some)
+        crate::model_context::context(self.id(), &binary, &[], &self.launch).map(Some)
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -435,7 +440,7 @@ impl Harness for OpencodeHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
-        let mut skills = crate::skills::discover(self.id(), cwd).await?;
+        let mut skills = crate::skills::discover(self.id(), cwd, &self.launch).await?;
         let _guard = self.probe_lock.lock().await;
         let directory = cwd
             .to_str()
@@ -712,6 +717,7 @@ impl Server {
     /// also resolves [`Protocol`]).
     async fn spawn(
         exe: &std::path::Path,
+        launch: &crate::LaunchOverrides,
         cwd: Option<&str>,
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
@@ -726,15 +732,18 @@ impl Server {
             .arg(port.to_string())
             .arg("--hostname")
             .arg("127.0.0.1")
-            // 2.x prefers OPENCODE_PASSWORD over the legacy name; a user's
-            // own value would otherwise lock us out of our server (401).
-            .env("OPENCODE_PASSWORD", &password)
+            .args(&launch.args);
+        crate::compose_child_path(&mut cmd, exe);
+        launch.apply(&mut cmd, None);
+        // 2.x prefers OPENCODE_PASSWORD over the legacy name; a user's
+        // own value would otherwise lock us out of our server (401).
+        cmd.env("OPENCODE_PASSWORD", &password)
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_CLIENT", "zeron");
         if let Some(mcp) = mcp {
             // The config shape differs by generation. If even the cold probe
             // can't tell, run without the Zeron MCP server rather than fail.
-            match opencode_version(exe).await {
+            match opencode_version(exe, launch).await {
                 Some(version) => {
                     let protocol = if version.major >= 2 {
                         Protocol::V2
@@ -744,7 +753,12 @@ impl Server {
                     cmd.env(
                         "OPENCODE_CONFIG_CONTENT",
                         mcp_config(
-                            std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
+                            launch
+                                .env
+                                .get("OPENCODE_CONFIG_CONTENT")
+                                .cloned()
+                                .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok())
+                                .as_deref(),
                             mcp,
                             protocol,
                         )?,
@@ -756,7 +770,6 @@ impl Server {
                 ),
             }
         }
-        crate::compose_child_path(&mut cmd, exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
@@ -4677,7 +4690,10 @@ const COLD_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// binary's lifetime, so one cold first exec after an upgrade failed every
 /// later run instantly until restart. Retry past that cache with a longer
 /// budget, and on success clear the cached failure for other callers.
-async fn opencode_version(exe: &std::path::Path) -> Option<semver::Version> {
+async fn opencode_version(
+    exe: &std::path::Path,
+    launch: &crate::LaunchOverrides,
+) -> Option<semver::Version> {
     let cached_exe = exe.to_path_buf();
     let cached =
         tokio::task::spawn_blocking(move || crate::executable::binary_version(&cached_exe))
@@ -4688,6 +4704,7 @@ async fn opencode_version(exe: &std::path::Path) -> Option<semver::Version> {
         return cached;
     }
     let mut cmd = Command::new(exe);
+    launch.apply(&mut cmd, None);
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -4793,6 +4810,7 @@ http.createServer((req, res) => {{
             second.env.insert("ZERON_CHAT_ID".into(), "second".into());
             let mut a = Server::spawn(
                 &exe,
+                &Default::default(),
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&first),
@@ -4801,6 +4819,7 @@ http.createServer((req, res) => {{
             .unwrap();
             let mut b = Server::spawn(
                 &exe,
+                &Default::default(),
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&second),
@@ -4849,6 +4868,7 @@ http.createServer((req, res) => {
         };
         let mut server = Server::spawn(
             &exe,
+            &Default::default(),
             fixture.path().to_str(),
             Duration::from_secs(5),
             Some(&mcp),
@@ -4907,6 +4927,7 @@ if (process.argv.includes('--version')) {{
         for _ in 0..2 {
             let mut server = Server::spawn(
                 &exe,
+                &Default::default(),
                 fixture.path().to_str(),
                 Duration::from_secs(10),
                 Some(&mcp),

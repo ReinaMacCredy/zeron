@@ -15,12 +15,17 @@ pub(crate) fn context(
     id: HarnessId,
     binary: &Path,
     extra: &[PathBuf],
+    launch: &crate::LaunchOverrides,
 ) -> Result<ModelContext, HarnessError> {
     let home = crate::executable::home_or_current_dir();
     let files = match id {
-        HarnessId::Codex => vec![root("CODEX_HOME", home.join(".codex")).join("auth.json")],
+        HarnessId::Codex => vec![
+            launch
+                .home_or("CODEX_HOME", home.join(".codex"))
+                .join("auth.json"),
+        ],
         HarnessId::ClaudeCode => {
-            let root = root("CLAUDE_CONFIG_DIR", home.join(".claude"));
+            let root = launch.home_or("CLAUDE_CONFIG_DIR", home.join(".claude"));
             vec![root.join("settings.json"), root.join(".credentials.json")]
         }
         HarnessId::Cursor => vec![home.join(".cursor/sdk/auth.json")],
@@ -61,7 +66,11 @@ pub(crate) fn context(
             ]
         }
         HarnessId::Pi => {
-            vec![root("PI_CODING_AGENT_DIR", home.join(".pi/agent")).join("auth.json")]
+            vec![
+                launch
+                    .home_or("PI_CODING_AGENT_DIR", home.join(".pi/agent"))
+                    .join("auth.json"),
+            ]
         }
         HarnessId::Devin => {
             let data = root("XDG_DATA_HOME", home.join(".local/share"));
@@ -119,6 +128,13 @@ pub(crate) fn context(
     for (key, value) in env {
         field(&mut hash, key.as_encoded_bytes());
         field(&mut hash, value.as_encoded_bytes());
+    }
+    for (key, value) in &launch.env {
+        field(&mut hash, key.as_bytes());
+        field(&mut hash, value.as_bytes());
+    }
+    for arg in &launch.args {
+        field(&mut hash, arg.as_bytes());
     }
     Ok(ModelContext {
         hash: format!("{:x}", hash.finalize()),

@@ -186,7 +186,7 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
 /// The Claude Code harness. Construct with [`ClaudeHarness::new`]; tests point
 /// it at a fake CLI with [`ClaudeHarness::with_executable`].
 pub struct ClaudeHarness {
-    executable: Option<PathBuf>,
+    launch: crate::LaunchOverrides,
     /// Grace between the interrupt control request and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
@@ -201,7 +201,7 @@ pub struct ClaudeHarness {
 impl Default for ClaudeHarness {
     fn default() -> Self {
         Self {
-            executable: None,
+            launch: crate::LaunchOverrides::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             initialize: discovery::InitializeCache::default(),
@@ -218,8 +218,20 @@ impl ClaudeHarness {
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
-        self.executable = Some(path.into());
+        self.launch.executable = Some(path.into());
         self
+    }
+
+    pub fn with_launch(mut self, launch: crate::LaunchOverrides) -> Self {
+        self.launch = launch;
+        self
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.launch.home_or(
+            "CLAUDE_CONFIG_DIR",
+            crate::executable::home_or_current_dir().join(".claude"),
+        )
     }
 
     /// Tune the interrupt→SIGTERM→SIGKILL escalation timing.
@@ -250,7 +262,7 @@ impl ClaudeHarness {
     }
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
-        if let Some(p) = &self.executable {
+        if let Some(p) = &self.launch.executable {
             return crate::executable::validate_native_override(p);
         }
         if let Some(p) = std::env::var_os("CLAUDE_CODE_EXECUTABLE")
@@ -356,7 +368,9 @@ impl ClaudeHarness {
     fn build_command(&self, exe: &PathBuf, request: &RunRequest, hook: Option<&str>) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
+        self.launch.apply(&mut cmd, Some("CLAUDE_CONFIG_DIR"));
         cmd.args(Self::launch_args(request, hook));
+        cmd.args(&self.launch.args);
         // File checkpoints are only recorded for sessions that ran with this
         // set; a chat that never had it can never restore code later.
         cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
@@ -442,6 +456,7 @@ impl ClaudeHarness {
             cmd.current_dir(cwd);
         }
         crate::compose_child_path(&mut cmd, &exe);
+        self.launch.apply(&mut cmd, Some("CLAUDE_CONFIG_DIR"));
         cmd.args([
             "--print",
             "--input-format",
@@ -452,6 +467,7 @@ impl ClaudeHarness {
             // CLI exits immediately with a usage error.
             "--verbose",
         ]);
+        cmd.args(&self.launch.args);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -634,10 +650,11 @@ impl Harness for ClaudeHarness {
 
     /// Credential and executable identity scopes both initialize and catalog caches.
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
-        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+        crate::model_context::context(self.id(), &self.resolve_executable()?, &[], &self.launch)
+            .map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
-        catalog::configured_models()
+        catalog::configured_models(&self.config_dir())
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
@@ -648,7 +665,10 @@ impl Harness for ClaudeHarness {
                 || self.model_context().map(|c| c.unwrap().key()),
                 || async {
                     let response = self.initialize().await?;
-                    catalog::with_discovered_models(catalog::configured_models(), &response)
+                    catalog::with_discovered_models(
+                        catalog::configured_models(&self.config_dir()),
+                        &response,
+                    )
                 },
             )
             .await
@@ -674,7 +694,7 @@ impl Harness for ClaudeHarness {
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
         let (skills, commands) = tokio::try_join!(
-            crate::skills::discover(self.id(), cwd),
+            crate::skills::discover(self.id(), cwd, &self.launch),
             self.workspace_commands
                 .get(cwd, self.discover_commands(Some(cwd)))
         )?;
@@ -788,11 +808,7 @@ impl ClaudeHarness {
             }
         }
         let normalizer = if let Some(session_id) = &request.resume {
-            let config = crate::model_context::root(
-                "CLAUDE_CONFIG_DIR",
-                crate::executable::home_or_current_dir().join(".claude"),
-            );
-            Normalizer::for_resume(&config, session_id).await
+            Normalizer::for_resume(&self.config_dir(), session_id).await
         } else {
             Normalizer::new()
         };
@@ -1744,6 +1760,73 @@ mod tests {
         );
         assert_eq!(commands[0].input_hint.as_deref(), Some("<focus>"));
         assert_eq!(commands[1].input_hint, None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_instance_runs_in_its_own_config_dir_with_its_env_and_args() {
+        let exe = PathBuf::from("/bin/claude");
+        let request = RunRequest {
+            prompt: String::new(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+            branch: None,
+            forked_at: None,
+            computer_control: false,
+            disabled_tools: Vec::new(),
+        };
+        let line = |harness: &ClaudeHarness| {
+            let cmd = harness.build_command(&exe, &request, None);
+            let std = cmd.as_std();
+            let env: std::collections::BTreeMap<String, Option<String>> = std
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect();
+            let args: Vec<String> = std
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            (env, args)
+        };
+        let (env, default_args) = line(&ClaudeHarness::new());
+        assert!(!env.contains_key("CLAUDE_CONFIG_DIR"));
+
+        let instance = ClaudeHarness::new().with_launch(crate::LaunchOverrides {
+            executable: None,
+            home: Some("/data/provider-homes/claude_work".into()),
+            args: vec!["--add-dir".into(), "/shared".into()],
+            env: [("ANTHROPIC_BASE_URL".into(), "https://proxy.example".into())].into(),
+        });
+        let (env, args) = line(&instance);
+        assert_eq!(
+            env["CLAUDE_CONFIG_DIR"].as_deref(),
+            Some("/data/provider-homes/claude_work")
+        );
+        assert_eq!(
+            env["ANTHROPIC_BASE_URL"].as_deref(),
+            Some("https://proxy.example")
+        );
+        assert_eq!(args[..default_args.len()], default_args[..]);
+        assert_eq!(args[default_args.len()..], ["--add-dir", "/shared"]);
+        assert_eq!(
+            instance.config_dir(),
+            PathBuf::from("/data/provider-homes/claude_work")
+        );
     }
 
     // The Windows `Command` wrapper has no `as_std` to read the built line back.

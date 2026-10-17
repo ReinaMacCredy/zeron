@@ -370,7 +370,9 @@ pub trait Harness: Send + Sync {
         if self.id() == HarnessId::Mock {
             return Ok(None);
         }
-        skills::discover(self.id(), cwd).await.map(Some)
+        skills::discover(self.id(), cwd, &LaunchOverrides::default())
+            .await
+            .map(Some)
     }
     async fn run_one_shot(
         &self,
@@ -452,6 +454,8 @@ pub mod cursor;
 pub(crate) mod executable;
 pub mod install;
 pub(crate) mod jsonrpc;
+mod launch;
+pub use launch::LaunchOverrides;
 pub mod mock;
 mod model_context;
 pub mod opencode;

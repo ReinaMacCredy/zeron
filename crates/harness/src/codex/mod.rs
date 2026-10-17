@@ -125,18 +125,14 @@ fn plain_executable(path: PathBuf) -> PathBuf {
 /// the harness itself would run. `CODEX_HOME` isolates the login from the live
 /// `~/.codex` session; the caller owns stdio wiring and cancellation.
 pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessError> {
-    let exe = CodexHarness::new().resolve_executable()?;
-    let mut cmd = Command::new(&exe);
-    crate::compose_child_path(&mut cmd, &exe);
-    cmd.arg("login").env("CODEX_HOME", codex_home);
-    Ok(cmd)
+    CodexHarness::new().login_command(codex_home)
 }
 
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
 /// fake app server with [`CodexHarness::with_executable`].
 pub struct CodexHarness {
     models_cache: crate::catalog::Catalog,
-    executable: Option<PathBuf>,
+    launch: crate::LaunchOverrides,
     /// Grace between `turn/interrupt` and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
@@ -147,7 +143,7 @@ impl Default for CodexHarness {
     fn default() -> Self {
         Self {
             models_cache: crate::catalog::Catalog::default(),
-            executable: None,
+            launch: crate::LaunchOverrides::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
         }
@@ -161,8 +157,30 @@ impl CodexHarness {
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
-        self.executable = Some(path.into());
+        self.launch.executable = Some(path.into());
         self
+    }
+
+    pub fn with_launch(mut self, launch: crate::LaunchOverrides) -> Self {
+        self.launch = launch;
+        self
+    }
+
+    pub fn login_command(&self, codex_home: &std::path::Path) -> Result<Command, HarnessError> {
+        let exe = self.resolve_executable()?;
+        let mut cmd = Command::new(&exe);
+        crate::compose_child_path(&mut cmd, &exe);
+        self.launch.apply(&mut cmd, None);
+        cmd.arg("login").env("CODEX_HOME", codex_home);
+        Ok(cmd)
+    }
+
+    fn app_server_command(&self, exe: &std::path::Path) -> Command {
+        let mut cmd = Command::new(exe);
+        cmd.arg("app-server").args(&self.launch.args);
+        crate::compose_child_path(&mut cmd, exe);
+        self.launch.apply(&mut cmd, Some("CODEX_HOME"));
+        cmd
     }
 
     /// Tune the interrupt→SIGTERM→SIGKILL escalation timing.
@@ -173,7 +191,7 @@ impl CodexHarness {
     }
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
-        if let Some(p) = &self.executable {
+        if let Some(p) = &self.launch.executable {
             return crate::executable::validate_native_override(p);
         }
         if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
@@ -200,12 +218,10 @@ impl CodexHarness {
     /// skills are separate from the slash-command catalog.
     async fn discover_skills(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
+        let mut cmd = self.app_server_command(&exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
-        crate::compose_child_path(&mut cmd, &exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -259,9 +275,7 @@ impl CodexHarness {
     /// successful picker response.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
-        crate::compose_child_path(&mut cmd, &exe);
+        let mut cmd = self.app_server_command(&exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -668,7 +682,8 @@ impl Harness for CodexHarness {
     /// discovery call is unavailable and no last-good catalog exists. Explicit
     /// picker refreshes bypass cooldowns while overlapping callers coalesce.
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
-        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+        crate::model_context::context(self.id(), &self.resolve_executable()?, &[], &self.launch)
+            .map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
         static_models()
@@ -874,9 +889,7 @@ impl CodexHarness {
                 .canonicalize()
                 .map_err(HarnessError::Io)?,
         );
-        let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
-        crate::compose_child_path(&mut cmd, &exe);
+        let mut cmd = self.app_server_command(&exe);
         if !cwd.is_empty() {
             cmd.current_dir(cwd);
         }
@@ -2766,6 +2779,50 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_instance_app_server_runs_in_its_own_home_with_its_env_and_args() {
+        let exe = std::path::Path::new("/usr/bin/true");
+        let envs = |cmd: &Command| -> std::collections::BTreeMap<String, Option<String>> {
+            cmd.as_std()
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect()
+        };
+        let default = CodexHarness::new().app_server_command(exe);
+        assert!(!envs(&default).contains_key("CODEX_HOME"));
+        let args: Vec<_> = default.as_std().get_args().collect();
+        assert_eq!(args, ["app-server"]);
+
+        let instance = CodexHarness::new().with_launch(crate::LaunchOverrides {
+            executable: None,
+            home: Some("/data/provider-homes/codex_work".into()),
+            args: vec!["-c".into(), "model_provider=work".into()],
+            env: [
+                ("OPENAI_BASE_URL".into(), "https://proxy.example".into()),
+                ("CODEX_HOME".into(), "/not/the/home".into()),
+            ]
+            .into(),
+        });
+        let cmd = instance.app_server_command(exe);
+        let env = envs(&cmd);
+        assert_eq!(
+            env["CODEX_HOME"].as_deref(),
+            Some("/data/provider-homes/codex_work")
+        );
+        assert_eq!(
+            env["OPENAI_BASE_URL"].as_deref(),
+            Some("https://proxy.example")
+        );
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args, ["app-server", "-c", "model_provider=work"]);
+    }
 
     #[test]
     fn current_schema_and_legacy_visibility_are_compatible() {
