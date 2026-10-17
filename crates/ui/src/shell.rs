@@ -2543,6 +2543,8 @@ pub struct Shell {
     home_settings_page: Option<Entity<HomeSettingsPage>>,
     home_view: Option<Entity<crate::home::HomeView>>,
     home_raise: Option<WidthTween>,
+    chat_work_focus: [FocusHandle; 2],
+    chat_work_slide: (usize, motion::IndicatorSlide),
     _home_events: Option<Subscription>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
@@ -3225,6 +3227,11 @@ impl Shell {
             home_settings_page: None,
             home_view: None,
             home_raise: None,
+            chat_work_focus: [cx.focus_handle(), cx.focus_handle()],
+            chat_work_slide: (
+                1,
+                motion::IndicatorSlide::at(1.0, std::time::Instant::now()),
+            ),
             _home_events: None,
             appearance_page: None,
             files_settings_page: None,
@@ -5842,8 +5849,9 @@ impl Shell {
     pub fn continue_in_new_thread(
         &mut self,
         source_chat_id: String,
-        harness: HarnessId,
+        harness: Option<HarnessId>,
         model: Option<String>,
+        target_space_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -5861,6 +5869,7 @@ impl Shell {
             "chatId": uuid::Uuid::new_v4().to_string(),
             "harness": harness,
             "model": model,
+            "targetSpaceId": target_space_id,
         });
         if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
             object.insert("targetDeviceId".into(), device.into());
@@ -15640,6 +15649,8 @@ impl Shell {
             window,
             cx,
         );
+        let chat_work_toggle = (chip_opacity > 0.001 && (!has_selection || dock_frame.active))
+            .then(|| self.render_chat_work_toggle(has_selection, theme, window, cx));
         let status = self.render_status_strip(composer_width, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
@@ -15736,6 +15747,22 @@ impl Shell {
                     )
                 },
             )
+            .when_some(chat_work_toggle, |column, toggle| {
+                column.child(
+                    div()
+                        .absolute()
+                        .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .opacity(chip_opacity)
+                        .child(toggle)
+                        .when(has_selection, |el| {
+                            el.child(div().absolute().inset_0().occlude())
+                        }),
+                )
+            })
             .when_some(home_grid, |column, grid| {
                 column.child(div().absolute().inset_0().child(
                     crate::terminal::dock::above_terminal(grid, terminal_geometry.clone()),

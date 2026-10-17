@@ -2666,20 +2666,21 @@ fn sidebar_show_more_row(
         .child(SharedString::from(format!("Show {remaining} more")))
 }
 
-/// Put this machine's device group first without disturbing the recency-based
-/// order of any remote groups. A targeted promotion is more truthful than a
-/// full name sort: local context leads, then the user's chosen chat sort wins.
-fn promote_local_device_group<T>(
-    groups: &mut Vec<(Option<(String, String)>, Vec<T>)>,
-    local_device_id: Option<&str>,
-) {
-    let Some(local_device_id) = local_device_id else {
+const CHATS_GROUP_KEY: &str = "chats";
+const NEW_CHAT_DIMMED_OPACITY: f32 = 0.45;
+
+/// Put one group first (this machine's device, or the projectless Chats)
+/// without disturbing the recency-based order of the others. A targeted
+/// promotion is more truthful than a full name sort: that context leads, then
+/// the user's chosen chat sort wins.
+fn promote_group<T>(groups: &mut Vec<(Option<(String, String)>, Vec<T>)>, key: Option<&str>) {
+    let Some(key) = key else {
         return;
     };
     let Some(index) = groups.iter().position(|(group, _)| {
         group
             .as_ref()
-            .is_some_and(|(device_id, _)| device_id == local_device_id)
+            .is_some_and(|(group_key, _)| group_key == key)
     }) else {
         return;
     };
@@ -2718,8 +2719,10 @@ fn grouped_visible_order(
             groups.push((key, vec![chat]));
         }
     }
-    if organization == SidebarOrganization::ByDevice {
-        promote_local_device_group(&mut groups, local_device_id);
+    match organization {
+        SidebarOrganization::ByDevice => promote_group(&mut groups, local_device_id),
+        SidebarOrganization::ByProject => promote_group(&mut groups, Some(CHATS_GROUP_KEY)),
+        SidebarOrganization::InOneList | SidebarOrganization::Inbox => {}
     }
     groups
         .into_iter()
@@ -2730,7 +2733,7 @@ fn grouped_visible_order(
 
 /// Project-mode group of a chat as (key, label). Projects sharing a
 /// repository identity fold into one group named for their representative
-/// space; project-less sessions group per device as "No project".
+/// space; project-less sessions on every device share one "Chats" group.
 fn sidebar_project_group(state: &AppState, chat: &zeron_proto::Chat) -> (String, String) {
     match state.space_for_chat(chat) {
         Some(space) => (
@@ -2739,7 +2742,7 @@ fn sidebar_project_group(state: &AppState, chat: &zeron_proto::Chat) -> (String,
         ),
         None => match chat.space_id.clone() {
             Some(space_id) => (space_id, "?".to_string()),
-            None => (format!("home:{}", chat.device_id), "No project".to_string()),
+            None => (CHATS_GROUP_KEY.to_string(), "Chats".to_string()),
         },
     }
 }
@@ -6015,9 +6018,15 @@ impl Shell {
                     .position(|id| id == &row.chat.id)
             });
         }
-        if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
-            let local_device_id = self.state.read(cx).local_device_id.clone();
-            promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
+        match self.settings.sidebar_organization {
+            SidebarOrganization::ByDevice => {
+                let local_device_id = self.state.read(cx).local_device_id.clone();
+                promote_group(&mut regular_groups, local_device_id.as_deref());
+            }
+            SidebarOrganization::ByProject => {
+                promote_group(&mut regular_groups, Some(CHATS_GROUP_KEY));
+            }
+            SidebarOrganization::InOneList | SidebarOrganization::Inbox => {}
         }
         let split_card = self.sidebar_split_card(pinned_order);
         if let Some(pair) = &split_card {
@@ -6137,6 +6146,12 @@ impl Shell {
             .selected_chat
             .clone()
             .filter(|_| !matches!(self.route, Route::PullRequests));
+        let canvas_chat_tab = {
+            let state = self.state.read(cx);
+            (matches!(self.route, Route::Chat) && state.selected_chat.is_none())
+                .then_some(state.no_project)
+        };
+        let dimmed = |chat: &zeron_proto::Chat| canvas_chat_tab == Some(chat.space_id.is_some());
         let split_pair = self.split_pair.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
@@ -6190,6 +6205,8 @@ impl Shell {
                             == shelf.group().map(|(key, _)| key)
                 });
             let slim = shelf == Some(InboxShelf::Settled);
+            let header_dimmed =
+                project_group && !rows.is_empty() && rows.iter().all(|row| dimmed(&row.chat));
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 let height = row.height(
@@ -6206,6 +6223,7 @@ impl Shell {
                     group: _,
                     created_by,
                 } = row;
+                let row_dimmed = dimmed(&chat);
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
@@ -6349,6 +6367,7 @@ impl Shell {
                     .h(px(slot_height.max(0.0)))
                     .mb(px(slot_height.min(0.0)))
                     .flex_none()
+                    .when(row_dimmed, |el| el.opacity(NEW_CHAT_DIMMED_OPACITY))
                     .child(element)
                     .children(row_top)
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
@@ -6564,6 +6583,7 @@ impl Shell {
                     chevron,
                 )
                     .group(group_name)
+                .when(header_dimmed, |el| el.opacity(NEW_CHAT_DIMMED_OPACITY))
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
@@ -6931,6 +6951,60 @@ impl Shell {
         // The active list already provides the spacing above Archived.
         let section = section.child(body);
         Some(section.into_any_element())
+    }
+
+    pub(super) fn render_chat_work_toggle(
+        &mut self,
+        leaving: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = std::time::Instant::now();
+        let slot = usize::from(!self.state.read(cx).no_project);
+        if !leaving && self.chat_work_slide.0 != slot {
+            self.chat_work_slide
+                .1
+                .retarget(slot as f32, self.reduced_motion, now);
+            self.chat_work_slide.0 = slot;
+        }
+        if self.chat_work_slide.1.animating_at(now) {
+            window.request_animation_frame();
+        }
+        let segments = [
+            crate::pull_request_detail::DockSegment {
+                id: "new-chat-mode-chat",
+                label: "Chat",
+                glyph: icons::CHAT_ROUND_LINE,
+                count: None,
+            },
+            crate::pull_request_detail::DockSegment {
+                id: "new-chat-mode-work",
+                label: "Work",
+                glyph: icons::FOLDER,
+                count: None,
+            },
+        ];
+        crate::pull_request_detail::dock_pill(
+            "new-chat-mode",
+            "Chat or Work",
+            &segments,
+            self.chat_work_slide.0,
+            self.chat_work_slide.1.value_at(now),
+            &self.chat_work_focus,
+            theme,
+            cx,
+            Self::select_chat_work,
+        )
+    }
+
+    fn select_chat_work(&mut self, slot: usize, _: &mut Window, cx: &mut Context<Self>) {
+        let pickers = self.composer.read(cx).pickers().clone();
+        if slot == 0 {
+            pickers.update(cx, |pickers, cx| pickers.pick_no_project(cx));
+        } else if !pickers.update(cx, |pickers, cx| pickers.pick_work(cx)) {
+            self.open_add_space(cx);
+        }
     }
 
     // ---- add-space flow ----
@@ -8610,8 +8684,8 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
 
     use super::{
-        ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
-        grouped_visible_order, inbox_rank, inbox_settled_at, promote_local_device_group,
+        CHATS_GROUP_KEY, ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
+        grouped_visible_order, inbox_rank, inbox_settled_at, promote_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -8622,7 +8696,7 @@ mod tests {
     fn space_key(chat: &zeron_proto::Chat) -> String {
         chat.space_id
             .clone()
-            .unwrap_or_else(|| format!("home:{}", chat.device_id))
+            .unwrap_or_else(|| CHATS_GROUP_KEY.to_string())
     }
 
     fn chat(id: &str) -> zeron_proto::Chat {
@@ -8703,7 +8777,7 @@ mod tests {
             group("older-remote", 3),
         ];
 
-        promote_local_device_group(&mut groups, Some("local"));
+        promote_group(&mut groups, Some("local"));
 
         let order: Vec<_> = groups
             .iter()
@@ -8735,7 +8809,7 @@ mod tests {
             None,
             space_key,
         );
-        assert_eq!(order, ["a1", "a2", "b1", "b2", "home"]);
+        assert_eq!(order, ["home", "a1", "a2", "b1", "b2"]);
 
         let filtered = grouped_visible_order(
             chats.clone(),
@@ -9009,7 +9083,7 @@ mod tests {
         let mut groups = vec![group("first", 1), group("second", 2)];
         let before = groups.clone();
 
-        promote_local_device_group(&mut groups, Some("not-present"));
+        promote_group(&mut groups, Some("not-present"));
 
         assert_eq!(groups, before);
     }

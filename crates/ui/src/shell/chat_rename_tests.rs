@@ -264,17 +264,13 @@ fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContex
         shell.settings.sidebar_organization = SidebarOrganization::ByProject;
         shell
             .sidebar_collapsed_groups
-            .insert("project:home:local".into());
+            .insert("project:chats".into());
         cx.notify();
     });
     redraw(cx);
     rename(&shell, cx, "older");
     shell.read_with(cx, |shell, _| {
-        assert!(
-            !shell
-                .sidebar_collapsed_groups
-                .contains("project:home:local")
-        );
+        assert!(!shell.sidebar_collapsed_groups.contains("project:chats"));
         assert!(shell.sidebar_reveal_motions.is_empty());
     });
     assert!(cx.debug_bounds("chat-title-editor-older").is_some());

@@ -145,7 +145,10 @@ struct CreateSidechatParams {
 struct ContinueInNewThreadParams {
     source_chat_id: String,
     chat_id: String,
-    harness: HarnessId,
+    #[serde(default)]
+    harness: Option<HarnessId>,
+    #[serde(default)]
+    target_space_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -3147,7 +3150,11 @@ impl RpcService for EngineRpc {
                         p.model.as_deref(),
                         p.reasoning,
                         &p.profile,
+                        p.target_space_id.as_deref(),
                         &packet,
+                        |source, title, config| {
+                            self.sessions.handoff_pointer(source, title, config)
+                        },
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chat)
