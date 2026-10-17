@@ -3,6 +3,10 @@
 pub mod nsworkspace;
 
 use anyhow::Context;
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::data::CFData;
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::string::CFString;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -156,7 +160,6 @@ pub(crate) fn set_app_hidden(pid: i32, hidden: bool) -> Result<Option<bool>, Str
         result
     }
 }
-
 
 /// Launch an app by bundle ID via NSWorkspace, background only (no focus
 /// steal). Returns the pid on success.
@@ -454,23 +457,28 @@ pub(crate) fn locate_by_name(name: &str) -> Option<AppLocator> {
 }
 
 /// Read `CFBundleIdentifier` from an `.app` bundle's `Info.plist`.
-/// Falls back to shelling out to `plutil` (already used elsewhere in
-/// this file) to avoid pulling in a plist crate just for this.
 fn bundle_id_for_app_path(app_path: &str) -> Option<String> {
-    let plist = format!("{app_path}/Contents/Info.plist");
-    let out = Command::new("/usr/bin/plutil")
-        .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-", &plist])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let bid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if bid.is_empty() {
-        None
-    } else {
-        Some(bid)
-    }
+    let info = info_plist(std::path::Path::new(app_path))?;
+    plist_string(&info, "CFBundleIdentifier")
+}
+
+fn info_plist(app_path: &std::path::Path) -> Option<CFDictionary> {
+    use core_foundation::propertylist::{
+        create_with_data, kCFPropertyListImmutable, CFPropertyList,
+    };
+    let bytes = std::fs::read(app_path.join("Contents/Info.plist")).ok()?;
+    let (list, _) = create_with_data(CFData::from_buffer(&bytes), kCFPropertyListImmutable).ok()?;
+    unsafe { CFPropertyList::wrap_under_create_rule(list) }.downcast_into::<CFDictionary>()
+}
+
+fn plist_string(info: &CFDictionary, key: &str) -> Option<String> {
+    let key = CFString::new(key);
+    let value = info.find(key.as_CFTypeRef())?;
+    let value = unsafe { CFType::wrap_under_get_rule(*value) };
+    value
+        .downcast::<CFString>()
+        .map(|text| text.to_string().trim().to_owned())
+        .filter(|text| !text.is_empty())
 }
 
 /// Return all apps: running apps merged with installed-but-not-running apps.
@@ -547,8 +555,7 @@ fn scan_installed_apps() -> Vec<AppInfo> {
             if path.extension().and_then(|e| e.to_str()) != Some("app") {
                 continue;
             }
-            let plist_path = path.join("Contents/Info.plist");
-            if let Some(mut info) = read_app_plist(&plist_path) {
+            if let Some(mut info) = read_app_info(&path) {
                 info.launch_path = path.to_str().map(str::to_owned);
                 info.kind = Some("desktop".to_owned());
                 info.last_used = fs_last_used(&path);
@@ -598,74 +605,13 @@ pub(crate) fn unix_secs_to_rfc3339(secs: i64) -> String {
     )
 }
 
-fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
-    let bundle_id_out = Command::new("plutil")
-        .args([
-            "-extract",
-            "CFBundleIdentifier",
-            "raw",
-            "-o",
-            "-",
-            plist_path.to_str()?,
-        ])
-        .output()
-        .ok()?;
-    if !bundle_id_out.status.success() {
-        return None;
-    }
-    let bundle_id = String::from_utf8_lossy(&bundle_id_out.stdout)
-        .trim()
-        .to_string();
-    if bundle_id.is_empty() {
-        return None;
-    }
-
-    let name_out = Command::new("plutil")
-        .args([
-            "-extract",
-            "CFBundleDisplayName",
-            "raw",
-            "-o",
-            "-",
-            plist_path.to_str()?,
-        ])
-        .output()
-        .ok();
-    let name = name_out
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            // Fallback: CFBundleName.
-            Command::new("plutil")
-                .args([
-                    "-extract",
-                    "CFBundleName",
-                    "raw",
-                    "-o",
-                    "-",
-                    plist_path.to_str().unwrap_or(""),
-                ])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    plist_path
-                        .parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.file_stem())
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string()
-                })
-        });
-
-    if name.is_empty() {
-        return None;
-    }
-
+fn read_app_info(app_path: &std::path::Path) -> Option<AppInfo> {
+    let info = info_plist(app_path)?;
+    let bundle_id = plist_string(&info, "CFBundleIdentifier")?;
+    let name = plist_string(&info, "CFBundleDisplayName")
+        .or_else(|| plist_string(&info, "CFBundleName"))
+        .or_else(|| app_path.file_stem()?.to_str().map(str::to_owned))
+        .filter(|name| !name.is_empty())?;
     Some(AppInfo {
         name,
         pid: 0,
