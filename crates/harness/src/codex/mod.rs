@@ -141,6 +141,7 @@ pub struct CodexHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    writers: ThreadWriters,
 }
 
 impl Default for CodexHarness {
@@ -150,7 +151,47 @@ impl Default for CodexHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            writers: ThreadWriters::default(),
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ThreadWriters(Arc<(std::sync::Mutex<HashSet<String>>, tokio::sync::Notify)>);
+
+struct WriterClaim {
+    writers: ThreadWriters,
+    thread_id: String,
+}
+
+impl ThreadWriters {
+    async fn claim(&self, thread_id: &str) -> WriterClaim {
+        let (held, released) = &*self.0;
+        loop {
+            let mut notified = std::pin::pin!(released.notified());
+            notified.as_mut().enable();
+            if held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(thread_id.to_owned())
+            {
+                return WriterClaim {
+                    writers: self.clone(),
+                    thread_id: thread_id.to_owned(),
+                };
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for WriterClaim {
+    fn drop(&mut self) {
+        let (held, released) = &*self.writers.0;
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.thread_id);
+        released.notify_waiters();
     }
 }
 
@@ -816,6 +857,7 @@ impl CodexHarness {
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            writers: self.writers.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -855,6 +897,7 @@ impl CodexHarness {
             thread_id,
             kill_grace: self.kill_grace,
             stderr_tail,
+            writers: self.writers.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -948,6 +991,7 @@ struct Session {
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    writers: ThreadWriters,
 }
 
 /// Turn-routing state (port of codex.ts's activeTurnId/completedTurnIds): the
@@ -1242,6 +1286,7 @@ async fn run_session(session: Session) {
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        writers,
     } = session;
     let RunControls {
         realtime,
@@ -1279,6 +1324,8 @@ async fn run_session(session: Session) {
     );
 
     // ---- handshake + thread + first turn (interruptible) ------------------
+    // Codex's thread writer is a flock its app-server holds until it exits.
+    let mut claim: Option<WriterClaim> = None;
     let setup = async {
         client
             .request(
@@ -1335,6 +1382,7 @@ async fn run_session(session: Session) {
                 )
                 .await?
         } else if let Some(resume) = &request.resume {
+            claim = Some(writers.claim(resume).await);
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
             match client.request("thread/resume", Value::Object(p)).await {
@@ -1359,6 +1407,9 @@ async fn run_session(session: Session) {
                 .await?
         };
         let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
+        if !thread_id.is_empty() && claim.as_ref().is_none_or(|c| c.thread_id != thread_id) {
+            claim = Some(writers.claim(&thread_id).await);
+        }
         let mut children = subagents::Subagents::new(thread_id.clone());
         children.restore(&thread["thread"]);
         let voice_context = realtime::ThreadContext {
@@ -2181,6 +2232,7 @@ struct CompactSession {
     thread_id: String,
     kill_grace: Duration,
     stderr_tail: crate::StderrTail,
+    writers: ThreadWriters,
 }
 
 /// How long the post-compaction `thread/tokenUsage/updated` is waited for
@@ -2211,6 +2263,7 @@ async fn compact_session(session: CompactSession) {
         thread_id,
         kill_grace,
         stderr_tail,
+        writers,
     } = session;
     let RunControls {
         request_input,
@@ -2220,6 +2273,7 @@ async fn compact_session(session: CompactSession) {
     } = controls;
     let request_input = Arc::new(request_input);
 
+    let mut claim: Option<WriterClaim> = None;
     let setup = async {
         client
             .request(
@@ -2247,6 +2301,7 @@ async fn compact_session(session: CompactSession) {
         // No fresh-thread fallback: compacting a thread the server could not
         // resume would compact nothing AND hand the engine a new session id to
         // remember, losing the chat's real thread.
+        claim = Some(writers.claim(&thread_id).await);
         let thread = client
             .request("thread/resume", Value::Object(resume_params))
             .await?;
