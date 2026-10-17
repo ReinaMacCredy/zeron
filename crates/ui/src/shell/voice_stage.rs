@@ -147,6 +147,7 @@ impl Shell {
             voice.speaker_level(),
         );
         let reduced = self.reduced_motion;
+        let wash = self.rail_wash(theme);
         self.voice_footer_orb.update(cx, |orb, cx| {
             orb.set_visible(live, cx);
             orb.set_state(orb_state, cx);
@@ -160,18 +161,14 @@ impl Shell {
             .role(gpui::Role::Button)
             .tab_index(0)
             .relative()
-            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+            .size(px(app_rail::BUTTON))
             .flex_none()
             .rounded(px(8.0))
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(motion::hover_blend(
-                FOOTER_HOVER,
-                theme.glass_hover().opacity(0.0),
-                theme.glass_hover(),
-            ))
+            .bg(motion::hover_blend(FOOTER_HOVER, wash.opacity(0.0), wash))
             .on_hover(motion::hover_listener(FOOTER_HOVER))
             .focus_visible(|s| s.border_2().border_color(theme.accent));
 
@@ -267,11 +264,7 @@ impl Shell {
                     .rounded_full()
                     .bg(theme.warning),
             )
-            .child(popover::anchored_menu_above_end(
-                "voice-failure",
-                card,
-                None,
-            ))
+            .child(popover::anchored_menu_right("voice-failure", card, None))
             .into_any_element()
             .into()
     }

@@ -1292,8 +1292,7 @@ const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 /// default-size pixels; scaled with the UI font via `ui_rems`.
 const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-/// The sidebar footer's profile and settings buttons share one hit target.
-const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 32.0;
+const USER_MENU_WIDTH: f32 = 284.0;
 
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
@@ -1320,8 +1319,6 @@ pub(crate) fn sidebar_faded_label(
     .fade_right(true)
     .fade_label_overflow(&overflow)
 }
-/// Breathing room between the account trigger and its adjacent action.
-const SIDEBAR_FOOTER_ACTION_GAP: f32 = 4.0;
 
 /// A chat row's inline title editor, swapped in for its faded title while
 /// the chat is renamed in place: the title's 13/17 type in an accent-ringed
@@ -2685,6 +2682,7 @@ pub struct Shell {
     sidebar_tween: Option<WidthTween>,
     sidebar_peek: sidebar_peek::SidebarPeek,
     sidebar_peek_focus: FocusHandle,
+    rail_focus: FocusHandle,
     files_tween: Option<WidthTween>,
     files_content_tween: Option<WidthTween>,
     /// The last tracked frame: its chat, the window fit, and for each of
@@ -3293,6 +3291,7 @@ impl Shell {
             sidebar_tween: None,
             sidebar_peek: sidebar_peek::SidebarPeek::default(),
             sidebar_peek_focus: cx.focus_handle(),
+            rail_focus: cx.focus_handle(),
             files_tween: None,
             files_content_tween: None,
             painted_columns: None,
@@ -9771,10 +9770,6 @@ impl Shell {
         // Dropdowns contain themselves to the page pane beside this column.
         settings::widgets::set_sidebar_width(self.content_left() + sidebar_width, cx);
         let nav = self.render_settings_nav(section, &theme, window, cx);
-        // The footer uses the chat sidebar's theme so the account and
-        // settings buttons render identically in both places.
-        let footer_theme = Theme::of(cx).clone();
-        let footer = self.render_sidebar_footer_row(&footer_theme, cx);
         let outlet = self.settings_outlet(section, window, cx);
         div()
             .id("settings-page")
@@ -9805,8 +9800,6 @@ impl Shell {
                 }
             }))
             .child(
-                // Same width and footer wrapper as the chat sidebar, so the
-                // account controls hold their position across the swap.
                 div()
                     .w(px(sidebar_width))
                     .h_full()
@@ -9814,6 +9807,7 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .pt(px(Theme::TITLEBAR_HEIGHT))
+                    .pb(px(Theme::SPACE_SM))
                     .child(
                         div().flex_none().px(px(Theme::SPACE_SM)).child(
                             settings::widgets::section_tab(
@@ -9839,8 +9833,7 @@ impl Shell {
                             .child("Back"),
                         ),
                     )
-                    .child(div().flex_1().min_h_0().child(nav))
-                    .child(div().px(px(8.0)).py(px(4.0)).flex_none().child(footer)),
+                    .child(div().flex_1().min_h_0().child(nav)),
             )
             .child(
                 div()
@@ -12323,10 +12316,7 @@ impl Shell {
         )
         .fade_overflow_y(&self.sidebar_scroll);
 
-        let update_strip = self.render_update_strip(theme, cx);
-        // Stacked above the update strip, the banner needs its own gap; alone
-        // it leans on the user-menu block's padding like the strip does.
-        let github_star_banner = self.render_github_star_banner(update_strip.is_some(), theme, cx);
+        let github_star_banner = self.render_github_star_banner(theme, cx);
 
         div()
             .w(px(self.sidebar_content_width()))
@@ -12343,28 +12333,15 @@ impl Shell {
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
                 el.child(pill)
             })
-            // "Star on GitHub" banner until dismissed (persisted), then the
-            // update strip — both above the user menu, below the lists.
             .when_some(github_star_banner, |el, banner| el.child(banner))
-            .when_some(update_strip, |el, strip| el.child(strip))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(self.render_sidebar_footer_row(theme, cx)),
-            )
             .into_any_element()
     }
 
-    /// "Star on GitHub" banner, styled like the update strip. Clicking it
+    /// "Star on GitHub" banner. Clicking it
     /// opens the repository; either that or the close button dismisses it for
     /// good — the choice is persisted so it never returns on the next launch.
     fn render_github_star_banner(
         &self,
-        above_update_strip: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -12378,7 +12355,7 @@ impl Shell {
             div()
                 .id("github-star-banner")
                 .mx(px(Theme::SPACE_SM))
-                .when(above_update_strip, |el| el.mb(px(Theme::SPACE_XS)))
+                .mb(px(Theme::SPACE_SM))
                 .pl(px(Theme::SPACE_SM))
                 .pr(px(Theme::SPACE_XS))
                 .py(px(4.0))
@@ -12436,53 +12413,67 @@ impl Shell {
         cx.notify();
     }
 
-    /// Update strip: shown above the user menu whenever this app's release
-    /// checker ([`crate::app_update`]) has found a newer version. Self-updating
-    /// installs (macOS bundles, Windows installs, Linux managed installs) show
-    /// the background download and then "restart to apply"; installs that
-    /// can't replace themselves explain why; advisory installs point at
-    /// `zeron update` or the GitHub releases page and dismiss per version.
-    fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Rail update button: shown whenever this app's release checker
+    /// ([`crate::app_update`]) has found a newer version. Self-updating
+    /// installs show the background download and then "restart to apply";
+    /// installs that can't replace themselves explain why; advisory installs
+    /// point at `zeron update` or the GitHub releases page and dismiss per
+    /// version. The strip label is the tooltip.
+    fn render_update_rail_button(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let update = crate::app_update::AppUpdate::global(cx)?;
         let (label, action) = update.read(cx).strip()?;
         let failed = matches!(
             update.read(cx).flow(),
             crate::app_update::Flow::Failed { .. }
         );
-        let tone = if failed { theme.danger } else { theme.accent };
-        // Follow the selected spectrum with a low-emphasis glass tint rather
-        // than painting the bright text accent as a solid slab.
-        let (chip_bg, chip_bg_hover) = if failed {
-            (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
-        } else {
-            (theme.accent_wash, theme.accent.opacity(0.16))
-        };
-
-        let mut strip = div()
-            .id("update-strip")
-            .mx(px(Theme::SPACE_SM))
-            // No bottom margin: the user-menu block below carries its own
-            // SPACE_SM padding — doubling it read as a hole (user report).
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .bg(chip_bg)
+        let fill = if failed { theme.danger } else { theme.accent };
+        let wash = self.rail_wash(theme);
+        let mut button = div()
+            .id("update-rail-button")
+            .debug_selector(|| "update-rail-button".into())
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
+            .tab_index(0)
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
+            .size(px(app_rail::BUTTON))
+            .flex_none()
             .flex()
-            .flex_row()
             .items_center()
-            .text_size(crate::typography::ui_rems(11.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(tone)
-            .child(div().flex_1().min_w_0().child(label));
+            .justify_center()
+            .rounded(px(8.0))
+            .tooltip(crate::settings::widgets::text_tooltip(label))
+            .child(
+                div()
+                    .size(px(28.0))
+                    .rounded_full()
+                    .bg(fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icon(icons::LUCIDE_DOWNLOAD)
+                            .size(px(16.0))
+                            .text_color(theme.on_accent),
+                    ),
+            );
         if action != crate::app_update::StripAction::None {
-            strip = strip
+            button = button
                 .cursor_pointer()
-                .hover(move |s| s.bg(chip_bg_hover))
+                .bg(motion::hover_blend(
+                    "update-rail-button",
+                    wash.opacity(0.0),
+                    wash,
+                ))
+                .on_hover(motion::hover_listener("update-rail-button"))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.on_update_strip_click(action, cx)),
                 );
         }
-        Some(strip.into_any_element())
+        Some(button.into_any_element())
     }
 
     /// Download → the background stage; Restart → swap + relaunch; Explain →
@@ -12822,6 +12813,9 @@ impl Shell {
             .map(|entry| self.render_rail_button(entry, &theme, cx))
             .collect();
         let rings = self.render_rail_rings(&theme, cx);
+        let voice = self.render_voice_trigger(&theme, cx);
+        let account = self.render_user_menu(&theme, cx);
+        let update = self.render_update_rail_button(&theme, cx);
         let bottom: Vec<AnyElement> = app_rail::BOTTOM
             .iter()
             .map(|entry| self.render_rail_button(entry, &theme, cx))
@@ -12829,6 +12823,7 @@ impl Shell {
         div()
             .id("app-rail")
             .debug_selector(|| "app-rail".into())
+            .track_focus(&self.rail_focus)
             .absolute()
             .left_0()
             .top(px(Theme::TITLEBAR_HEIGHT))
@@ -12842,6 +12837,9 @@ impl Shell {
             .children(top)
             .child(div().flex_1())
             .children(rings)
+            .children(voice)
+            .child(account)
+            .children(update)
             .children(bottom)
             .into_any_element()
     }
@@ -13068,40 +13066,11 @@ impl Shell {
         })
     }
 
-    /// Shared by the chat sidebar and the settings page so both sit in one
-    /// position.
-    fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("sidebar-footer-row")
-            .debug_selector(|| "sidebar-footer-row".into())
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(SIDEBAR_FOOTER_ACTION_GAP))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(self.render_sidebar_footer(theme, cx)),
-            )
-            .into_any_element()
-    }
-
-    fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_user_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (user_line, menu_identity) = {
             let state = self.state.read(cx);
             sidebar_account_identity(state.workspace_scope, self.sync_flow, state.auth_user())
         };
-        self.render_user_menu(user_line, menu_identity, theme, cx)
-    }
-
-    fn render_user_menu(
-        &mut self,
-        user_line: SharedString,
-        menu_identity: SharedString,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
@@ -13132,7 +13101,7 @@ impl Shell {
             .tab_index(0)
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .relative()
-            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+            .size(px(app_rail::BUTTON))
             .flex_none()
             .rounded_full()
             .flex()
@@ -13168,15 +13137,15 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .tooltip(crate::settings::widgets::text_tooltip_above(
-                user_line.clone(),
-            ))
+            .when(!open, |el| {
+                el.tooltip(crate::settings::widgets::text_tooltip(user_line.clone()))
+            })
             .child(initial);
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
 
             let menu = popover::popover_card(theme)
-                .w(px(self.sidebar_content_width() - 16.0))
+                .w(px(USER_MENU_WIDTH))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
                 }))
@@ -13281,24 +13250,13 @@ impl Shell {
                     )
                 })
                 .into_any_element();
-            // Opens upward, left-aligned with the pill: the card is as wide as
-            // the footer row, so it covers the row instead of the pane beside it.
-            trigger = trigger.child(popover::anchored_menu_above_end(
+            trigger = trigger.child(popover::anchored_menu_right(
                 "user-menu-popover",
                 menu,
                 closing,
             ));
         }
-        let voice_trigger = self.render_voice_trigger(theme, cx);
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .children(voice_trigger)
-            .child(div().flex_1())
-            .child(trigger)
-            .into_any_element()
+        trigger.into_any_element()
     }
 
     /// The account menu's Usage section: a title row with Refresh, then per
@@ -14057,7 +14015,8 @@ impl Shell {
         // controls qualify.
         let in_right = self.navigation_focus.right.is_focused(window)
             || self.navigation_focus.tabs.is_focused(window);
-        let on_sidebar_control = self.sidebar_peek_focus.contains_focused(window, cx)
+        let on_sidebar_control = (self.sidebar_peek_focus.contains_focused(window, cx)
+            || self.rail_focus.contains_focused(window, cx))
             && self.chat_rename.is_none()
             && self.spaces_menu.get().is_none();
         if !in_right
@@ -17954,7 +17913,7 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
-                // `=user-menu` opens the bottom-of-sidebar account menu (its
+                // `=user-menu` opens the rail's account menu (its
                 // Usage section) once the first usage probe has landed.
                 // `=rail-usage` opens the first ring's popover once accounts load.
                 if self.debug_dialog.as_deref() == Some("rail-usage")

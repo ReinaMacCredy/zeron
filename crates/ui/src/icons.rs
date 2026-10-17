@@ -348,6 +348,7 @@ icon_assets![
     (LUCIDE_FOLDER_PLUS, "lucide-folder-plus"),
     (LUCIDE_SETTINGS, "lucide-settings"),
     (LUCIDE_CHART_NO_AXES_COLUMN, "lucide-chart-no-axes-column"),
+    (LUCIDE_DOWNLOAD, "lucide-download"),
     (APPLE, "apple"),
     (ANDROID, "android"),
     (DUO_CLOSED, "duo-closed"),

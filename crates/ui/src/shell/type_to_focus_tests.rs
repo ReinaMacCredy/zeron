@@ -172,17 +172,17 @@ fn shell_window<'a>(
 }
 
 #[gpui::test]
-fn typing_on_a_sidebar_control_reaches_the_composer(cx: &mut TestAppContext) {
+fn typing_on_a_rail_control_reaches_the_composer(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = shell_window(dir.path(), cx);
-    let account = cx.debug_bounds("user-menu").expect("sidebar footer");
+    let account = cx.debug_bounds("user-menu").expect("rail account");
     cx.simulate_click(account.center(), gpui::Modifiers::default());
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     cx.update(|window, cx| {
         let shell = shell.read(cx);
-        assert!(shell.sidebar_peek_focus.contains_focused(window, cx));
-        assert!(!shell.sidebar_peek_focus.is_focused(window));
+        assert!(shell.rail_focus.contains_focused(window, cx));
+        assert!(!shell.rail_focus.is_focused(window));
         assert!(!shell.composer.focus_handle(cx).contains_focused(window, cx));
     });
     cx.simulate_keystrokes("h");

@@ -10,7 +10,7 @@ use crate::settings::accounts::{self, usage_color, usage_level};
 use crate::theme::Theme;
 
 pub(crate) const WIDTH: f32 = 46.0;
-const BUTTON: f32 = 34.0;
+pub(crate) const BUTTON: f32 = 34.0;
 const GLYPH: f32 = 18.0;
 pub(crate) const GAP: f32 = 6.0;
 pub(crate) const PAD_Y: f32 = 8.0;

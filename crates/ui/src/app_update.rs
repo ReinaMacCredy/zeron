@@ -359,7 +359,7 @@ impl AppUpdate {
         cx.notify();
     }
 
-    /// The sidebar strip for the current state: `None` while there is
+    /// The rail update button's label and action: `None` while there is
     /// nothing newer (or the advisory was dismissed for this version).
     pub fn strip(&self) -> Option<(SharedString, StripAction)> {
         let latest = self.available()?;
