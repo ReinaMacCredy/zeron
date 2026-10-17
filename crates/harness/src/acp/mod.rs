@@ -1660,9 +1660,10 @@ impl AcpHarness {
     }
 
     fn gemini_home(&self) -> Result<PathBuf, HarnessError> {
-        match &self.launch.home {
-            Some(home) => Ok(home.clone()),
-            None => antigravity_paths::home(),
+        match (&self.launch.home, self.launch.env.get("GEMINI_HOME")) {
+            (Some(home), _) => Ok(home.clone()),
+            (None, Some(home)) => Ok(PathBuf::from(home)),
+            (None, None) => antigravity_paths::home(),
         }
     }
 
