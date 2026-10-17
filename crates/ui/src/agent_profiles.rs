@@ -154,8 +154,14 @@ pub fn unlisted_rules(disabled: &[String], inventory: &HarnessToolInventory) -> 
         .collect()
 }
 
-pub fn char_count(text: &str, limit: usize) -> SharedString {
-    format!("{} / {limit}", text.chars().count()).into()
+pub fn token_count(text: &str, limit_chars: usize) -> SharedString {
+    let tokens = |chars| crate::session_stats::tokens(zeron_engine::estimated_tokens(chars));
+    format!(
+        "~{} / {} tokens",
+        tokens(text.chars().count()),
+        tokens(limit_chars)
+    )
+    .into()
 }
 
 pub fn expand_toggle(id: &'static str, expanded: bool, muted: Hsla) -> Stateful<Div> {
@@ -358,7 +364,11 @@ mod tests {
             draft_summary(&draft_of(&profile), "Codex", None),
             "Reviewer · Codex"
         );
-        assert_eq!(char_count("ừ ok", 2000).as_ref(), "4 / 2000");
+        assert_eq!(token_count("ừ ok", 2000).as_ref(), "~1 / 500 tokens");
+        assert_eq!(
+            token_count(&"x".repeat(16_000), 16_000).as_ref(),
+            "~4K / 4K tokens"
+        );
         profile.disabled_tools = vec!["WebFetch".into(), "mcp__xcode".into()];
         assert_eq!(summary(&profile, "Codex", None), "Codex · 2 tools off");
     }

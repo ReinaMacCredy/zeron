@@ -9,6 +9,10 @@ const HIDDEN_DECAY: f64 = 0.8;
 const HIDDEN_PRIOR_MS: f64 = 10_000.0;
 const CHARS_PER_TOKEN: f64 = 4.0;
 
+pub fn estimated_tokens(chars: usize) -> u64 {
+    (chars as f64 / CHARS_PER_TOKEN).ceil() as u64
+}
+
 #[derive(Clone, Copy, Default)]
 struct Sums {
     tokens: f64,

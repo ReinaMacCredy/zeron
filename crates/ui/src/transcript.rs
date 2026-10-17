@@ -2794,13 +2794,11 @@ fn handoff_open_knob() -> bool {
     *OPEN.get_or_init(|| std::env::var_os("ZERON_OPEN_HANDOFF").is_some())
 }
 
-/// "612 chars" up to four digits, "12.3k chars" past that.
 fn handoff_size_label(chars: usize) -> String {
-    if chars < 10_000 {
-        format!("{chars} chars")
-    } else {
-        format!("{:.1}k chars", chars as f64 / 1000.0)
-    }
+    format!(
+        "~{} tokens",
+        crate::session_stats::tokens(zeron_engine::estimated_tokens(chars))
+    )
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -15255,8 +15253,8 @@ mod tests {
         assert!(!rows[1].turn_start);
         assert_eq!(rows[1].timestamp, Some(1_700_000_000_000));
         assert_eq!(rows[1].copy_text.as_deref(), Some("third"));
-        assert_eq!(handoff_size_label(612), "612 chars");
-        assert_eq!(handoff_size_label(12_345), "12.3k chars");
+        assert_eq!(handoff_size_label(613), "~154 tokens");
+        assert_eq!(handoff_size_label(12_345), "~3.1K tokens");
         assert_eq!(
             handoff_message_count(
                 "<previous_conversation>\nUser: a\n\nAssistant: b\nUser: not a turn\n\nUser: c\n</previous_conversation>"

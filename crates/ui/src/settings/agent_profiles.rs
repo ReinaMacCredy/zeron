@@ -14,9 +14,9 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::agent_profiles::{
-    ProfileWrite, blank_draft, brand_badge, char_count, draft_of, draft_summary, expand_toggle,
-    folded_row, in_pairs, mode_label, options_for_model, rules_on, set_rules, set_zeron_group,
-    summary, unlisted_rules, zeron_rule, zeron_unlocked,
+    ProfileWrite, blank_draft, brand_badge, draft_of, draft_summary, expand_toggle, folded_row,
+    in_pairs, mode_label, options_for_model, rules_on, set_rules, set_zeron_group, summary,
+    token_count, unlisted_rules, zeron_rule, zeron_unlocked,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
 use crate::device_panel::setup::activate;
@@ -849,7 +849,7 @@ impl AgentProfilesPage {
             let title = field_label(&theme, label).when(open, |el| {
                 el.flex()
                     .child(div().flex_1())
-                    .child(char_count(input.read(cx).text(), limit))
+                    .child(token_count(input.read(cx).text(), limit))
             });
             div()
                 .flex()
