@@ -4,17 +4,21 @@ Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi,
 
 *English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md)*
 
+> This is ReinaMacCredy's fork of [zeronsh/zeron](https://github.com/zeronsh/zeron) (MIT), kept in sync with upstream and carrying its own features. Its builds update from this repository's releases, not from upstream.
+
 ![Zeron desktop app](docs/media/readme/app-screenshot.jpg)
 
 ## Desktop app
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
+Download the latest release for your platform from [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest):
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
 No account or network connection is needed; sessions stay on your device. The app updates itself.
+
+Fork builds are not code-signed. On macOS, the first launch is blocked by Gatekeeper: right-click Zeron in Applications and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zeron.app`. On Windows, SmartScreen warns about an unknown publisher: choose **More info**, then **Run anyway**.
 
 ## Headless (CLI)
 

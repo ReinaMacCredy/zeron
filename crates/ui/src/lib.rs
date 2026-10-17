@@ -270,7 +270,11 @@ pub fn run_app(config: UiConfig) {
                 appshots::set_welcome_pending(!ui_settings.appshot_welcome_acknowledged);
                 terminal::panel::init(cx);
                 app_menus::init(cx);
-                app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+                app_update::AppUpdate::init(
+                    zeron_update::RELEASES_FEED.to_owned(),
+                    data_dir.clone(),
+                    cx,
+                );
                 cx.register_url_scheme("zeron").detach();
 
                 let state = cx.new(|cx| {

@@ -3,9 +3,8 @@
 //! (its own report-only checker, the "Check for Updates…" menu item, the
 //! sidebar update strip, and the desktop install paths).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
+//! Release layout (see `.github/workflows/release.yml`): artifacts are assets on
+//! this fork's GitHub Releases, read through [`RELEASES_FEED`]. `manifest.json` carries the latest version plus a
 //! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
 //! releases published before the manifest existed.
 //!
@@ -82,7 +81,7 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 // Release metadata
 // ---------------------------------------------------------------------------
 
-/// `{edge}/releases/manifest.json` — written by the release workflow.
+/// `{RELEASES_FEED}/manifest.json` — written by the release workflow.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
@@ -317,13 +316,17 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
 /// The project's GitHub releases page — the advisory update strip opens this
 /// for unmanaged installs (source builds, hand-copied binaries), where no
 /// updater flow exists to drive.
-pub const RELEASES_PAGE: &str = "https://github.com/zeronsh/zeron/releases";
+pub const RELEASES_PAGE: &str = "https://github.com/ReinaMacCredy/zeron/releases";
 
 /// The newest release's page — the download destination offered when this
 /// installation cannot replace itself.
-pub const LATEST_RELEASE_PAGE: &str = "https://github.com/zeronsh/zeron/releases/latest";
+pub const LATEST_RELEASE_PAGE: &str = "https://github.com/ReinaMacCredy/zeron/releases/latest";
 
-fn release_base(edge_url: &str) -> anyhow::Result<String> {
+/// The fork publishes to GitHub Releases, not upstream's zeron.sh feed, so a
+/// fork install never updates itself to an upstream build.
+pub const RELEASES_FEED: &str = "https://github.com/ReinaMacCredy/zeron/releases/latest/download";
+
+fn release_base(feed: &str) -> anyhow::Result<String> {
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
         && !url.trim().is_empty()
     {
@@ -333,7 +336,7 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
     if let Some(url) = windows::release_url()? {
         return Ok(url.trim_end_matches('/').to_owned());
     }
-    Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
+    Ok(feed.trim_end_matches('/').to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +591,7 @@ fn bundle_short_version(plist: &str) -> Option<String> {
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Stream `{edge}/releases/<file>` to `dest`, verifying the manifest sha256 when
+/// Stream `{RELEASES_FEED}/<file>` to `dest`, verifying the manifest sha256 when
 /// present. Writes through a `.partial` sidecar so an interrupted download never
 /// leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
@@ -1009,7 +1012,7 @@ enum Role {
     Desktop,
 }
 
-/// Background release checker: polls `{edge}/releases` hourly on a wall-clock
+/// Background release checker: polls the release feed hourly on a wall-clock
 /// schedule (so sleep/wake cannot stretch it), backs off on failure, and
 /// publishes [`UpdateStatus`] over a watch channel. In the engine, managed
 /// installs with `ZERON_AUTO_UPDATE` set stage + apply + service restart on
@@ -1074,7 +1077,7 @@ impl Updater {
     }
 
     /// Stop the check loop and wait for it to exit — a replaced runtime must
-    /// not keep polling `{edge}/releases` (or auto-applying) in the background.
+    /// not keep polling the release feed (or auto-applying) in the background.
     /// Idempotent, and callable from any clone.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
