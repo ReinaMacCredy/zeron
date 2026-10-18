@@ -625,7 +625,7 @@ pub(super) enum Element {
 }
 
 impl Element {
-    fn selector(&self) -> Result<(Selector, Option<usize>, String), String> {
+    pub(super) fn selector(&self) -> Result<(Selector, Option<usize>, String), String> {
         match self {
             Element::Ref { id } => {
                 let raw = format!("#{}", id.strip_prefix('#').unwrap_or(id));
@@ -639,19 +639,42 @@ impl Element {
         let (selector, nth, raw) = self.selector()?;
         resolve(&tree.nodes, &raw, &selector, nth).map(|i| &tree.nodes[i])
     }
-}
 
-fn touch(window: u64, cx: &mut App) {
-    LEASES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .insert(window, Instant::now());
-    if !REAPING.swap(true, Ordering::Relaxed) {
-        cx.spawn(async move |cx| reap(cx).await).detach();
+    pub(super) fn find_or_absent<'a>(&self, tree: &'a Tree) -> Result<Option<&'a Node>, String> {
+        let (selector, nth, raw) = self.selector()?;
+        if !matches!(selector, Selector::Ref(_))
+            && selector.hits(&tree.nodes).len() <= nth.unwrap_or(0)
+        {
+            return Ok(None);
+        }
+        resolve(&tree.nodes, &raw, &selector, nth).map(|i| Some(&tree.nodes[i]))
     }
 }
 
-static LEASES: LazyLock<Mutex<HashMap<u64, Instant>>> = LazyLock::new(Mutex::default);
+struct Lease {
+    used: Instant,
+    forced_after: Option<u64>,
+}
+
+fn touch(window: u64, forced_after: Option<Option<u64>>, cx: &mut App) -> Option<u64> {
+    let mut leases = LEASES.lock().unwrap_or_else(|poison| poison.into_inner());
+    let lease = leases.entry(window).or_insert(Lease {
+        used: Instant::now(),
+        forced_after: None,
+    });
+    lease.used = Instant::now();
+    if let Some(prior) = forced_after {
+        lease.forced_after = prior;
+    }
+    let prior = lease.forced_after;
+    drop(leases);
+    if !REAPING.swap(true, Ordering::Relaxed) {
+        cx.spawn(async move |cx| reap(cx).await).detach();
+    }
+    prior
+}
+
+static LEASES: LazyLock<Mutex<HashMap<u64, Lease>>> = LazyLock::new(Mutex::default);
 static REAPING: AtomicBool = AtomicBool::new(false);
 
 async fn reap(cx: &mut AsyncApp) {
@@ -661,7 +684,7 @@ async fn reap(cx: &mut AsyncApp) {
             let mut leases = LEASES.lock().unwrap_or_else(|poison| poison.into_inner());
             let expired: Vec<u64> = leases
                 .iter()
-                .filter(|(_, used)| used.elapsed() >= LEASE)
+                .filter(|(_, lease)| lease.used.elapsed() >= LEASE)
                 .map(|(&window, _)| window)
                 .collect();
             leases.retain(|window, _| !expired.contains(window));
@@ -689,8 +712,7 @@ pub(super) async fn read(handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<T
     let gone = |error: anyhow::Error| format!("window is gone: {error}");
     let prior = cx
         .update(|cx| {
-            touch(id, cx);
-            handle.update(cx, |_, window, _| {
+            let forced = handle.update(cx, |_, window, _| {
                 if window.is_a11y_forced() {
                     return None;
                 }
@@ -699,41 +721,39 @@ pub(super) async fn read(handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<T
                     .and_then(|dump| frame_number(&dump));
                 window.set_a11y_forced(true);
                 Some(prior)
-            })
+            })?;
+            anyhow::Ok(touch(id, forced, cx))
         })
         .map_err(gone)?;
-    if let Some(prior) = prior {
-        // The forced flag is sampled at the end of a draw, so the first tree comes one frame after the next.
-        for _ in 0..6 {
+    // The forced flag is sampled at the end of a draw, so the first tree comes one frame after the next.
+    for attempt in 0..=6 {
+        if attempt > 0 {
             super::fresh_frame(handle, Duration::from_millis(250), cx).await?;
-            let built = cx
-                .update(|cx| {
-                    handle.update(cx, |_, window, _| {
-                        window
-                            .debug_a11y_tree_json()
-                            .and_then(|dump| frame_number(&dump))
-                    })
-                })
-                .map_err(gone)?;
-            if built.is_some_and(|built| prior.is_none_or(|prior| built > prior)) {
-                break;
-            }
         }
-    }
-    let (dump, title) = cx
-        .update(|cx| {
-            handle.update(cx, |_, window, _| {
-                (window.debug_a11y_tree_json(), window.window_title())
+        let (dump, title) = cx
+            .update(|cx| {
+                handle.update(cx, |_, window, _| {
+                    (window.debug_a11y_tree_json(), window.window_title())
+                })
             })
-        })
-        .map_err(gone)?;
-    let dump = dump.ok_or("the window has not built an a11y tree yet; retry")?;
-    let mut refs = REFS.lock().unwrap_or_else(|poison| poison.into_inner());
-    let mut tree = parse_dump(&dump, id, &mut refs)?;
-    if tree.title.is_empty() {
-        tree.title = title;
+            .map_err(gone)?;
+        let Some(dump) = dump else {
+            continue;
+        };
+        let mut refs = REFS.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut tree = parse_dump(&dump, id, &mut refs)?;
+        if prior.is_some_and(|prior| tree.frame <= prior) {
+            continue;
+        }
+        if tree.title.is_empty() {
+            tree.title = title;
+        }
+        return Ok(tree);
     }
-    Ok(tree)
+    Err(
+        "the window drew no frame after the accessibility tree was enabled (minimized or occluded window?); retry once it is visible"
+            .into(),
+    )
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -756,6 +776,16 @@ pub(super) enum Seen {
         #[serde(default = "super::wait_timeout")]
         timeout_ms: u64,
     },
+}
+
+impl Seen {
+    pub(super) fn timeout_ms(&self) -> u64 {
+        match self {
+            Seen::Select { timeout_ms, .. }
+            | Seen::Gone { timeout_ms, .. }
+            | Seen::Text { timeout_ms, .. } => *timeout_ms,
+        }
+    }
 }
 
 fn check(seen: &Seen, tree: &Tree) -> Result<Value, String> {
@@ -801,11 +831,7 @@ pub(super) async fn wait(
     seen: Seen,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let timeout_ms = match &seen {
-        Seen::Select { timeout_ms, .. }
-        | Seen::Gone { timeout_ms, .. }
-        | Seen::Text { timeout_ms, .. } => *timeout_ms,
-    };
+    let timeout_ms = seen.timeout_ms();
     if let Seen::Select { element, .. } | Seen::Gone { element, .. } = &seen {
         element.selector()?;
     }
@@ -962,6 +988,21 @@ pub(super) mod tests {
         }
         let gone = resolve("#e9", None).unwrap_err();
         assert!(gone.contains("gone"), "{gone}");
+        let tree = Tree {
+            nodes,
+            ..Tree::default()
+        };
+        let select = |select: &str, nth| Element::Select {
+            select: select.into(),
+            nth,
+        };
+        let absent = |element: Element| element.find_or_absent(&tree).map(|n| n.map(|n| &n.id));
+        assert_eq!(absent(select("Tab", None)), Ok(None));
+        assert_eq!(absent(select("Link", Some(1))), Ok(None));
+        assert_eq!(absent(select("Link", None)), Ok(Some(&"e2".to_owned())));
+        assert!(absent(select("Button \"open\"", None)).is_err());
+        assert!(absent(select("Buton", None)).is_err());
+        assert!(absent(Element::Ref { id: "e9".into() }).is_err());
     }
 
     #[test]

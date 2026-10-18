@@ -19,8 +19,10 @@ const POLL: Duration = Duration::from_millis(2);
 const SETTLE_CAP: Duration = Duration::from_millis(1000);
 #[cfg(debug_assertions)]
 const QUIET: Duration = Duration::from_millis(50);
+#[cfg(debug_assertions)]
+const STILL_PT: f64 = 0.5;
 
-static LAST_US: AtomicU64 = AtomicU64::new(0);
+pub(super) static LAST_US: AtomicU64 = AtomicU64::new(0);
 static STAMPS: Mutex<Stamps> = Mutex::new(Stamps {
     recorders: 0,
     times: Vec::new(),
@@ -209,16 +211,17 @@ pub(super) async fn track(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let span = check_ms(request.ms, TRACK_MAX_MS)?;
+    request.element.selector()?;
     let handle = cx.update(|cx| target_window(window, cx))?;
     let first = tree::read(handle, cx).await?;
     #[cfg(debug_assertions)]
     let appears = request.during.is_some();
     #[cfg(not(debug_assertions))]
     let appears = false;
-    let start = match request.element.find(&first) {
-        Ok(node) => Some(node),
-        Err(_) if appears => None,
-        Err(error) => return Err(error),
+    let start = if appears {
+        request.element.find_or_absent(&first)?
+    } else {
+        Some(request.element.find(&first)?)
     };
     let start_ref = start.map(|node| node.id.clone());
     let start_line = start.map(tree::line);
@@ -286,7 +289,10 @@ pub(super) async fn settled(
             continue;
         }
         let found = element.find(&next).cloned();
-        let still = matches!((&last, &found), (Ok(a), Ok(b)) if a.bounds == b.bounds);
+        let still = matches!((&last, &found), (Ok(a), Ok(b)) if match (a.bounds, b.bounds) {
+            (Some(a), Some(b)) => delta(&a, &b) < STILL_PT,
+            (a, b) => a == b,
+        });
         (tree, last) = (next, found);
         if still || started.elapsed() >= SETTLE_CAP {
             return last.map(|node| (node, tree.size, !still));

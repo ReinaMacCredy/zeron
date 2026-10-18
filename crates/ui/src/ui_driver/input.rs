@@ -14,14 +14,80 @@ const SETTLE_CAP: Duration = Duration::from_millis(500);
 const TRACKPAD_STEPS: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(
-    untagged,
-    expecting = "a target: \"ref\", \"select\" (with optional \"nth\"), or numeric \"x\" and \"y\" in window points"
-)]
+#[serde(try_from = "RawTarget")]
 pub(super) enum Target {
     Point { x: f32, y: f32 },
     Pair([f32; 2]),
     Element(tree::Element),
+}
+
+#[derive(Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a target: \"ref\", \"select\" (with optional \"nth\"), or numeric \"x\" and \"y\" in window points"
+)]
+enum RawTarget {
+    Pair([f32; 2]),
+    Fields(TargetFields),
+}
+
+#[derive(Deserialize)]
+struct TargetFields {
+    #[serde(rename = "ref")]
+    id: Option<String>,
+    select: Option<String>,
+    nth: Option<usize>,
+    x: Option<f32>,
+    y: Option<f32>,
+}
+
+const ONE_TARGET: &str = "give one of ref, select, or x and y";
+
+impl TargetFields {
+    fn target(self) -> Result<Option<Target>, String> {
+        match self {
+            TargetFields {
+                id: None,
+                select: None,
+                nth: None,
+                x: None,
+                y: None,
+            } => Ok(None),
+            TargetFields {
+                id: None,
+                select: None,
+                nth: None,
+                x: Some(x),
+                y: Some(y),
+            } => Ok(Some(Target::Point { x, y })),
+            TargetFields {
+                id: Some(id),
+                select: None,
+                nth: None,
+                x: None,
+                y: None,
+            } => Ok(Some(Target::Element(tree::Element::Ref { id }))),
+            TargetFields {
+                id: None,
+                select: Some(select),
+                nth,
+                x: None,
+                y: None,
+            } => Ok(Some(Target::Element(tree::Element::Select { select, nth }))),
+            _ => Err(ONE_TARGET.into()),
+        }
+    }
+}
+
+impl TryFrom<RawTarget> for Target {
+    type Error = String;
+
+    fn try_from(raw: RawTarget) -> Result<Self, String> {
+        match raw {
+            RawTarget::Pair(pair) => Ok(Target::Pair(pair)),
+            RawTarget::Fields(fields) => fields.target()?.ok_or_else(|| ONE_TARGET.into()),
+        }
+    }
 }
 
 impl Target {
@@ -54,10 +120,18 @@ fn center(node: &tree::Node, (width, height): (f32, f32)) -> Result<Point<Pixels
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
+#[serde(try_from = "TargetFields")]
 pub(super) enum TypeAt {
     Target(Target),
-    Focused {},
+    Focused,
+}
+
+impl TryFrom<TargetFields> for TypeAt {
+    type Error = String;
+
+    fn try_from(fields: TargetFields) -> Result<Self, String> {
+        Ok(fields.target()?.map_or(TypeAt::Focused, TypeAt::Target))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -165,10 +239,13 @@ impl Driver {
     }
 
     async fn settle(self, cx: &AsyncApp) -> Result<Value, String> {
-        next_frame(self.mark, SETTLE_CAP.saturating_sub(STEP_CAP), cx).await;
+        let drawn = next_frame(self.mark, SETTLE_CAP.saturating_sub(STEP_CAP), cx).await;
         let mut reply = json!({ "frame": frame_count() });
         if self.unsettled {
             reply["unsettled"] = json!(true);
+        }
+        if drawn.is_none() {
+            reply["stale"] = json!(true);
         }
         Ok(reply)
     }
@@ -376,7 +453,7 @@ pub(super) async fn type_text(
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
     let position = match into {
-        TypeAt::Focused {} => None,
+        TypeAt::Focused => None,
         TypeAt::Target(Target::Element(element)) => {
             let (node, viewport) = driver.find(&element, cx).await?;
             if node.supports("focus") {
@@ -439,6 +516,27 @@ fn ax_action(name: &str) -> Result<AxAction, String> {
         })
 }
 
+fn performable(
+    node: &tree::Node,
+    action: AxAction,
+    viewport: (f32, f32),
+) -> Result<String, String> {
+    let name = tree::lower_camel(&format!("{action:?}"));
+    if !node.supports(&name) {
+        if action == AxAction::Click {
+            // gpui answers an unlistened Click with a synthetic mouse click at the node's center.
+            center(node, viewport)?;
+        } else {
+            return Err(format!(
+                "{} does not support `{name}`; it lists [{}]",
+                tree::line(node),
+                node.actions.join(",")
+            ));
+        }
+    }
+    Ok(name)
+}
+
 pub(super) async fn press(
     window: Option<u64>,
     element: tree::Element,
@@ -449,19 +547,7 @@ pub(super) async fn press(
     let action = ax_action(perform.as_deref().unwrap_or("click"))?;
     let mut driver = Driver::open(window, cx)?;
     let (node, viewport) = driver.find(&element, cx).await?;
-    let name = tree::lower_camel(&format!("{action:?}"));
-    if !node.supports(&name) {
-        if action == AxAction::Click {
-            // gpui answers an unlistened Click with a synthetic mouse click at the node's center.
-            center(&node, viewport)?;
-        } else {
-            return Err(format!(
-                "{} does not support `{name}`; it lists [{}]",
-                tree::line(&node),
-                node.actions.join(",")
-            ));
-        }
-    }
+    let name = performable(&node, action, viewport)?;
     let data = match (action, value) {
         (AxAction::SetValue, Some(value)) => Some(ActionData::Value(value.into())),
         (AxAction::SetValue, None) => return Err("`setValue` needs a string `value`".into()),
@@ -555,4 +641,67 @@ pub(super) async fn set(window: Option<u64>, set: Set, cx: &mut AsyncApp) -> Res
     reply["motionScale"] = json!(crate::motion::speed_scale());
     reply["theme"] = cx.update(super::theme_json);
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tree::tests::node;
+
+    #[test]
+    fn center_points_inside_the_window_only() {
+        let button = node("e1", "Button", Some("Go"));
+        assert_eq!(
+            center(&button, (800.0, 600.0)),
+            Ok(point(px(60.0), px(35.0)))
+        );
+        let outside = center(&button, (50.0, 600.0)).unwrap_err();
+        assert!(outside.contains("outside the 50x600 window"), "{outside}");
+        let mut empty = button.clone();
+        empty.bounds = Some(tree::Bounds::default());
+        assert!(
+            center(&empty, (800.0, 600.0))
+                .unwrap_err()
+                .contains("no on-screen bounds")
+        );
+        empty.bounds = None;
+        assert!(center(&empty, (800.0, 600.0)).is_err());
+    }
+
+    #[test]
+    fn ax_action_names_are_case_insensitive() {
+        assert_eq!(ax_action("click"), Ok(AxAction::Click));
+        assert_eq!(ax_action("SETVALUE"), Ok(AxAction::SetValue));
+        let error = ax_action("explode").unwrap_err();
+        assert!(
+            error.starts_with("unknown a11y action `explode`"),
+            "{error}"
+        );
+        assert!(
+            error.contains("click") && error.contains("setValue"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn press_refuses_the_offscreen_click_fallback() {
+        let mut plain = node("e1", "GenericContainer", Some("Row"));
+        plain.bounds.as_mut().unwrap().y = 900.0;
+        let error = performable(&plain, AxAction::Click, (800.0, 600.0)).unwrap_err();
+        assert!(error.contains("outside the 800x600 window"), "{error}");
+        plain.bounds.as_mut().unwrap().y = 20.0;
+        assert_eq!(
+            performable(&plain, AxAction::Click, (800.0, 600.0)),
+            Ok("click".into())
+        );
+        let mut listened = plain.clone();
+        listened.actions = vec!["click".into()];
+        listened.bounds.as_mut().unwrap().y = 900.0;
+        assert_eq!(
+            performable(&listened, AxAction::Click, (800.0, 600.0)),
+            Ok("click".into())
+        );
+        let error = performable(&plain, AxAction::Expand, (800.0, 600.0)).unwrap_err();
+        assert!(error.contains("does not support `expand`"), "{error}");
+    }
 }

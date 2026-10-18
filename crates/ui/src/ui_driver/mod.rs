@@ -18,10 +18,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use zeron_proto::ui_driver::{DRIVE_ACTIONS as DRIVE, OBSERVE_ACTIONS as OBSERVE};
+use zeron_proto::ui_driver::{DRIVE_ACTIONS as DRIVE, MAX_WAIT_MS, OBSERVE_ACTIONS as OBSERVE};
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
-static LAST_DRAW_MS: AtomicU64 = AtomicU64::new(0);
+static DRIVING: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
 
 fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -31,7 +31,6 @@ fn epoch() -> Instant {
 pub(crate) fn frame_drawn() {
     let elapsed = epoch().elapsed();
     FRAMES.fetch_add(1, Ordering::Relaxed);
-    LAST_DRAW_MS.store(elapsed.as_millis() as u64 + 1, Ordering::Relaxed);
     frames::stamp(elapsed.as_micros() as u64);
 }
 
@@ -40,13 +39,9 @@ fn frame_count() -> u64 {
 }
 
 fn last_draw_ago() -> Option<Duration> {
-    match LAST_DRAW_MS.load(Ordering::Relaxed) {
+    match frames::LAST_US.load(Ordering::Relaxed) {
         0 => None,
-        at => Some(
-            epoch()
-                .elapsed()
-                .saturating_sub(Duration::from_millis(at - 1)),
-        ),
+        at => Some(epoch().elapsed().saturating_sub(Duration::from_micros(at))),
     }
 }
 
@@ -219,10 +214,35 @@ fn parse(raw: Value) -> Result<Request, String> {
             valid_actions().join(", ")
         ));
     }
-    if let Some(during) = raw.get("during") {
+    if let Some(during) = raw.get("during").filter(|during| !during.is_null()) {
         check_during(during)?;
     }
-    serde_json::from_value(raw).map_err(|error| format!("invalid `{name}` request: {error}"))
+    let request: Request = serde_json::from_value(raw)
+        .map_err(|error| format!("invalid `{name}` request: {error}"))?;
+    if let Action::Wait(until) = &request.action {
+        until.check()?;
+    }
+    Ok(request)
+}
+
+impl Until {
+    fn check(&self) -> Result<(), String> {
+        let limits = match self {
+            Until::Frame { timeout_ms } => vec![("timeoutMs", *timeout_ms)],
+            Until::Idle {
+                quiet_ms,
+                timeout_ms,
+            } => vec![("quietMs", *quiet_ms), ("timeoutMs", *timeout_ms)],
+            Until::Ms { ms } => vec![("ms", *ms)],
+            Until::Seen(seen) => vec![("timeoutMs", seen.timeout_ms())],
+        };
+        match limits.into_iter().find(|&(_, ms)| ms > MAX_WAIT_MS) {
+            Some((name, ms)) => Err(format!(
+                "`{name}` must be at most {MAX_WAIT_MS} ms, not {ms}"
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 fn check_during(during: &Value) -> Result<(), String> {
@@ -250,7 +270,16 @@ async fn handle(raw: Value, cx: &mut AsyncApp) -> Value {
 }
 
 async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
+    let drives = raw
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|name| DRIVE.contains(&name));
     let Request { window, action } = parse(raw)?;
+    let _driving = if drives {
+        Some(DRIVING.lock().await)
+    } else {
+        None
+    };
     match action {
         Action::State => cx.update(state),
         Action::Tree(view) => {
@@ -268,8 +297,12 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
         Action::Snapshot { rect, path } => {
             let handle = cx.update(|cx| target_window(window, cx))?;
             // The window server holds the frame before the last one drawn until another presents.
-            fresh_frame(handle, Duration::from_millis(500), cx).await?;
-            cx.update(|cx| capture::snapshot(handle, rect, path, cx))
+            let drawn = fresh_frame(handle, Duration::from_millis(500), cx).await?;
+            let mut reply = cx.update(|cx| capture::snapshot(handle, rect, path, cx))?;
+            if drawn.is_none() {
+                reply["stale"] = json!(true);
+            }
+            Ok(reply)
         }
         Action::Wait(until) => wait(window, until, cx).await,
         Action::Frames(request) => frames::frames(window, request, cx).await,
@@ -498,6 +531,41 @@ mod tests {
     }
 
     #[test]
+    fn every_wait_is_capped_at_the_ceiling() {
+        let at = MAX_WAIT_MS;
+        for (request, field) in [
+            (json!({ "for": "frame", "timeoutMs": at + 1 }), "timeoutMs"),
+            (json!({ "for": "idle", "quietMs": at + 1 }), "quietMs"),
+            (json!({ "for": "idle", "timeoutMs": 70_000 }), "timeoutMs"),
+            (json!({ "for": "ms", "ms": at + 1 }), "ms"),
+            (
+                json!({ "for": "select", "select": "Button", "timeoutMs": at + 1 }),
+                "timeoutMs",
+            ),
+            (
+                json!({ "for": "gone", "ref": "e1", "timeoutMs": at + 1 }),
+                "timeoutMs",
+            ),
+            (
+                json!({ "for": "text", "text": "x", "timeoutMs": at + 1 }),
+                "timeoutMs",
+            ),
+        ] {
+            let mut over = request.clone();
+            over["action"] = json!("wait");
+            let error = parse(over).unwrap_err();
+            assert!(
+                error.starts_with(&format!("`{field}` must be at most {MAX_WAIT_MS} ms")),
+                "{request}: {error}"
+            );
+            let mut limit = request;
+            limit["action"] = json!("wait");
+            limit[field] = json!(at);
+            assert!(parse(limit.clone()).is_ok(), "{limit}");
+        }
+    }
+
+    #[test]
     fn unknown_action_lists_this_builds_actions() {
         let error = parse(json!({ "id": 2, "action": "explode" })).unwrap_err();
         assert!(error.starts_with("unknown action `explode`"), "{error}");
@@ -509,11 +577,30 @@ mod tests {
 
     #[test]
     fn every_listed_action_is_a_variant() {
-        for name in valid_actions() {
-            if let Err(error) = parse(json!({ "action": name })) {
-                assert!(!error.contains("unknown variant"), "{name}: {error}");
+        for &name in OBSERVE.iter().chain(DRIVE) {
+            match parse(json!({ "action": name })) {
+                Err(error) if !cfg!(debug_assertions) && DRIVE.contains(&name) => {
+                    assert!(error.contains("only in debug builds"), "{name}: {error}");
+                }
+                Err(error) => assert!(
+                    !error.contains("unknown variant") && !error.contains("unknown action"),
+                    "{name}: {error}"
+                ),
+                Ok(_) => {}
             }
         }
+        let error = serde_json::from_value::<Request>(json!({ "action": "zzz" }))
+            .unwrap_err()
+            .to_string();
+        let (_, variants) = error.split_once("expected one of ").expect(&error);
+        let mut variants: Vec<&str> = variants
+            .split(", ")
+            .map(|variant| variant.trim_matches(|c: char| c == '`' || c.is_whitespace()))
+            .collect();
+        let mut listed = valid_actions();
+        variants.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(variants, listed, "{error}");
     }
 
     #[test]
@@ -594,7 +681,7 @@ mod tests {
             typed.action,
             Action::Type {
                 text: "hi".into(),
-                into: input::TypeAt::Focused {}
+                into: input::TypeAt::Focused
             }
         );
         let typed = parse(json!({ "action": "type", "text": "hi", "ref": "e7" })).unwrap();
@@ -621,6 +708,38 @@ mod tests {
         );
         let error = parse(json!({ "action": "press", "do": "click" })).unwrap_err();
         assert!(error.starts_with("invalid `press` request"), "{error}");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn malformed_or_doubled_targets_fail() {
+        for bad in [
+            json!({ "action": "type", "text": "hi", "ref": 5 }),
+            json!({ "action": "type", "text": "hi", "x": 3 }),
+            json!({ "action": "type", "text": "hi", "nth": 1 }),
+            json!({ "action": "click", "x": 1, "y": 2, "ref": "e3" }),
+            json!({ "action": "move", "x": 1, "y": 2, "select": "Button" }),
+            json!({ "action": "type", "text": "hi", "x": 1, "y": 2, "ref": "e3" }),
+            json!({ "action": "drag", "from": { "x": 1, "y": 2, "ref": "e3" }, "to": [3, 4] }),
+            json!({ "action": "click", "ref": "e3", "select": "Button" }),
+            json!({ "action": "click" }),
+        ] {
+            let error = parse(bad.clone()).unwrap_err();
+            assert!(error.starts_with("invalid `"), "{bad}: {error}");
+        }
+        let error = parse(json!({ "action": "click", "x": 1, "y": 2, "ref": "e3" })).unwrap_err();
+        assert!(
+            error.contains("give one of ref, select, or x and y"),
+            "{error}"
+        );
+        let point = parse(json!({ "id": 9, "action": "type", "text": "hi", "x": 1, "y": 2 }));
+        assert_eq!(
+            point.unwrap().action,
+            Action::Type {
+                text: "hi".into(),
+                into: input::TypeAt::Target(input::Target::Point { x: 1.0, y: 2.0 })
+            }
+        );
     }
 
     #[test]
@@ -657,6 +776,8 @@ mod tests {
         } else {
             assert!(error.contains("only in debug builds"), "{error}");
         }
+        let null = parse(json!({ "action": "frames", "during": null }));
+        assert!(null.is_ok(), "{null:?}");
     }
 
     #[cfg(debug_assertions)]
