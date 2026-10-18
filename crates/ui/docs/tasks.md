@@ -41,9 +41,48 @@ To give a task to a chat you already have, type **@** and part of its name in **
 
 Click **Assign** or press Cmd+Enter. A task has one chat at a time. The × next to the chat's status unassigns it, so you can start or assign the task again.
 
+When a task could not be sent to its chat, the list shows **Not sent**, and the card shows **Not sent:** with the reason and a **Retry** button that sends it to the same chat again.
+
+## Orchestrate a big task
+
+For work that needs more than one agent, switch **Hand it to an agent** from **One agent** to **Orchestrate**. A lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back.
+
+- Pick the lead's agent and model, and where it runs, the same way as for one agent.
+- **Step agents**: **Lead picks per step** lets the lead choose an agent and model for each step. **Same as the lead** runs every step on the lead's agent and model.
+- **Show me the plan before it runs** is on by default: the lead writes the plan and waits for you. Turn it off to let the lead start the steps as soon as the plan is written.
+
+Click **Orchestrate** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's center page.
+
+## The center page
+
+An orchestrated task opens its center page instead of the card, from the list, the board, or the Inbox. **Tasks** in the titlebar takes you back.
+
+The header shows the task's status, **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
+
+- The lead, with its model and what it is doing: **Planning**, **Watching** its running steps, **Waiting on you**, or **Done**.
+- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Failed**, **Done**, or **Skipped**.
+
+Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
+
+## Approve the plan
+
+While the lead writes the plan, the page reads **The lead is planning**. Then **Plan ready** shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step, and you can change the plan: hover a step to **Rename** or **Remove** it, or type a new one in **Add a step** and press Enter. Click **Approve and run** when it looks right.
+
+## While the steps run
+
+Steps that do not depend on each other run at the same time, each on its own thread under the lead. Like other [delegated tasks](zeron://docs/delegation), these threads stay out of the sidebar, and **Delegated tasks per chat** in Settings > General caps how many run at once.
+
+A step turns **Done** when its thread finishes, and the lead checks each result. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's thread failed or was stopped, **Retry** asks the lead to look at what happened and run the step again.
+
+When every step is done, the lead checks the whole result, tells you what was built, and marks the task done.
+
+If a message to the lead, such as an approval or a retry, does not get through, the page shows **Not sent to the lead:** with the reason. Write to the lead in the composer instead, then click **Dismiss**.
+
+In the list, an orchestrated task has a progress ring in place of its circle, and its line shows the agents on it, steps done out of all steps, and how many are running or need you. On the board, its card has a bar with one segment per step.
+
 ## Tasks from agents
 
-Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. See [Agent tools](zeron://docs/agent-tools).
+Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A lead uses the same tool to write its plan and mark steps done or skipped. See [Agent tools](zeron://docs/agent-tools).
 
 ## Kanban columns
 
@@ -51,7 +90,7 @@ Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit t
 | --- | --- |
 | **To do** | Tasks with no chat yet |
 | **Working** | Tasks whose agent is working |
-| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something |
+| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. An orchestrated task also lands here while its plan waits for you or a step needs you |
 | **Done** | Tasks you marked done |
 
 Drag a card to **Done** to finish it, or from **Done** back to **To do** to reopen it. **Working** and **Needs you** follow the chat, so you cannot drop cards there. A card stays in **Needs you** until you mark it done.
