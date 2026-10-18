@@ -47,8 +47,8 @@ What each level exposes:
 ## Reaching a target
 
 Each process listens on `~/.zeron/run/ui-<pid>.sock` (mode 0600, directory 0700) and writes a
-descriptor `~/.zeron/run/ui-<pid>.json`. A clean quit removes both. A crash or SIGKILL leaves
-them, and the client prunes any descriptor whose pid is gone or whose socket refuses.
+descriptor `~/.zeron/run/ui-<pid>.json`. A clean quit removes both. A crash, SIGTERM or SIGKILL
+leaves them, and the client prunes any descriptor whose pid is gone or whose socket refuses.
 
 Two clients share one implementation (`crates/mcp/src/ui_driver.rs`):
 
