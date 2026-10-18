@@ -60,6 +60,18 @@ pub(crate) fn pill_label(index: u32, lines: Option<usize>) -> String {
     }
 }
 
+pub(crate) fn chip_preview(bytes: &[u8]) -> Option<SharedString> {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    const PREVIEW_GRAPHEMES: usize = 20;
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4 * 1024)]);
+    let line = head.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let graphemes: Vec<&str> = line.graphemes(true).collect();
+    if graphemes.len() <= PREVIEW_GRAPHEMES {
+        return Some(line.to_owned().into());
+    }
+    Some(format!("{}…", graphemes[..PREVIEW_GRAPHEMES].concat().trim_end()).into())
+}
+
 #[derive(Default)]
 struct Cache {
     map: HashMap<(String, String), (Arc<PastedText>, u64)>,

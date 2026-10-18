@@ -1471,7 +1471,11 @@ impl TextProjection {
 
     /// `live` names the attachments the draft still holds; a chip outside it is
     /// a dangling reference and shows as its plain label.
-    fn rich(raw: &str, active: Option<Range<usize>>, live: Option<&HashSet<u32>>) -> Self {
+    fn rich(
+        raw: &str,
+        active: Option<Range<usize>>,
+        live: Option<&HashMap<u32, ChipAttachment>>,
+    ) -> Self {
         Self::project(raw, active, true, live)
     }
 
@@ -1479,7 +1483,7 @@ impl TextProjection {
         raw: &str,
         active: Option<Range<usize>>,
         compact: bool,
-        live: Option<&HashSet<u32>>,
+        live: Option<&HashMap<u32, ChipAttachment>>,
     ) -> Self {
         let mut links = file_mention_links(raw);
         links.extend(thread_mention_links(raw));
@@ -1546,12 +1550,18 @@ impl TextProjection {
             .into_iter()
             .zip(labels)
             .map(|(link, label)| {
-                let label = label.replace(' ', "\u{00A0}");
-                if let (Some(index), Some(live)) = (link.attachment, live)
-                    && !live.contains(&index)
-                {
+                let attachment = link
+                    .attachment
+                    .zip(live)
+                    .map(|(index, live)| live.get(&index));
+                if let Some(None) = attachment {
                     return (link.range.clone(), link.basename.clone(), None);
                 }
+                let label = match attachment {
+                    Some(Some(ChipAttachment::PastedText(Some(preview)))) => preview.to_string(),
+                    _ => label,
+                };
+                let label = label.replace(' ', "\u{00A0}");
                 let pad = MENTION_SIDE_PAD;
                 let display = if link.is_thread() {
                     format!("{pad}{CHIP_ICON_SLOT}{label}{pad}")
@@ -2547,14 +2557,10 @@ impl ComposerInput {
 
     fn refresh_projection(&mut self) {
         self.projection = if self.mentions_enabled {
-            let live: Option<HashSet<u32>> = self
-                .attachment_chips
-                .as_ref()
-                .map(|images| images.keys().copied().collect());
             TextProjection::rich(
                 &self.content,
                 Some(self.editing_source_range()),
-                live.as_ref(),
+                self.attachment_chips.as_ref(),
             )
         } else {
             TextProjection {
@@ -2968,7 +2974,7 @@ impl ComposerInput {
 
     fn mention_tooltip_text(&self, target: &MentionTooltipTarget) -> SharedString {
         match self.chip_attachment(target) {
-            Some(ChipAttachment::PastedText) => "Click to show in text field".into(),
+            Some(ChipAttachment::PastedText(_)) => "Click to show in text field".into(),
             _ => target.path.clone(),
         }
     }

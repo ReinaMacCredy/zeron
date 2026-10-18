@@ -5,7 +5,7 @@ use super::*;
 /// its picture on click, a pasted-text chip puts its text back in the draft.
 pub(crate) enum ChipAttachment {
     Image(std::sync::Arc<gpui::Image>),
-    PastedText,
+    PastedText(Option<SharedString>),
     File,
 }
 
@@ -13,7 +13,9 @@ impl ChipAttachment {
     pub(super) fn of(att: &crate::attachments::StagedAttachment) -> Self {
         match att.image() {
             Some(image) => Self::Image(image.clone()),
-            None if att.is_pasted_text() => Self::PastedText,
+            None if att.is_pasted_text() => {
+                Self::PastedText(crate::pasted_text::chip_preview(att.bytes()))
+            }
             None => Self::File,
         }
     }
@@ -27,7 +29,8 @@ impl PartialEq for ChipAttachment {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Image(a), Self::Image(b)) => std::sync::Arc::ptr_eq(a, b),
-            (Self::PastedText, Self::PastedText) | (Self::File, Self::File) => true,
+            (Self::PastedText(a), Self::PastedText(b)) => a == b,
+            (Self::File, Self::File) => true,
             _ => false,
         }
     }
