@@ -2061,6 +2061,11 @@ impl AcpHarness {
                     }
                 })?;
             let mut models = models_from_session(&session, &(self.spec.models)());
+            // Builtin agents order their own catalog; a registry or local agent's first
+            // advertised row is arbitrary, and the picker defaults to the first row.
+            if self.spec.id == HarnessId::Acp {
+                lead_with_current_model(&mut models, &session);
+            }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
@@ -2126,6 +2131,23 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
 /// option outside mode/model/thought_level becomes a `ModelOption` — so
 /// unmatched models keep fast mode etc.; the catalog only enriches matched
 /// ids with label/description/per-model ladders.
+fn lead_with_current_model(models: &mut [Model], session_response: &Value) {
+    let current = session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|o| o.get("category").and_then(Value::as_str) == Some("model"))
+        })
+        .and_then(|o| o.get("currentValue"))
+        .or_else(|| session_response.pointer("/models/currentModelId"))
+        .and_then(Value::as_str);
+    if let Some(index) = current.and_then(|current| models.iter().position(|m| m.id == current)) {
+        models[..=index].rotate_right(1);
+    }
+}
+
 fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
     let config_options = session_response
         .get("configOptions")
@@ -6190,6 +6212,39 @@ mod tests {
             ),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn generic_agent_models_lead_with_the_model_the_session_opens_on() {
+        let legacy = json!({
+            "models": {
+                "currentModelId": "copilot/haiku",
+                "availableModels": [
+                    { "modelId": "copilot/fable" },
+                    { "modelId": "copilot/haiku" },
+                    { "modelId": "copilot/opus" },
+                ],
+            },
+        });
+        let mut models = models_from_session(&legacy, &[]);
+        lead_with_current_model(&mut models, &legacy);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["copilot/haiku", "copilot/fable", "copilot/opus"]
+        );
+
+        let config = json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "b",
+                "options": [{ "value": "a" }, { "value": "b" }],
+            }],
+        });
+        let mut models = models_from_session(&config, &[]);
+        lead_with_current_model(&mut models, &config);
+        assert_eq!(models[0].id, "b");
     }
 
     #[test]
