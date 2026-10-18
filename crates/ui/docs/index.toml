@@ -222,7 +222,7 @@ id = "tasks"
 section = "work"
 title = "Tasks"
 icon = "hugeicons-apple-reminder"
-blurb = "Plan work as a list or a Kanban board and start a task with one click."
+blurb = "Plan work as a list or a Kanban board, start a task with one click, or let a lead agent run it in steps."
 actions = ["tasks"]
 
 [[article]]

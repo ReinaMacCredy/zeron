@@ -43,6 +43,7 @@ pub enum InboxEvent {
     OpenChat(String),
     OpenPullRequests,
     OpenTasks,
+    OpenTaskCenter(String),
     CreateTask {
         task_id: String,
         title: String,
@@ -861,6 +862,7 @@ impl InboxPage {
                         })
                     }));
                 let open_id = task.id.clone();
+                let orchestrated = crate::tasks::has_lead(&state.chats, task);
                 let is_selected = selected.as_deref() == Some(task.id.as_str());
                 div()
                     .id(SharedString::from(format!("inbox-task-{}", task.id)))
@@ -908,7 +910,11 @@ impl InboxPage {
                             })),
                     )
                     .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                        page.open_task(open_id.clone(), window, cx)
+                        if orchestrated {
+                            cx.emit(InboxEvent::OpenTaskCenter(open_id.clone()));
+                        } else {
+                            page.open_task(open_id.clone(), window, cx)
+                        }
                     }))
                     .into_any_element()
             })

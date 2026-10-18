@@ -304,7 +304,12 @@ impl Shell {
         }
         if matches!(
             self.route,
-            Route::PullRequests | Route::Inbox | Route::Tasks | Route::Usage | Route::Docs
+            Route::PullRequests
+                | Route::Inbox
+                | Route::Tasks
+                | Route::TaskCenter
+                | Route::Usage
+                | Route::Docs
         ) {
             self.open_home(cx);
         }

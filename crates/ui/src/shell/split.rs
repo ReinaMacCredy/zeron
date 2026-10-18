@@ -340,43 +340,8 @@ impl Shell {
         let composer = cx.new(|cx| Composer::for_chat(self.state.clone(), chat_id.clone(), cx));
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
-            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Sent {
-                    chat_id,
-                    message_id,
-                } => transcript.update(cx, |t, cx| {
-                    t.on_own_send(chat_id.clone(), message_id.clone(), cx)
-                }),
-                ComposerEvent::Queued {
-                    chat_id,
-                    message_id,
-                } => transcript.update(cx, |t, cx| {
-                    t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
-                }),
-                ComposerEvent::OpenSidechat { .. }
-                | ComposerEvent::NewThreadTransitionStarted
-                | ComposerEvent::BackgroundStarted
-                | ComposerEvent::WorkspaceCommand(_)
-                | ComposerEvent::WorktreeSetup { .. }
-                | ComposerEvent::OpenChat(_)
-                | ComposerEvent::OpenChanges => {}
-                ComposerEvent::OpenSubagent {
-                    chat_id,
-                    doc_id,
-                    title,
-                    frozen,
-                } => _this.add_subagent_surface(
-                    chat_id.clone(),
-                    doc_id.clone(),
-                    title.clone(),
-                    *frozen,
-                    cx,
-                ),
-                ComposerEvent::UnsentChanged => cx.notify(),
-                ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
-                ComposerEvent::OpenComputerSetup { missing } => {
-                    _this.open_computer_permission_guide(missing.clone(), cx)
-                }
+            move |this: &mut Shell, _, event: &ComposerEvent, cx| {
+                this.on_pane_composer_event(&transcript, event, cx)
             }
         });
         self.split = Some(SplitPane {
@@ -388,6 +353,53 @@ impl Shell {
             _composer_events: composer_events,
         });
         cx.notify();
+    }
+
+    /// Sidechats and new threads have no surface to open on from the split or the task center.
+    pub(super) fn on_pane_composer_event(
+        &mut self,
+        transcript: &Entity<Transcript>,
+        event: &ComposerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Sent {
+                chat_id,
+                message_id,
+            } => transcript.update(cx, |t, cx| {
+                t.on_own_send(chat_id.clone(), message_id.clone(), cx)
+            }),
+            ComposerEvent::Queued {
+                chat_id,
+                message_id,
+            } => transcript.update(cx, |t, cx| {
+                t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
+            }),
+            ComposerEvent::OpenSidechat { .. }
+            | ComposerEvent::NewThreadTransitionStarted
+            | ComposerEvent::BackgroundStarted
+            | ComposerEvent::WorkspaceCommand(_)
+            | ComposerEvent::WorktreeSetup { .. }
+            | ComposerEvent::OpenChat(_)
+            | ComposerEvent::OpenChanges => {}
+            ComposerEvent::OpenSubagent {
+                chat_id,
+                doc_id,
+                title,
+                frozen,
+            } => self.add_subagent_surface(
+                chat_id.clone(),
+                doc_id.clone(),
+                title.clone(),
+                *frozen,
+                cx,
+            ),
+            ComposerEvent::UnsentChanged => cx.notify(),
+            ComposerEvent::ThreadMentionDropped => self.accept_command_palette_drop(),
+            ComposerEvent::OpenComputerSetup { missing } => {
+                self.open_computer_permission_guide(missing.clone(), cx)
+            }
+        }
     }
 
     /// Drop the secondary pane (the pair stays). The doc watch is shared
@@ -404,7 +416,8 @@ impl Shell {
             || self
                 .subagent_tabs
                 .values()
-                .any(|tab| tab.doc_id == split.chat_id);
+                .any(|tab| tab.doc_id == split.chat_id)
+            || self.task_center_holds(&split.chat_id);
         if !held_elsewhere {
             self.state
                 .update(cx, |s, _| s.unwatch_subagent_doc(&split.chat_id));

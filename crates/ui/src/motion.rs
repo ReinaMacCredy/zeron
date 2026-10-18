@@ -418,6 +418,9 @@ pub const EASE_RESORT: CubicBezier = EASE_OUT_QUINT;
 /// shape: gentle start, cruise, gentle landing).
 pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.42, 0.0, 0.58, 1.0);
 pub const EASE_IN: CubicBezier = CubicBezier::new(0.42, 0.0, 1.0, 1.0);
+pub const EASE_IN_SHARP: CubicBezier = CubicBezier::new(0.4, 0.0, 1.0, 1.0);
+pub const EASE_DRAWER: CubicBezier = CubicBezier::new(0.32, 0.72, 0.0, 1.0);
+pub const LINEAR: CubicBezier = CubicBezier::new(0.0, 0.0, 1.0, 1.0);
 
 // ---------------------------------------------------------------------------
 // Motion specs (the catalog)
@@ -498,11 +501,10 @@ pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
 /// Astra `sidecar.css` values.
-pub const SIDECAR_LAYOUT: MotionSpec = MotionSpec::new(300, CubicBezier::new(0.32, 0.72, 0.0, 1.0));
+pub const SIDECAR_LAYOUT: MotionSpec = MotionSpec::new(300, EASE_DRAWER);
 pub const SIDECAR_FADE: MotionSpec = MotionSpec::new(150, EASE);
 pub const SIDECAR_POPOVER_FADE: MotionSpec = MotionSpec::new(160, EASE);
-pub const SIDECAR_POPOVER_SLIDE: MotionSpec =
-    MotionSpec::new(220, CubicBezier::new(0.32, 0.72, 0.0, 1.0));
+pub const SIDECAR_POPOVER_SLIDE: MotionSpec = MotionSpec::new(220, EASE_DRAWER);
 /// Panel columns share the dialog entrance's gentle acceleration and soft
 /// landing. Wide moves stretch this base to at most 240ms in the shell.
 pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
@@ -771,6 +773,24 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 
+pub fn lerp_bounds(
+    from: gpui::Bounds<gpui::Pixels>,
+    to: gpui::Bounds<gpui::Pixels>,
+    t: f32,
+) -> gpui::Bounds<gpui::Pixels> {
+    let mix = |a: gpui::Pixels, b: gpui::Pixels| px(lerp(f32::from(a), f32::from(b), t));
+    gpui::Bounds {
+        origin: gpui::point(
+            mix(from.origin.x, to.origin.x),
+            mix(from.origin.y, to.origin.y),
+        ),
+        size: gpui::size(
+            mix(from.size.width, to.size.width),
+            mix(from.size.height, to.size.height),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hover color fades (CSS `transition-colors` parity)
 // ---------------------------------------------------------------------------
@@ -864,50 +884,78 @@ impl DisclosureMotion {
 /// instead of jumping. Pure core — callers pass `now`.
 #[derive(Debug, Clone, Copy)]
 pub struct IndicatorSlide {
-    from: f32,
-    to: f32,
-    started: Instant,
+    tween: Tween,
 }
 
 impl IndicatorSlide {
     pub fn at(position: f32, now: Instant) -> Self {
         Self {
-            from: position,
-            to: position,
-            started: now,
+            tween: Tween::at(position, now),
         }
-    }
-
-    fn duration() -> Duration {
-        INDICATOR_SLIDE.total().mul_f32(speed_scale())
-    }
-
-    fn progress(&self, now: Instant) -> f32 {
-        let duration = Self::duration();
-        if duration.is_zero() {
-            return 1.0;
-        }
-        let raw =
-            now.saturating_duration_since(self.started).as_secs_f32() / duration.as_secs_f32();
-        INDICATOR_SLIDE.progress(raw)
     }
 
     pub fn value_at(&self, now: Instant) -> f32 {
-        lerp(self.from, self.to, self.progress(now))
+        self.tween.value_at(now)
     }
 
     /// Aim at a new slot. Reduced motion snaps.
     pub fn retarget(&mut self, to: f32, reduced: bool, now: Instant) {
+        self.tween.retarget(to, INDICATOR_SLIDE, reduced, now);
+    }
+
+    pub fn animating_at(&self, now: Instant) -> bool {
+        !self.tween.settled_at(now)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Tween {
+    from: f32,
+    to: f32,
+    started: Instant,
+    spec: MotionSpec,
+}
+
+impl Tween {
+    pub fn at(value: f32, now: Instant) -> Self {
+        Self {
+            from: value,
+            to: value,
+            started: now,
+            spec: MotionSpec::new(0, LINEAR),
+        }
+    }
+
+    fn duration(&self) -> Duration {
+        self.spec.total().mul_f32(speed_scale())
+    }
+
+    pub fn target(&self) -> f32 {
+        self.to
+    }
+
+    pub fn value_at(&self, now: Instant) -> f32 {
+        let duration = self.duration();
+        let elapsed = now.saturating_duration_since(self.started);
+        if duration.is_zero() || elapsed >= duration {
+            return self.to;
+        }
+        let raw = elapsed.as_secs_f32() / duration.as_secs_f32();
+        lerp(self.from, self.to, self.spec.progress(raw))
+    }
+
+    pub fn retarget(&mut self, to: f32, spec: MotionSpec, reduced: bool, now: Instant) {
         let from = if reduced { to } else { self.value_at(now) };
         *self = Self {
             from,
             to,
             started: now,
+            spec,
         };
     }
 
-    pub fn animating_at(&self, now: Instant) -> bool {
-        self.from != self.to && now.saturating_duration_since(self.started) < Self::duration()
+    pub fn settled_at(&self, now: Instant) -> bool {
+        self.from == self.to || now.saturating_duration_since(self.started) >= self.duration()
     }
 }
 
@@ -1070,31 +1118,8 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 
 #[derive(Debug, Clone, Copy)]
 struct StateEntry {
-    origin: f32,
-    target: f32,
-    started: Instant,
-    spec: MotionSpec,
+    tween: Tween,
     seen: u64,
-}
-
-impl StateEntry {
-    fn duration(&self) -> Duration {
-        self.spec.total().mul_f32(speed_scale())
-    }
-
-    fn value(&self, now: Instant) -> f32 {
-        let duration = self.duration();
-        let elapsed = now.saturating_duration_since(self.started);
-        if duration.is_zero() || elapsed >= duration {
-            return self.target;
-        }
-        let raw = elapsed.as_secs_f32() / duration.as_secs_f32();
-        lerp(self.origin, self.target, self.spec.progress(raw))
-    }
-
-    fn settled(&self, now: Instant) -> bool {
-        self.origin == self.target || now.saturating_duration_since(self.started) >= self.duration()
-    }
 }
 
 /// Per-key state-morph store. Pure core (explicit `now`) — unit-testable.
@@ -1121,27 +1146,17 @@ impl StateMorphs {
             self.entries.insert(
                 key.to_string(),
                 StateEntry {
-                    origin: target,
-                    target,
-                    started: now,
-                    spec,
+                    tween: Tween::at(target, now),
                     seen: frame,
                 },
             );
             return target;
         };
-        if entry.target != target {
-            let current = entry.value(now);
-            *entry = StateEntry {
-                origin: if reduced { target } else { current },
-                target,
-                started: now,
-                spec,
-                seen: frame,
-            };
+        if entry.tween.target() != target {
+            entry.tween.retarget(target, spec, reduced, now);
         }
         entry.seen = frame;
-        entry.value(now)
+        entry.tween.value_at(now)
     }
 
     /// Once-per-frame bookkeeping: prune unmounted entries and report whether
@@ -1154,7 +1169,7 @@ impl StateMorphs {
             if entry.seen + 1 < frame {
                 return false;
             }
-            active |= !entry.settled(now);
+            active |= !entry.tween.settled_at(now);
             true
         });
         active

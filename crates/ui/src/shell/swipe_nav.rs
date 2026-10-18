@@ -334,6 +334,14 @@ impl Shell {
             NavEntry::Usage => "Usage".into(),
             NavEntry::Inbox => "Inbox".into(),
             NavEntry::Tasks => "Tasks".into(),
+            NavEntry::TaskCenter(id) => self
+                .state
+                .read(cx)
+                .tasks
+                .iter()
+                .find(|task| &task.id == id)
+                .map(|task| transcript::single_line(&task.title).into())
+                .unwrap_or_else(|| "Task".into()),
             NavEntry::Docs(article) => article
                 .and_then(crate::docs::article)
                 .map_or_else(|| "Docs".into(), |article| article.title.clone().into()),

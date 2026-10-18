@@ -2568,3 +2568,137 @@ fn a_task_row_always_reseeds_within_the_op_budget() {
             .all(|b| b.ops.iter().all(fits_op_budget))
     );
 }
+
+fn step(id: &str, task_id: &str, title: &str) -> zeron_proto::TaskStep {
+    serde_json::from_value(
+        json!({ "id": id, "taskId": task_id, "title": title, "createdAt": ts(2_000) }),
+    )
+    .unwrap()
+}
+
+fn step_ids(doc: &RegistryDoc, task_id: &str) -> Vec<String> {
+    doc.task_steps_of(task_id)
+        .into_iter()
+        .map(|s| s.id)
+        .collect()
+}
+
+#[test]
+fn task_steps_sync_in_order_and_follow_their_task_out() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    a.create_task(&task("t1", "Shop backend")).unwrap();
+    a.create_task(&task("t2", "Other")).unwrap();
+    assert!(
+        a.create_task_step(&step("s1", "missing", "Orphan"))
+            .is_err(),
+        "a step needs its task"
+    );
+    for (id, title) in [("s1", "Schema"), ("s2", "API"), ("s3", "Tests")] {
+        assert!(a.create_task_step(&step(id, "t1", title)).unwrap());
+    }
+    a.create_task_step(&step("o1", "t2", "Elsewhere")).unwrap();
+    assert!(!a.create_task_step(&step("s1", "t1", "Retried")).unwrap());
+    assert!(a.create_task_step(&step("s4", "t1", "   ")).is_err());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(step_ids(&b, "t1"), ["s1", "s2", "s3"]);
+    assert_eq!(b.task_step("s1").unwrap().title, "Schema");
+
+    let first = b.task_step("s1").unwrap().order_key;
+    let to_front = zeron_proto::TaskStepPatch {
+        order_key: Some(zeron_proto::pin_order_key_between(None, Some(&first), "n").unwrap()),
+        chat_id: Some(Some("child-3".into())),
+        outcome: Some(Some(zeron_proto::StepOutcome::Done)),
+        ..Default::default()
+    };
+    assert!(a.update_task_step("s3", &to_front, ts(3_000)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(step_ids(&b, "t1"), ["s3", "s1", "s2"]);
+    let moved = b.task_step("s3").unwrap();
+    assert_eq!(moved.chat_id.as_deref(), Some("child-3"));
+    assert_eq!(moved.outcome, Some(zeron_proto::StepOutcome::Done));
+    let reopen = zeron_proto::TaskStepPatch {
+        outcome: Some(None),
+        ..Default::default()
+    };
+    a.update_task_step("s3", &reopen, ts(3_001)).unwrap();
+    assert_eq!(a.task_step("s3").unwrap().outcome, None);
+
+    assert!(a.delete_task_step("s2", ts(4_000)).unwrap());
+    assert!(a.task_step("s2").is_none());
+    assert!(!a.create_task_step(&step("s2", "t1", "Revived")).unwrap());
+    a.create_task_step(&step("s5", "t1", "Docs")).unwrap();
+    assert_eq!(step_ids(&a, "t1"), ["s3", "s1", "s5"]);
+
+    let restarted = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "a").unwrap();
+    assert_eq!(
+        restarted.read_task_steps().unwrap(),
+        a.read_task_steps().unwrap()
+    );
+
+    let batches = a.pending_len();
+    assert!(a.delete_task("t1", ts(5_000)).unwrap());
+    assert_eq!(a.pending_len(), batches + 1, "the cascade is one batch");
+    assert!(step_ids(&a, "t1").is_empty());
+    assert_eq!(step_ids(&a, "t2"), ["o1"]);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(step_ids(&b, "t1").is_empty());
+    assert!(b.task_step("s3").is_none());
+}
+
+#[test]
+fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
+    let mut doc = RegistryDoc::new("a");
+    doc.create_task(&task("t1", "Shop backend")).unwrap();
+    for id in ["run", "open", "done"] {
+        doc.create_task_step(&step(id, "t1", id)).unwrap();
+    }
+    let bind = zeron_proto::TaskStepPatch {
+        chat_id: Some(Some("child".into())),
+        ..Default::default()
+    };
+    doc.update_task_step("run", &bind, ts(3_000)).unwrap();
+    let finish = zeron_proto::TaskStepPatch {
+        outcome: Some(Some(zeron_proto::StepOutcome::Skipped)),
+        ..Default::default()
+    };
+    doc.update_task_step("done", &finish, ts(3_000)).unwrap();
+    let plan = [step("n1", "t1", "First"), step("n2", "t1", "Second")];
+    doc.plan_task_steps("t1", &plan, ts(4_000)).unwrap();
+    assert_eq!(step_ids(&doc, "t1"), ["run", "done", "n1", "n2"]);
+    assert!(doc.task_step("open").is_none());
+
+    let before = doc.read_task_steps().unwrap();
+    let refused = [step("n3", "t1", "Fine"), step("n4", "t1", "  ")];
+    assert!(doc.plan_task_steps("t1", &refused, ts(5_000)).is_err());
+    assert_eq!(
+        doc.read_task_steps().unwrap(),
+        before,
+        "a refused plan writes nothing"
+    );
+    assert!(doc.plan_task_steps("gone", &plan, ts(5_000)).is_err());
+
+    let lead = zeron_proto::TaskPatch {
+        mode: Some(zeron_proto::TaskMode::Orchestrated),
+        plan_pending: Some(true),
+        send_error: Some(Some("offline".into())),
+        ..Default::default()
+    };
+    doc.update_task("t1", &lead, ts(6_000)).unwrap();
+    let restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "a").unwrap();
+    let task = restarted.task("t1").unwrap();
+    assert_eq!(task.mode, zeron_proto::TaskMode::Orchestrated);
+    assert!(task.plan_pending);
+    assert_eq!(task.send_error.as_deref(), Some("offline"));
+    let cleared = zeron_proto::TaskPatch {
+        plan_pending: Some(false),
+        send_error: Some(None),
+        ..Default::default()
+    };
+    doc.update_task("t1", &cleared, ts(6_001)).unwrap();
+    let task = doc.task("t1").unwrap();
+    assert!(!task.plan_pending);
+    assert_eq!(task.send_error, None);
+}

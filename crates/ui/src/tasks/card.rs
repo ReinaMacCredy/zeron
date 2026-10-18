@@ -13,6 +13,7 @@ use super::logic::{self, DuePick};
 use super::{Row, SAVE_DEBOUNCE, START_PENDING, linked_chat, patched, row_for};
 use crate::composer::{ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
+use crate::motion::{self, MotionSpec, Tween};
 use crate::pickers::Pickers;
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -21,6 +22,16 @@ use crate::typography::ui_rems;
 
 const PILL_HEIGHT: f32 = 28.0;
 const CARD_RADIUS: f32 = 24.0;
+const PANEL_IN: MotionSpec = MotionSpec::new(300, motion::EASE_DRAWER);
+const PANEL_OUT: MotionSpec = MotionSpec::new(220, motion::EASE_IN_SHARP);
+const SLOT_SHIFT: MotionSpec = MotionSpec::new(320, motion::EASE_DRAWER);
+const CONTENT_IN: MotionSpec = MotionSpec::new(200, motion::LINEAR).with_delay(80);
+const SWAP_OUT: MotionSpec = MotionSpec::new(90, motion::LINEAR);
+const SWAP_IN: MotionSpec = MotionSpec::new(180, motion::EASE_DRAWER).with_delay(90);
+const PANEL_SHIFT_IN: f32 = 28.0;
+const PANEL_SHIFT_OUT: f32 = 20.0;
+const SWAP_OUT_RISE: f32 = 4.0;
+const SWAP_IN_DROP: f32 = 6.0;
 
 #[derive(Clone)]
 pub enum TaskCardEvent {
@@ -35,6 +46,7 @@ pub enum TaskCardEvent {
         space_id: Option<String>,
         harness: Option<HarnessId>,
         model: Option<String>,
+        orchestrate: Option<Orchestrate>,
     },
     CreateSpace {
         space_id: String,
@@ -49,6 +61,12 @@ pub enum TaskCardEvent {
     },
     OpenChat(String),
     Refused(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Orchestrate {
+    pub approve_plan: bool,
+    pub same_agents: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,6 +91,7 @@ struct Open {
     assign: Entity<ComposerInput>,
     assign_pick: Option<(String, String)>,
     assign_send: bool,
+    orchestrate: Option<Orchestrate>,
     _subscriptions: [Subscription; 3],
 }
 
@@ -82,9 +101,32 @@ struct Fields {
     notes: Entity<ComposerInput>,
 }
 
+struct Leaving {
+    open: Open,
+    swap_out: Option<Tween>,
+}
+
+#[derive(Clone, Copy)]
+struct Content {
+    opacity: f32,
+    rise: f32,
+    inert: bool,
+}
+
+pub struct CardFrame {
+    pub slot: f32,
+    pub panel: f32,
+    pub shift: f32,
+}
+
 pub struct TaskCard {
     state: Entity<AppState>,
     open: Option<Open>,
+    leaving: Option<Leaving>,
+    presence: Tween,
+    slot: Tween,
+    content: Tween,
+    content_drop: f32,
     project_select: widgets::SelectState,
     due_select: widgets::SelectState,
     run_select: widgets::SelectState,
@@ -104,10 +146,16 @@ impl TaskCard {
             cx.notify();
         });
         let agent = cx.new(|cx| Pickers::new_for_tasks(state.clone(), cx));
+        let now = Instant::now();
         Self {
             agent,
             state,
             open: None,
+            leaving: None,
+            presence: Tween::at(0.0, now),
+            slot: Tween::at(0.0, now),
+            content: Tween::at(1.0, now),
+            content_drop: 0.0,
             project_select: widgets::SelectState::default(),
             due_select: widgets::SelectState::default(),
             run_select: widgets::SelectState::default(),
@@ -124,6 +172,45 @@ impl TaskCard {
 
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    pub fn frame(&self, now: Instant) -> Option<CardFrame> {
+        let shown =
+            self.open.is_some() || !self.presence.settled_at(now) || !self.slot.settled_at(now);
+        shown.then(|| {
+            let panel = self.presence.value_at(now);
+            let shift = if self.presence.target() > 0.0 {
+                PANEL_SHIFT_IN
+            } else {
+                PANEL_SHIFT_OUT
+            };
+            CardFrame {
+                slot: self.slot.value_at(now),
+                panel,
+                shift: shift * (1.0 - panel),
+            }
+        })
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        self.leaving.is_some()
+            || !self.presence.settled_at(now)
+            || !self.slot.settled_at(now)
+            || !self.content.settled_at(now)
+    }
+
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let reduced = motion::reduced_motion(cx);
+        if let Some(mut open) = self.open.take() {
+            open.save = None;
+            self.leaving = (!reduced).then_some(Leaving {
+                open,
+                swap_out: None,
+            });
+        }
+        self.presence.retarget(0.0, PANEL_OUT, reduced, now);
+        self.slot.retarget(0.0, SLOT_SHIFT, reduced, now);
     }
 
     /// `title` seeds the card of a task whose row has not arrived yet.
@@ -221,7 +308,9 @@ impl TaskCard {
             };
             window.focus(&target, cx);
         }
-        self.open = Some(Open {
+        let now = Instant::now();
+        let reduced = motion::reduced_motion(cx);
+        let previous = self.open.replace(Open {
             task_id,
             title: title_input,
             notes: notes_input,
@@ -236,14 +325,40 @@ impl TaskCard {
             assign: assign_input,
             assign_pick: None,
             assign_send: true,
+            orchestrate: None,
             _subscriptions: subscriptions,
         });
+        match previous {
+            Some(mut open) if !reduced => {
+                open.save = None;
+                let mut fade = Tween::at(1.0, now);
+                fade.retarget(0.0, SWAP_OUT, false, now);
+                self.leaving = Some(Leaving {
+                    open,
+                    swap_out: Some(fade),
+                });
+                self.content = Tween::at(0.0, now);
+                self.content.retarget(1.0, SWAP_IN, false, now);
+                self.content_drop = SWAP_IN_DROP;
+            }
+            Some(_) => {}
+            None => {
+                self.leaving = None;
+                if self.presence.value_at(now) == 0.0 {
+                    self.content = Tween::at(0.0, now);
+                    self.content.retarget(1.0, CONTENT_IN, reduced, now);
+                    self.content_drop = 0.0;
+                }
+                self.presence.retarget(1.0, PANEL_IN, reduced, now);
+                self.slot.retarget(1.0, SLOT_SHIFT, reduced, now);
+            }
+        }
         cx.notify();
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.flush(cx);
-        self.open = None;
+        self.dismiss(cx);
         cx.notify();
     }
 
@@ -277,7 +392,7 @@ impl TaskCard {
         if present {
             open.seen = true;
         } else if open.seen {
-            self.open = None;
+            self.dismiss(cx);
         }
     }
 
@@ -387,12 +502,14 @@ impl TaskCard {
             .and_then(|open| open.run_in.clone())
             .flatten();
         let (harness, model) = self.agent.read(cx).task_harness_model();
+        let orchestrate = self.open.as_ref().and_then(|open| open.orchestrate);
         cx.emit(TaskCardEvent::Start {
             task_id,
             patch,
             space_id,
             harness,
             model,
+            orchestrate,
         });
         cx.notify();
     }
@@ -543,6 +660,13 @@ impl TaskCard {
         if let Some(open) = self.open.as_mut() {
             open.run_in = Some(Some(space_id));
             open.folder = Some(path);
+        }
+        cx.notify();
+    }
+
+    fn set_orchestrate(&mut self, orchestrate: Option<Orchestrate>, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            open.orchestrate = orchestrate;
         }
         cx.notify();
     }
@@ -715,9 +839,10 @@ impl TaskCard {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let assign = self.render_assign(theme, cx);
         let open = self.open.as_ref();
-        let picked = open.is_some_and(|open| open.assign_pick.is_some());
+        let orchestrate = open.and_then(|open| open.orchestrate);
+        let assign = orchestrate.is_none().then(|| self.render_assign(theme, cx));
+        let picked = orchestrate.is_none() && open.is_some_and(|open| open.assign_pick.is_some());
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
         let spaces: Vec<(String, String)> = state
@@ -807,9 +932,13 @@ impl TaskCard {
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.pick_folder(cx)));
 
         let starting = self.is_starting(task_id);
+        let (start_id, start_label) = match orchestrate {
+            Some(_) => ("task-card-orchestrate", "Orchestrate"),
+            None => ("task-card-start", "Start"),
+        };
         let start = widgets::action_button(theme, widgets::ActionTone::Solid)
-            .id("task-card-start")
-            .debug_selector(|| "task-card-start".into())
+            .id(start_id)
+            .debug_selector(move || start_id.into())
             .role(gpui::Role::Button)
             .track_focus(&self.start_focus)
             .tab_index(0)
@@ -817,7 +946,7 @@ impl TaskCard {
             .min_h(px(30.0))
             .px(px(14.0))
             .when(row.is_none() || starting, |el| el.opacity(0.5))
-            .child(if starting { "Starting…" } else { "Start" })
+            .child(if starting { "Starting…" } else { start_label })
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.start(cx)));
         let assign_button = widgets::action_button(theme, widgets::ActionTone::Solid)
             .id("task-card-assign-button")
@@ -846,30 +975,125 @@ impl TaskCard {
             })
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.toggle_more(cx)));
 
+        let weak = cx.entity().downgrade();
+        let mode = widgets::segmented(
+            theme,
+            "task-card-hand-off-mode",
+            &[(false, "One agent"), (true, "Orchestrate")],
+            orchestrate.is_some(),
+            move |orchestrated, _, cx| {
+                weak.update(cx, |card, cx| {
+                    let pick = orchestrated.then_some(Orchestrate {
+                        approve_plan: true,
+                        same_agents: false,
+                    });
+                    card.set_orchestrate(pick, cx)
+                })
+                .ok();
+            },
+        )
+        .debug_selector(|| "task-card-hand-off-mode".into());
+        let agents = div()
+            .ml(px(-6.0))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.0))
+            .child(div().min_w_0().child(self.agent.clone()))
+            .child(run_select)
+            .child(folder_button);
+        let label = |text: &'static str| {
+            div()
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let pane = match orchestrate {
+            None => agents,
+            Some(choice) => {
+                let weak = cx.entity().downgrade();
+                let step_agents = widgets::segmented(
+                    theme,
+                    "task-card-step-agents",
+                    &[(false, "Lead picks per step"), (true, "Same as the lead")],
+                    choice.same_agents,
+                    move |same_agents, _, cx| {
+                        weak.update(cx, |card, cx| {
+                            card.set_orchestrate(
+                                Some(Orchestrate {
+                                    same_agents,
+                                    ..choice
+                                }),
+                                cx,
+                            )
+                        })
+                        .ok();
+                    },
+                )
+                .debug_selector(|| "task-card-step-agents".into());
+                let on = choice.approve_plan;
+                let approve = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .text_size(ui_rems(12.5))
+                    .text_color(theme.text)
+                    .child("Show me the plan before it runs")
+                    .child(
+                        widgets::toggle_switch(theme, on, "task-card-approve-plan")
+                            .id("task-card-approve-plan")
+                            .debug_selector(|| "task-card-approve-plan".into())
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .role(gpui::Role::Switch)
+                            .aria_label("Show me the plan before it runs")
+                            .aria_toggled(if on {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            })
+                            .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
+                                card.set_orchestrate(
+                                    Some(Orchestrate {
+                                        approve_plan: !on,
+                                        ..choice
+                                    }),
+                                    cx,
+                                )
+                            })),
+                    );
+                div()
+                    .debug_selector(|| "task-card-orchestrate-pane".into())
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                "A lead agent plans the work into steps, runs each step on its \
+                                 own thread, checks the results and reports back here.",
+                            ),
+                    )
+                    .child(label("Lead"))
+                    .child(agents)
+                    .child(label("Step agents"))
+                    .child(div().flex().child(step_agents))
+                    .child(approve)
+            }
+        };
         div()
             .id("task-card-hand-off")
             .debug_selector(|| "task-card-hand-off".into())
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(ui_rems(12.5))
-                    .text_color(theme.text_muted)
-                    .child("Hand it to an agent"),
-            )
-            .child(
-                div()
-                    .ml(px(-6.0))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(div().min_w_0().child(self.agent.clone()))
-                    .child(run_select)
-                    .child(folder_button),
-            )
-            .child(assign)
+            .child(label("Hand it to an agent"))
+            .child(div().flex().child(mode))
+            .child(pane)
+            .children(assign)
             .child(
                 div()
                     .pt(px(2.0))
@@ -1008,6 +1232,7 @@ impl TaskCard {
         &self,
         fields: Fields,
         row: Option<&Row>,
+        content: Content,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1142,6 +1367,33 @@ impl TaskCard {
                         ),
                 )
             });
+            let not_sent = row
+                .and_then(|row| row.task.send_error.clone())
+                .zip(linked_chat_id.clone())
+                .map(|(error, chat_id)| {
+                    let retry_task = task_id.clone();
+                    widgets::warning_strip(theme, format!("Not sent: {error}"))
+                        .debug_selector(|| "task-card-not-sent".into())
+                        .mt_0()
+                        .child(div().flex_1())
+                        .child(
+                            widgets::text_action(theme, widgets::ActionTone::Filled, "Retry")
+                                .id("task-card-retry-send")
+                                .debug_selector(|| "task-card-retry-send".into())
+                                .role(gpui::Role::Button)
+                                .flex_none()
+                                .min_h(px(24.0))
+                                .rounded_full()
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                    cx.emit(TaskCardEvent::Assign {
+                                        task_id: retry_task.clone(),
+                                        patch: None,
+                                        chat_id: chat_id.clone(),
+                                        send: true,
+                                    });
+                                })),
+                        )
+                });
             let unassign = widgets::text_action(theme, widgets::ActionTone::Quiet, "Unassign")
                 .id("task-card-unassign")
                 .debug_selector(|| "task-card-unassign".into())
@@ -1163,6 +1415,7 @@ impl TaskCard {
                     .flex_col()
                     .gap(px(8.0))
                     .children(linked_block)
+                    .children(not_sent)
                     .child(
                         div()
                             .flex()
@@ -1208,10 +1461,7 @@ impl TaskCard {
             )
             .child("Delete")
             .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                if let Some(open) = card.open.as_mut() {
-                    open.save = None;
-                }
-                card.open = None;
+                card.dismiss(cx);
                 cx.emit(TaskCardEvent::Delete(delete_task.clone()));
                 cx.notify();
             }));
@@ -1233,9 +1483,6 @@ impl TaskCard {
             .max_h_full()
             .overflow_y_scroll()
             .p(px(16.0))
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
             .rounded(px(CARD_RADIUS))
             .bg(theme.surface_raised)
             .border_1()
@@ -1244,11 +1491,9 @@ impl TaskCard {
                 let modifiers = &event.keystroke.modifiers;
                 if event.keystroke.key == "enter" && (modifiers.platform || modifiers.control) {
                     cx.stop_propagation();
-                    if card
-                        .open
-                        .as_ref()
-                        .is_some_and(|open| open.assign_pick.is_some())
-                    {
+                    if card.open.as_ref().is_some_and(|open| {
+                        open.orchestrate.is_none() && open.assign_pick.is_some()
+                    }) {
                         card.assign(cx);
                     } else {
                         card.start(cx);
@@ -1257,21 +1502,89 @@ impl TaskCard {
             }))
             .child(
                 div()
+                    .relative()
+                    .top(px(content.rise))
+                    .opacity(content.opacity)
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
-                    .child(header)
-                    .child(note),
+                    .gap(px(14.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(header)
+                            .child(note),
+                    )
+                    .child(chips)
+                    .children(body)
+                    .children(actions),
             )
-            .child(chips)
-            .children(body)
-            .children(actions)
+            .when(content.inert, |el| {
+                el.child(div().absolute().inset_0().occlude())
+            })
             .into_any_element()
     }
 }
 
 impl Render for TaskCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let expired = self.leaving.as_ref().is_some_and(|leaving| {
+            leaving
+                .swap_out
+                .map_or(self.presence.settled_at(now), |fade| fade.settled_at(now))
+        });
+        if expired {
+            self.leaving = None;
+        }
+        if self.animating(now) {
+            window.request_animation_frame();
+        }
+        let swap_out = self
+            .leaving
+            .as_ref()
+            .and_then(|leaving| leaving.swap_out)
+            .map(|fade| fade.value_at(now));
+        let content = match (swap_out, &self.open, &self.leaving) {
+            (Some(fade), _, _) => Content {
+                opacity: fade,
+                rise: -SWAP_OUT_RISE * (1.0 - fade),
+                inert: true,
+            },
+            (None, Some(_), _) => {
+                let shown = self.content.value_at(now);
+                Content {
+                    opacity: shown,
+                    rise: self.content_drop * (1.0 - shown),
+                    inert: false,
+                }
+            }
+            (None, None, Some(_)) => Content {
+                opacity: 1.0,
+                rise: 0.0,
+                inert: true,
+            },
+            (None, None, None) => return div().into_any_element(),
+        };
+        if !content.inert {
+            return self.render_open(content, cx);
+        }
+        let Some(mut leaving) = self.leaving.take() else {
+            return div().into_any_element();
+        };
+        let current = std::mem::replace(&mut self.open, Some(leaving.open));
+        let element = self.render_open(content, cx);
+        if let Some(open) = std::mem::replace(&mut self.open, current) {
+            leaving.open = open;
+            self.leaving = Some(leaving);
+        }
+        element
+    }
+}
+
+impl TaskCard {
+    fn render_open(&mut self, content: Content, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(open) = self.open.as_ref() else {
             return div().into_any_element();
@@ -1290,7 +1603,7 @@ impl Render for TaskCard {
             title: open.title.clone(),
             notes: open.notes.clone(),
         };
-        self.render_card(fields, row.as_ref(), &theme, cx)
+        self.render_card(fields, row.as_ref(), content, &theme, cx)
     }
 }
 
@@ -1308,6 +1621,217 @@ mod tests {
         .unwrap()
     }
 
+    fn chat(id: &str, delegation: Option<&str>) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "deviceId": "mac", "archived": false,
+            "createdAt": "2026-10-18T00:00:00Z",
+            "delegation": delegation.map(|status| serde_json::json!({
+                "delegatedByChatId": "lead", "depth": 1, "anchor": "m",
+                "wake": "always", "status": status, "startedAt": "2026-10-18T00:00:00Z",
+            })),
+        }))
+        .unwrap()
+    }
+
+    fn step(
+        id: &str,
+        key: &str,
+        chat: Option<&str>,
+        outcome: Option<&str>,
+    ) -> zeron_proto::TaskStep {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "taskId": "orch", "title": id, "orderKey": key,
+            "chatId": chat, "outcome": outcome,
+        }))
+        .unwrap()
+    }
+
+    fn orchestrated(plan_pending: bool) -> zeron_proto::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+            "mode": "orchestrated", "planPending": plan_pending,
+        }))
+        .unwrap()
+    }
+
+    fn init(cx: &mut gpui::TestAppContext) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        dir
+    }
+
+    #[test]
+    fn an_orchestrated_task_rolls_its_steps_into_its_status() {
+        let mut state = AppState::new();
+        state.tasks = vec![orchestrated(false)];
+        state.chats = vec![chat("lead", None), chat("child", Some("running"))];
+        state.task_steps = vec![
+            step("s1", "1", None, Some("done")),
+            step("s2", "2", Some("child"), None),
+            step("s3", "3", None, None),
+            step("s4", "4", None, Some("skipped")),
+        ];
+        let now = Utc::now();
+        let plan = super::super::rollup(&state, &state.tasks[0], now);
+        let statuses: Vec<_> = plan.steps.iter().map(|row| row.status).collect();
+        use zeron_proto::StepStatus::*;
+        assert_eq!(statuses, [Done, Working, Planned, Skipped]);
+        assert_eq!(plan.status, TaskStatus::Working);
+        assert_eq!((plan.progress.done, plan.progress.total), (1, 3));
+        assert_eq!(super::super::needs_you_count(&state), 0);
+
+        state.chats[1] = chat("child", Some("failed"));
+        let plan = super::super::rollup(&state, &state.tasks[0], now);
+        assert_eq!(plan.status, TaskStatus::NeedsYou);
+        assert_eq!(super::super::needs_you_count(&state), 1);
+    }
+
+    #[gpui::test]
+    fn an_orchestrated_row_opens_the_center_instead_of_the_card(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![orchestrated(false), task("plain", false)];
+            state.chats = vec![chat("lead", None)];
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| super::super::TasksPage::new(state, cx));
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = opened.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &super::super::TasksEvent, _| {
+                if let super::super::TasksEvent::OpenCenter(id) = event {
+                    sink.borrow_mut().push(id.clone());
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-ring-orch").is_some());
+        let at = cx.debug_bounds("task-row-orch").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*opened.borrow(), ["orch"]);
+        assert!(!page.read_with(cx, |page, cx| page.card().read(cx).is_open()));
+        let at = cx.debug_bounds("task-row-plain").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*opened.borrow(), ["orch"]);
+        let open = page.read_with(cx, |page, cx| {
+            page.card().read(cx).task_id().map(str::to_owned)
+        });
+        assert_eq!(open.as_deref(), Some("plain"));
+    }
+
+    #[gpui::test]
+    fn the_center_shows_the_selected_steps_thread_or_else_the_lead(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![orchestrated(true)];
+            state.chats = vec![chat("lead", None), chat("child", Some("failed"))];
+            state.task_steps = vec![
+                step("s1", "1", Some("child"), None),
+                step("s2", "2", None, None),
+            ];
+        });
+        let (center, cx) =
+            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(
+                &center,
+                move |_, event: &super::super::TaskCenterEvent, _| {
+                    use super::super::TaskCenterEvent::*;
+                    match event {
+                        ApprovePlan(id) => sink.borrow_mut().push(format!("approve {id}")),
+                        RetryStep(id) => sink.borrow_mut().push(format!("retry {id}")),
+                        _ => {}
+                    }
+                },
+            )
+            .detach();
+        });
+        cx.run_until_parked();
+        let target = |cx: &mut gpui::VisualTestContext| {
+            center.read_with(cx, |center, cx| center.live_target(cx))
+        };
+        assert_eq!(target(cx).as_deref(), Some("lead"));
+        for (selector, expected) in [
+            ("task-center-step-s1", "child"),
+            ("task-center-step-s2", "lead"),
+            ("task-center-lead", "lead"),
+        ] {
+            let at = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(target(cx).as_deref(), Some(expected), "{selector}");
+        }
+        assert!(cx.debug_bounds("task-center-add-step").is_some());
+        assert!(cx.debug_bounds("task-center-retry-s2").is_none());
+        for selector in ["task-center-retry-s1", "task-center-approve"] {
+            let at = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        assert_eq!(*events.borrow(), ["retry s1", "approve orch"]);
+    }
+
+    #[gpui::test]
+    fn orchestrate_starts_the_task_with_the_chosen_options(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let starts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = starts.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| {
+                if let TaskCardEvent::Start { orchestrate, .. } = event {
+                    sink.borrow_mut().push(*orchestrate);
+                }
+            })
+            .detach();
+        });
+        card.update(cx, |card, cx| {
+            card.open("plain".into(), None, CardFocus::Title, None, cx)
+        });
+        cx.run_until_parked();
+        let right_half = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            gpui::point(
+                bounds.origin.x + bounds.size.width * 0.75,
+                bounds.center().y,
+            )
+        };
+        assert!(cx.debug_bounds("task-card-assign").is_some());
+        let at = right_half(cx, "task-card-hand-off-mode");
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-card-assign").is_none());
+        assert!(cx.debug_bounds("task-card-start").is_none());
+        let at = cx.debug_bounds("task-card-approve-plan").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let at = right_half(cx, "task-card-step-agents");
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let at = cx.debug_bounds("task-card-orchestrate").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            *starts.borrow(),
+            [Some(Orchestrate {
+                approve_plan: false,
+                same_agents: true,
+            })]
+        );
+    }
+
     #[gpui::test]
     fn every_card_state_renders_its_controls(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1315,6 +1839,7 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::motion::set_reduced_motion(cx, true);
         });
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {

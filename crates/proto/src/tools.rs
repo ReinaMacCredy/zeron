@@ -117,7 +117,7 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             ),
             tool(
                 "tasks",
-                "Write, update and assign tasks on the person's Tasks list.",
+                "Write, update and assign tasks on the person's Tasks list, and plan an orchestrated task's steps.",
             ),
             tool(
                 "context_settings",

@@ -30,7 +30,7 @@ use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
     AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId, PermissionMode,
-    ReasoningLevel, Session, Space, Task, UserInputAnswer,
+    ReasoningLevel, Session, Space, StepStatus, Task, TaskMode, TaskStep, UserInputAnswer,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -380,11 +380,11 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task.",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. An orchestrated task (`mode` orchestrated) has a lead thread and steps, each run on its own delegate_task child: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `steps` with their status (planned, working, needsYou, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}]: steps that have not started are replaced, the rest are kept, and the new ones follow them. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with delegate_task and its `taskStepId`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "create", "update", "assign", "unassign", "delete"] },
+                    "action": { "type": "string", "enum": ["list", "create", "update", "assign", "unassign", "delete", "plan", "step"] },
                     "taskId": { "type": "string" },
                     "includeDone": { "type": "boolean" },
                     "title": { "type": "string", "maxLength": 500 },
@@ -393,7 +393,21 @@ fn thread_tool_list() -> Value {
                     "projectId": { "type": "string" },
                     "completed": { "type": "boolean" },
                     "threadId": { "type": "string" },
-                    "send": { "type": "boolean" }
+                    "send": { "type": "boolean" },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "maxLength": 500 },
+                                "notes": { "type": "string", "maxLength": 10000 }
+                            },
+                            "required": ["title"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "stepId": { "type": "string" },
+                    "state": { "type": "string", "enum": ["done", "skipped", "open"] }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -564,7 +578,8 @@ fn thread_tool_list() -> Value {
                     "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
-                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] }
+                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] },
+                    "taskStepId": { "type": "string", "description": "A step id from the tasks tool: runs that step of a task this chat leads and binds the child to it. The child takes the step's title unless title is set." }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -1391,6 +1406,7 @@ impl ThreadTools {
         run["role"] = json!(args["role"].as_str());
         run["wait"] = json!(wait);
         run["clientRequestId"] = json!(args["clientRequestId"].as_str());
+        run["taskStepId"] = json!(args["taskStepId"].as_str());
         let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
         if !wait {
             view["waitTimedOut"] = json!(false);
@@ -1904,13 +1920,27 @@ impl ThreadTools {
                         .iter()
                         .find(|task| task.id == id)
                         .ok_or_else(|| format!("no task {id}"))?;
-                    return Ok(json!({ "task": task_json(task, false) }));
+                    let steps = self.step_statuses().await?;
+                    let mut row = task_json(task, false);
+                    add_plan(&mut row, task, &steps, true);
+                    return Ok(json!({ "task": row }));
                 }
                 let include_done = args["includeDone"].as_bool().unwrap_or(false);
-                let listed: Vec<Value> = tasks
+                let tasks: Vec<&Task> = tasks
                     .iter()
                     .filter(|task| include_done || task.completed_at.is_none())
-                    .map(|task| task_json(task, true))
+                    .collect();
+                let steps = match tasks.iter().any(|task| task.mode == TaskMode::Orchestrated) {
+                    true => self.step_statuses().await?,
+                    false => Vec::new(),
+                };
+                let listed: Vec<Value> = tasks
+                    .iter()
+                    .map(|task| {
+                        let mut row = task_json(task, true);
+                        add_plan(&mut row, task, &steps, false);
+                        row
+                    })
                     .collect();
                 let truncated = listed.len() > MAX_LISTED_TASKS;
                 let listed: Vec<Value> = listed.into_iter().take(MAX_LISTED_TASKS).collect();
@@ -1998,8 +2028,99 @@ impl ThreadTools {
                 .await?;
                 Ok(json!({ "taskId": task_id, "deleted": true }))
             }
-            _ => Err("action must be list, create, update, assign, unassign or delete".into()),
+            "plan" => {
+                let task_id = required()?;
+                let steps: Vec<Value> = args["steps"]
+                    .as_array()
+                    .ok_or("steps is required")?
+                    .iter()
+                    .map(|step| {
+                        json!({
+                            "title": step["title"].as_str().unwrap_or_default(),
+                            "notes": step["notes"].as_str().unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+                let planned = self
+                    .call_engine(
+                        methods::MUTATE,
+                        json!({
+                            "op": "planSteps",
+                            "taskId": task_id,
+                            "steps": steps,
+                            "fromChatId": self.chat_id,
+                        }),
+                    )
+                    .await?;
+                let task: Task = serde_json::from_value(planned["task"].clone())
+                    .map_err(|_| format!("no task {task_id}"))?;
+                let steps: Vec<TaskStep> = serde_json::from_value(planned["steps"].clone())
+                    .map_err(|e| format!("planSteps: {e}"))?;
+                let steps = self.statuses_of(steps).await?;
+                let mut row = task_json(&task, false);
+                add_plan(&mut row, &task, &steps, true);
+                Ok(json!({ "task": row }))
+            }
+            "step" => {
+                let step_id = args["stepId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .ok_or("stepId is required")?;
+                let outcome = match args["state"].as_str() {
+                    Some("done") => json!("done"),
+                    Some("skipped") => json!("skipped"),
+                    Some("open") => Value::Null,
+                    _ => return Err("state must be done, skipped or open".into()),
+                };
+                self.call_engine(
+                    methods::MUTATE,
+                    json!({
+                        "op": "updateTaskStep",
+                        "stepId": step_id,
+                        "patch": { "outcome": outcome },
+                        "fromChatId": self.chat_id,
+                    }),
+                )
+                .await?;
+                Ok(json!({ "stepId": step_id, "state": args["state"] }))
+            }
+            _ => Err(
+                "action must be list, create, update, assign, unassign, delete, plan or step"
+                    .into(),
+            ),
         }
+    }
+
+    async fn step_statuses(&self) -> Result<Vec<(TaskStep, StepStatus)>, String> {
+        let steps: Vec<TaskStep> = self.snapshot(methods::WATCH_TASK_STEPS, json!({})).await?;
+        self.statuses_of(steps).await
+    }
+
+    async fn statuses_of(
+        &self,
+        steps: Vec<TaskStep>,
+    ) -> Result<Vec<(TaskStep, StepStatus)>, String> {
+        if steps.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chats: Vec<Chat> = self.snapshot(methods::WATCH_CHATS, json!({})).await?;
+        let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
+        let now = Utc::now();
+        Ok(steps
+            .into_iter()
+            .map(|step| {
+                let thread = step
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| chats.iter().find(|chat| chat.id == id));
+                let indicator = thread.map(|chat| {
+                    let session = sessions.iter().find(|s| s.chat_id == chat.id);
+                    zeron_proto::view::display_status(chat, session, now)
+                });
+                let status = zeron_proto::step_status(&step, thread, indicator);
+                (step, status)
+            })
+            .collect())
     }
 
     async fn update_task_row(&self, task_id: &str, patch: Value) -> Result<Value, String> {
@@ -3081,6 +3202,35 @@ fn error(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+fn add_plan(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)], whole: bool) {
+    if task.mode != TaskMode::Orchestrated {
+        return;
+    }
+    let own: Vec<&(TaskStep, StepStatus)> = steps
+        .iter()
+        .filter(|(step, _)| step.task_id == task.id)
+        .collect();
+    let statuses: Vec<StepStatus> = own.iter().map(|(_, status)| *status).collect();
+    row["progress"] = json!(zeron_proto::plan_progress(&statuses));
+    if whole {
+        row["steps"] = own
+            .iter()
+            .map(|(step, status)| {
+                let mut entry = json!({
+                    "id": step.id,
+                    "title": step.title,
+                    "notes": step.notes,
+                    "status": status,
+                });
+                if let Some(thread) = &step.chat_id {
+                    entry["threadId"] = json!(thread);
+                }
+                entry
+            })
+            .collect();
+    }
+}
+
 fn task_json(task: &Task, preview: bool) -> Value {
     let cut = preview && task.notes.chars().count() > LISTED_NOTES_PREVIEW_CHARS;
     let notes: String = if cut {
@@ -3099,9 +3249,16 @@ fn task_json(task: &Task, preview: bool) -> Value {
         "dueOn": task.due_on,
         "threadId": task.chat_id,
         "completed": task.completed_at.is_some(),
+        "mode": task.mode,
     });
     if cut {
         row["notesTruncated"] = json!(true);
+    }
+    if task.plan_pending {
+        row["planPending"] = json!(true);
+    }
+    if let Some(error) = &task.send_error {
+        row["sendError"] = json!(error);
     }
     row
 }
@@ -3187,6 +3344,8 @@ mod tests {
         actions: Vec<(&'static str, Value)>,
         release: tokio::sync::Notify,
         disabled: Vec<&'static str>,
+        tasks: Vec<Value>,
+        task_steps: Vec<Value>,
     }
 
     fn timed(snapshots: Vec<Value>) -> RpcReply {
@@ -3210,6 +3369,12 @@ mod tests {
                 )),
                 methods::WATCH_SPACES => Ok(RpcReply::Stream(
                     futures::stream::iter(vec![Value::Array(self.spaces.clone())]).boxed(),
+                )),
+                methods::WATCH_TASKS => Ok(RpcReply::Stream(
+                    futures::stream::iter(vec![Value::Array(self.tasks.clone())]).boxed(),
+                )),
+                methods::WATCH_TASK_STEPS => Ok(RpcReply::Stream(
+                    futures::stream::iter(vec![Value::Array(self.task_steps.clone())]).boxed(),
                 )),
                 methods::LIST_HARNESSES => Ok(RpcReply::Value(json!([
                     {
@@ -3309,6 +3474,9 @@ mod tests {
                         methods::SEND_THREAD_MESSAGE => json!({ "id": "q-1" }),
                         methods::SET_THREAD_WATCHES => json!({ "watching": params["add"] }),
                         methods::QUEUE_COMMAND => json!({ "commandId": "cmd-1" }),
+                        methods::MUTATE if params["op"] == "planSteps" => json!({
+                            "ok": true, "task": self.tasks[0], "steps": self.task_steps,
+                        }),
                         methods::TAKE_THREAD_MESSAGES => json!({
                             "messages": [{ "id": "q-9", "fromChatId": "b", "text": "done, 4 tests" }]
                         }),
@@ -3616,6 +3784,17 @@ mod tests {
             actions: vec![],
             release: tokio::sync::Notify::new(),
             disabled: vec![],
+            tasks: vec![
+                json!({ "id": "t1", "title": "Shop backend", "chatId": "a", "mode": "orchestrated", "planPending": true }),
+                json!({ "id": "t2", "title": "Fix the redirect", "chatId": "c", "sendError": "offline" }),
+            ],
+            task_steps: vec![
+                json!({ "id": "s1", "taskId": "t1", "title": "API", "chatId": "b" }),
+                json!({ "id": "s2", "taskId": "t1", "title": "Schema", "outcome": "done", "chatId": "e" }),
+                json!({ "id": "s3", "taskId": "t1", "title": "Docs" }),
+                json!({ "id": "s4", "taskId": "t1", "title": "Ads", "outcome": "skipped" }),
+                json!({ "id": "s5", "taskId": "t1", "title": "Deploy", "chatId": "c" }),
+            ],
         }
     }
 
@@ -4664,6 +4843,106 @@ mod tests {
                 json!({ "op": "assignTask", "taskId": task_id, "chatId": "b", "send": true, "fromChatId": "a" }),
                 json!({ "op": "assignTask", "taskId": task_id, "chatId": "a", "send": false, "fromChatId": "a" }),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_orchestrated_task_lists_its_steps_and_its_lead_plans_and_marks_them() {
+        let rig = rig(fixture());
+        let listed = rig
+            .tools
+            .call("tasks", &json!({ "action": "list" }))
+            .await
+            .unwrap();
+        let [lead, single] = listed["tasks"].as_array().unwrap().as_slice() else {
+            panic!("two tasks: {listed}")
+        };
+        assert_eq!(lead["mode"], "orchestrated");
+        assert_eq!(lead["planPending"], true);
+        assert_eq!(lead["progress"], json!({ "done": 1, "total": 4 }));
+        assert!(lead.get("steps").is_none(), "the list leaves steps out");
+        assert_eq!(single["mode"], "single");
+        assert_eq!(single["sendError"], "offline");
+        assert!(single.get("progress").is_none());
+
+        let one = rig
+            .tools
+            .call("tasks", &json!({ "action": "list", "taskId": "t1" }))
+            .await
+            .unwrap();
+        let steps: Vec<(&str, &str)> = one["task"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["id"].as_str().unwrap(), s["status"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("s1", "working"),
+                ("s2", "done"),
+                ("s3", "planned"),
+                ("s4", "skipped"),
+                ("s5", "needsYou"),
+            ]
+        );
+        assert_eq!(one["task"]["steps"][0]["threadId"], "b");
+        assert!(one["task"]["steps"][2].get("threadId").is_none());
+
+        let planned = rig
+            .tools
+            .call(
+                "tasks",
+                &json!({ "action": "plan", "taskId": "t1", "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(planned["task"]["steps"].as_array().unwrap().len(), 5);
+        rig.tools
+            .call(
+                "tasks",
+                &json!({ "action": "step", "stepId": "s5", "state": "skipped" }),
+            )
+            .await
+            .unwrap();
+        rig.tools
+            .call(
+                "tasks",
+                &json!({ "action": "step", "stepId": "s5", "state": "open" }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rig.tools
+                .call(
+                    "tasks",
+                    &json!({ "action": "step", "stepId": "s5", "state": "maybe" })
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            logged(&rig.calls, methods::MUTATE),
+            [
+                json!({
+                    "op": "planSteps", "taskId": "t1", "fromChatId": "a",
+                    "steps": [{ "title": "API", "notes": "" }, { "title": "Docs", "notes": "README" }],
+                }),
+                json!({ "op": "updateTaskStep", "stepId": "s5", "patch": { "outcome": "skipped" }, "fromChatId": "a" }),
+                json!({ "op": "updateTaskStep", "stepId": "s5", "patch": { "outcome": null }, "fromChatId": "a" }),
+            ]
+        );
+
+        rig.tools
+            .call(
+                "delegate_task",
+                &json!({ "task": "build the API", "taskStepId": "s1" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            logged(&rig.calls, methods::DELEGATE_TASK)[0]["taskStepId"],
+            "s1"
         );
     }
 

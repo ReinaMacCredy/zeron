@@ -2625,3 +2625,114 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
     );
     rig.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_orchestrated_task_runs_its_approved_steps_on_bound_children() {
+    let rig = rig(Duration::from_millis(100));
+    let rpc = rig.core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, zeron_rpc::methods::MUTATE, params).await }
+    };
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Shop backend" }))
+        .await
+        .unwrap();
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "task-lead",
+        "spaceId": "space-tt", "orchestrate": true,
+    }))
+    .await
+    .unwrap();
+    wait_for(
+        || !prompts_with(&rig, "You lead this task (task id t1)").is_empty(),
+        "the lead's brief",
+    )
+    .await;
+    let plan = serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "steps": [{ "title": "Build the API" }, { "title": "Write the docs", "notes": "README" }],
+    });
+    let mut stranger = plan.clone();
+    stranger["fromChatId"] = "lead".into();
+    assert!(mutate(stranger).await.is_err(), "only the lead plans");
+    mutate(plan).await.unwrap();
+    let steps = rig.core.workspace.task_steps_of("t1");
+    assert_eq!(
+        steps.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+        ["Build the API", "Write the docs"]
+    );
+    let run = |step: &zeron_proto::TaskStep, owner: &str| {
+        let mut params = delegate(&format!("do: {}", step.title));
+        params.owner_chat_id = owner.into();
+        params.task_step_id = Some(step.id.clone());
+        let core = &rig.core;
+        async move {
+            core.doc_host
+                .delegate_task(params, Default::default())
+                .await
+        }
+    };
+    let err = run(&steps[0], "task-lead").await.unwrap_err().to_string();
+    assert!(err.starts_with("plan_pending"), "{err}");
+    let err = run(&steps[0], "lead").await.unwrap_err().to_string();
+    assert!(err.contains("Only the task's lead runs its steps"), "{err}");
+
+    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+        .await
+        .unwrap();
+    assert!(!rig.core.workspace.task("t1").unwrap().plan_pending);
+    wait_for(
+        || !prompts_with(&rig, "The plan is approved. Run it.").is_empty(),
+        "the lead's approval message",
+    )
+    .await;
+
+    let first = run(&steps[0], "task-lead").await.unwrap().task_id;
+    wait_for(
+        || delegation(&rig.core, &first).status == zeron_proto::DelegationStatus::Completed,
+        "the first step's child to finish",
+    )
+    .await;
+    let second = run(&steps[1], "task-lead").await.unwrap().task_id;
+    let status = |step_id: &str| {
+        let step = rig.core.workspace.task_step(step_id).unwrap();
+        let chat = step
+            .chat_id
+            .as_deref()
+            .and_then(|id| rig.core.workspace.chat(id).unwrap());
+        let indicator = chat.as_ref().map(|chat| {
+            let session = rig.core.sessions.session_status(&chat.id);
+            zeron_proto::view::display_status(chat, session.as_ref(), chrono::Utc::now())
+        });
+        (
+            step.chat_id,
+            zeron_proto::step_status(
+                &rig.core.workspace.task_step(step_id).unwrap(),
+                chat.as_ref(),
+                indicator,
+            ),
+        )
+    };
+    assert_eq!(
+        status(&steps[0].id),
+        (Some(first.clone()), zeron_proto::StepStatus::Done)
+    );
+    assert_eq!(
+        status(&steps[1].id),
+        (Some(second.clone()), zeron_proto::StepStatus::Working)
+    );
+    assert_eq!(
+        rig.core
+            .workspace
+            .chat(&second)
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Write the docs"),
+        "an untitled step child takes the step's title"
+    );
+    let err = run(&steps[1], "task-lead").await.unwrap_err().to_string();
+    assert!(err.contains("still running"), "{err}");
+    rig.core.shutdown().await;
+}

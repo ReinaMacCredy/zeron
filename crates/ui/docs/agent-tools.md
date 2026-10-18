@@ -21,6 +21,7 @@ The tools come in six groups, the same ones you see in Settings > Tools:
 - An agent can answer another chat's permission request only when its own chat runs at **Full access**.
 - A child agent, or a profile an agent applies, never gets a higher permission mode than the chat that started it.
 - A question from an agent waits up to 25 minutes for your answer.
+- Only an [orchestrated task](zeron://docs/tasks)'s lead writes its plan and runs its steps, and while the plan waits for your approval, the lead cannot start a step.
 
 ## Turn tools off
 
