@@ -1,8 +1,10 @@
+use std::time::Instant;
+
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div, prelude::*, px,
-    relative,
+    AnimationExt, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div,
+    prelude::*, px, relative,
 };
 use zeron_proto::{
     ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, TaskPatch, TaskStatus,
@@ -12,6 +14,7 @@ use zeron_proto::{
 use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
+use crate::motion::{self, MotionSpec, Tween};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -19,6 +22,9 @@ use crate::transcript::Transcript;
 use crate::typography::ui_rems;
 
 const ICON_SLOT: f32 = 16.0;
+const STEP_IN: MotionSpec = MotionSpec::new(350, motion::EASE_DRAWER);
+const STEP_RISE: f32 = 6.0;
+const PROGRESS_FILL: MotionSpec = MotionSpec::new(500, motion::EASE_DRAWER);
 
 pub enum TaskCenterEvent {
     Update {
@@ -83,6 +89,7 @@ pub struct TaskCenter {
     rename: Option<Rename>,
     add: Entity<ComposerInput>,
     live: Option<LiveThread>,
+    fill: Option<Tween>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -115,6 +122,7 @@ impl TaskCenter {
             rename: None,
             add,
             live: None,
+            fill: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![add_events, state_changes],
         }
@@ -304,6 +312,7 @@ impl TaskCenter {
         &self,
         task: &zeron_proto::Task,
         plan: &Rollup,
+        fill: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -315,11 +324,6 @@ impl TaskCenter {
             done: finished,
             total,
         } = plan.progress;
-        let fraction = if total == 0 {
-            0.0
-        } else {
-            finished as f32 / total as f32
-        };
         let task_id = task.id.clone();
         let toggle = widgets::text_action(
             theme,
@@ -393,7 +397,7 @@ impl TaskCenter {
                             .rounded(px(2.0))
                             .bg(theme.wash(0.08))
                             .overflow_hidden()
-                            .child(div().h_full().w(relative(fraction)).bg(complete)),
+                            .child(div().h_full().w(relative(fill)).bg(complete)),
                     )
                     .child(
                         div()
@@ -1130,8 +1134,24 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
 
+impl TaskCenter {
+    fn fill_at(&mut self, progress: PlanProgress, reduced: bool, now: Instant) -> (f32, bool) {
+        let PlanProgress { done, total } = progress;
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            done as f32 / total as f32
+        };
+        let fill = self.fill.get_or_insert_with(|| Tween::at(fraction, now));
+        if fill.target() != fraction {
+            fill.retarget(fraction, PROGRESS_FILL, reduced, now);
+        }
+        (fill.value_at(now), !fill.settled_at(now))
+    }
+}
+
 impl Render for TaskCenter {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let found = {
             let state = self.state.read(cx);
@@ -1145,6 +1165,11 @@ impl Render for TaskCenter {
             return self.render_missing(&theme, cx);
         };
         let threads = self.threads(&plan, cx);
+        let (fill, filling) =
+            self.fill_at(plan.progress, motion::reduced_motion(cx), Instant::now());
+        if filling {
+            window.request_animation_frame();
+        }
         let editable = task.plan_pending && task.completed_at.is_none();
         let last = plan.steps.len().saturating_sub(1);
         let steps: Vec<AnyElement> = plan
@@ -1153,7 +1178,7 @@ impl Render for TaskCenter {
             .zip(&threads)
             .enumerate()
             .map(|(ix, (row, thread))| {
-                self.render_step(
+                let step = self.render_step(
                     ix,
                     ix == last && !editable,
                     row,
@@ -1161,7 +1186,16 @@ impl Render for TaskCenter {
                     editable,
                     &theme,
                     cx,
-                )
+                );
+                div()
+                    .relative()
+                    .child(step)
+                    .with_animation(
+                        SharedString::from(format!("task-center-step-in-{}", row.step.id)),
+                        STEP_IN.animation(),
+                        |el, t| el.top(px(STEP_RISE * (1.0 - t))).opacity(t),
+                    )
+                    .into_any_element()
             })
             .collect();
         let left = div()
@@ -1193,7 +1227,7 @@ impl Render for TaskCenter {
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .flex()
             .flex_col()
-            .child(self.render_header(&task, &plan, &theme, cx))
+            .child(self.render_header(&task, &plan, fill, &theme, cx))
             .children(self.render_send_error(&task, &theme, cx))
             .child(
                 div()
