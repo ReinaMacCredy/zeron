@@ -39,6 +39,10 @@ What each level exposes:
   and the raw socket have no such check: an agent with a shell can still reach its own app.
   Turn `ui_driver_drive` off in Settings > Tools to keep reading without driving; turning
   `ui_driver` off turns both off.
+- `ui_driver_drive` carries a destructive hint, so Codex would ask before every call. Zeron's
+  Codex thread config pre-approves it, as it does `device_close`
+  (`mcp_servers.zeron.tools.<tool>.approval_mode = "approve"`), so a Codex chat drives without
+  a prompt in Ask, Auto and Full alike.
 
 ## Reaching a target
 
@@ -313,8 +317,9 @@ zui wait '{"for":"gone","select":"Button \"Stop\""}'
   `{frame,quietMs}` once no frame has drawn for `quietMs` (300); `ms` sleeps `ms`; `select`
   returns `{ref,node,waitedMs}` once the element exists; `gone` takes an element (`ref` or `select`) or `text` and
   returns `{gone,waitedMs}` once nothing matches it; `text` returns `{ref,node,waitedMs}` once a label, value or description
-  contains `text`. `timeoutMs` defaults to 5000. `timeoutMs`, `quietMs` and `ms` are at most
-  60000; a larger value errors at once. A timeout reports what it last saw, for example
+  contains `text`. An empty `text` errors at once, since every node contains it. `timeoutMs`
+  defaults to 5000. `timeoutMs`, `quietMs` and `ms` are at most 60000; a larger value errors
+  at once. A timeout reports what it last saw, for example
   `not idle after 5000 ms: 120 frames drawn (24.0 fps), last 3 ms ago`.
 - The tree exists only while a window is forced to build it. The first `tree`, `audit`,
   element target or element wait forces it, which costs one or two frames (15-17 ms live). The
@@ -579,6 +584,8 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `timed out after N ms; last seen: ...` / `not idle after ...` | The UI never reached the state, or an animation or spinner keeps drawing. Read the last-seen part, raise `timeoutMs`, or wait on an element instead of `idle`. |
 | `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. |
 | `` `timeoutMs` must be at most 60000 ms `` | Waits are capped at 60 s. Wait on an element or for `idle` in steps instead of one long wait. |
+| `` `text` must not be empty `` | A `text` or `gone` wait (or a scenario `text` assert) got `""`, which every node contains. Pass the text to wait for. |
+| `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The chat runs on a Zeron build from before the pre-approval. Rebuild, or switch the chat to Full. |
 | `the window drew no frame after the accessibility tree was enabled` | The window is minimized or fully hidden, so gpui does not draw. Bring it back on screen and retry. |
 | `give one of ref, select, or x and y` | The request mixed target kinds, or gave `x` without `y` or `nth` without `select`. |
 | `` `path` must end in .png `` / `is not a regular file` | Snapshot paths are absolute `.png` files; pick a new file name, not a link or folder. |
