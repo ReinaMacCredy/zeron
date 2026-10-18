@@ -499,7 +499,16 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let first = visible.first().cloned().unwrap_or_default();
-        let pill = pill_frame("ask-pill", theme).debug_selector(|| "ask-pill".into());
+        let label = if single {
+            format!("{text} · Input")
+        } else {
+            text.clone()
+        };
+        let pill = pill_frame("ask-pill", theme)
+            .debug_selector(|| "ask-pill".into())
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .aria_expanded(self.ask.open.is_some());
         let pill = ask_pill_body(pill, text, single, self.ask.open.is_some(), theme)
             .on_mouse_down(
                 MouseButton::Left,
@@ -556,6 +565,8 @@ impl Composer {
                 div()
                     .id("ask-tray-open-thread")
                     .debug_selector(|| "ask-tray-open-thread".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Open thread")
                     .flex()
                     .flex_row()
                     .items_center()
@@ -582,6 +593,8 @@ impl Composer {
                 div()
                     .id("ask-tray-close")
                     .debug_selector(|| "ask-tray-close".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Close")
                     .size(px(20.0))
                     .flex_none()
                     .flex()
@@ -600,6 +613,9 @@ impl Composer {
         let tabs =
             (visible.len() > 1).then(|| {
                 div()
+                    .id("ask-tray-tabs")
+                    .role(gpui::Role::TabList)
+                    .aria_label("Questions")
                     .flex()
                     .flex_row()
                     .flex_wrap()
@@ -612,6 +628,9 @@ impl Composer {
                         div()
                             .id(("ask-tray-tab", ix))
                             .debug_selector(move || format!("ask-tray-tab-{ix}"))
+                            .role(gpui::Role::Tab)
+                            .aria_label(SharedString::from(self.ask_title(id, cx)))
+                            .aria_selected(selected)
                             .flex()
                             .flex_row()
                             .items_center()
@@ -648,6 +667,8 @@ impl Composer {
             });
         let tray = div()
             .id("ask-tray")
+            .role(gpui::Role::Dialog)
+            .aria_label(SharedString::from(self.ask_title(chat_id, cx)))
             .when(motion.live, |el| {
                 el.debug_selector(|| "ask-tray".into())
                     .track_focus(&self.ask_focus)

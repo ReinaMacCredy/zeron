@@ -61,6 +61,21 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Inspect and drive a running Zeron app through its UI driver:
+    /// `zeron ui list`, `zeron ui <action> ['<json args>'] [--target <t>]`,
+    /// or `zeron ui scenario <file.json> [--target <t>] [--out <dir>]`.
+    Ui {
+        /// `list`, `scenario`, or a driver action such as state, tree, snapshot, wait, click or key.
+        action: String,
+        /// The action's arguments as one JSON object, such as '{"keys":"cmd-k"}'; for `scenario`, the scenario file.
+        args: Option<String>,
+        /// A pid or label from `zeron ui list` (exact, or a unique substring), or a socket path.
+        #[arg(long)]
+        target: Option<String>,
+        /// For `scenario`: the report directory (default ~/.zeron/run/scenarios/<name>-<time>).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
@@ -209,7 +224,7 @@ fn main() -> anyhow::Result<()> {
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
         if matches!(
             &cli.command,
-            Some(Command::Mcp { .. } | Command::Hook { .. })
+            Some(Command::Mcp { .. } | Command::Hook { .. } | Command::Ui { .. })
         ) {
             tracing_subscriber::registry()
                 .with(filter)
@@ -297,6 +312,36 @@ fn main() -> anyhow::Result<()> {
                 tracing::debug!(%error, "context hook skipped");
             }
             Ok(())
+        }
+        Some(Command::Ui {
+            action,
+            args,
+            target,
+            out,
+        }) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            if action == "scenario" {
+                let file = args.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "usage: zeron ui scenario <file.json> [--target <t>] [--out <dir>]"
+                    )
+                })?;
+                match runtime.block_on(zeron_mcp::ui_scenario::run(
+                    std::path::Path::new(&file),
+                    target.as_deref(),
+                    out,
+                )) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => std::process::exit(1),
+                    Err(message) => {
+                        eprintln!("{message}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            runtime.block_on(ui_cli(action, args, target))
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
@@ -411,7 +456,7 @@ async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
-    let tools = zeron_mcp::ThreadTools::new(client, chat);
+    let tools = zeron_mcp::ThreadTools::new(client, chat).with_ipc_port(ipc_port);
     zeron_mcp::serve(
         tokio::io::BufReader::new(tokio::io::stdin()),
         tokio::io::stdout(),
@@ -419,6 +464,34 @@ async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+async fn ui_cli(
+    action: String,
+    args: Option<String>,
+    target: Option<String>,
+) -> anyhow::Result<()> {
+    let parsed = args.as_deref().map(serde_json::from_str).transpose();
+    let mut request =
+        match parsed.map_err(|e| anyhow::anyhow!("the action's arguments are not JSON: {e}"))? {
+            None => serde_json::Map::new(),
+            Some(serde_json::Value::Object(args)) => args,
+            Some(_) => anyhow::bail!("the action's arguments must be one JSON object"),
+        };
+    request.insert("action".into(), action.into());
+    if let Some(target) = target {
+        request.insert("target".into(), target.into());
+    }
+    match zeron_mcp::ui_driver::run(&serde_json::Value::Object(request), None).await {
+        Ok(reply) => {
+            println!("{}", zeron_mcp::ui_driver::text(&reply));
+            Ok(())
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn hook_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {

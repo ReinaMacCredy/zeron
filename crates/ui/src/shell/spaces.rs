@@ -4977,6 +4977,7 @@ impl Shell {
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
+                .role(gpui::Role::Button)
                 .group(group.clone())
                 .size(px(28.0))
                 .flex_none()
@@ -5001,6 +5002,12 @@ impl Shell {
         let search = div()
             .id("sidebar-search")
             .debug_selector(|| "sidebar-search".into())
+            .role(gpui::Role::Button)
+            .aria_label(if filtered {
+                SharedString::from(format!("Search {label}"))
+            } else {
+                SharedString::from("Search")
+            })
             .group("sidebar-search")
             .flex_1()
             .min_w_0()
@@ -5036,6 +5043,12 @@ impl Shell {
             ));
         let filter_button = self.settings.sidebar_show_project_filter.then(|| {
             header_button("spaces-filter", icons::LUCIDE_LIST_FILTER, open)
+                .aria_label(if filtered {
+                    SharedString::from(format!("Filter: {label}"))
+                } else {
+                    SharedString::from("Filter by project")
+                })
+                .aria_expanded(open)
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
@@ -5054,11 +5067,13 @@ impl Shell {
                 }))
         });
         let add_project = header_button("sidebar-add-project", icons::LUCIDE_FOLDER_PLUS, false)
+            .aria_label(ShortcutId::NewProject.label())
             .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
             .tooltip(crate::settings::widgets::text_tooltip(
                 ShortcutId::NewProject.label(),
             ));
         let new_chat = header_button("sidebar-new-chat", icons::LUCIDE_SQUARE_PEN, false)
+            .aria_label(ShortcutId::NewSession.label())
             .on_click(cx.listener(|this, _, _, cx| this.open_new_session(None, cx)))
             .tooltip(crate::settings::widgets::text_tooltip(
                 ShortcutId::NewSession.label(),
@@ -5533,6 +5548,9 @@ impl Shell {
             chevron,
         )
         .id("sidebar-group-drafts")
+        .role(gpui::Role::Button)
+        .aria_label("Drafts")
+        .aria_expanded(!collapsed)
         .on_click(cx.listener(move |this, _, _, cx| {
             let was_open = !this.sidebar_collapsed_groups.contains(key);
             this.begin_sidebar_disclosure_motion(
@@ -5594,6 +5612,8 @@ impl Shell {
         let discard_group = SharedString::from(format!("draft-discard-{id}"));
         let discard = div()
             .id(discard_group.clone())
+            .role(gpui::Role::Button)
+            .aria_label("Discard draft")
             .group(discard_group.clone())
             .ml_auto()
             .h(px(20.0))
@@ -5616,6 +5636,10 @@ impl Shell {
             );
         div()
             .id(SharedString::from(row_id.clone()))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(crate::transcript::single_line(&prompt)))
+            .aria_description(SharedString::from(format!("Draft in {target}")))
+            .aria_selected(selected)
             .h(px(super::chat_row_height(true)))
             .py(px(super::SIDEBAR_CARD_INSET))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -6637,7 +6661,7 @@ impl Shell {
                 sidebar_disclosure_header(
                     theme,
                     group_icon,
-                    visible_label,
+                    visible_label.clone(),
                     collapsed.then_some(row_count),
                     new_chat_button,
                     chevron,
@@ -6645,6 +6669,9 @@ impl Shell {
                     .group(group_name)
                 .when(header_dimmed, |el| el.opacity(NEW_CHAT_DIMMED_OPACITY))
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                .role(gpui::Role::Button)
+                .aria_label(visible_label)
+                .aria_expanded(!collapsed)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
                     this.begin_sidebar_disclosure_motion(
@@ -6707,6 +6734,9 @@ impl Shell {
         let chevron = self.sidebar_disclosure_chevron("pinned", open, theme);
         let header = sidebar_disclosure_header(theme, None, "Pinned".into(), count, None, chevron)
             .id("pinned-toggle")
+            .role(gpui::Role::Button)
+            .aria_label("Pinned")
+            .aria_expanded(open)
             .debug_selector(|| "pinned-toggle".into())
             .on_drag_move::<SidebarSessionDrag>(cx.listener(
                 |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, _| {
@@ -6791,6 +6821,9 @@ impl Shell {
         )
             .id("sessions-toggle")
             .debug_selector(|| "sessions-toggle".into())
+            .role(gpui::Role::Button)
+            .aria_label("Sessions")
+            .aria_expanded(open)
             .on_drag_move::<SidebarSessionDrag>(cx.listener(
                 |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, _| {
                     if event.bounds.contains(&event.event.position) {
@@ -6929,6 +6962,9 @@ impl Shell {
         )
             .id("archived-toggle")
             .debug_selector(|| "archived-toggle".into())
+            .role(gpui::Role::Button)
+            .aria_label("Archived")
+            .aria_expanded(open)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = this.archived_open;
                 this.begin_sidebar_disclosure_motion(
@@ -7090,8 +7126,10 @@ impl Shell {
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_space_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search devices…", "PaletteSearch", cx));
+        let search = cx.new(|cx| {
+            ComposerInput::with_context("Search devices…", "PaletteSearch", cx)
+                .with_accessibility_role(gpui::Role::SearchInput)
+        });
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 // Typing `/` after a query that names a folder descends into
@@ -7978,6 +8016,8 @@ impl Shell {
         let row = |ix: usize| {
             popover::menu_row(&theme, ix == active, format!("project-result-{ix}"))
                 .id(("project-result", ix))
+                .role(gpui::Role::ListBoxOption)
+                .aria_selected(ix == active)
                 .rounded(px(popover::PALETTE_ITEM_RADIUS))
                 .min_h(px(30.0))
                 .py(px(4.0))
@@ -8014,6 +8054,7 @@ impl Shell {
                     let name = device.name.clone();
                     rows.push(
                         row(ix)
+                            .aria_label(SharedString::from(name.clone()))
                             .child(glyph_el(device_glyph(&device.platform)))
                             .child(label_el(name))
                             .child(
@@ -8044,6 +8085,7 @@ impl Shell {
                     let label = name.clone();
                     rows.push(
                         row(ix)
+                            .aria_label(SharedString::from(label.clone()))
                             .child(glyph_el(glyph))
                             .child(label_el(label))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -8080,6 +8122,7 @@ impl Shell {
                         let is_repo = entry.is_repo;
                         rows.push(
                             row(ix)
+                                .aria_label(SharedString::from(entry.name.clone()))
                                 .child(glyph_el(icons::FOLDER))
                                 .child(label_el(entry.name))
                                 .when(is_repo, |el| {
@@ -8115,6 +8158,8 @@ impl Shell {
         });
         let mut results = div()
             .id("project-results")
+            .role(gpui::Role::ListBox)
+            .aria_label("Results")
             .min_h_0()
             .max_h(px(command_palette::palette_results_height(viewport)))
             .overflow_y_scroll()
@@ -8490,6 +8535,8 @@ impl Shell {
             });
         let card =
             command_palette::palette_card("add-space-palette", &focus, viewport, &theme)
+                .role(gpui::Role::Dialog)
+                .aria_label("Add project")
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     this.add_space_key(event, cx)
                 }))

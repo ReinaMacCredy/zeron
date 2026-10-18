@@ -109,6 +109,13 @@ fn terminal_button(open: bool, theme: &Theme, cx: &App) -> AnyElement {
     div()
         .id(HOVER)
         .debug_selector(|| HOVER.into())
+        .role(gpui::Role::Button)
+        .aria_label("Terminal")
+        .aria_toggled(if open {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
         .flex_none()
         .h(px(20.0))
         .flex()
@@ -806,6 +813,19 @@ pub enum PickerKind {
     /// The approval-mode dropdown beside the context ring (Ask for approval
     /// | Approve for me | Full access) — one setting for every harness.
     Permission,
+}
+
+impl PickerKind {
+    fn a11y_name(self) -> &'static str {
+        match self {
+            Self::Branch => "Branch",
+            Self::Checkout => "Checkout",
+            Self::HarnessModel => "Model",
+            Self::Space => "Project",
+            Self::Device => "Device",
+            Self::Permission => "Permissions",
+        }
+    }
 }
 
 pub(crate) struct ReturnComposerFocus;
@@ -4461,6 +4481,8 @@ impl Pickers {
                 .child(popover::faded_menu_list(
                     &self.menu_scroll,
                     popover::menu_scroll_list("device-list", &self.menu_scroll)
+                        .role(gpui::Role::ListBox)
+                        .aria_label("Devices")
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
@@ -4483,6 +4505,10 @@ impl Pickers {
                                     format!("device-row-{ix}"),
                                 )
                                 .id(("device-row", ix))
+                                .role(gpui::Role::ListBoxOption)
+                                .aria_label(label.clone())
+                                .aria_selected(is_selected)
+                                .when_some(detail.clone(), |el, detail| el.aria_description(detail))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_device_row(row.clone(), cx);
                                 }))
@@ -5092,6 +5118,10 @@ impl Pickers {
         // this picker's entity.
         let id: SharedString = format!("{base}-{}", cx.entity_id()).into();
         let open = self.open_kind() == Some(kind);
+        let a11y_label = SharedString::from(match &suffix {
+            Some((suffix, _)) => format!("{}: {label} {suffix}", kind.a11y_name()),
+            None => format!("{}: {label}", kind.a11y_name()),
+        });
         let resizing = kind == PickerKind::HarnessModel && self.chip_resizing;
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
@@ -5199,6 +5229,9 @@ impl Pickers {
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)));
         let Some((name, edited)) = profile else {
             return chip
+                .role(gpui::Role::Button)
+                .aria_label(a11y_label)
+                .aria_expanded(open)
                 .gap(px(6.0))
                 // The model trigger sits beside the right-hand composer actions.
                 // Its own padding participates in that visible gap; footer and
@@ -5238,6 +5271,7 @@ impl Pickers {
                 .debug_selector(|| "picker-model-profile".into())
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(format!("{name} · Change profile")))
+                .aria_expanded(open && self.profiles_only)
                 .flex_none()
                 .children(icon)
                 .child(
@@ -5272,6 +5306,9 @@ impl Pickers {
         )
         .child(
             part(model_key, open && !self.profiles_only)
+                .role(gpui::Role::Button)
+                .aria_label(a11y_label)
+                .aria_expanded(open && !self.profiles_only)
                 .flex_1()
                 .min_w_0()
                 .child(label)
@@ -5299,6 +5336,9 @@ impl Pickers {
             .relative()
             .child(self.measure_trigger(kind, cx))
             .id(id.clone())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("{}: {label}", kind.a11y_name())))
+            .aria_expanded(open)
             .h(px(20.0))
             .max_w(px(280.0))
             .flex()
@@ -5397,11 +5437,17 @@ impl Pickers {
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Space) => {
                 let content = self.render_space_popover(cx);
-                Some((PickerKind::Space, self.popover_frame(280.0, content, cx)))
+                Some((
+                    PickerKind::Space,
+                    self.popover_frame(PickerKind::Space, 280.0, content, cx),
+                ))
             }
             Some(PickerKind::Device) => {
                 let content = self.render_device_popover(cx);
-                Some((PickerKind::Device, self.popover_frame(224.0, content, cx)))
+                Some((
+                    PickerKind::Device,
+                    self.popover_frame(PickerKind::Device, 224.0, content, cx),
+                ))
             }
             _ => None,
         };
@@ -5481,11 +5527,17 @@ impl Pickers {
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Branch) => {
                 let content = self.render_branch_popover(cx);
-                Some((PickerKind::Branch, self.popover_frame(320.0, content, cx)))
+                Some((
+                    PickerKind::Branch,
+                    self.popover_frame(PickerKind::Branch, 320.0, content, cx),
+                ))
             }
             Some(PickerKind::Checkout) => {
                 let content = self.render_checkout_popover(cx);
-                Some((PickerKind::Checkout, self.popover_frame(224.0, content, cx)))
+                Some((
+                    PickerKind::Checkout,
+                    self.popover_frame(PickerKind::Checkout, 224.0, content, cx),
+                ))
             }
             _ => None,
         };
@@ -5657,11 +5709,17 @@ impl Pickers {
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Branch) => {
                 let content = self.render_branch_popover(cx);
-                Some((PickerKind::Branch, self.popover_frame(320.0, content, cx)))
+                Some((
+                    PickerKind::Branch,
+                    self.popover_frame(PickerKind::Branch, 320.0, content, cx),
+                ))
             }
             Some(PickerKind::Checkout) => {
                 let content = self.render_checkout_popover(cx);
-                Some((PickerKind::Checkout, self.popover_frame(224.0, content, cx)))
+                Some((
+                    PickerKind::Checkout,
+                    self.popover_frame(PickerKind::Checkout, 224.0, content, cx),
+                ))
             }
             // Space/Device popovers mount in the floating row above the pill.
             _ => None,
@@ -5717,9 +5775,18 @@ impl Pickers {
         Some(row().child(left).child(right).into_any_element())
     }
 
-    fn popover_frame(&self, width: f32, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+    fn popover_frame(
+        &self,
+        kind: PickerKind,
+        width: f32,
+        content: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         popover::popover_card(&theme)
+            .id("picker-popover")
+            .role(gpui::Role::Dialog)
+            .aria_label(SharedString::from(format!("{} picker", kind.a11y_name())))
             .w(px(width))
             // zeron caps its tallest picker at min(640px, 75vh).
             .max_h(px(self.menu_geometry().height))
@@ -5772,6 +5839,9 @@ impl Pickers {
         let height = self.menu_geometry().height.min(self.open_model_height);
         let fits_content = self.model_rail == ModelRail::Profiles && self.profile_edit.is_none();
         popover::popover_card_flush(&theme)
+            .id("picker-popover")
+            .role(gpui::Role::Dialog)
+            .aria_label("Model picker")
             .w(px(width))
             .when(!fits_content, |el| el.h(px(height)))
             .when(fits_content, |el| el.max_h(px(height)))
@@ -6049,7 +6119,7 @@ impl Pickers {
                 let content = self.render_permission_popover(cx);
                 Some((
                     PickerKind::Permission,
-                    self.popover_frame(360.0, content, cx),
+                    self.popover_frame(PickerKind::Permission, 360.0, content, cx),
                 ))
             }
             _ => None,
@@ -6063,6 +6133,9 @@ impl Pickers {
         let chip = div()
             .id("picker-permission")
             .debug_selector(|| "picker-permission".into())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Permissions: {}", mode.label())))
+            .aria_expanded(open)
             .flex_none()
             .flex()
             .items_center()

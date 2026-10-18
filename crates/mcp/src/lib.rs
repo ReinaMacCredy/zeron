@@ -34,6 +34,8 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcClient, methods};
 
+pub mod ui_driver;
+pub mod ui_scenario;
 mod visual;
 
 /// The MCP revision this server was written against; a client's own value
@@ -65,6 +67,7 @@ pub struct ThreadTools {
     sends: AtomicUsize,
     run_secret: Option<String>,
     computer_calls: Mutex<HashSet<String>>,
+    ipc_port: Option<u16>,
 }
 
 /// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
@@ -87,6 +90,7 @@ pub fn tool_list() -> Value {
         for (after, tool) in [
             ("html_render", visual::tool()),
             ("context_settings", compact_tool()),
+            ("project_actions", ui_driver::tool()),
         ] {
             if let Some(at) = list.iter().position(|tool| tool["name"] == after) {
                 list.insert(at + 1, tool);
@@ -634,11 +638,17 @@ impl ThreadTools {
                 .ok()
                 .filter(|secret| !secret.is_empty()),
             computer_calls: Mutex::new(HashSet::new()),
+            ipc_port: None,
         }
     }
 
     pub fn with_run_secret(mut self, secret: Option<String>) -> Self {
         self.run_secret = secret;
+        self
+    }
+
+    pub fn with_ipc_port(mut self, port: u16) -> Self {
+        self.ipc_port = Some(port);
         self
     }
 
@@ -3156,6 +3166,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             if name == html_render::PREVIEW_TOOL {
                 return Some(ok(id, tools.html_preview(&args).await));
             }
+            if name == ui_driver::TOOL {
+                return Some(ok(id, ui_driver::mcp_result(&args, tools.ipc_port).await));
+            }
             let (text, is_error) = match tools.call(name, &args).await {
                 Ok(value) => (
                     serde_json::to_string_pretty(&value).unwrap_or_default(),
@@ -3256,7 +3269,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 34] = [
+    const THREAD_TOOLS: [&str; 35] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -3271,6 +3284,7 @@ mod tests {
         "ask_user",
         "terminal",
         "project_actions",
+        "ui_driver",
         "tasks",
         "agent_profiles",
         "context_settings",
@@ -3805,6 +3819,13 @@ mod tests {
                 "{}",
                 tool["name"]
             );
+            for (name, property) in tool["inputSchema"]["properties"].as_object().unwrap() {
+                assert!(
+                    !property["type"].is_array(),
+                    "{}.{name} has a union type",
+                    tool["name"]
+                );
+            }
         }
     }
 

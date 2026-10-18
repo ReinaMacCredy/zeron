@@ -280,6 +280,8 @@ impl Shell {
         let menu_button = show_menu.then(|| {
             div()
                 .id(SharedString::from(format!("section-menu-{menu_id}")))
+                .role(gpui::Role::Button)
+                .aria_label("Section options")
                 .size(px(20.0))
                 .flex()
                 .items_center()
@@ -312,6 +314,9 @@ impl Shell {
             chevron,
         )
         .id(SharedString::from(format!("section-header-{id}")))
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(section.name.clone()))
+        .aria_expanded(open)
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             this.section_header_hover = hovered.then(|| hover_id.clone());
             cx.notify();

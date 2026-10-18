@@ -99,6 +99,7 @@ pub mod theme_library;
 pub mod toast;
 pub mod transcript;
 pub mod typography;
+mod ui_driver;
 mod usage;
 pub mod visuals;
 pub mod voice;
@@ -342,6 +343,8 @@ pub fn run_app(config: UiConfig) {
                     boot: config.boot(),
                 });
                 open_main_window(state, config.boot(), cx);
+                #[cfg(unix)]
+                ui_driver::start(config.data_dir.clone(), config.ipc_port, cx);
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 start_appshot_service(config.boot().data_dir, cx);
                 // Native menu bar — macOS gets the standard app menu (About/Services/

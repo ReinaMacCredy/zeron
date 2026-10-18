@@ -9,8 +9,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
-DEV_ROOT="$ROOT/target/macos-dev"
-APP="$DEV_ROOT/Zeron Dev.app"
+DEV_ROOT="${ZERON_DEV_ROOT:-$ROOT/target/macos-dev}"
+[[ "$DEV_ROOT" == /* ]] || DEV_ROOT="$ROOT/$DEV_ROOT"
+APP="$DEV_ROOT/${ZERON_DEV_APP_NAME:-Zeron Dev}.app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
@@ -90,7 +91,8 @@ fi
 if [[ -n "${ZERON_CUA_PROBE:-}" ]]; then
   OPEN_ENV+=(--env "ZERON_CUA_PROBE=$ZERON_CUA_PROBE" --env "ZERON_BUNDLE_ID=sh.zeron.app.dev")
 fi
-for knob in ZERON_CUA_NATIVE_PROBE ZERON_CUA_ESCAPE_PROBE ZERON_CUA_BLOCK_MAIN_MS; do
+for knob in ZERON_CUA_NATIVE_PROBE ZERON_CUA_ESCAPE_PROBE ZERON_CUA_BLOCK_MAIN_MS \
+  $(compgen -A variable ZERON_MOCK_ || true) ZERON_HARNESS ZERON_MOTION_SCALE; do
   if [[ -n "${!knob:-}" ]]; then
     OPEN_ENV+=(--env "$knob=${!knob}")
   fi
