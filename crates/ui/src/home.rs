@@ -2006,6 +2006,9 @@ impl Render for HomeView {
         let customize = div()
             .id("home-customize")
             .debug_selector(|| "home-customize".into())
+            .role(gpui::Role::Button)
+            .aria_label("Customize")
+            .aria_expanded(customize_open)
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -2070,6 +2073,8 @@ impl Render for HomeView {
             } else {
                 "Hide widgets"
             })
+            .aria_expanded(!toggles.collapsed)
+            .aria_description(SharedString::from(summary.clone()))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_collapsed(cx)))
             .child(
                 icon(icons::HOME)

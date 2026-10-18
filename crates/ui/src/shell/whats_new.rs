@@ -711,6 +711,8 @@ impl Shell {
                 WhatsNewView::Highlights => {
                     popover::btn_ghost(theme, "View changelog \u{2192}", "whats-new-view-changelog")
                         .id("whats-new-view-changelog")
+                        .role(gpui::Role::Button)
+                        .aria_label("View changelog")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_whats_new_view(WhatsNewView::Changelog, cx);
                         }))
@@ -721,9 +723,14 @@ impl Shell {
             .child(
                 popover::btn_primary(theme, "Got it")
                     .id("whats-new-got-it")
+                    .role(gpui::Role::Button)
+                    .aria_label("Got it")
                     .on_click(cx.listener(|this, _, _, cx| this.close_whats_new(cx))),
             );
         let card = popover::dialog_card(theme)
+            .id("whats-new-dialog-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("What's new")
             .w(px(DIALOG_WIDTH))
             .p(px(0.0))
             .child(header)
