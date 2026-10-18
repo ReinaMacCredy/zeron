@@ -531,18 +531,10 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
         // labels fighting.
-        ToolCall::Unknown { name, input } => match name.strip_prefix("Agent: ") {
+        ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
             Some(description) => ("Agent", description.to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
-            None if name == "Skill" => (
-                "Skill",
-                input
-                    .as_ref()
-                    .and_then(|i| i.get("skill"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            ),
+            None if name == "Skill" => ("Skill", call.skill_name().unwrap_or_default().to_owned()),
             None => ("Tool", name.clone()),
         },
     }

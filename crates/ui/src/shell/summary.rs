@@ -763,14 +763,7 @@ impl Shell {
                     icons::ASTRA_GIT_BRANCH,
                     branch.unwrap_or_else(|| "No branch".into()),
                 )
-                .ink(
-                    gpui::rgb(if theme.appearance.is_dark() {
-                        0xc4b4ff
-                    } else {
-                        0x7f22fe
-                    })
-                    .into(),
-                )
+                .ink(theme.branch_ink())
                 .value(head.map(|sha| SidecarValue::Mono(sha.into()))),
             );
         }

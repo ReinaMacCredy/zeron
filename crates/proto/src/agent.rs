@@ -592,6 +592,29 @@ impl ToolCall {
     pub fn is_advisor(&self) -> bool {
         matches!(self, ToolCall::Unknown { name, .. } if name == ADVISOR_TOOL_NAME)
     }
+
+    pub fn skill_name(&self) -> Option<&str> {
+        self.skill_input("skill")
+    }
+
+    pub fn skill_path(&self) -> Option<&str> {
+        self.skill_input("path")
+    }
+
+    fn skill_input(&self, key: &str) -> Option<&str> {
+        let ToolCall::Unknown {
+            name,
+            input: Some(input),
+        } = self
+        else {
+            return None;
+        };
+        if name != "Skill" {
+            return None;
+        }
+        let value = input.get(key)?.as_str()?.trim();
+        (!value.is_empty()).then_some(value)
+    }
 }
 
 /// The name the claude driver decodes a `server_tool_use` advisor call into.

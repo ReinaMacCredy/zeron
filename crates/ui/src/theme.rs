@@ -1143,6 +1143,15 @@ impl Theme {
             .opacity(self.contrast_checked_tint_alpha(self.surface, 0.40, window))
     }
 
+    pub fn branch_ink(&self) -> Hsla {
+        gpui::rgb(if self.appearance.is_dark() {
+            0xc4b4ff
+        } else {
+            0x7f22fe
+        })
+        .into()
+    }
+
     /// The standard modal backdrop — see [`scrim`].
     pub fn scrim(&self) -> Hsla {
         scrim_for(self.appearance, SCRIM_ALPHA_DARK)

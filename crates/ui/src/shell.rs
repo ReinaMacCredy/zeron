@@ -5328,6 +5328,7 @@ impl Shell {
                 cx.notify();
             }
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
+            TranscriptEvent::OpenSkill { chat_id, name } => self.open_skill_file(chat_id, name, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
             TranscriptEvent::OpenDelegate { chat_id } => self.open_child_chat_tab(chat_id, cx),
             #[cfg(target_os = "macos")]
@@ -5513,6 +5514,53 @@ impl Shell {
             .find(|chat| chat.id == chat_id)
             .or_else(|| chats.iter().find(|chat| chat.id == self.active_chat))
             .and_then(|chat| chat.cwd.clone())
+    }
+
+    /// For Skill calls recorded before the driver learned their file.
+    fn open_skill_file(&mut self, chat_id: &str, name: &str, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
+        let Some((harness, device)) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| Some((chat.config.as_ref()?.harness, chat.device_id.clone())))
+        else {
+            self.note_composer_failure(format!("Can't find the file for {name} here"), cx);
+            return;
+        };
+        let mut params = serde_json::json!({ "harness": harness, "chatId": chat_id });
+        if state.local_device_id.as_deref() != Some(device.as_str()) {
+            params["targetDeviceId"] = device.into();
+        }
+        let (chat_id, name) = (chat_id.to_owned(), name.to_owned());
+        cx.spawn(async move |this, cx| {
+            let path = engine
+                .client()
+                .call(methods::LIST_SKILLS, params)
+                .await
+                .ok()
+                .and_then(|value| {
+                    serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(value)
+                        .ok()
+                })
+                .flatten()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|skill| {
+                    skill.name == name
+                        && !zeron_proto::invocation::native_skill_identity(&skill.path)
+                })
+                .map(|skill| skill.path);
+            this.update(cx, |shell, cx| match path {
+                Some(path) => shell.open_tool_file(&chat_id, &path, cx),
+                None => shell.note_composer_failure(format!("No SKILL.md found for {name}"), cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn note_composer_failure(&mut self, message: String, cx: &mut Context<Self>) {

@@ -757,21 +757,14 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
     }
 }
 
-/// A `Skill` call keeps the skill's name for its chip; its `args` stay in the
-/// journal like a spawn's prompt.
+/// A `Skill` call keeps the skill's name and file for its chip; its `args`
+/// stay in the journal like a spawn's prompt.
 fn skill_badge(call: &ToolCall) -> Option<serde_json::Value> {
-    let ToolCall::Unknown {
-        name,
-        input: Some(input),
-    } = call
-    else {
-        return None;
-    };
-    if name != "Skill" {
-        return None;
-    }
-    let skill = input.get("skill")?.as_str()?.trim();
-    (!skill.is_empty()).then(|| serde_json::json!({ "skill": skill }))
+    let skill = call.skill_name()?;
+    Some(match call.skill_path() {
+        Some(path) => serde_json::json!({ "skill": skill, "path": path }),
+        None => serde_json::json!({ "skill": skill }),
+    })
 }
 
 /// The only slice of a tool input allowed into the doc: a subagent spawn's

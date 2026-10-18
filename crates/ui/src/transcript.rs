@@ -4215,6 +4215,10 @@ pub enum TranscriptEvent {
         chat_id: String,
         path: String,
     },
+    OpenSkill {
+        chat_id: String,
+        name: String,
+    },
     /// A peer message's "From <thread>" header: open that thread.
     OpenChat {
         chat_id: String,
@@ -4392,6 +4396,8 @@ impl Transcript {
     fn tool_file_opener(&mut self, cx: &mut Context<Self>) -> Option<ToolFileOpener> {
         let chat_id = self.chat_id.clone().unwrap_or_default();
         let transcript = cx.weak_entity();
+        let skill_chat_id = chat_id.clone();
+        let skill_transcript = transcript.clone();
         self.link_ui(cx).map(|link| ToolFileOpener {
             link,
             on_open: Rc::new(move |path, _, cx| {
@@ -4399,6 +4405,14 @@ impl Transcript {
                 transcript
                     .update(cx, |_, cx| {
                         cx.emit(TranscriptEvent::OpenFile { chat_id, path })
+                    })
+                    .ok();
+            }),
+            on_open_skill: Rc::new(move |name, cx| {
+                let (chat_id, name) = (skill_chat_id.clone(), name.to_owned());
+                skill_transcript
+                    .update(cx, |_, cx| {
+                        cx.emit(TranscriptEvent::OpenSkill { chat_id, name })
                     })
                     .ok();
             }),
@@ -13004,6 +13018,7 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
 struct ToolFileOpener {
     link: render::LinkUi,
     on_open: Rc<dyn Fn(&str, &mut Window, &mut gpui::App)>,
+    on_open_skill: Rc<dyn Fn(&str, &mut gpui::App)>,
 }
 
 impl ToolFileOpener {
@@ -13016,6 +13031,10 @@ impl ToolFileOpener {
 
     fn open(&self, path: &str, window: &mut Window, cx: &mut gpui::App) {
         (self.on_open)(path, window, cx);
+    }
+
+    fn open_skill(&self, name: &str, cx: &mut gpui::App) {
+        (self.on_open_skill)(name, cx);
     }
 }
 
@@ -13074,6 +13093,14 @@ fn chip_header_row(
         },
     };
     let activity = !is_agent_tool(tool);
+    let skill = match tool.kind {
+        ToolItemKind::Call => tool.call.skill_name(),
+        _ => None,
+    };
+    let open_skill = skill.zip(file_opener).map(|(name, opener)| {
+        let path = tool.call.skill_path().filter(|path| opener.opens(path));
+        (name.to_owned(), path.map(str::to_owned), opener.clone())
+    });
     let file_path = tool_file_path(&tool.call);
     let open_file = file_path
         .zip(file_opener)
@@ -13254,8 +13281,26 @@ fn chip_header_row(
                     div()
                         .min_w_0()
                         .truncate()
+                        .when(skill.is_some() && !failed, |name| {
+                            name.text_color(theme.branch_ink())
+                        })
                         .child(SharedString::from(detail))
-                        .into_any_element()
+                        .map(|name| match open_skill {
+                            Some((skill, path, opener)) => name
+                                .id("tool-skill-name")
+                                .debug_selector(|| "tool-skill-name".into())
+                                .cursor_pointer()
+                                .hover(|style| style.underline())
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    match &path {
+                                        Some(path) => opener.open(path, window, cx),
+                                        None => opener.open_skill(&skill, cx),
+                                    }
+                                })
+                                .into_any_element(),
+                            None => name.into_any_element(),
+                        })
                 })
                 .map(|detail| {
                     if hover_text {
@@ -21199,6 +21244,8 @@ mod tests {
         });
         let opened: Rc<RefCell<Vec<String>>> = Rc::default();
         let recorded = opened.clone();
+        let skills: Rc<RefCell<Vec<String>>> = Rc::default();
+        let recorded_skills = skills.clone();
         let opener = ToolFileOpener {
             link: render::LinkUi {
                 source_session: Some("chat".into()),
@@ -21211,6 +21258,9 @@ mod tests {
                 handler: Rc::new(|_, _, _| render::LinkOutcome::Internal),
             },
             on_open: Rc::new(move |path, _, _| recorded.borrow_mut().push(path.to_owned())),
+            on_open_skill: Rc::new(move |name, _| {
+                recorded_skills.borrow_mut().push(name.to_owned())
+            }),
         };
         assert!(opener.opens("/work/app/src/guard.rs"));
         assert!(opener.opens("src/guard.rs"));
@@ -21301,6 +21351,26 @@ mod tests {
             window.debug_bounds("tool-file-badge").is_none(),
             "paths the link handler cannot open keep an inert badge"
         );
+
+        let skill_toggles = Rc::new(Cell::new(0));
+        let (_skill, window) = cx.add_window_view(|_, _| ChipFixture {
+            tool: ToolItem {
+                call: ToolCall::Unknown {
+                    name: "Skill".into(),
+                    input: Some(serde_json::json!({ "skill": "maestro-coach" })),
+                },
+                ..read("unused")
+            },
+            opener: opener.clone(),
+            toggles: skill_toggles.clone(),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        let name = window
+            .debug_bounds("tool-skill-name")
+            .expect("a Skill chip's name is clickable");
+        window.simulate_click(name.center(), Modifiers::default());
+        assert_eq!(*skills.borrow(), ["maestro-coach"]);
+        assert_eq!(skill_toggles.get(), 0);
     }
 
     #[test]

@@ -268,8 +268,12 @@ fn advisor_result(id: String, is_error: bool) -> AgentEvent {
 /// (`…by user]` and `…by user for tool use]`).
 fn is_synthetic_user_text(text: &str) -> bool {
     let text = text.trim_start();
-    text.starts_with("<system-reminder>") || text.starts_with("[Request interrupted")
+    text.starts_with("<system-reminder>")
+        || text.starts_with("[Request interrupted")
+        || text.starts_with(SKILL_BASE_DIR)
 }
+
+const SKILL_BASE_DIR: &str = "Base directory for this skill: ";
 
 /// The opening prompt an `Agent`/`Task` tool_use block hands its subagent;
 /// `None` for any other tool or an empty prompt.
@@ -332,6 +336,8 @@ pub(crate) struct Normalizer {
     /// 3 calls, 1 answer) gets no answer frame at all, so the previous call
     /// settles when the next opens and any survivor settles at turn end.
     pending_advisor: std::collections::HashMap<Option<String>, String>,
+    /// The CLI names a loaded skill's directory in a later frame with no tool id.
+    pending_skill: std::collections::HashMap<Option<String>, (String, Value)>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -361,6 +367,7 @@ impl Normalizer {
             seeded_prompts: std::collections::HashMap::new(),
             computer_scripts: std::collections::HashSet::new(),
             pending_advisor: std::collections::HashMap::new(),
+            pending_skill: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
             pending_error: None,
@@ -393,6 +400,30 @@ impl Normalizer {
             .get(tool_use_id)
             .cloned()
             .unwrap_or_else(|| tool_use_id.to_owned())
+    }
+
+    fn note_skill_call(&mut self, parent: Option<&str>, b: &ContentBlock) {
+        if b.kind == "tool_use" && b.name == "Skill" {
+            self.pending_skill
+                .insert(parent.map(str::to_owned), (b.id.clone(), b.input.clone()));
+        }
+    }
+
+    fn skill_loaded(&mut self, parent: Option<&str>, text: &str) -> Option<AgentEvent> {
+        let dir = text.strip_prefix(SKILL_BASE_DIR)?.lines().next()?.trim();
+        let (id, mut input) = self.pending_skill.remove(&parent.map(str::to_owned))?;
+        if dir.is_empty() || !input.is_object() {
+            return None;
+        }
+        input["path"] = format!("{dir}/SKILL.md").into();
+        let event = AgentEvent::ToolCall {
+            id,
+            call: decode_tool_use("Skill", &input),
+        };
+        Some(match parent {
+            Some(parent) => tag(parent, event),
+            None => event,
+        })
     }
 
     fn advisor_events(&mut self, parent: Option<&str>, b: &ContentBlock) -> Vec<AgentEvent> {
@@ -794,6 +825,7 @@ impl Normalizer {
                         .collect();
                     for b in f.message.blocks() {
                         out.extend(self.advisor_events(Some(parent), &b));
+                        self.note_skill_call(Some(parent), &b);
                     }
                     if let Some(code) = &f.error {
                         out.push(tag(
@@ -808,6 +840,7 @@ impl Normalizer {
                 // Record spawn tool ids up front: `task_notification` keys on
                 // them; a task may finish before a `task_started` arrives.
                 for b in f.message.blocks() {
+                    self.note_skill_call(None, &b);
                     if b.kind == "tool_use" && b.name == "mcp__zeron__computer" {
                         self.computer_scripts.insert(b.id.clone());
                     }
@@ -948,6 +981,13 @@ impl Normalizer {
                 let relisted = learned_output.then(|| AgentEvent::BackgroundTasks {
                     tasks: self.live_tasks.clone(),
                 });
+                let feed = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p));
+                let skill_paths: Vec<AgentEvent> = f
+                    .message
+                    .blocks()
+                    .filter(|b: &ContentBlock| b.kind == "text")
+                    .filter_map(|b| self.skill_loaded(feed.as_deref(), b.text.trim_start()))
+                    .collect();
                 let scripts: Vec<Option<String>> = results
                     .iter()
                     .map(|b| {
@@ -975,8 +1015,10 @@ impl Normalizer {
                     let parent = &parent;
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
-                    let mut out: Vec<AgentEvent> =
-                        tool_results.map(|event| tag(parent, event)).collect();
+                    let mut out: Vec<AgentEvent> = tool_results
+                        .map(|event| tag(parent, event))
+                        .chain(skill_paths)
+                        .collect();
                     // A tagged user frame's TEXT blocks are the parent
                     // steering its subagent (SendMessage-style follow-ups —
                     // tool results ride their own blocks, filtered above).
@@ -1030,6 +1072,7 @@ impl Normalizer {
                 anchor
                     .into_iter()
                     .chain(tool_results)
+                    .chain(skill_paths)
                     .chain(relisted)
                     .collect()
             }
@@ -2035,6 +2078,39 @@ mod tests {
                         && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
             )),
             "a real steer must still reach the subagent"
+        );
+    }
+
+    #[test]
+    fn a_loaded_skill_names_its_file_on_the_call_and_is_no_prompt_anchor() {
+        let mut norm = Normalizer::new();
+        let mut feed = |line: &str| {
+            let frame = crate::claude::wire::parse_frame(line).expect("parses");
+            norm.normalize(frame, false)
+        };
+        // Shapes captured from the CLI's stream-json, 2026-10-18.
+        feed(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s","name":"Skill","input":{"skill":"maestro-coach","args":"test"}}]}}"#,
+        );
+        feed(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s","content":"Launching skill: maestro-coach"}]}}"#,
+        );
+        let loaded = feed(
+            r#"{"type":"user","uuid":"u-skill","isSynthetic":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /h/.claude/skills/maestro-coach\n\n# maestro-coach"}]}}"#,
+        );
+        let call = loaded.iter().find_map(|e| match e {
+            AgentEvent::ToolCall { id, call } if id == "toolu_s" => Some(call),
+            _ => None,
+        });
+        assert_eq!(
+            call.and_then(ToolCall::skill_path),
+            Some("/h/.claude/skills/maestro-coach/SKILL.md")
+        );
+        assert!(
+            !loaded
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Anchor { .. })),
+            "the skill body must not take over the prompt's checkpoint"
         );
     }
 
