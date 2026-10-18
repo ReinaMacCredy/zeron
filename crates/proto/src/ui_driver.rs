@@ -12,6 +12,10 @@ pub const DRIVE_ACTIONS: &[&str] = &[
 
 pub const MAX_WAIT_MS: u64 = 60_000;
 
+pub const STEP_CAP_MS: u64 = 100;
+
+pub const DRAG_STEPS: u32 = 12;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiDriverBuild {

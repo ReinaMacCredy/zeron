@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const STEP_CAP: Duration = Duration::from_millis(100);
+const STEP_CAP: Duration = Duration::from_millis(zeron_proto::ui_driver::STEP_CAP_MS);
 const SETTLE_CAP: Duration = Duration::from_millis(500);
 const TRACKPAD_STEPS: u32 = 6;
 

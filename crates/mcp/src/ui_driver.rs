@@ -5,16 +5,14 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{
-    DRIVE_ACTIONS, MAX_WAIT_MS, OBSERVE_ACTIONS, UiDriverBuild, UiDriverDescriptor, run_dir,
-    socket_path,
+    DRAG_STEPS, DRIVE_ACTIONS, MAX_WAIT_MS, OBSERVE_ACTIONS, STEP_CAP_MS, UiDriverBuild,
+    UiDriverDescriptor, run_dir, socket_path,
 };
 
 pub const TOOL: &str = "ui_driver";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
-const STEP_MS: u64 = 100;
-const DRAG_STEPS: u64 = 12;
 
 pub fn tool() -> Value {
     let field = |kind: &str, description: &str| json!({ "type": kind, "description": description });
@@ -297,7 +295,7 @@ fn work_ms(request: &Map<String, Value>) -> u64 {
         .unwrap_or(0)
         .min(MAX_WAIT_MS);
     let steps = match request.get("action").and_then(Value::as_str) {
-        Some("drag") => number("steps").unwrap_or(DRAG_STEPS).max(1),
+        Some("drag") => number("steps").unwrap_or(u64::from(DRAG_STEPS)).max(1),
         Some("type") => request
             .get("text")
             .and_then(Value::as_str)
@@ -309,7 +307,7 @@ fn work_ms(request: &Map<String, Value>) -> u64 {
         _ => 0,
     };
     wait.saturating_add(number("holdMs").unwrap_or(0))
-        .saturating_add(steps.saturating_mul(STEP_MS))
+        .saturating_add(steps.saturating_mul(STEP_CAP_MS))
         .saturating_add(during)
 }
 

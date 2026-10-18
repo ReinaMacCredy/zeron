@@ -178,7 +178,7 @@ fn one() -> usize {
 
 #[cfg(debug_assertions)]
 fn drag_steps() -> u32 {
-    12
+    zeron_proto::ui_driver::DRAG_STEPS
 }
 
 fn quiet() -> u64 {
