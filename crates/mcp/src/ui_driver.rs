@@ -39,6 +39,9 @@ impl Tool {
                 "`{}` drives the UI, which {TOOL} never does: call {DRIVE_TOOL} with a Zeron Dev bundle as `target`",
                 if during { "during" } else { action }
             )),
+            Tool::Observe if args.get("path").is_some_and(|path| !path.is_null()) => Err(format!(
+                "{TOOL} never writes where the caller picks, so it takes no `path`: a snapshot is saved under ~/.zeron/run/shots and returned inline, or by path with `inline: false`. `zeron ui snapshot` takes `path`."
+            )),
             Tool::Drive if !drives && !(during && RECORDERS.contains(&action)) => Err(format!(
                 "{DRIVE_TOOL} takes a drive action ({}), or `frames` or `track` with `during`; call {TOOL} for `{action}`",
                 DRIVE_ACTIONS.join(", ")
@@ -92,7 +95,6 @@ pub fn tool(tool: Tool) -> Value {
         (drive, "name", field("string", "gpui action name, for `action`.")),
         (drive, "args", field("object", "Arguments of the gpui action, for `action`.")),
         (observe, "rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
-        (observe, "path", field("string", "Absolute path for the snapshot PNG. Defaults to a file under ~/.zeron/run/shots.")),
         (drive, "from", end("start")),
         (drive, "to", end("end")),
         (drive, "steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
@@ -630,6 +632,20 @@ mod tests {
             unreachable!()
         };
         assert_eq!(Tool::Observe.admits("track", &null), Ok(()));
+        let Value::Object(path) = json!({ "path": "/tmp/shot.png" }) else {
+            unreachable!()
+        };
+        let error = Tool::Observe.admits("snapshot", &path).unwrap_err();
+        assert!(error.contains("takes no `path`"), "{error}");
+        for (name, tool) in [(TOOL, Tool::Observe), (DRIVE_TOOL, Tool::Drive)] {
+            assert_eq!(Tool::named(name), Some(tool));
+            let schema = super::tool(tool);
+            assert_eq!(schema["name"], name);
+            assert!(schema["inputSchema"]["properties"]["path"].is_null());
+            let hints = &schema["annotations"];
+            assert_eq!(hints["readOnlyHint"], tool == Tool::Observe, "{name}");
+            assert_eq!(hints["destructiveHint"], tool == Tool::Drive, "{name}");
+        }
     }
 
     #[cfg(unix)]

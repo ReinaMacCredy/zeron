@@ -146,7 +146,7 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 |---|---|---|
 | `state` | none | `pid, build, input, windows[{id,title,kind,size{w,h},active,a11yForced}], route{kind,section,selectedChat}, frames{count,lastDrawAgoMs}, motionScale, theme{mode,appearance}` |
 | `tree` | `query`, `root` (ref), `depth`, `full` (false), `json` (false) | text lines, or `{window,title,size,focus,total,nodes[...]}` |
-| `snapshot` | `rect {x,y,w,h}` in points, `path` (absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
+| `snapshot` | `rect {x,y,w,h}` in points, `path` (`zeron ui` only, so the read-only `ui_driver` tool never writes where the caller picks; absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
 | `wait` | `for`, plus the fields below | depends on `for` |
 | `frames` | `ms` (1000, max 10000), `during` | `{frames,fps,intervalsMs{p50,p95,max},longFrames[{atMs,gapMs}],firstFrameAtMs,lastFrameAtMs,drawMs?,during?}` |
 | `track` | `ref` or `select`+`nth`, `ms` (800, max 5000), `jumpPx` (40), `during` | `{samples[[tMs,x,y,w,h]],framesSampled,missingFrames,jumps[{atMs,from,to,delta}],settledAtMs,reresolved,ref,node,framesDrawn,readMs,during?}` |
@@ -161,7 +161,7 @@ zui state
 zui tree '{"query":"settings"}'
 {"action":"tree","query":"settings","target":"Zeron Dev 7"}
 zui snapshot '{"rect":{"x":520,"y":200,"w":760,"h":170},"path":"/abs/out/crop.png"}'
-{"action":"snapshot","rect":{"x":520,"y":200,"w":760,"h":170},"path":"/abs/out/crop.png","inline":false,"target":"Zeron Dev 7"}
+{"action":"snapshot","rect":{"x":520,"y":200,"w":760,"h":170},"inline":false,"target":"Zeron Dev 7"}
 zui wait '{"for":"select","select":"Button \"New chat\"","timeoutMs":3000}'
 {"action":"wait","for":"select","select":"Button \"New chat\"","timeoutMs":3000,"target":"Zeron Dev 7"}
 zui frames '{"ms":1500}'
