@@ -3,7 +3,7 @@ use serde::Deserialize;
 use zeron_proto::{
     Chat, ChatConfig, Delegation, DelegationDelivery, DelegationStatus, DelegationWake,
     FindingOutcome, FindingOutcomeKind, PermissionMode, ReasoningLevel, Session, SessionStatus,
-    UserInputQuestion,
+    TaskStep, TaskStepPatch, UserInputQuestion,
 };
 
 use super::*;
@@ -54,6 +54,8 @@ pub struct DelegateTaskParams {
     pub wake: Option<DelegationWake>,
     #[serde(default)]
     pub client_request_id: Option<String>,
+    #[serde(default)]
+    pub task_step_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -133,6 +135,44 @@ fn resolve_next(task_id: &str) -> String {
 
 fn failure(code: &str, message: impl std::fmt::Display) -> EngineError {
     EngineError::Other(format!("{code}: {message}"))
+}
+
+fn runnable_step(
+    workspace: &WorkspaceHost,
+    chats: &[Chat],
+    owner_id: &str,
+    step_id: &str,
+) -> Result<TaskStep, EngineError> {
+    let refused = |message: &str| failure("invalid_request", message);
+    let step = workspace
+        .task_step(step_id)
+        .ok_or_else(|| refused("That task step no longer exists"))?;
+    let task = workspace
+        .task(&step.task_id)
+        .ok_or_else(|| refused("That step's task no longer exists"))?;
+    if task.chat_id.as_deref() != Some(owner_id) {
+        return Err(refused("Only the task's lead runs its steps"));
+    }
+    if task.plan_pending {
+        return Err(failure(
+            "plan_pending",
+            "The person has not approved the plan yet. Stop and wait for the approval message.",
+        ));
+    }
+    if step.outcome.is_some() {
+        return Err(refused(
+            "This step is already marked done or skipped; reopen it with the tasks tool first",
+        ));
+    }
+    let running = step.chat_id.as_deref().is_some_and(|bound| {
+        chats.iter().any(|chat| {
+            chat.id == bound && chat.delegation.as_ref().is_some_and(Delegation::is_running)
+        })
+    });
+    if running {
+        return Err(refused("This step's thread is still running"));
+    }
+    Ok(step)
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -414,7 +454,7 @@ impl DocHost {
 
     pub async fn delegate_task(
         &self,
-        params: DelegateTaskParams,
+        mut params: DelegateTaskParams,
         limits: DelegationSettings,
     ) -> Result<TaskView, EngineError> {
         let task = params.task.trim();
@@ -481,6 +521,18 @@ impl DocHost {
                 ),
             ));
         }
+        let step = match params.task_step_id.as_deref() {
+            Some(step_id) => Some(runnable_step(workspace, &chats, &owner.id, step_id)?),
+            None => None,
+        };
+        if let Some(step) = &step
+            && params
+                .title
+                .as_deref()
+                .is_none_or(|title| title.trim().is_empty())
+        {
+            params.title = Some(step.title.clone());
+        }
         let config = self.derived_config(
             &owner,
             params.harness,
@@ -522,11 +574,27 @@ impl DocHost {
             owner.cwd.clone(),
             delegation,
         )?;
+        let bound = match &step {
+            Some(step) => workspace
+                .update_task_step(
+                    &step.id,
+                    &TaskStepPatch {
+                        chat_id: Some(Some(chat_id.clone())),
+                        ..Default::default()
+                    },
+                )
+                .map(drop),
+            None => Ok(()),
+        };
         drop(admitting);
-        if let Err(err) = self
-            .start_child(&params, task, role, &owner.id, &chat_id, anchor)
-            .await
-        {
+        let started = match bound {
+            Ok(()) => {
+                self.start_child(&params, task, role, &owner.id, &chat_id, anchor)
+                    .await
+            }
+            Err(err) => Err(err),
+        };
+        if let Err(err) = started {
             workspace.update_chat_delegation(&chat_id, |d| {
                 d.status = DelegationStatus::Failed;
                 d.summary = Some(clip(&err.to_string(), SUMMARY_CHARS));

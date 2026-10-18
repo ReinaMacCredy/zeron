@@ -30,6 +30,7 @@ use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
 use zeron_proto::{
     Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskPatch,
+    TaskStep, TaskStepPatch,
 };
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -186,6 +187,7 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     tasks_tx: watch::Sender<Vec<Task>>,
+    task_steps_tx: watch::Sender<Vec<TaskStep>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
@@ -314,6 +316,7 @@ impl WorkspaceHost {
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
         let (tasks_tx, _) = watch::channel(state.tasks);
+        let (task_steps_tx, _) = watch::channel(doc.read_task_steps()?);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
             revision: 0,
@@ -339,6 +342,7 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 tasks_tx,
+                task_steps_tx,
                 sidebar_preferences_tx,
                 room: Mutex::new(None),
                 changed_tx,
@@ -1341,6 +1345,38 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.delete_task(task_id, Utc::now()))?)
     }
 
+    pub fn watch_task_steps(&self) -> watch::Receiver<Vec<TaskStep>> {
+        self.inner.task_steps_tx.subscribe()
+    }
+
+    pub fn task_step(&self, step_id: &str) -> Option<TaskStep> {
+        self.read(|doc| doc.task_step(step_id))
+    }
+
+    pub fn task_steps_of(&self, task_id: &str) -> Vec<TaskStep> {
+        self.read(|doc| doc.task_steps_of(task_id))
+    }
+
+    pub fn create_task_step(&self, step: &TaskStep) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.create_task_step(step))?)
+    }
+
+    pub fn plan_task_steps(&self, task_id: &str, steps: &[TaskStep]) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.plan_task_steps(task_id, steps, Utc::now()))?)
+    }
+
+    pub fn update_task_step(
+        &self,
+        step_id: &str,
+        patch: &TaskStepPatch,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_task_step(step_id, patch, Utc::now()))?)
+    }
+
+    pub fn delete_task_step(&self, step_id: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.delete_task_step(step_id, Utc::now()))?)
+    }
+
     /// Synced seen marker (any device; LWW + monotonic guard in the doc layer).
     pub fn mark_chat_seen(
         &self,
@@ -1565,9 +1601,10 @@ impl WorkspaceHostInner {
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
             doc.read_all()
+                .and_then(|state| Ok((state, doc.read_task_steps()?)))
         };
         match snapshot {
-            Ok(mut state) => {
+            Ok((mut state, task_steps)) => {
                 self.overlay_presence(&mut state.devices);
                 // Retain the latest value even with no subscribers, but don't
                 // wake every list for unrelated registry/presence changes.
@@ -1582,6 +1619,7 @@ impl WorkspaceHostInner {
                 publish_if_changed(&self.sessions_tx, state.sessions);
                 publish_if_changed(&self.spaces_tx, state.spaces);
                 publish_if_changed(&self.tasks_tx, state.tasks);
+                publish_if_changed(&self.task_steps_tx, task_steps);
             }
             Err(err) => {
                 tracing::warn!(error = %err, "registry read failed");

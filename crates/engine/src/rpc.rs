@@ -1037,6 +1037,12 @@ enum MutateParams {
         harness: Option<HarnessId>,
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        orchestrate: bool,
+        #[serde(default = "approve_plan_default")]
+        approve_plan: bool,
+        #[serde(default)]
+        same_agents: bool,
     },
     #[serde(rename_all = "camelCase")]
     AssignTask {
@@ -1047,6 +1053,47 @@ enum MutateParams {
         #[serde(default)]
         from_chat_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    PlanSteps {
+        task_id: String,
+        steps: Vec<PlannedStep>,
+        #[serde(default)]
+        from_chat_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    CreateTaskStep {
+        task_id: String,
+        step_id: String,
+        title: String,
+        #[serde(default)]
+        notes: String,
+        #[serde(default)]
+        order_key: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    UpdateTaskStep {
+        step_id: String,
+        patch: zeron_proto::TaskStepPatch,
+        #[serde(default)]
+        from_chat_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    DeleteTaskStep { step_id: String },
+    #[serde(rename_all = "camelCase")]
+    ApprovePlan { task_id: String },
+    #[serde(rename_all = "camelCase")]
+    RetryTaskStep { step_id: String },
+}
+
+fn approve_plan_default() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+struct PlannedStep {
+    title: String,
+    #[serde(default)]
+    notes: String,
 }
 
 #[derive(Clone)]
@@ -1457,6 +1504,7 @@ impl EngineRpc {
                     wait: false,
                     wake: Some(p.wake.unwrap_or(zeron_proto::DelegationWake::Never)),
                     client_request_id: Some(request),
+                    task_step_id: None,
                 },
                 self.registry.delegation_settings(),
             )
@@ -2265,8 +2313,15 @@ impl EngineRpc {
                 space_id,
                 harness,
                 model,
+                orchestrate,
+                approve_plan,
+                same_agents,
             } => {
-                self.start_task(&task_id, &chat_id, space_id, harness, model)
+                let lead = orchestrate.then_some(tasks::Lead {
+                    approve_plan,
+                    same_agents,
+                });
+                self.start_task(&task_id, &chat_id, space_id, harness, model, lead)
                     .await
             }
             MutateParams::AssignTask {
@@ -2278,6 +2333,32 @@ impl EngineRpc {
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref())
                     .await
             }
+            MutateParams::PlanSteps {
+                task_id,
+                steps,
+                from_chat_id,
+            } => {
+                let steps = steps
+                    .into_iter()
+                    .map(|step| (step.title, step.notes))
+                    .collect();
+                self.plan_steps(&task_id, steps, from_chat_id.as_deref())
+            }
+            MutateParams::CreateTaskStep {
+                task_id,
+                step_id,
+                title,
+                notes,
+                order_key,
+            } => self.create_task_step(task_id, step_id, title, notes, order_key),
+            MutateParams::UpdateTaskStep {
+                step_id,
+                patch,
+                from_chat_id,
+            } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
+            MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
+            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await,
+            MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
         }
     }
 }
@@ -3955,6 +4036,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_TASKS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
             }
+            methods::WATCH_TASK_STEPS => Ok(RpcReply::Stream(watch_stream(
+                self.workspace.watch_task_steps(),
+            ))),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self
@@ -4122,7 +4206,18 @@ impl RpcService for EngineRpc {
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
+                let planned = match &p {
+                    MutateParams::PlanSteps { task_id, .. } => Some(task_id.clone()),
+                    _ => None,
+                };
                 self.mutate(p).await?;
+                if let Some(task_id) = planned {
+                    return RpcReply::value(&serde_json::json!({
+                        "ok": true,
+                        "task": self.workspace.task(&task_id),
+                        "steps": self.workspace.task_steps_of(&task_id),
+                    }));
+                }
                 if sidebar_pins {
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),
