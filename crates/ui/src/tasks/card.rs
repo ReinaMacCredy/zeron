@@ -916,6 +916,7 @@ impl TaskCard {
                     .id(("task-card-assign-match", ix))
                     .debug_selector(move || format!("task-card-assign-match-{ix}"))
                     .role(gpui::Role::Button)
+                    .aria_label(found.title.clone())
                     .flex()
                     .items_center()
                     .gap(px(8.0))
@@ -1079,6 +1080,13 @@ impl TaskCard {
             })
         };
         let unassign_task = task_id.clone();
+        let linked_title = linked_chat_id
+            .as_deref()
+            .and_then(|id| self.state.read(cx).chats.iter().find(|chat| chat.id == id))
+            .map(|chat| {
+                crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+            })
+            .unwrap_or_default();
         let body = if done {
             None
         } else if linked_chat_id.is_some() {
@@ -1104,6 +1112,14 @@ impl TaskCard {
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text)
+                                .child(linked_title.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
                                 .text_color(tone)
                                 .child(super::TasksPage::linked_label(linked.indicator)),
                         )
@@ -1119,36 +1135,24 @@ impl TaskCard {
                                         tone,
                                     )
                                 }),
-                        )
-                        .child(
-                            div()
-                                .id("task-card-unassign")
-                                .debug_selector(|| "task-card-unassign".into())
-                                .role(gpui::Role::Button)
-                                .aria_label("Unassign thread")
-                                .flex_none()
-                                .size(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(6.0))
-                                .cursor_pointer()
-                                .text_color(theme.text_muted)
-                                .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                                .child(icon(icons::LUCIDE_X).size(px(12.0)))
-                                .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                                    card.update(
-                                        &unassign_task,
-                                        TaskPatch {
-                                            chat_id: Some(None),
-                                            ..Default::default()
-                                        },
-                                        cx,
-                                    );
-                                })),
                         ),
                 )
             });
+            let unassign = widgets::text_action(theme, widgets::ActionTone::Quiet, "Unassign")
+                .id("task-card-unassign")
+                .debug_selector(|| "task-card-unassign".into())
+                .role(gpui::Role::Button)
+                .rounded_full()
+                .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
+                    card.update(
+                        &unassign_task,
+                        TaskPatch {
+                            chat_id: Some(None),
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                }));
             Some(
                 div()
                     .flex()
@@ -1159,6 +1163,8 @@ impl TaskCard {
                         div()
                             .flex()
                             .justify_end()
+                            .gap(px(6.0))
+                            .child(unassign)
                             .children(open_chat("Open thread", cx)),
                     )
                     .into_any_element(),
