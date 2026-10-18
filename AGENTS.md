@@ -68,5 +68,9 @@ the next session does not mistake them for abandoned.
 - `[profile.dev]` uses `debug = "line-tables-only"` because macOS keeps every
   codegen `.o` in `target/debug/deps` and Cargo never prunes stale hashes.
   Do not raise it back to full debuginfo in a shared checkout.
+- Run `scripts/gc-target.sh` before a `cargo build` or `cargo test`, in the
+  main checkout or a worktree. It `cargo clean -p`s each workspace crate whose
+  artifacts passed 8G, so stale codegen stops piling up while third-party
+  deps stay built. It waits on cargo's lock, so a peer's build is safe.
 - Never `cargo fmt --all`; format only files you changed, with `rustfmt
   --edition 2024`.
