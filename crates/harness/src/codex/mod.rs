@@ -1154,6 +1154,12 @@ fn thread_params(
         // wait_threads blocks up to 30 min; Codex's own per-call ceiling
         // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
         overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
+        for tool in PREAPPROVED_ZERON_TOOLS {
+            overrides.insert(
+                format!("mcp_servers.zeron.tools.{tool}.approval_mode"),
+                "approve".into(),
+            );
+        }
         if request.computer_control {
             // One computer surface per run: Codex's bundled plugins would compete with Zeron's.
             for plugin in COMPETING_BUNDLED_PLUGINS {
@@ -2272,6 +2278,9 @@ const COMPETING_BUNDLED_PLUGINS: [&str; 4] = [
     "chrome@openai-bundled",
 ];
 
+// Their destructiveHint makes Codex ask on every call, and Zeron refuses non-computer elicitations.
+const PREAPPROVED_ZERON_TOOLS: [&str; 2] = ["ui_driver_drive", "device_close"];
+
 /// Compact one thread: resume it, ask the app server to compact, then read
 /// notifications until it says so. Deliberately NOT [`run_session`] — no turn
 /// is started, no content is streamed, and the only events that reach the
@@ -3016,6 +3025,12 @@ mod tests {
         for competing in COMPETING_BUNDLED_PLUGINS {
             let key = format!("plugins.{competing}.enabled");
             assert!(off["config"].get(key.as_str()).is_none());
+        }
+        for params in [&on, &off] {
+            for tool in ["ui_driver_drive", "device_close"] {
+                let key = format!("mcp_servers.zeron.tools.{tool}.approval_mode");
+                assert_eq!(params["config"][key.as_str()], "approve");
+            }
         }
         assert_eq!(
             off["config"]["mcp_servers.zeron.command"],
