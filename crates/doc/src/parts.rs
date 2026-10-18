@@ -163,6 +163,7 @@ pub enum DecidedBy {
     Stage2,
     Streak,
     Ceiling,
+    AgentNote,
     #[default]
     #[serde(other)]
     Stage1,

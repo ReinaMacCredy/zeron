@@ -10693,6 +10693,11 @@ impl Transcript {
         let model = record
             .harness
             .map(|harness| HandoffSide::new(harness, record.model.as_deref(), cx));
+        let model_text = record
+            .model
+            .clone()
+            .filter(|_| record.harness.is_none())
+            .map(SharedString::from);
         let label = |verdict: ClassifierVerdict| match verdict {
             ClassifierVerdict::New => "New task",
             ClassifierVerdict::Carry => "Carry over",
@@ -10718,6 +10723,7 @@ impl Transcript {
             DecidedBy::Stage2 => "Second look",
             DecidedBy::Streak => "Three same-task verdicts in a row",
             DecidedBy::Ceiling => "Context near the window, not asked",
+            DecidedBy::AgentNote => "Agent note, compacted without asking",
         };
         let toggle_id = row_id.clone();
         let rule = || {
@@ -10750,6 +10756,7 @@ impl Transcript {
             )
             .child("Classifier")
             .children(model.as_ref().map(|side| side.chip(theme)))
+            .children(model_text.clone())
             .child(SharedString::from(format!("· {secs} ·")))
             .when(overturned, |header| {
                 header
@@ -10845,6 +10852,7 @@ impl Transcript {
                         .border_color(theme.border)
                         .bg(theme.surface.opacity(0.6))
                         .children(model.as_ref().map(|side| field("Model", side.detail())))
+                        .children(model_text.map(|text| field("Model", text.to_string())))
                         .child(field("Verdict", verdict.to_string()))
                         .child(field("Decided", decided.to_string()))
                         .child(field("Time", secs.clone()))
