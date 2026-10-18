@@ -33,15 +33,15 @@ fn lead_brief(task_id: &str, lead: Lead) -> String {
         );
     }
     lines.push(
-        "Run each step with delegate_task: task set to what the step must do, taskStepId set to the step's id. Steps that do not depend on each other can run at the same time.",
+        "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time.",
     );
     lines.push(if lead.same_agents {
-        "Run every step on your own harness and model: do not pass harness or model to delegate_task."
+        "Run every step on your own harness and model: do not pass harness or model to create_thread."
     } else {
         "Pick the harness and model for each step; orchestrator_capabilities lists them."
     });
     lines.push(
-        "When a step's thread finishes, check its result. Mark a step done or skipped with the tasks tool, action \"step\", or run it again with delegate_task and the same taskStepId.",
+        "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.",
     );
     lines.push(
         "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.",
@@ -330,6 +330,7 @@ impl EngineRpc {
                 created_at: now,
                 updated_at: now,
                 deleted: false,
+                turn: None,
             })
             .collect();
         self.workspace
@@ -366,6 +367,7 @@ impl EngineRpc {
                 created_at: now,
                 updated_at: now,
                 deleted: false,
+                turn: None,
             })
             .map_err(failed)
             .map(drop)
@@ -430,11 +432,11 @@ impl EngineRpc {
         let lead = self.lead_of(&task)?;
         let (title, id) = (&step.title, &step.id);
         let text = match step.chat_id {
-            Some(_) => format!(
-                "Step \"{title}\" needs another run (taskStepId {id}). Check what happened on its thread, then run it again with delegate_task and taskStepId {id}."
+            Some(thread) => format!(
+                "Step \"{title}\" needs another run (taskStepId {id}). Check its thread {thread} with read_thread, then send it what to fix with send_message_to_thread, or start the step again with create_thread and taskStepId {id}."
             ),
             None => format!(
-                "Step \"{title}\" has not started (taskStepId {id}). Run it with delegate_task and taskStepId {id}."
+                "Step \"{title}\" has not started (taskStepId {id}). Run it with create_thread and taskStepId {id}."
             ),
         };
         self.send_to_task_thread(&task, &lead, None, &text).await

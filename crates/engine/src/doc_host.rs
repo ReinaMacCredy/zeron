@@ -47,6 +47,8 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 #[path = "doc_host_delegation.rs"]
 mod delegation;
+#[path = "doc_host_steps.rs"]
+mod steps;
 pub use delegation::{
     DELEGATION_GUIDANCE, DelegateTaskParams, ProfileParams, ResolveFindingsParams, TaskView,
 };
@@ -254,6 +256,7 @@ struct DocHostInner {
     store: Arc<DocsStore>,
     config: DocHostConfig,
     delegation_lock: tokio::sync::Mutex<()>,
+    active_step_threads: Mutex<HashSet<String>>,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
@@ -1165,6 +1168,7 @@ impl DocHost {
                 store,
                 config,
                 delegation_lock: tokio::sync::Mutex::new(()),
+                active_step_threads: Mutex::new(HashSet::new()),
                 sessions: Mutex::new(None),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
@@ -3946,6 +3950,35 @@ impl DocHost {
         space_id: Option<&str>,
         cwd: Option<&str>,
     ) -> Result<String, EngineError> {
+        self.create_step_thread(
+            from_chat_id,
+            prompt,
+            title,
+            harness,
+            model,
+            reasoning,
+            profile,
+            space_id,
+            cwd,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_step_thread(
+        &self,
+        from_chat_id: &str,
+        prompt: &str,
+        title: Option<&str>,
+        harness: Option<zeron_proto::HarnessId>,
+        model: Option<&str>,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+        profile: &ProfileParams,
+        space_id: Option<&str>,
+        cwd: Option<&str>,
+        step: Option<(&str, crate::registry::DelegationSettings)>,
+    ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
             .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
@@ -3961,18 +3994,33 @@ impl DocHost {
         {
             return Err(EngineError::Other(format!("cwd {cwd} is not a directory")));
         }
-        let live = workspace
-            .read_chats()?
-            .iter()
-            .filter(|chat| {
-                !chat.archived && chat.created_by_chat_id.as_deref() == Some(from_chat_id)
-            })
-            .count();
-        if live >= MAX_CREATED_THREADS {
-            return Err(EngineError::Other(format!(
-                "this thread already has {live} open threads it created; archive one first"
-            )));
-        }
+        let admitting = match step {
+            Some(_) => Some(self.inner.delegation_lock.lock().await),
+            None => None,
+        };
+        let step = match step {
+            Some((step_id, limits)) => {
+                Some(self.runnable_step(workspace, from_chat_id, step_id, limits)?)
+            }
+            None => {
+                let bound = self.bound_step_threads(workspace);
+                let live = workspace
+                    .read_chats()?
+                    .iter()
+                    .filter(|chat| {
+                        !chat.archived
+                            && chat.created_by_chat_id.as_deref() == Some(from_chat_id)
+                            && !bound.contains(&chat.id)
+                    })
+                    .count();
+                if live >= MAX_CREATED_THREADS {
+                    return Err(EngineError::Other(format!(
+                        "this thread already has {live} open threads it created; archive one first"
+                    )));
+                }
+                None
+            }
+        };
         let config = self.derived_config(&from, harness, model, reasoning, profile)?;
         let chat_id = new_id();
         let (space_id, cwd) = match (space_id, cwd) {
@@ -3988,8 +4036,26 @@ impl DocHost {
             cwd,
             Some(from_chat_id).filter(|id| !zeron_proto::voice::is_orchestrator_chat(id)),
         )?;
-        if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
+        let title = title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .or(step.as_ref().map(|step| step.title.as_str()));
+        if let Some(title) = title {
             workspace.rename_chat(&chat_id, title)?;
+        }
+        if let Some(step) = &step {
+            workspace.update_task_step(
+                &step.id,
+                &zeron_proto::TaskStepPatch {
+                    chat_id: Some(Some(chat_id.clone())),
+                    turn: Some(None),
+                    ..Default::default()
+                },
+            )?;
+        }
+        drop(admitting);
+        if let Some(sessions) = self.sessions() {
+            sessions.bind_delegate(from_chat_id, prompt, &chat_id);
         }
         self.queue_thread_message(&chat_id, Some(from_chat_id), prompt)
             .await?;

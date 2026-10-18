@@ -70,9 +70,9 @@ While the lead writes the plan, the page reads **The lead is planning**. Then **
 
 ## While the steps run
 
-Steps that do not depend on each other run at the same time, each on its own thread under the lead. Like other [delegated tasks](zeron://docs/delegation), these threads stay out of the sidebar, and **Delegated tasks per chat** in Settings > General caps how many run at once.
+Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > General caps how many steps one lead runs at once.
 
-A step turns **Done** when its thread finishes, and the lead checks each result. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's thread failed, was stopped, or was interrupted, **Retry** asks the lead to look at what happened and run the step again.
+A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
 
 When every step is done, the lead checks the whole result, tells you what was built, and marks the task done.
 
@@ -82,7 +82,7 @@ In the list, an orchestrated task has a progress ring in place of its circle, an
 
 ## Tasks from agents
 
-Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A lead uses the same tool to write its plan and mark steps done or skipped. See [Agent tools](zeron://docs/agent-tools).
+Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A lead uses the same tool to write its plan and mark steps done or skipped, and runs each step on a new chat with `create_thread`. See [Agent tools](zeron://docs/agent-tools).
 
 ## Kanban columns
 

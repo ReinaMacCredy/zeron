@@ -1281,6 +1281,8 @@ pub(super) fn chat_row_height(show_label: bool) -> f32 {
             SIDEBAR_CARD_TWO_LINE_HEIGHT
         }
 }
+const SIDEBAR_NESTED_INDENT: f32 = 16.0;
+
 fn sidebar_row_height(compact: bool, slim: bool, show_label: bool) -> f32 {
     if compact {
         29.0
@@ -11328,6 +11330,7 @@ impl Shell {
         project_icon: bool,
         in_project_group: bool,
         slim: bool,
+        nested: bool,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -11358,6 +11361,7 @@ impl Shell {
                 project_icon,
                 in_project_group,
                 slim,
+                nested,
                 theme,
                 cx,
             );
@@ -11822,6 +11826,7 @@ impl Shell {
                 8.0
             }))
             .px(px(Theme::SPACE_SM))
+            .when(nested, |el| el.pl(px(Theme::SPACE_SM + SIDEBAR_NESTED_INDENT)))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
@@ -12129,6 +12134,7 @@ impl Shell {
         project_icon: bool,
         in_project_group: bool,
         slim: bool,
+        nested: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -12425,6 +12431,7 @@ impl Shell {
                 .items_center()
                 .gap(px(10.0))
                 .px(px(10.0))
+                .when(nested, |el| el.pl(px(10.0 + SIDEBAR_NESTED_INDENT)))
                 .rounded(px(8.0))
                 .bg(bg)
                 .children(project_icon.map(|icon| {
@@ -12701,6 +12708,7 @@ impl Shell {
                     .size_full()
                     .rounded(px(8.0))
                     .px(px(10.0))
+                    .when(nested, |el| el.pl(px(10.0 + SIDEBAR_NESTED_INDENT)))
                     .py(px(8.0))
                     .flex()
                     .flex_col()

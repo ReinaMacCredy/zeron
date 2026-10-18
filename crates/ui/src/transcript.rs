@@ -426,6 +426,7 @@ fn is_agent_tool(item: &ToolItem) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolGenus {
     Agent,
+    Thread,
     Computer,
     Device,
     Other,
@@ -450,6 +451,8 @@ fn group_computer_rows_by_app(tools: &mut [ToolItem]) {
 fn tool_genus(item: &ToolItem) -> ToolGenus {
     if is_agent_tool(item) {
         ToolGenus::Agent
+    } else if is_thread_link(item) {
+        ToolGenus::Thread
     } else if item.kind == ToolItemKind::Call && computer_call(&item.call).is_some() {
         ToolGenus::Computer
     } else if item.kind == ToolItemKind::Call && device_call(&item.call).is_some() {
@@ -463,6 +466,10 @@ fn tool_genus(item: &ToolItem) -> ToolGenus {
 /// when an agent call has actually been bound to its doc.
 fn is_spawn_link(item: &ToolItem) -> bool {
     is_agent_call(&item.call) && item.subagent_ref.is_some()
+}
+
+fn is_thread_link(item: &ToolItem) -> bool {
+    item.call.is_create_thread() && item.subagent_ref.is_some()
 }
 
 /// One spawned subagent as the pinned summary lists it: what a spawn chip
@@ -484,7 +491,9 @@ pub(crate) struct SubagentSummary {
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
 /// render as their own always-open row.
 fn tool_group_collapses(tools: &[ToolItem]) -> bool {
-    tools.iter().any(|t| !is_agent_tool(t))
+    tools
+        .iter()
+        .any(|t| !matches!(tool_genus(t), ToolGenus::Agent | ToolGenus::Thread))
 }
 
 /// Column budget for soft-wrapping thought text into detail lines. The
@@ -11129,7 +11138,7 @@ impl Transcript {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if is_spawn_link(tool) {
+                if is_spawn_link(tool) || is_thread_link(tool) {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -11151,7 +11160,11 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
+            .map(|tool| {
+                tool.invocation
+                    .clone()
+                    .filter(|_| !is_spawn_link(tool) && !is_thread_link(tool))
+            })
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -11508,6 +11521,21 @@ impl Transcript {
                 let continuation_reveal =
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
+                if let Some(thread) = tool.subagent_ref.clone().filter(|_| is_thread_link(tool)) {
+                    let title =
+                        started_thread_title(&self.state.read(cx).chats, &thread, &tool.call);
+                    return started_thread_line(
+                        SharedString::from(format!("{row_id}#s{ix}")),
+                        title,
+                        row_height,
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::OpenChat {
+                                chat_id: thread.to_string(),
+                            });
+                        }),
+                        theme,
+                    );
+                }
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
@@ -13907,6 +13935,91 @@ fn delegate_status_text(status: Option<zeron_proto::DelegationStatus>) -> &'stat
         Some(Cancelled | Interrupted) => "Stopped",
         None => "Unavailable",
     }
+}
+
+fn started_thread_title(
+    chats: &[zeron_proto::Chat],
+    thread: &str,
+    call: &ToolCall,
+) -> SharedString {
+    let input = match call {
+        ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. } => input.as_ref(),
+        _ => None,
+    };
+    let title = chats
+        .iter()
+        .find(|chat| chat.id == thread)
+        .and_then(|chat| chat.title.clone())
+        .or_else(|| {
+            input
+                .and_then(|input| input.get("title")?.as_str())
+                .map(str::to_owned)
+        })
+        .map(|title| single_line(&title))
+        .filter(|title| !title.is_empty());
+    title.unwrap_or_else(|| "thread".into()).into()
+}
+
+fn started_thread_line(
+    id: SharedString,
+    title: SharedString,
+    height: f32,
+    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .h(px(height))
+        .w_full()
+        .min_w_0()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .child(
+            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.text_faint),
+        )
+        .child(div().flex_none().child("Started thread"))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text.opacity(0.8))
+                .child(title.clone()),
+        )
+        .child(div().flex_none().child("·"))
+        .child(
+            div()
+                .id(id)
+                .debug_selector(|| "started-thread-open".into())
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!("Open thread {title}")))
+                .flex_none()
+                .cursor_pointer()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text.opacity(0.8))
+                .hover(|s| s.text_color(theme.text))
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    on_open(event, window, cx);
+                })
+                .child("Open"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(8.0))
+                .h(px(1.0))
+                .ml(px(4.0))
+                .bg(theme.border.opacity(0.6)),
+        )
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]

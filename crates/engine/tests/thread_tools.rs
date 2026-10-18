@@ -1689,26 +1689,42 @@ impl Harness for DelegatingHarness {
             };
             let _ = tx.send(Ok(started)).await;
             if owner {
-                let call = zeron_proto::ToolCall::Mcp {
-                    server: "zeron".into(),
-                    tool: "delegate_task".into(),
-                    input: Some(serde_json::json!({ "task": "probe the cache" })),
-                };
-                let _ = tx
-                    .send(Ok(AgentEvent::ToolCall {
-                        id: "tc-1".into(),
-                        call,
-                    }))
-                    .await;
+                let calls = [
+                    (
+                        "tc-1",
+                        "delegate_task",
+                        serde_json::json!({ "task": "probe the cache" }),
+                    ),
+                    (
+                        "tc-2",
+                        "create_thread",
+                        serde_json::json!({ "prompt": "draft the notes" }),
+                    ),
+                ];
+                for (id, tool, input) in calls.clone() {
+                    let call = zeron_proto::ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: tool.into(),
+                        input: Some(input),
+                    };
+                    let _ = tx
+                        .send(Ok(AgentEvent::ToolCall {
+                            id: id.into(),
+                            call,
+                        }))
+                        .await;
+                }
                 release.notified().await;
-                let _ = tx
-                    .send(Ok(AgentEvent::ToolResult {
-                        id: "tc-1".into(),
-                        is_error: false,
-                        output: None,
-                        diff: None,
-                    }))
-                    .await;
+                for (id, _, _) in calls {
+                    let _ = tx
+                        .send(Ok(AgentEvent::ToolResult {
+                            id: id.into(),
+                            is_error: false,
+                            output: None,
+                            diff: None,
+                        }))
+                        .await;
+                }
             }
             let _ = tx
                 .send(Ok(AgentEvent::TextDelta { text: "ok".into() }))
@@ -1730,7 +1746,7 @@ impl Harness for DelegatingHarness {
 }
 
 #[tokio::test]
-async fn the_delegate_task_chip_links_to_the_child_it_opened() {
+async fn the_delegate_task_and_create_thread_chips_link_to_the_threads_they_opened() {
     let release = Arc::new(tokio::sync::Notify::new());
     let rig = rig_on(Arc::new(DelegatingHarness {
         release: release.clone(),
@@ -1746,19 +1762,39 @@ async fn the_delegate_task_chip_links_to_the_child_it_opened() {
         .await
         .unwrap()
         .task_id;
+    let peer = core
+        .doc_host
+        .create_thread(
+            "lead",
+            " draft the notes ",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     release.notify_one();
-    let chip_ref = || {
+    let chip_ref = |tool: &str| {
         entries(&core, "lead").iter().find_map(|entry| {
             entry.parts.iter().find_map(|part| match part {
                 zeron_doc::MessagePart::Tool {
                     id, subagent_ref, ..
-                } if id == "tc-1" => Some(subagent_ref.clone()),
+                } if id == tool => Some(subagent_ref.clone()),
                 _ => None,
             })
         })
     };
-    wait_for(|| chip_ref().flatten().is_some(), "the chip binding").await;
-    assert_eq!(chip_ref().flatten().as_deref(), Some(child.as_str()));
+    wait_for(
+        || chip_ref("tc-1").flatten().is_some() && chip_ref("tc-2").flatten().is_some(),
+        "the chip bindings",
+    )
+    .await;
+    assert_eq!(chip_ref("tc-1").flatten().as_deref(), Some(child.as_str()));
+    assert_eq!(chip_ref("tc-2").flatten().as_deref(), Some(peer.as_str()));
     core.shutdown().await;
 }
 
@@ -2627,13 +2663,14 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
 }
 
 #[tokio::test]
-async fn an_orchestrated_task_runs_its_approved_steps_on_bound_children() {
-    let rig = rig(Duration::from_millis(100));
+async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
+    let rig = rig(Duration::from_millis(400));
     let rpc = rig.core.rpc_service();
-    let mutate = |params: serde_json::Value| {
+    let call = |method: &'static str, params: serde_json::Value| {
         let rpc = rpc.clone();
-        async move { zeron_rpc::RpcService::handle(&*rpc, zeron_rpc::methods::MUTATE, params).await }
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
     };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
     mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Shop backend" }))
         .await
         .unwrap();
@@ -2662,19 +2699,25 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_children() {
         ["Build the API", "Write the docs"]
     );
     let run = |step: &zeron_proto::TaskStep, owner: &str| {
-        let mut params = delegate(&format!("do: {}", step.title));
-        params.owner_chat_id = owner.into();
-        params.task_step_id = Some(step.id.clone());
-        let core = &rig.core;
-        async move {
-            core.doc_host
-                .delegate_task(params, Default::default())
-                .await
-        }
+        call(
+            zeron_rpc::methods::CREATE_THREAD,
+            serde_json::json!({
+                "fromChatId": owner, "prompt": format!("do: {}", step.title), "taskStepId": step.id,
+            }),
+        )
     };
-    let err = run(&steps[0], "task-lead").await.unwrap_err().to_string();
-    assert!(err.starts_with("plan_pending"), "{err}");
-    let err = run(&steps[0], "lead").await.unwrap_err().to_string();
+    let started = |reply: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>| match reply {
+        Ok(zeron_rpc::RpcReply::Value(value)) => value["chatId"].as_str().unwrap().to_string(),
+        Ok(_) => panic!("a chat id"),
+        Err(err) => panic!("{err}"),
+    };
+    let refused = |reply: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>| match reply {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("a refusal"),
+    };
+    let err = refused(run(&steps[0], "task-lead").await);
+    assert!(err.contains("plan_pending"), "{err}");
+    let err = refused(run(&steps[0], "lead").await);
     assert!(err.contains("Only the task's lead runs its steps"), "{err}");
 
     mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
@@ -2687,13 +2730,37 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_children() {
     )
     .await;
 
-    let first = run(&steps[0], "task-lead").await.unwrap().task_id;
+    let first = started(run(&steps[0], "task-lead").await);
+    let turn_of = |step_id: &str| {
+        rig.core
+            .workspace
+            .task_step(step_id)
+            .unwrap()
+            .turn
+            .map(|turn| turn.ended)
+    };
     wait_for(
-        || delegation(&rig.core, &first).status == zeron_proto::DelegationStatus::Completed,
-        "the first step's child to finish",
+        || turn_of(&steps[0].id) == Some(zeron_proto::StepTurnEnd::Completed),
+        "the first step's thread to finish its turn",
     )
     .await;
-    let second = run(&steps[1], "task-lead").await.unwrap().task_id;
+    wait_for(
+        || {
+            !prompts_with(
+                &rig,
+                &format!(
+                    "Step \"Build the API\" (taskStepId {}) finished a turn on its thread {first}.",
+                    steps[0].id
+                ),
+            )
+            .is_empty()
+        },
+        "the lead's step message",
+    )
+    .await;
+    let second = started(run(&steps[1], "task-lead").await);
+    let err = refused(run(&steps[1], "task-lead").await);
+    assert!(err.contains("still running"), "{err}");
     let status = |step_id: &str| {
         let step = rig.core.workspace.task_step(step_id).unwrap();
         let chat = step
@@ -2705,12 +2772,8 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_children() {
             zeron_proto::view::display_status(chat, session.as_ref(), chrono::Utc::now())
         });
         (
-            step.chat_id,
-            zeron_proto::step_status(
-                &rig.core.workspace.task_step(step_id).unwrap(),
-                chat.as_ref(),
-                indicator,
-            ),
+            step.chat_id.clone(),
+            zeron_proto::step_status(&step, chat.as_ref(), indicator),
         )
     };
     assert_eq!(
@@ -2721,18 +2784,16 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_children() {
         status(&steps[1].id),
         (Some(second.clone()), zeron_proto::StepStatus::Working)
     );
+    let thread = rig.core.workspace.chat(&second).unwrap().unwrap();
     assert_eq!(
-        rig.core
-            .workspace
-            .chat(&second)
-            .unwrap()
-            .unwrap()
-            .title
-            .as_deref(),
+        thread.title.as_deref(),
         Some("Write the docs"),
-        "an untitled step child takes the step's title"
+        "an untitled step thread takes the step's title"
     );
-    let err = run(&steps[1], "task-lead").await.unwrap_err().to_string();
-    assert!(err.contains("still running"), "{err}");
+    assert_eq!(thread.created_by_chat_id.as_deref(), Some("task-lead"));
+    assert!(
+        thread.delegation.is_none(),
+        "a step runs on an ordinary thread"
+    );
     rig.core.shutdown().await;
 }

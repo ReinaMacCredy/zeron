@@ -548,6 +548,8 @@ pub struct TaskStep {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<StepTurn>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,6 +557,22 @@ pub struct TaskStep {
 pub enum StepOutcome {
     Done,
     Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepTurn {
+    pub ended: StepTurnEnd,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StepTurnEnd {
+    Completed,
+    Failed,
+    Stopped,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -578,6 +596,12 @@ pub struct TaskStepPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub chat_id: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub turn: Option<Option<StepTurn>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +612,7 @@ pub enum StepStatus {
     NeedsYou,
     Done,
     Skipped,
+    Failed,
 }
 
 pub fn step_status(
@@ -608,10 +633,19 @@ pub fn step_status(
         Some(ChatIndicator::AwaitingInput) => return StepStatus::NeedsYou,
         _ => {}
     }
-    match thread.delegation.as_ref().map(|d| d.status) {
-        Some(DelegationStatus::Running) => StepStatus::Working,
-        Some(DelegationStatus::Completed) => StepStatus::Done,
-        _ => StepStatus::NeedsYou,
+    // Steps bound to a delegate_task child before steps ran on threads.
+    if let Some(delegation) = &thread.delegation {
+        return match delegation.status {
+            DelegationStatus::Running => StepStatus::Working,
+            DelegationStatus::Completed => StepStatus::Done,
+            _ => StepStatus::NeedsYou,
+        };
+    }
+    match step.turn.as_ref().map(|turn| turn.ended) {
+        Some(StepTurnEnd::Completed) => StepStatus::Done,
+        Some(StepTurnEnd::Failed) => StepStatus::Failed,
+        Some(StepTurnEnd::Stopped) => StepStatus::NeedsYou,
+        None => StepStatus::Working,
     }
 }
 
@@ -698,6 +732,7 @@ pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStat
             Some(ChatIndicator::AwaitingInput | ChatIndicator::Errored)
         )
         || steps.contains(&StepStatus::NeedsYou)
+        || (steps.contains(&StepStatus::Failed) && !lead_working)
         || (task.plan_pending && !steps.is_empty() && !lead_working)
     {
         return TaskStatus::NeedsYou;
@@ -2216,6 +2251,20 @@ mod tests {
             TaskStatus::NeedsYou
         );
         assert_eq!(task_status(&task, None, &[Working]), TaskStatus::Working);
+        assert_eq!(
+            task_status(&task, lead, &[Failed, Working]),
+            TaskStatus::NeedsYou,
+            "a failed step waits on the person while the lead is idle"
+        );
+        assert_eq!(
+            task_status(&task, None, &[Done, Failed]),
+            TaskStatus::NeedsYou
+        );
+        assert_eq!(
+            task_status(&task, Some(ChatIndicator::Working), &[Failed]),
+            TaskStatus::Working,
+            "the lead is handling the failed step"
+        );
         task.plan_pending = true;
         assert_eq!(
             task_status(&task, Some(ChatIndicator::Working), &[Planned]),
@@ -2305,22 +2354,50 @@ mod tests {
             StepStatus::NeedsYou
         );
         let cases = [
-            (Some(DelegationStatus::Running), StepStatus::Working),
-            (Some(DelegationStatus::Completed), StepStatus::Done),
-            (Some(DelegationStatus::Failed), StepStatus::NeedsYou),
-            (Some(DelegationStatus::Cancelled), StepStatus::NeedsYou),
-            (Some(DelegationStatus::Interrupted), StepStatus::NeedsYou),
-            (None, StepStatus::NeedsYou),
+            (DelegationStatus::Running, StepStatus::Working),
+            (DelegationStatus::Completed, StepStatus::Done),
+            (DelegationStatus::Failed, StepStatus::NeedsYou),
+            (DelegationStatus::Cancelled, StepStatus::NeedsYou),
+            (DelegationStatus::Interrupted, StepStatus::NeedsYou),
         ];
         for (delegation, status) in cases {
+            let mut bound = step(Some("c"), None);
+            bound.turn = Some(StepTurn {
+                ended: StepTurnEnd::Failed,
+                turn: None,
+            });
             assert_eq!(
                 step_status(
-                    &step(Some("c"), None),
-                    Some(&child(delegation)),
+                    &bound,
+                    Some(&child(Some(delegation))),
                     Some(ChatIndicator::Idle)
                 ),
                 status,
-                "{delegation:?}"
+                "a delegated child reads its delegation: {delegation:?}"
+            );
+        }
+        let thread = child(None);
+        let ended = [
+            (None, StepStatus::Working),
+            (Some(StepTurnEnd::Completed), StepStatus::Done),
+            (Some(StepTurnEnd::Failed), StepStatus::Failed),
+            (Some(StepTurnEnd::Stopped), StepStatus::NeedsYou),
+        ];
+        for (end, status) in ended {
+            let mut bound = step(Some("c"), None);
+            bound.turn = end.map(|ended| StepTurn {
+                ended,
+                turn: Some("turn-1".into()),
+            });
+            assert_eq!(
+                step_status(&bound, Some(&thread), Some(ChatIndicator::Idle)),
+                status,
+                "{end:?}"
+            );
+            assert_eq!(
+                step_status(&bound, Some(&thread), Some(ChatIndicator::Working)),
+                StepStatus::Working,
+                "a thread taking another turn works: {end:?}"
             );
         }
     }
@@ -2329,8 +2406,8 @@ mod tests {
     fn plan_progress_leaves_skipped_steps_out_of_the_total() {
         use StepStatus::*;
         assert_eq!(
-            plan_progress(&[Done, Skipped, Working, Planned, NeedsYou, Done]),
-            PlanProgress { done: 2, total: 5 }
+            plan_progress(&[Done, Skipped, Working, Planned, NeedsYou, Done, Failed]),
+            PlanProgress { done: 2, total: 6 }
         );
         assert_eq!(plan_progress(&[]), PlanProgress::default());
     }
@@ -2357,6 +2434,25 @@ mod tests {
         assert_eq!(patch.outcome, Some(None));
         assert_eq!(patch.chat_id, Some(Some("c".into())));
         assert_eq!(patch.title, None);
+        assert_eq!(patch.turn, None);
+        let patch: TaskStepPatch = serde_json::from_value(
+            serde_json::json!({ "turn": { "ended": "completed", "turn": "m1" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            patch.turn,
+            Some(Some(StepTurn {
+                ended: StepTurnEnd::Completed,
+                turn: Some("m1".into())
+            }))
+        );
+        let patch: TaskStepPatch =
+            serde_json::from_value(serde_json::json!({ "turn": null })).unwrap();
+        assert_eq!(patch.turn, Some(None));
+        assert_eq!(
+            serde_json::to_value(&patch).unwrap(),
+            serde_json::json!({ "turn": null })
+        );
     }
 
     #[test]

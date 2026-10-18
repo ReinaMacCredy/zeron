@@ -2621,10 +2621,18 @@ fn task_steps_sync_in_order_and_follow_their_task_out() {
     assert_eq!(moved.outcome, Some(zeron_proto::StepOutcome::Done));
     let reopen = zeron_proto::TaskStepPatch {
         outcome: Some(None),
+        turn: Some(Some(zeron_proto::StepTurn {
+            ended: zeron_proto::StepTurnEnd::Failed,
+            turn: Some("m1".into()),
+        })),
         ..Default::default()
     };
     a.update_task_step("s3", &reopen, ts(3_001)).unwrap();
     assert_eq!(a.task_step("s3").unwrap().outcome, None);
+    assert_eq!(
+        a.task_step("s3").unwrap().turn.map(|turn| turn.ended),
+        Some(zeron_proto::StepTurnEnd::Failed)
+    );
 
     assert!(a.delete_task_step("s2", ts(4_000)).unwrap());
     assert!(a.task_step("s2").is_none());

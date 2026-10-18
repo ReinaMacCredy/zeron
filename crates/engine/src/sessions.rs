@@ -35,7 +35,7 @@ use zeron_harness::{
 use zeron_proto::tools::ToolGroup;
 use zeron_proto::{
     AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, PermissionMode, RunRequest,
-    Session, SessionBranch, SessionStatus, ToolDiff, UserInputAnswer, UserInputQuestion,
+    Session, SessionBranch, SessionStatus, ToolCall, ToolDiff, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::computer::runtime::ComputerRuntime;
@@ -646,6 +646,17 @@ struct Inner {
 /// Turn-start hook: called with `(chat_id, cwd)`.
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
+fn spawned_text(call: &ToolCall) -> Option<&str> {
+    match call {
+        ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. }
+            if call.is_create_thread() =>
+        {
+            input.as_ref()?.get("prompt")?.as_str().map(str::trim)
+        }
+        _ => call.delegate_task_text(),
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -750,7 +761,7 @@ impl Inner {
             let slot = parts.iter_mut().find_map(|part| match part {
                 MessagePart::Tool {
                     call, subagent_ref, ..
-                } if subagent_ref.is_none() && call.delegate_task_text() == Some(task.as_str()) => {
+                } if subagent_ref.is_none() && spawned_text(call) == Some(task.as_str()) => {
                     Some(subagent_ref)
                 }
                 _ => None,
