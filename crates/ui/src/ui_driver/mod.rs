@@ -1,8 +1,10 @@
+mod audit;
 mod capture;
 #[cfg(debug_assertions)]
 mod input;
 #[cfg(unix)]
 mod server;
+mod tree;
 
 #[cfg(unix)]
 pub(crate) use server::start;
@@ -16,8 +18,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-const OBSERVE: &[&str] = &["state", "snapshot", "wait"];
-const DRIVE: &[&str] = &["click", "move", "drag", "scroll", "key", "type", "action"];
+const OBSERVE: &[&str] = &["state", "tree", "snapshot", "wait", "audit"];
+const DRIVE: &[&str] = &[
+    "click", "move", "drag", "scroll", "key", "type", "press", "action",
+];
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 static LAST_DRAW_MS: AtomicU64 = AtomicU64::new(0);
@@ -80,6 +84,8 @@ struct Request {
 )]
 enum Action {
     State,
+    Tree(tree::View),
+    Audit,
     Snapshot {
         rect: Option<capture::Rect>,
         path: Option<PathBuf>,
@@ -103,8 +109,8 @@ enum Action {
     },
     #[cfg(debug_assertions)]
     Drag {
-        from: [f32; 2],
-        to: [f32; 2],
+        from: input::Target,
+        to: input::Target,
         #[serde(default = "drag_steps")]
         steps: u32,
         #[serde(default)]
@@ -130,6 +136,16 @@ enum Action {
     #[cfg(debug_assertions)]
     Type {
         text: String,
+        #[serde(flatten)]
+        into: input::TypeAt,
+    },
+    #[cfg(debug_assertions)]
+    Press {
+        #[serde(flatten)]
+        element: tree::Element,
+        #[serde(rename = "do")]
+        perform: Option<String>,
+        value: Option<String>,
     },
     #[cfg(debug_assertions)]
     Action {
@@ -154,6 +170,8 @@ enum Until {
     Ms {
         ms: u64,
     },
+    #[serde(untagged)]
+    Seen(tree::Seen),
 }
 
 #[cfg(debug_assertions)]
@@ -214,6 +232,18 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
     let Request { window, action } = parse(raw)?;
     match action {
         Action::State => cx.update(state),
+        Action::Tree(view) => {
+            let handle = cx.update(|cx| target_window(window, cx))?;
+            tree::render(&tree::read(handle, cx).await?, &view)
+        }
+        Action::Audit => {
+            let handle = cx.update(|cx| target_window(window, cx))?;
+            let tree = tree::read(handle, cx).await?;
+            let focus_held = cx
+                .update(|cx| handle.update(cx, |_, window, cx| window.focused(cx).is_some()))
+                .map_err(|error| format!("window is gone: {error}"))?;
+            Ok(audit::audit(&tree, focus_held))
+        }
         Action::Snapshot { rect, path } => {
             let handle = cx.update(|cx| target_window(window, cx))?;
             // The window server holds the frame before the last one drawn until another presents.
@@ -248,7 +278,13 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
         #[cfg(debug_assertions)]
         Action::Key { keys } => input::keys(window, keys, cx).await,
         #[cfg(debug_assertions)]
-        Action::Type { text } => input::type_text(window, &text, cx).await,
+        Action::Type { text, into } => input::type_text(window, &text, into, cx).await,
+        #[cfg(debug_assertions)]
+        Action::Press {
+            element,
+            perform,
+            value,
+        } => input::press(window, element, perform, value, cx).await,
         #[cfg(debug_assertions)]
         Action::Action { name, args } => input::action(window, &name, args, cx).await,
     }
@@ -299,6 +335,7 @@ fn state(cx: &mut App) -> Result<Value, String> {
                 "kind": if shell.is_some() { "shell" } else { "other" },
                 "size": { "w": f32::from(size.width), "h": f32::from(size.height) },
                 "active": window.is_window_active(),
+                "a11yForced": window.is_a11y_forced(),
             }));
         });
         if route.is_null()
@@ -379,6 +416,10 @@ async fn wait(window: Option<u64>, until: Until, cx: &mut AsyncApp) -> Result<Va
                     .await;
             }
         }
+        Until::Seen(seen) => {
+            let handle = cx.update(|cx| target_window(window, cx))?;
+            tree::wait(handle, seen, cx).await
+        }
         Until::Ms { ms } => {
             cx.background_executor()
                 .timer(Duration::from_millis(ms))
@@ -437,6 +478,113 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_tree_audit_and_element_waits() {
+        let tree = parse(json!({ "action": "tree", "query": "send", "depth": 2 })).unwrap();
+        assert_eq!(
+            tree.action,
+            Action::Tree(tree::View {
+                query: Some("send".into()),
+                depth: Some(2),
+                ..tree::View::default()
+            })
+        );
+        assert_eq!(
+            parse(json!({ "action": "audit" })).unwrap().action,
+            Action::Audit
+        );
+        let select = parse(json!({
+            "action": "wait", "for": "select", "select": "Button \"Send\"", "nth": 1,
+        }))
+        .unwrap();
+        assert_eq!(
+            select.action,
+            Action::Wait(Until::Seen(tree::Seen::Select {
+                element: tree::Element::Select {
+                    select: "Button \"Send\"".into(),
+                    nth: Some(1)
+                },
+                timeout_ms: 5000,
+            }))
+        );
+        let gone = parse(json!({ "action": "wait", "for": "gone", "ref": "e4", "timeoutMs": 9 }));
+        assert_eq!(
+            gone.unwrap().action,
+            Action::Wait(Until::Seen(tree::Seen::Gone {
+                element: tree::Element::Ref { id: "e4".into() },
+                timeout_ms: 9,
+            }))
+        );
+        let text = parse(json!({ "action": "wait", "for": "text", "text": "Done" })).unwrap();
+        assert_eq!(
+            text.action,
+            Action::Wait(Until::Seen(tree::Seen::Text {
+                text: "Done".into(),
+                timeout_ms: 5000,
+            }))
+        );
+        assert!(parse(json!({ "action": "wait", "for": "gone" })).is_err());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn parses_element_targets_and_press() {
+        let click = parse(json!({ "action": "click", "select": "Tab \"Git\"", "nth": 0 }));
+        assert_eq!(
+            click.unwrap().action,
+            Action::Click {
+                at: input::Target::Element(tree::Element::Select {
+                    select: "Tab \"Git\"".into(),
+                    nth: Some(0)
+                }),
+                button: input::Button::Left,
+                count: 1,
+                modifiers: vec![],
+            }
+        );
+        let drag = parse(json!({ "action": "drag", "from": { "ref": "e3" }, "to": [5, 6] }));
+        let Action::Drag { from, to, .. } = drag.unwrap().action else {
+            panic!("not a drag");
+        };
+        assert_eq!(
+            from,
+            input::Target::Element(tree::Element::Ref { id: "e3".into() })
+        );
+        assert_eq!(to, input::Target::Pair([5.0, 6.0]));
+        let typed = parse(json!({ "action": "type", "text": "hi" })).unwrap();
+        assert_eq!(
+            typed.action,
+            Action::Type {
+                text: "hi".into(),
+                into: input::TypeAt::Focused {}
+            }
+        );
+        let typed = parse(json!({ "action": "type", "text": "hi", "ref": "e7" })).unwrap();
+        assert_eq!(
+            typed.action,
+            Action::Type {
+                text: "hi".into(),
+                into: input::TypeAt::Target(input::Target::Element(tree::Element::Ref {
+                    id: "e7".into()
+                }))
+            }
+        );
+        let press = parse(json!({
+            "action": "press", "ref": "e7", "do": "setValue", "value": "hello",
+        }))
+        .unwrap();
+        assert_eq!(
+            press.action,
+            Action::Press {
+                element: tree::Element::Ref { id: "e7".into() },
+                perform: Some("setValue".into()),
+                value: Some("hello".into()),
+            }
+        );
+        let error = parse(json!({ "action": "press", "do": "click" })).unwrap_err();
+        assert!(error.starts_with("invalid `press` request"), "{error}");
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn parses_a_drive_actions_args() {
@@ -464,8 +612,8 @@ mod tests {
         assert_eq!(
             drag.action,
             Action::Drag {
-                from: [1.0, 2.0],
-                to: [3.0, 4.0],
+                from: input::Target::Pair([1.0, 2.0]),
+                to: input::Target::Pair([3.0, 4.0]),
                 steps: 12,
                 hold_ms: 50,
                 modifiers: vec![],

@@ -1,4 +1,6 @@
+use super::tree;
 use super::{frame_count, next_frame, target_window};
+use gpui::accesskit::{Action as AxAction, ActionData, NodeId};
 use gpui::{
     AnyWindowHandle, AppContext as _, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent,
@@ -12,21 +14,55 @@ const STEP_CAP: Duration = Duration::from_millis(100);
 const SETTLE_CAP: Duration = Duration::from_millis(500);
 const TRACKPAD_STEPS: u32 = 6;
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(
     untagged,
-    expecting = "a target point: numeric \"x\" and \"y\" in window points"
+    expecting = "a target: \"ref\", \"select\" (with optional \"nth\"), or numeric \"x\" and \"y\" in window points"
 )]
 pub(super) enum Target {
     Point { x: f32, y: f32 },
+    Pair([f32; 2]),
+    Element(tree::Element),
 }
 
 impl Target {
-    fn point(self) -> Point<Pixels> {
+    async fn point(
+        &self,
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+    ) -> Result<Point<Pixels>, String> {
         match self {
-            Target::Point { x, y } => point(px(x), px(y)),
+            Target::Point { x, y } | Target::Pair([x, y]) => Ok(point(px(*x), px(*y))),
+            Target::Element(element) => {
+                let (node, viewport) = tree::find(window, element, cx).await?;
+                center(&node, viewport)
+            }
         }
     }
+}
+
+fn center(node: &tree::Node, (width, height): (f32, f32)) -> Result<Point<Pixels>, String> {
+    let Some(b) = node.bounds.filter(|b| !b.is_empty()) else {
+        return Err(format!(
+            "{} has no on-screen bounds to point at",
+            tree::line(node)
+        ));
+    };
+    let (x, y) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+    if x < 0.0 || y < 0.0 || x >= width || y >= height {
+        return Err(format!(
+            "{} is outside the {width}x{height} window; scroll it into view first",
+            tree::line(node)
+        ));
+    }
+    Ok(point(px(x), px(y)))
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub(super) enum TypeAt {
+    Target(Target),
+    Focused {},
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -139,7 +175,7 @@ fn mouse_move(
     })
 }
 
-fn press(
+fn mouse_press(
     position: Point<Pixels>,
     button: MouseButton,
     modifiers: Modifiers,
@@ -171,7 +207,7 @@ pub(super) async fn click(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
-    let (position, modifiers) = (at.point(), modifiers(held));
+    let (position, modifiers) = (at.point(driver.window, cx).await?, modifiers(held));
     let button = match button {
         Button::Left => MouseButton::Left,
         Button::Right => MouseButton::Right,
@@ -182,7 +218,7 @@ pub(super) async fn click(
         .await?;
     for click_count in 1..=count.max(1) {
         driver
-            .send(cx, press(position, button, modifiers, click_count))
+            .send(cx, mouse_press(position, button, modifiers, click_count))
             .await?;
     }
     driver.settle(cx).await
@@ -194,16 +230,17 @@ pub(super) async fn hover(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
+    let position = at.point(driver.window, cx).await?;
     driver
-        .send(cx, [mouse_move(at.point(), None, Modifiers::default())])
+        .send(cx, [mouse_move(position, None, Modifiers::default())])
         .await?;
     driver.settle(cx).await
 }
 
 pub(super) async fn drag(
     window: Option<u64>,
-    from: [f32; 2],
-    to: [f32; 2],
+    from: Target,
+    to: Target,
     steps: u32,
     hold_ms: u64,
     held: &[Modifier],
@@ -211,13 +248,12 @@ pub(super) async fn drag(
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
     let modifiers = modifiers(held);
-    let at = |t: f32| {
-        point(
-            px(from[0] + (to[0] - from[0]) * t),
-            px(from[1] + (to[1] - from[1]) * t),
-        )
-    };
-    let [down, _] = press(at(0.0), MouseButton::Left, modifiers, 1);
+    let (from, to) = (
+        from.point(driver.window, cx).await?,
+        to.point(driver.window, cx).await?,
+    );
+    let at = |t: f32| from + (to - from) * t;
+    let [down, _] = mouse_press(at(0.0), MouseButton::Left, modifiers, 1);
     driver
         .send(cx, [mouse_move(at(0.0), None, modifiers), down])
         .await?;
@@ -236,7 +272,7 @@ pub(super) async fn drag(
             .timer(Duration::from_millis(hold_ms))
             .await;
     }
-    let [_, up] = press(at(1.0), MouseButton::Left, modifiers, 1);
+    let [_, up] = mouse_press(at(1.0), MouseButton::Left, modifiers, 1);
     driver.send(cx, [up]).await?;
     driver.settle(cx).await
 }
@@ -250,7 +286,7 @@ pub(super) async fn scroll(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
-    let position = at.point();
+    let position = at.point(driver.window, cx).await?;
     let wheel = |dx: f32, dy: f32, touch_phase| {
         PlatformInput::ScrollWheel(ScrollWheelEvent {
             position,
@@ -324,9 +360,38 @@ fn typed(ch: char) -> Keystroke {
 pub(super) async fn type_text(
     window: Option<u64>,
     text: &str,
+    into: TypeAt,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
+    let position = match into {
+        TypeAt::Focused {} => None,
+        TypeAt::Target(Target::Element(element)) => {
+            let (node, viewport) = tree::find(driver.window, &element, cx).await?;
+            if node.supports("focus") {
+                let id = NodeId(node.accesskit_id);
+                driver.apply(cx, |window, cx| {
+                    window.perform_a11y_action(id, AxAction::Focus, None, cx)
+                })?;
+                driver.step(cx).await;
+                None
+            } else {
+                Some(center(&node, viewport)?)
+            }
+        }
+        TypeAt::Target(at) => Some(at.point(driver.window, cx).await?),
+    };
+    if let Some(position) = position {
+        driver
+            .send(cx, [mouse_move(position, None, Modifiers::default())])
+            .await?;
+        driver
+            .send(
+                cx,
+                mouse_press(position, MouseButton::Left, Modifiers::default(), 1),
+            )
+            .await?;
+    }
     for ch in text.chars() {
         driver.apply(cx, |window, cx| window.dispatch_keystroke(typed(ch), cx))?;
         driver.step(cx).await;
@@ -349,4 +414,50 @@ pub(super) async fn action(
         Ok::<_, String>(())
     })??;
     driver.settle(cx).await
+}
+
+fn ax_action(name: &str) -> Result<AxAction, String> {
+    let all = || (0..=u8::MAX).map_while(AxAction::n);
+    all()
+        .find(|action| format!("{action:?}").eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let names: Vec<String> = all()
+                .map(|action| tree::lower_camel(&format!("{action:?}")))
+                .collect();
+            format!("unknown a11y action `{name}`; valid: {}", names.join(", "))
+        })
+}
+
+pub(super) async fn press(
+    window: Option<u64>,
+    element: tree::Element,
+    perform: Option<String>,
+    value: Option<String>,
+    cx: &mut AsyncApp,
+) -> Result<Value, String> {
+    let action = ax_action(perform.as_deref().unwrap_or("click"))?;
+    let mut driver = Driver::open(window, cx)?;
+    let (node, _) = tree::find(driver.window, &element, cx).await?;
+    let name = tree::lower_camel(&format!("{action:?}"));
+    // gpui answers an unlistened Click with a synthetic mouse click at the node's center.
+    if action != AxAction::Click && !node.supports(&name) {
+        return Err(format!(
+            "{} does not support `{name}`; it lists [{}]",
+            tree::line(&node),
+            node.actions.join(",")
+        ));
+    }
+    let data = match (action, value) {
+        (AxAction::SetValue, Some(value)) => Some(ActionData::Value(value.into())),
+        (AxAction::SetValue, None) => return Err("`setValue` needs a string `value`".into()),
+        (_, Some(_)) => return Err(format!("`{name}` takes no `value`")),
+        (_, None) => None,
+    };
+    let id = NodeId(node.accesskit_id);
+    driver.apply(cx, |window, cx| {
+        window.perform_a11y_action(id, action, data, cx)
+    })?;
+    let mut reply = driver.settle(cx).await?;
+    reply["ref"] = json!(node.id);
+    Ok(reply)
 }
