@@ -1026,6 +1026,7 @@ mod drag_regressions {
                     true,
                     false,
                     false,
+                    false,
                     None,
                     &theme,
                     cx,
