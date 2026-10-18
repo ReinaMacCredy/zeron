@@ -20,7 +20,7 @@ for pkg in $(cargo metadata --no-deps --format-version 1 |
   crate="${pkg//-/_}"
   files=("$DEBUG/deps/$crate"-* "$DEBUG/deps/lib$crate"-* "$DEBUG/incremental/$crate"-*)
   [ "${#files[@]}" -gt 0 ] || continue
-  kb=$(du -sck "${files[@]}" | tail -1 | cut -f1)
+  kb=$(printf '%s\0' "${files[@]}" | xargs -0 du -sk | awk '{ kb += $1 } END { print kb + 0 }')
   if [ "$kb" -gt $((LIMIT_GB * 1024 * 1024)) ]; then
     echo "gc: $pkg $((kb / 1024 / 1024))G > ${LIMIT_GB}G"
     over+=(-p "$pkg")
