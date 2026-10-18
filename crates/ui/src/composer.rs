@@ -8964,7 +8964,7 @@ impl Composer {
                     )
                     .into_any_element(),
             };
-            card = card.child(
+            card = card.child(gpui::deferred(
                 div()
                     .absolute()
                     .left_0()
@@ -8978,7 +8978,7 @@ impl Composer {
                             .flex()
                             .flex_col()
                             .child(scrim(0.0, 0.55))
-                            .child(scrim(0.55, 0.9)),
+                            .child(scrim(0.55, 0.9).rounded_b(px(11.0))),
                     )
                     .child(
                         div()
@@ -9004,7 +9004,7 @@ impl Composer {
                                     .child(provenance),
                             ),
                     ),
-            );
+            ));
             // `AttachmentRemoveButton size="sm"`: a 14px solid disc at 70%,
             // full opacity while the card or the disc is hovered.
             let remove_opacity = motion::lerp(0.7, 1.0, hover_t);
