@@ -11190,7 +11190,7 @@ impl Shell {
         change_request: Option<zeron_proto::ChangeRequestSummary>,
         // Every harness the chat ran on, current last
         // (`pickers::chat_harness_marks`); empty hides the mark.
-        harnesses: Vec<zeron_proto::HarnessId>,
+        harnesses: Vec<crate::provider_instances::InstanceIcon>,
         // Title of the chat whose agent opened this one (thread tools); the
         // row names it on its metadata line.
         created_by: Option<SharedString>,
@@ -11998,7 +11998,7 @@ impl Shell {
         space_name: SharedString,
         branch: Option<SharedString>,
         change_request: Option<zeron_proto::ChangeRequestSummary>,
-        harnesses: Vec<zeron_proto::HarnessId>,
+        harnesses: Vec<crate::provider_instances::InstanceIcon>,
         created_by: Option<SharedString>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
@@ -12611,13 +12611,14 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (device, config) = {
+        let (device, config, mark) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == id);
             (
                 chat.and_then(|chat| state.device_name(&chat.device_id))
                     .map(str::to_string),
                 chat.and_then(|chat| chat.config.clone()),
+                chat.and_then(|chat| crate::pickers::chat_mark(chat, cx)),
             )
         };
         let model = config.map(|config| {
@@ -12632,7 +12633,7 @@ impl Shell {
                 Some(label) => format!("{} · {label}", config.harness.display_name()),
                 None => config.harness.display_name().to_string(),
             };
-            (config.harness, text)
+            (mark, text)
         });
         let muted = theme.text_muted;
         let body = theme.text.opacity(0.75);
@@ -12683,9 +12684,9 @@ impl Shell {
                     body,
                 ))
             })
-            .when_some(model, |el, (harness, text)| {
+            .when_some(model, |el, (mark, text)| {
                 el.child(line(
-                    crate::pickers::harness_mark_stack(&[harness], 12.0, muted, 1.0)
+                    crate::pickers::harness_mark_stack(mark.as_slice(), 12.0, muted, 1.0)
                         .into_any_element(),
                     text.into(),
                     body,
@@ -12807,7 +12808,7 @@ impl Shell {
         row_id: &str,
         id: &str,
         title: &SharedString,
-        harnesses: &[zeron_proto::HarnessId],
+        harnesses: &[crate::provider_instances::InstanceIcon],
         drag: Option<SidebarSessionDrag>,
         preview: bool,
         search_query_none: bool,
@@ -12879,10 +12880,7 @@ impl Shell {
             .when_some(drag, |el, payload| {
                 let shell = cx.weak_entity();
                 let title = title.clone();
-                let brand = harnesses
-                    .last()
-                    .copied()
-                    .map(crate::pickers::harness_brand_icon);
+                let brand = harnesses.last().cloned();
                 el.on_drag(payload, move |payload, point, window, cx| {
                     shell
                         .update(cx, |shell, cx| {
@@ -12892,7 +12890,7 @@ impl Shell {
                     cx.stop_propagation();
                     let tab = cx.new(|_| tabs::TabGhost {
                         title: title.clone(),
-                        brand,
+                        brand: brand.clone(),
                     });
                     let shell = shell.clone();
                     cx.new(|_| SessionRowGhost { shell, tab })
@@ -17347,6 +17345,7 @@ impl Shell {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             let mut icon_tint = None;
+            let mut instance_icon = None;
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(id) => self
@@ -17363,7 +17362,9 @@ impl Shell {
                 RightSurface::SideChat(id) => {
                     let branded = self.side_chats.get(&id).and_then(|tab| {
                         let state = tab.state.read(cx);
-                        let config = state.selected_chat_row()?.config.as_ref()?;
+                        let chat = state.selected_chat_row()?;
+                        let config = chat.config.as_ref()?;
+                        instance_icon = crate::provider_instances::chat_icon(chat, cx);
                         Some(crate::pickers::agent_brand_icon(
                             Some(config.harness),
                             config.model.as_deref(),
@@ -17568,6 +17569,12 @@ impl Shell {
                             .size(px(14.0))
                             .when(!is_active, |icon| icon.opacity(0.78))
                             .into_any_element()
+                        } else if let Some(instance_icon) = &instance_icon {
+                            let color = theme.text_muted;
+                            instance_icon
+                                .svg(if is_active { color } else { color.opacity(0.7) })
+                                .size(px(12.0))
+                                .into_any_element()
                         } else {
                             let color = icon_tint.unwrap_or(theme.text_muted);
                             icon(icon_path)

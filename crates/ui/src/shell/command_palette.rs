@@ -1276,7 +1276,7 @@ impl Shell {
                 let harness = self
                     .settings
                     .sidebar_show_harness
-                    .then(|| crate::pickers::chat_harness_marks(chat))
+                    .then(|| crate::pickers::chat_marks(chat, cx))
                     .unwrap_or_default();
                 self.render_chat_row(
                     id.clone(),

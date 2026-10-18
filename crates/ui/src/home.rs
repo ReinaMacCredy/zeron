@@ -890,7 +890,7 @@ impl HomeView {
             String,
             String,
             Option<String>,
-            Option<(&'static str, Option<Hsla>)>,
+            Option<crate::provider_instances::InstanceIcon>,
             DateTime<Utc>,
             Option<String>,
         )> = {
@@ -905,10 +905,7 @@ impl HomeView {
                             .next()
                             .map(|task| task.label);
                     let detail = shell.or_else(|| zeron_proto::view::chat_location(chat));
-                    let mark = chat
-                        .config
-                        .as_ref()
-                        .map(|config| crate::pickers::harness_brand_icon(config.harness));
+                    let mark = crate::pickers::chat_mark(chat, cx);
                     let model = chat.config.as_ref().and_then(|config| {
                         let name = config.model.as_deref().map(|id| {
                             pickers
@@ -979,13 +976,8 @@ impl HomeView {
                                         .text_color(theme.text)
                                         .child(title),
                                 )
-                                .when_some(mark, |row, (path, tint)| {
-                                    row.child(
-                                        icon(path)
-                                            .size(px(12.0))
-                                            .flex_none()
-                                            .text_color(tint.unwrap_or(theme.text_muted)),
-                                    )
+                                .when_some(mark, |row, mark| {
+                                    row.child(mark.svg(theme.text_muted).size(px(12.0)).flex_none())
                                 })
                                 .when_some(model, |row, model| {
                                     row.child(

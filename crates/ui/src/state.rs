@@ -3105,6 +3105,7 @@ impl AppState {
                 methods::AUTH_STATUS,
                 AppState::apply_auth_value,
             ),
+            crate::provider_instances::spawn_watch(cx, handle.clone()),
             spawn_local_device_probe(cx, handle.clone()),
             spawn_computer_settings_load(cx, handle.clone()),
             spawn_sidebar_settings_load(cx, handle.clone()),

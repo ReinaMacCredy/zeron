@@ -200,6 +200,7 @@ pub struct HarnessesPage {
     checking_updates: bool,
     instances: Loadable<Vec<ProviderInstance>>,
     instances_task: Option<Task<()>>,
+    _instances_observe: Subscription,
     instance_write_task: Option<Task<()>>,
     instance_accounts: HashMap<String, Entity<AccountsPage>>,
     confirm_delete: Option<String>,
@@ -231,6 +232,15 @@ impl HarnessesPage {
             checking_updates: false,
             instances: Loadable::Idle,
             instances_task: None,
+            _instances_observe: cx.observe_global::<provider_instances::ProviderInstancesChanged>(
+                |page: &mut Self, cx| {
+                    if page.target_device.is_none()
+                        && let Some(instances) = provider_instances::local_instances(cx)
+                    {
+                        page.set_instances(Ok(instances.to_vec()), cx);
+                    }
+                },
+            ),
             instance_write_task: None,
             instance_accounts: HashMap::new(),
             confirm_delete: None,
@@ -298,19 +308,25 @@ impl HarnessesPage {
                 page.wizard = None;
                 page.instance_accounts.remove(&instance.id);
                 page.set_instances(Ok(instances.clone()), cx);
-                provider_instances::bump_provider_instances(cx);
+                page.bump_remote_instances(cx);
                 if *sign_in && let Some(accounts) = page.instance_accounts.get(&instance.id) {
                     accounts.update(cx, |accounts, cx| accounts.sign_in(cx));
                 }
             }
             AddProviderEvent::Created { instances } => {
                 page.set_instances(Ok(instances.clone()), cx);
-                provider_instances::bump_provider_instances(cx);
+                page.bump_remote_instances(cx);
             }
         });
         self.confirm_delete = None;
         self.wizard = Some((wizard, events));
         cx.notify();
+    }
+
+    fn bump_remote_instances(&self, cx: &mut Context<Self>) {
+        if self.target_device.is_some() {
+            provider_instances::bump_provider_instances(cx);
+        }
     }
 
     fn set_instances(
@@ -379,7 +395,7 @@ impl HarnessesPage {
             this.update(cx, |page, cx| match result {
                 Ok(instances) => {
                     page.set_instances(Ok(instances), cx);
-                    provider_instances::bump_provider_instances(cx);
+                    page.bump_remote_instances(cx);
                 }
                 Err(error) => {
                     page.error = Some(error);
@@ -853,13 +869,23 @@ impl HarnessesPage {
                 }
             })
         });
-        let instance_engine = engine.clone();
-        let target = self.target_device.clone().map(serde_json::Value::String);
-        self.instances_task = Some(cx.spawn(async move |this, cx| {
-            let result = provider_instances::list(&instance_engine, target).await;
-            this.update(cx, |page, cx| page.set_instances(result, cx))
-                .ok();
-        }));
+        let local = self
+            .target_device
+            .is_none()
+            .then(|| provider_instances::local_instances(cx).map(<[_]>::to_vec))
+            .flatten();
+        if let Some(instances) = local {
+            self.instances_task = None;
+            self.set_instances(Ok(instances), cx);
+        } else {
+            let instance_engine = engine.clone();
+            let target = self.target_device.clone().map(serde_json::Value::String);
+            self.instances_task = Some(cx.spawn(async move |this, cx| {
+                let result = provider_instances::list(&instance_engine, target).await;
+                this.update(cx, |page, cx| page.set_instances(result, cx))
+                    .ok();
+            }));
+        }
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {

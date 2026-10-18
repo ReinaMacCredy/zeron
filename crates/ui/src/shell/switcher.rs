@@ -445,9 +445,15 @@ impl Shell {
                     .or_else(|| draft.and_then(|d| crate::draft_store::entry_prompt(&d.id, cx)))
                     .map(|p| transcript::single_line(&p).into());
                 let brand = chat
-                    .and_then(|c| c.config.as_ref().map(|c| c.harness))
-                    .map(crate::pickers::harness_brand_icon)
-                    .or_else(|| draft.map(|_| (icons::PEN, Some(theme.warning))));
+                    .and_then(|c| crate::pickers::chat_mark(c, cx))
+                    .or_else(|| {
+                        draft.map(|_| {
+                            crate::provider_instances::InstanceIcon::Brand(
+                                icons::PEN,
+                                Some(theme.warning),
+                            )
+                        })
+                    });
                 let thumb = self.session_thumbs.get(id).cloned();
                 let is_hi = ix == hi;
 
@@ -518,13 +524,8 @@ impl Shell {
                             .flex_row()
                             .items_center()
                             .gap(px(6.0))
-                            .when_some(brand, |el, (path, tint)| {
-                                el.child(
-                                    icon(path)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
-                                )
+                            .when_some(brand, |el, brand| {
+                                el.child(brand.svg(theme.text_muted).size(px(14.0)).flex_none())
                             })
                             .child(
                                 div()

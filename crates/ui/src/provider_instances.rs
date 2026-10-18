@@ -1,24 +1,107 @@
-use gpui::App;
+use gpui::{App, Context, Task};
 use serde_json::{Value, json};
 use zeron_proto::{
-    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, HarnessId,
+    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, Chat, HarnessId,
     InstanceConfig, ProviderInstance, ProviderInstancesSnapshot, validate_instance_id,
 };
 use zeron_rpc::methods;
 
-use crate::state::EngineHandle;
+use crate::state::{AppState, EngineHandle};
 
 pub const ACCENTS: [&str; 7] = [
     "#e5484d", "#f5a524", "#46a758", "#3e9cf0", "#8e4ec6", "#d6409f", "#8b8d98",
 ];
 
 #[derive(Default)]
-pub struct ProviderInstancesChanged;
+pub struct ProviderInstancesChanged {
+    device_id: Option<String>,
+    instances: Vec<ProviderInstance>,
+}
 
 impl gpui::Global for ProviderInstancesChanged {}
 
+// Remote-device writes only; the local list comes from the watch.
 pub fn bump_provider_instances(cx: &mut App) {
     cx.default_global::<ProviderInstancesChanged>();
+}
+
+pub fn local_instances(cx: &App) -> Option<&[ProviderInstance]> {
+    let local = cx.try_global::<ProviderInstancesChanged>()?;
+    local.device_id.as_ref().map(|_| local.instances.as_slice())
+}
+
+// Only an icon file counts, so builtin harnesses keep their model-maker marks.
+pub fn chat_icon(chat: &Chat, cx: &App) -> Option<InstanceIcon> {
+    let id = chat.config.as_ref()?.instance_id.as_deref()?;
+    let local = cx.try_global::<ProviderInstancesChanged>()?;
+    if local.device_id.as_deref() != Some(chat.device_id.as_str()) {
+        return None;
+    }
+    local
+        .instances
+        .iter()
+        .find(|instance| instance.id == id)
+        .map(InstanceIcon::of)
+        .filter(|icon| matches!(icon, InstanceIcon::File(_)))
+}
+
+pub fn spawn_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    let device_id = handle.engine_info().device_id.clone();
+    // Side chat states attach the same engine; only a different one drops the list.
+    if cx
+        .try_global::<ProviderInstancesChanged>()
+        .and_then(|local| local.device_id.as_ref())
+        != Some(&device_id)
+    {
+        cx.set_global(ProviderInstancesChanged::default());
+    }
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        loop {
+            match handle
+                .client()
+                .subscribe(methods::WATCH_PROVIDER_INSTANCES, json!({}))
+                .await
+            {
+                Ok(mut rx) => {
+                    while let Some(value) = rx.recv().await {
+                        let instances = match serde_json::from_value::<ProviderInstancesSnapshot>(
+                            value,
+                        ) {
+                            Ok(snapshot) => snapshot.instances,
+                            Err(err) => {
+                                tracing::warn!(error = %err, "dropping malformed instances frame");
+                                continue;
+                            }
+                        };
+                        let alive = this.update(cx, |_, cx| {
+                            let current = cx.global::<ProviderInstancesChanged>();
+                            if current.device_id.as_ref() == Some(&device_id)
+                                && current.instances == instances
+                            {
+                                return;
+                            }
+                            cx.set_global(ProviderInstancesChanged {
+                                device_id: Some(device_id.clone()),
+                                instances,
+                            });
+                            cx.notify();
+                        });
+                        if alive.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "instances watch unavailable; retrying");
+                }
+            }
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
 }
 
 pub enum ProviderInstanceWrite {
@@ -120,6 +203,7 @@ pub async fn auth_methods(
         .map_err(|err| err.to_string())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstanceIcon {
     Brand(&'static str, Option<gpui::Hsla>),
     File(gpui::SharedString),
@@ -134,7 +218,11 @@ impl InstanceIcon {
         {
             return InstanceIcon::File(path.clone().into());
         }
-        let (mark, tint) = crate::pickers::harness_brand_icon(instance.driver);
+        Self::harness(instance.driver)
+    }
+
+    pub fn harness(harness: HarnessId) -> Self {
+        let (mark, tint) = crate::pickers::harness_brand_icon(harness);
         InstanceIcon::Brand(mark, tint)
     }
 
