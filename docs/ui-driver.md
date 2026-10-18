@@ -420,7 +420,7 @@ is layout that flips in one frame, not a fast ease. Pair it with
 ### (e) Script a realistic session: mock scripts and scenario files
 
 `ZERON_MOCK_SCRIPT=<path>` makes the mock harness play scripted turns instead of its knob
-output (`crates/harness/src/mock.rs`). Titles, commit messages and other one-shot calls ignore
+output (`crates/harness/src/mock/script.rs`). Titles, commit messages and other one-shot calls ignore
 the script.
 
 - A `.json` step list is one turn, played on every run. A turn list
