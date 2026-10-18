@@ -26,6 +26,7 @@ struct ProviderInstancesFile {
 struct ProviderInstancesStoreInner {
     path: PathBuf,
     state: Mutex<ProviderInstancesFile>,
+    changes: tokio::sync::watch::Sender<ProviderInstancesSnapshot>,
 }
 
 #[derive(Clone)]
@@ -46,12 +47,20 @@ impl ProviderInstancesStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => empty_file(),
             Err(err) => return Err(err.into()),
         };
+        let changes = tokio::sync::watch::Sender::new(ProviderInstancesSnapshot {
+            instances: state.instances.clone(),
+        });
         Ok(Self {
             inner: Arc::new(ProviderInstancesStoreInner {
                 path,
                 state: Mutex::new(state),
+                changes,
             }),
         })
+    }
+
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<ProviderInstancesSnapshot> {
+        self.inner.changes.subscribe()
     }
 
     pub fn snapshot(&self) -> ProviderInstancesSnapshot {
@@ -150,9 +159,22 @@ impl ProviderInstancesStore {
         change(&mut next.instances)?;
         persist_json(&self.inner.path, &next)?;
         *state = next;
-        Ok(ProviderInstancesSnapshot {
+        let snapshot = ProviderInstancesSnapshot {
             instances: state.instances.clone(),
-        })
+        };
+        self.inner.changes.send_replace(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    pub(crate) fn launch_config(&self, id: &str) -> Option<InstanceConfig> {
+        let mut config = self.instance(id)?.config;
+        match &mut config {
+            InstanceConfig::Acp { icon_path, .. } => *icon_path = None,
+            InstanceConfig::Native { executable, .. } => {
+                *executable = executable.take().filter(|path| !path.trim().is_empty());
+            }
+        }
+        Some(config)
     }
 }
 
@@ -402,12 +424,24 @@ mod tests {
 
         let reopened = ProviderInstancesStore::open(temp.path()).unwrap();
         assert_eq!(reopened.snapshot(), snapshot);
+        let mut watcher = reopened.watch();
+        assert_eq!(*watcher.borrow_and_update(), snapshot);
         assert_eq!(
             reopened.instance("acp_gemini").unwrap().driver,
             HarnessId::Acp
         );
         assert_eq!(ids(&reopened.delete("codex_work").unwrap()), ["acp_gemini"]);
+        assert!(watcher.has_changed().unwrap());
+        assert_eq!(ids(&watcher.borrow_and_update()), ["acp_gemini"]);
         assert!(reopened.delete("codex_work").is_err());
+        assert!(!watcher.has_changed().unwrap());
+        reopened
+            .upsert(instance("codex_work", HarnessId::Codex))
+            .unwrap();
+        assert_eq!(
+            ids(&watcher.borrow_and_update()),
+            ["acp_gemini", "codex_work"]
+        );
     }
 
     #[test]

@@ -6583,7 +6583,7 @@ fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
 struct ThreadMatch {
     chat_id: String,
     title: String,
-    marks: Vec<HarnessId>,
+    marks: Vec<crate::provider_instances::InstanceIcon>,
     project: String,
 }
 
@@ -6614,6 +6614,7 @@ fn thread_matches<'a>(
     scope: MentionScope<'_>,
     is_draft: impl Fn(&str) -> bool,
     project_of: impl Fn(&zeron_proto::Chat) -> String,
+    marks_of: impl Fn(&zeron_proto::Chat) -> Vec<crate::provider_instances::InstanceIcon>,
 ) -> Vec<ThreadMatch> {
     let query = query.trim().to_lowercase();
     let mut matches: Vec<(bool, String, &zeron_proto::Chat)> = chats
@@ -6637,7 +6638,7 @@ fn thread_matches<'a>(
         .map(|(_, title, chat)| ThreadMatch {
             chat_id: chat.id.clone(),
             title,
-            marks: crate::pickers::chat_harness_marks(chat),
+            marks: marks_of(chat),
             project: project_of(chat),
         })
         .collect()
@@ -9353,6 +9354,7 @@ impl Composer {
                             (None, None) => "~".to_string(),
                             (None, Some(_)) => "?".to_string(),
                         },
+                        |chat| crate::pickers::chat_marks(chat, cx),
                     )
                 }
                 None => Vec::new(),
@@ -19251,6 +19253,7 @@ mod tests {
                 scope(Some("mine")),
                 |id| id == "b2",
                 project_of,
+                |_| Vec::new(),
             )
             .into_iter()
             .map(|m| format!("{} · {}", m.title, m.project))
@@ -19272,11 +19275,17 @@ mod tests {
         assert_eq!(titles("C3"), vec!["New session · ~"]);
         assert!(titles("zzz").is_empty());
         // A project-less composer puts project-less threads first.
-        let ids: Vec<String> =
-            thread_matches(chats.iter(), "", scope(None), |id| id == "b2", project_of)
-                .into_iter()
-                .map(|m| m.chat_id)
-                .collect();
+        let ids: Vec<String> = thread_matches(
+            chats.iter(),
+            "",
+            scope(None),
+            |id| id == "b2",
+            project_of,
+            |_| Vec::new(),
+        )
+        .into_iter()
+        .map(|m| m.chat_id)
+        .collect();
         assert_eq!(ids, vec!["c3", "a1", "f6"]);
     }
 

@@ -1884,32 +1884,44 @@ impl Pickers {
         if self.title.is_some() {
             return;
         }
+        let target = self.space_target(cx);
+        if target.is_none()
+            && let Some(instances) = crate::provider_instances::local_instances(cx)
+        {
+            let instances = instances.to_vec();
+            self.instances_task = None;
+            self.apply_instances(instances, cx);
+            return;
+        }
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let target = self.space_target(cx).map(serde_json::Value::String);
+        let target = target.map(serde_json::Value::String);
         let generation = self.target_generation;
         self.instances_task = Some(cx.spawn(async move |this, cx| {
             let Ok(instances) = crate::provider_instances::list(&engine, target).await else {
                 return;
             };
             this.update(cx, |pickers, cx| {
-                if pickers.target_generation != generation {
-                    return;
+                if pickers.target_generation == generation {
+                    pickers.apply_instances(instances, cx);
                 }
-                let previous = std::mem::take(&mut pickers.instances);
-                pickers.instance_models.retain(|id, _| {
-                    instances
-                        .iter()
-                        .any(|i| &i.id == id && previous.contains(i))
-                });
-                pickers.instances = instances;
-                pickers.catalog_rev += 1;
-                pickers.prefetch_models(false, cx);
-                cx.notify();
             })
             .ok();
         }));
+    }
+
+    fn apply_instances(&mut self, instances: Vec<ProviderInstance>, cx: &mut Context<Self>) {
+        let previous = std::mem::take(&mut self.instances);
+        self.instance_models.retain(|id, _| {
+            instances
+                .iter()
+                .any(|i| &i.id == id && previous.contains(i))
+        });
+        self.instances = instances;
+        self.catalog_rev += 1;
+        self.prefetch_models(false, cx);
+        cx.notify();
     }
 
     fn ensure_instance_models(&mut self, id: &str, force: bool, cx: &mut Context<Self>) {
@@ -8935,16 +8947,19 @@ pub(crate) fn chat_harness_marks(chat: &zeron_proto::Chat) -> Vec<HarnessId> {
 /// several overlapping left to right so the current harness sits on top,
 /// the way a group avatar stacks its members.
 pub(crate) fn harness_mark_stack(
-    marks: &[HarnessId],
+    marks: &[InstanceIcon],
     size: f32,
     fallback: gpui::Hsla,
     opacity: f32,
 ) -> gpui::Div {
     // Explicit width + absolute children: a negative margin shrank the
     // container to one mark and the rest spilled under the title.
-    let mut icons: Vec<_> = marks.iter().map(|h| harness_brand_icon(*h)).collect();
+    let mut icons = marks.to_vec();
     // Agents sharing a brand (Mock wears Claude's mark) would stack two identical marks.
-    icons.dedup_by_key(|(path, _)| *path);
+    icons.dedup_by(|a, b| match (a, b) {
+        (InstanceIcon::Brand(a, _), InstanceIcon::Brand(b, _)) => a == b,
+        (a, b) => a == b,
+    });
     let step = size * 0.65;
     let width = size + step * icons.len().saturating_sub(1) as f32;
     div()
@@ -8952,18 +8967,41 @@ pub(crate) fn harness_mark_stack(
         .relative()
         .w(px(width))
         .h(px(size))
-        .children(icons.into_iter().enumerate().map(|(ix, (path, tint))| {
+        .children(icons.into_iter().enumerate().map(|(ix, mark)| {
             div()
                 .absolute()
                 .top_0()
                 .left(px(step * ix as f32))
                 .size(px(size))
-                .child(
-                    crate::icons::icon(path)
+                .child(match mark {
+                    InstanceIcon::Brand(path, tint) => crate::icons::icon(path)
                         .size(px(size))
                         .text_color(tint.unwrap_or(fallback).opacity(opacity)),
-                )
+                    file => file.svg(fallback.opacity(opacity)).size(px(size)),
+                })
         }))
+}
+
+pub(crate) fn chat_mark(chat: &zeron_proto::Chat, cx: &App) -> Option<InstanceIcon> {
+    let harness = chat.config.as_ref()?.harness;
+    Some(
+        crate::provider_instances::chat_icon(chat, cx)
+            .unwrap_or_else(|| InstanceIcon::harness(harness)),
+    )
+}
+
+pub(crate) fn chat_marks(chat: &zeron_proto::Chat, cx: &App) -> Vec<InstanceIcon> {
+    let mut marks: Vec<InstanceIcon> = chat_harness_marks(chat)
+        .into_iter()
+        .map(InstanceIcon::harness)
+        .collect();
+    if let (Some(current), Some(icon)) = (
+        marks.last_mut(),
+        crate::provider_instances::chat_icon(chat, cx),
+    ) {
+        *current = icon;
+    }
+    marks
 }
 
 /// Model labels for surfaces that hold no picker of their own (the transcript).

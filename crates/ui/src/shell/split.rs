@@ -623,8 +623,7 @@ impl Shell {
                     chat.and_then(|c| c.title.as_deref())
                         .unwrap_or("New session"),
                 )),
-                chat.and_then(|c| c.config.as_ref().map(|c| c.harness))
-                    .map(crate::pickers::harness_brand_icon),
+                chat.and_then(|c| crate::pickers::chat_mark(c, cx)),
             )
         };
         let (focus_id, close_id) = if primary {
@@ -644,13 +643,8 @@ impl Shell {
             .border_color(theme.border)
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text_muted)
-            .when_some(brand, |el, (path, tint)| {
-                el.child(
-                    icon(path)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(tint.unwrap_or(theme.text_muted)),
-                )
+            .when_some(brand, |el, brand| {
+                el.child(brand.svg(theme.text_muted).size(px(14.0)).flex_none())
             })
             .child(div().flex_1().min_w_0().truncate().child(title))
             .child(

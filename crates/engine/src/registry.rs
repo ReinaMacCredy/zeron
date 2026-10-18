@@ -285,15 +285,7 @@ impl HarnessRegistry {
         id: HarnessId,
         lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     ) -> Result<Vec<zeron_proto::Model>, HarnessError> {
-        let harness = self.resolve(id)?;
-        tokio::spawn(async move {
-            // An RPC cancellation must not drop the gate before the probe's
-            // own deadline and child cleanup finish.
-            let _lease = lease;
-            harness.models().await
-        })
-        .await
-        .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
+        models_with_lease(self.resolve(id)?, lease).await
     }
 
     pub async fn discover_commands(
@@ -937,6 +929,20 @@ fn native_instance(driver: HarnessId, launch: LaunchOverrides) -> Result<Arc<dyn
         HarnessId::Cursor => Arc::new(zeron_harness::CursorHarness::new().with_launch(launch)),
         _ => return Err(format!("{name} does not run as a provider instance yet")),
     })
+}
+
+pub(crate) async fn models_with_lease(
+    harness: Arc<dyn Harness>,
+    lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+) -> Result<Vec<zeron_proto::Model>, HarnessError> {
+    tokio::spawn(async move {
+        // An RPC cancellation must not drop the gate before the probe's
+        // own deadline and child cleanup finish.
+        let _lease = lease;
+        harness.models().await
+    })
+    .await
+    .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
 }
 
 /// The production registry: MockHarness (hidden from production pickers) plus a lazy

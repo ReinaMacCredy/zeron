@@ -9393,7 +9393,10 @@ impl Transcript {
                 let auto_continue = from_chat_id
                     .as_deref()
                     .is_some_and(|from| Some(from) == self.chat_id.as_deref());
-                let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> = from_chat_id
+                let peer: Option<(
+                    SharedString,
+                    Option<crate::provider_instances::InstanceIcon>,
+                )> = from_chat_id
                     .as_ref()
                     .filter(|_| !auto_continue)
                     .map(|from| {
@@ -9406,11 +9409,11 @@ impl Transcript {
                             .and_then(|chat| chat.title.clone())
                             .map(|title| SharedString::from(single_line(&title)))
                             .unwrap_or_else(|| from.clone());
-                        let harness = chat.and_then(|chat| chat.config.as_ref().map(|c| c.harness));
-                        (title, harness)
+                        let mark = chat.and_then(|chat| crate::pickers::chat_mark(chat, cx));
+                        (title, mark)
                     });
                 let mut column = div().w_full().flex().flex_col();
-                if let Some((title, harness)) = &peer {
+                if let Some((title, mark)) = &peer {
                     let clock: Option<SharedString> = row
                         .timestamp
                         .and_then(chrono::DateTime::from_timestamp_millis)
@@ -9451,17 +9454,11 @@ impl Transcript {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text.opacity(0.8))
                                     .hover(|s| s.text_color(theme.text))
-                                    .when_some(
-                                        harness.map(crate::pickers::harness_brand_icon),
-                                        |el, (path, tint)| {
-                                            el.child(
-                                                crate::icons::icon(path)
-                                                    .size(px(12.0))
-                                                    .flex_none()
-                                                    .text_color(tint.unwrap_or(theme.text_muted)),
-                                            )
-                                        },
-                                    )
+                                    .when_some(mark.as_ref(), |el, mark| {
+                                        el.child(
+                                            mark.svg(theme.text_muted).size(px(12.0)).flex_none(),
+                                        )
+                                    })
                                     .child(title.clone())
                                     .when_some(open_id, |el, open_id| {
                                         el.on_click(cx.listener(move |_, _, _, cx| {

@@ -18,6 +18,7 @@
 
 use super::terminal_tabs::{is_terminal_tab, keep_terminal_tab};
 use super::*;
+use crate::provider_instances::InstanceIcon;
 use crate::terminal::panel::{drop_index, reorder_tabs, slide_offset};
 use crate::theme::InsetTones;
 use zeron_proto::ChatIndicator;
@@ -49,13 +50,13 @@ pub(crate) struct TabDragPayload {
     from: usize,
     pub(crate) chat_id: String,
     title: SharedString,
-    brand: Option<(&'static str, Option<gpui::Hsla>)>,
+    brand: Option<InstanceIcon>,
 }
 
 /// The floating tab rendered at the cursor while dragging (tab or sidebar row).
 pub(super) struct TabGhost {
     pub(super) title: SharedString,
-    pub(super) brand: Option<(&'static str, Option<gpui::Hsla>)>,
+    pub(super) brand: Option<InstanceIcon>,
 }
 
 impl Render for TabGhost {
@@ -75,13 +76,8 @@ impl Render for TabGhost {
             .text_size(px(12.0))
             .text_color(theme.text)
             .opacity(0.85)
-            .when_some(self.brand, |el, (path, tint)| {
-                el.child(
-                    icon(path)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(tint.unwrap_or(theme.text_muted)),
-                )
+            .when_some(self.brand.as_ref(), |el, brand| {
+                el.child(brand.svg(theme.text_muted).size(px(14.0)).flex_none())
             })
             .child(div().truncate().child(self.title.clone()))
     }
@@ -247,12 +243,7 @@ fn tab_grip(theme: &Theme) -> AnyElement {
 /// carries the split's own close.
 fn split_tab_chip(
     ix: usize,
-    halves: [(
-        String,
-        SharedString,
-        Vec<zeron_proto::HarnessId>,
-        ChatIndicator,
-    ); 2],
+    halves: [(String, SharedString, Vec<InstanceIcon>, ChatIndicator); 2],
     selected: Option<&str>,
     hovered: Option<&str>,
     tones: Option<InsetTones>,
@@ -294,7 +285,7 @@ fn split_tab_chip(
         }
         let is_primary = selected == Some(id.as_str());
         let half_hovered = hovered == Some(id.as_str());
-        let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
+        let brand = harness.last().cloned();
         let trailing = tab_trailing(&id, status, is_primary || half_hovered, theme, cx);
         let select_id = id.clone();
         let middle_id = id.clone();
@@ -360,7 +351,7 @@ fn split_tab_chip(
                     },
                     |payload, _point, _, cx| {
                         let title = payload.title.clone();
-                        let brand = payload.brand;
+                        let brand = payload.brand.clone();
                         cx.stop_propagation();
                         cx.new(|_| TabGhost { title, brand })
                     },
@@ -1199,13 +1190,7 @@ impl Shell {
                 .into_iter()
                 .map(|row| (row.id.clone(), row))
                 .collect();
-        let tabs: Vec<(
-            String,
-            SharedString,
-            Vec<zeron_proto::HarnessId>,
-            ChatIndicator,
-            bool,
-        )> = {
+        let tabs: Vec<(String, SharedString, Vec<InstanceIcon>, ChatIndicator, bool)> = {
             let state = self.state.read(cx);
             let chats: std::collections::HashMap<_, _> = state
                 .chats
@@ -1249,7 +1234,7 @@ impl Shell {
                         SharedString::from(transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )),
-                        crate::pickers::chat_harness_marks(chat),
+                        crate::pickers::chat_marks(chat, cx),
                         if state.send_pending(&chat.id, now) {
                             ChatIndicator::Working
                         } else {
@@ -1290,7 +1275,7 @@ impl Shell {
 
         let tabs_by_id: std::collections::HashMap<
             String,
-            (SharedString, Vec<zeron_proto::HarnessId>, ChatIndicator),
+            (SharedString, Vec<InstanceIcon>, ChatIndicator),
         > = tabs
             .iter()
             .map(|(id, title, harness, status, _)| (id.clone(), (title.clone(), harness.clone(), *status)))
@@ -1337,12 +1322,9 @@ impl Shell {
                         (false, false, _) => (theme.text_muted, crate::theme::wash(0.0)),
                     };
                     let glyph_alpha = 0.9;
-                    let brand = terminal.or_else(|| {
-                        harness
-                            .last()
-                            .copied()
-                            .map(crate::pickers::harness_brand_icon)
-                    });
+                    let brand = terminal
+                        .map(|(path, tint)| InstanceIcon::Brand(path, tint))
+                        .or_else(|| harness.last().cloned());
                     let select_id = id.clone();
                     let middle_id = id.clone();
                     let menu_id = id.clone();
@@ -1415,7 +1397,7 @@ impl Shell {
                             },
                             |payload, _point, _, cx| {
                                 let title = payload.title.clone();
-                                let brand = payload.brand;
+                                let brand = payload.brand.clone();
                                 cx.stop_propagation();
                                 cx.new(|_| TabGhost { title, brand })
                             },

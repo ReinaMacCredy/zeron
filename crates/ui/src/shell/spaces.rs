@@ -6291,7 +6291,7 @@ impl Shell {
                 let harness = self
                     .settings
                     .sidebar_show_harness
-                    .then(|| crate::pickers::chat_harness_marks(&chat))
+                    .then(|| crate::pickers::chat_marks(&chat, cx))
                     .unwrap_or_default();
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -6959,7 +6959,7 @@ impl Shell {
                 let harness = self
                     .settings
                     .sidebar_show_harness
-                    .then(|| crate::pickers::chat_harness_marks(&chat))
+                    .then(|| crate::pickers::chat_marks(&chat, cx))
                     .unwrap_or_default();
                 list = list.child(
                     self.render_chat_row(

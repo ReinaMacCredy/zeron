@@ -16,6 +16,7 @@ use zeron_rpc::methods;
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, MentionTab};
 use crate::home::HomePrs;
 use crate::icons::{self, icon};
+use crate::provider_instances::InstanceIcon;
 use crate::settings::accounts;
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -680,14 +681,11 @@ fn row_text(theme: &Theme, title: String, meta: String) -> gpui::Div {
         )
 }
 
-fn brand_mark(theme: &Theme, harness: Option<HarnessId>, size: f32) -> AnyElement {
-    let (mark, tint) = harness
-        .map(crate::pickers::harness_brand_icon)
-        .unwrap_or((icons::CHAT_ROUND_LINE, None));
-    icon(mark)
+fn brand_mark(theme: &Theme, mark: Option<InstanceIcon>, size: f32) -> AnyElement {
+    mark.unwrap_or(InstanceIcon::Brand(icons::CHAT_ROUND_LINE, None))
+        .svg(theme.text_muted)
         .size(px(size))
         .flex_none()
-        .text_color(tint.unwrap_or(theme.text_muted))
         .into_any_element()
 }
 
@@ -741,7 +739,7 @@ impl InboxPage {
                 .child(row_text(theme, chat_title(chat), meta))
                 .child(div().mt(px(3.0)).child(brand_mark(
                     theme,
-                    chat.config.as_ref().map(|c| c.harness),
+                    crate::pickers::chat_mark(chat, cx),
                     14.0,
                 )))
                 .on_click(
@@ -1178,7 +1176,11 @@ impl InboxPage {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(brand_mark(theme, Some(harness), 18.0))
+                        .child(brand_mark(
+                            theme,
+                            Some(InstanceIcon::harness(harness)),
+                            18.0,
+                        ))
                         .child(
                             div()
                                 .text_size(ui_rems(20.0))

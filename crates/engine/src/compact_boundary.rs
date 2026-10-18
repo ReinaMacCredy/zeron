@@ -149,12 +149,14 @@ pub(crate) async fn classifier_target(
     registry: &HarnessRegistry,
     settings: TitleSettings,
     session: HarnessId,
+    instance: Option<std::sync::Arc<dyn zeron_harness::Harness>>,
 ) -> Option<OneShotTarget> {
     one_shot_target(
         registry,
         settings.harness,
         settings.model,
         session,
+        instance,
         mid_tier_model,
     )
     .await
