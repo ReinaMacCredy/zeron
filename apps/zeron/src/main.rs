@@ -7,6 +7,7 @@
 mod auth_cli;
 mod daemon;
 mod paths;
+mod ui_scenario;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
@@ -328,7 +329,7 @@ fn main() -> anyhow::Result<()> {
                         "usage: zeron ui scenario <file.json> [--target <t>] [--out <dir>]"
                     )
                 })?;
-                match runtime.block_on(zeron_mcp::ui_scenario::run(
+                match runtime.block_on(ui_scenario::run(
                     std::path::Path::new(&file),
                     target.as_deref(),
                     out,

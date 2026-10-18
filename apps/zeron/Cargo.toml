@@ -13,13 +13,16 @@ path = "src/main.rs"
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
 zeron-mcp.workspace = true
+zeron-proto.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -5,11 +5,14 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{UiDriverDescriptor, run_dir};
 
-use crate::ui_driver;
+use zeron_mcp::ui_driver;
+
+mod report;
+
+use report::{file_label, markdown, one_line, short, status_word, summary};
 
 const ASSERT_TIMEOUT_MS: u64 = 3000;
 const ENGINE_TIMEOUT: Duration = Duration::from_secs(30);
-const RESULT_CHARS: usize = 160;
 
 #[derive(Debug, PartialEq)]
 struct Scenario {
@@ -588,9 +591,11 @@ fn lookup(saved: &Map<String, Value>, path: &str) -> Result<Value, String> {
             .map_err(|_| unresolved(format!("environment variable {rest} is not set")));
     }
     let mut value = saved.get(head).ok_or_else(|| {
+        let mut names: Vec<&str> = saved.keys().map(String::as_str).collect();
+        names.sort_unstable();
         unresolved(format!(
             "nothing saved as `{head}`; saved: {}",
-            saved.keys().cloned().collect::<Vec<_>>().join(", ")
+            names.join(", ")
         ))
     })?;
     for segment in rest.split('.').filter(|segment| !segment.is_empty()) {
@@ -689,92 +694,6 @@ fn describe(kind: &Kind) -> String {
         Kind::Snapshot(label) => format!("snapshot {label}"),
         Kind::Sleep(ms) => format!("sleep {ms}"),
     }
-}
-
-fn status_word(status: Status) -> &'static str {
-    match status {
-        Status::Pass => "pass",
-        Status::Fail => "FAIL",
-        Status::Skipped => "skipped",
-    }
-}
-
-fn file_label(label: &str) -> String {
-    label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn short(value: &Value) -> String {
-    let line = one_line(&ui_driver::text(value));
-    match line.char_indices().nth(RESULT_CHARS) {
-        Some((cut, _)) => format!("{}…", &line[..cut]),
-        None => line,
-    }
-}
-
-fn summary(reports: &[StepReport]) -> String {
-    let passed = reports.iter().filter(|r| r.status == Status::Pass).count();
-    let total = reports.len();
-    match reports.iter().find(|r| r.status == Status::Fail) {
-        None => format!("PASS {passed}/{total}"),
-        Some(failed) => format!(
-            "FAIL {passed}/{total}: step {} {}: {}",
-            failed.index,
-            failed.name,
-            one_line(failed.error.as_deref().unwrap_or_default())
-        ),
-    }
-}
-
-fn markdown(name: &str, target: &Value, reports: &[StepReport]) -> String {
-    let cell = |text: &str| one_line(text).replace('|', "\\|");
-    let mut md = format!(
-        "# Scenario {name}\n\n**{}**\n\nTarget: {} (pid {}, engine port {})\n\n| # | Step | Kind | Status | ms | Result or error |\n|---|---|---|---|---|---|\n",
-        summary(reports),
-        target["label"].as_str().unwrap_or_default(),
-        target["pid"],
-        target["ipcPort"],
-    );
-    for report in reports {
-        let detail = match (&report.error, &report.shot, &report.result) {
-            (Some(error), _, _) => cell(error),
-            (None, Some(shot), _) => format!("[{shot}]({shot})"),
-            (None, None, Some(result)) => cell(result),
-            (None, None, None) => String::new(),
-        };
-        let detail = match &report.warning {
-            Some(warning) => format!("warning: {}; {detail}", cell(warning)),
-            None => detail,
-        };
-        md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {detail} |\n",
-            report.index,
-            cell(&report.name),
-            report.kind,
-            status_word(report.status),
-            report.ms,
-        ));
-    }
-    let shots: Vec<&String> = reports.iter().filter_map(|r| r.shot.as_ref()).collect();
-    if !shots.is_empty() {
-        md.push_str("\n## Snapshots\n");
-        for shot in shots {
-            md.push_str(&format!("\n### {shot}\n\n![{shot}]({shot})\n"));
-        }
-    }
-    md
 }
 
 #[cfg(test)]
@@ -1091,70 +1010,16 @@ mod tests {
         for (file, raw) in [
             (
                 "mock-question.json",
-                include_str!("../../../scripts/scenarios/mock-question.json"),
+                include_str!("../../../../scripts/scenarios/mock-question.json"),
             ),
             (
                 "journal-replay.json",
-                include_str!("../../../scripts/scenarios/journal-replay.json"),
+                include_str!("../../../../scripts/scenarios/journal-replay.json"),
             ),
         ] {
             let value: Value = serde_json::from_str(raw).unwrap_or_else(|e| panic!("{file}: {e}"));
             let scenario = parse_scenario(&value).unwrap_or_else(|e| panic!("{file}: {e}"));
             assert!(!scenario.steps.is_empty(), "{file}");
         }
-    }
-
-    #[test]
-    fn the_report_tables_every_step_and_links_each_snapshot() {
-        let report = |index, status, shot: Option<&str>, error: Option<&str>| StepReport {
-            index,
-            kind: "ui",
-            name: format!("step | {index}"),
-            status,
-            ms: 5,
-            result: Some("ok".into()),
-            error: error.map(str::to_owned),
-            warning: None,
-            shot: shot.map(str::to_owned),
-        };
-        let reports = [
-            report(1, Status::Pass, Some("shots/01-before.png"), None),
-            report(2, Status::Fail, None, Some("timed out\nlast seen: x")),
-            report(3, Status::Skipped, None, None),
-        ];
-        let md = markdown(
-            "demo",
-            &json!({ "label": "Zeron Scenario", "pid": 42, "ipcPort": 49880 }),
-            &reports,
-        );
-        assert!(
-            md.starts_with(
-                "# Scenario demo\n\n**FAIL 1/3: step 2 step | 2: timed out last seen: x**"
-            ),
-            "{md}"
-        );
-        assert!(
-            md.contains("Target: Zeron Scenario (pid 42, engine port 49880)"),
-            "{md}"
-        );
-        assert!(
-            md.contains(
-                "| 1 | step \\| 1 | ui | pass | 5 | [shots/01-before.png](shots/01-before.png) |"
-            ),
-            "{md}"
-        );
-        assert!(
-            md.contains("| 2 | step \\| 2 | ui | FAIL | 5 | timed out last seen: x |"),
-            "{md}"
-        );
-        assert!(
-            md.contains("| 3 | step \\| 3 | ui | skipped | 5 | ok |"),
-            "{md}"
-        );
-        assert!(
-            md.contains("![shots/01-before.png](shots/01-before.png)"),
-            "{md}"
-        );
-        assert_eq!(summary(&reports[..1]), "PASS 1/1");
     }
 }

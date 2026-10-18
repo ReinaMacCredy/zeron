@@ -35,7 +35,6 @@ use zeron_proto::{
 use zeron_rpc::{RpcClient, methods};
 
 pub mod ui_driver;
-pub mod ui_scenario;
 mod visual;
 
 /// The MCP revision this server was written against; a client's own value
