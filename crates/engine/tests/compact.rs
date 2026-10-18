@@ -1061,7 +1061,7 @@ async fn a_same_task_agent_note_skips_the_compaction_and_says_why() {
     );
     let input = harness.one_shots.lock().unwrap()[0].clone();
     assert!(
-        input.ends_with("New message (the agent's own note, written when it asked to compact):\nagent note: now run the tests"),
+        input.contains("New message (the agent's own note, written when it asked to compact):\nagent note: now run the tests\n\n"),
         "{input}"
     );
     assert_eq!(

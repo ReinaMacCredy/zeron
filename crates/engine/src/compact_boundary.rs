@@ -40,8 +40,11 @@ Reply with exactly one word: NEW, CARRY or CONTINUE.";
 
 const STAGE2_SUFFIX: &str = "Before answering, check carefully whether CARRY covers the new message. Compaction would keep only the last 2 user/agent pairs above, word for word, plus a summary of everything older (requests, decisions, files touched, pending work). Does the new message, or the work it asks for, need anything else: a detail from an older turn, an option or number given earlier, a command's output, or an operation still in progress? Reason briefly, then end with a final line containing only CARRY or CONTINUE. NEW is not an option here.";
 
+const STAGE2_NOTE_SUFFIX: &str = "Before answering, check carefully whether CARRY covers the new message. Compaction would keep only the last 2 user/agent pairs above, word for word, plus a summary of everything older (requests, decisions, files touched, pending work). Does the note, or the work it asks for, need anything else: a detail from an older turn, an option or number given earlier, or a command's output? Work the agent started that is still running does not count: it keeps running through compaction and reports after it. Reason briefly, then end with a final line containing only CARRY or CONTINUE. NEW is not an option here.";
+
 const PERSON_HEAD: &str = "New message (from the person):";
 const NOTE_HEAD: &str = "New message (the agent's own note, written when it asked to compact):";
+const NOTE_TRAILER: &str = "The agent asked to compact itself, so work it started that is still running (builds, tests, background jobs, sub-agents, delegates) is not a reason for CONTINUE: it keeps running through compaction, its ids are listed next to the carried text, and its results arrive after it.";
 
 const TURNS: usize = 4;
 const CLIP_CHARS: usize = 800;
@@ -96,13 +99,17 @@ pub(crate) fn classifier_input(earlier: &[SessionMessageEntry], message: NewMess
         }
     }
     lines.push(String::new());
-    lines.extend(match message {
-        NewMessage::Person(text) => [PERSON_HEAD.to_string(), format!("user: {}", text.trim())],
-        NewMessage::AgentNote(text) => [
+    match message {
+        NewMessage::Person(text) => {
+            lines.extend([PERSON_HEAD.to_string(), format!("user: {}", text.trim())])
+        }
+        NewMessage::AgentNote(text) => lines.extend([
             NOTE_HEAD.to_string(),
             format!("agent note: {}", text.trim()),
-        ],
-    });
+            String::new(),
+            NOTE_TRAILER.to_string(),
+        ]),
+    }
     lines.join("\n")
 }
 
@@ -141,8 +148,13 @@ fn parse_stage2(reply: &str) -> ClassifierVerdict {
     }
 }
 
-fn stage2_prompt(input: &str) -> String {
-    format!("{input}\n\n{STAGE2_SUFFIX}")
+fn stage2_prompt(input: &str, agent_note: bool) -> String {
+    let suffix = if agent_note {
+        STAGE2_NOTE_SUFFIX
+    } else {
+        STAGE2_SUFFIX
+    };
+    format!("{input}\n\n{suffix}")
 }
 
 pub(crate) async fn classifier_target(
@@ -192,7 +204,11 @@ fn add_usage(record: &mut ClassifierRecord, reply: &crate::titles::OneShotReply)
 }
 
 /// Any failure reads as a follow-up: a missed compaction is retried later.
-pub(crate) async fn classify(target: OneShotTarget, input: String) -> ClassifierRecord {
+pub(crate) async fn classify(
+    target: OneShotTarget,
+    input: String,
+    agent_note: bool,
+) -> ClassifierRecord {
     let started = std::time::Instant::now();
     let mut record = ClassifierRecord {
         harness: Some(target.harness_id),
@@ -213,7 +229,7 @@ pub(crate) async fn classify(target: OneShotTarget, input: String) -> Classifier
     }
     if record.verdict == ClassifierVerdict::Continue {
         record.decided_by = DecidedBy::Stage2;
-        match ask(&target, stage2_prompt(&input), STAGE2_TIMEOUT).await {
+        match ask(&target, stage2_prompt(&input, agent_note), STAGE2_TIMEOUT).await {
             Ok(reply) => {
                 add_usage(&mut record, &reply);
                 record.verdict = parse_stage2(&reply.text);
@@ -466,7 +482,9 @@ mod tests {
         let note = classifier_input(&entries[..1], NewMessage::AgentNote("run phase 2"));
         assert_eq!(
             note,
-            "Recent conversation:\nuser: ask 0\n\nNew message (the agent's own note, written when it asked to compact):\nagent note: run phase 2"
+            format!(
+                "Recent conversation:\nuser: ask 0\n\nNew message (the agent's own note, written when it asked to compact):\nagent note: run phase 2\n\n{NOTE_TRAILER}"
+            )
         );
     }
 
@@ -485,8 +503,12 @@ mod tests {
         assert_eq!(parse_stage2("no verdict here"), Continue);
         assert_eq!(parse_stage2(""), Continue);
         assert_eq!(
-            stage2_prompt("Recent conversation:"),
+            stage2_prompt("Recent conversation:", false),
             format!("Recent conversation:\n\n{STAGE2_SUFFIX}")
+        );
+        assert_eq!(
+            stage2_prompt("Recent conversation:", true),
+            format!("Recent conversation:\n\n{STAGE2_NOTE_SUFFIX}")
         );
     }
 

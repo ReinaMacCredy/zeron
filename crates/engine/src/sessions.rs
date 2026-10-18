@@ -2070,7 +2070,7 @@ impl SessionsEngine {
             }
         } else {
             let Some(record) = self
-                .run_classifier(chat_id, harness_id, settings.classifier, input)
+                .run_classifier(chat_id, harness_id, settings.classifier, input, false)
                 .await
             else {
                 return false;
@@ -2150,6 +2150,7 @@ impl SessionsEngine {
         harness_id: HarnessId,
         classifier: crate::registry::TitleSettings,
         input: String,
+        agent_note: bool,
     ) -> Option<zeron_doc::ClassifierRecord> {
         let target = crate::compact_boundary::classifier_target(
             &self.inner.registry,
@@ -2165,7 +2166,7 @@ impl SessionsEngine {
                 model: target.model.clone(),
             }),
         );
-        let record = crate::compact_boundary::classify(target, input).await;
+        let record = crate::compact_boundary::classify(target, input, agent_note).await;
         self.inner.set_classifying(chat_id, None);
         Some(record)
     }
@@ -2417,7 +2418,7 @@ impl SessionsEngine {
             }
         } else {
             match self
-                .run_classifier(chat_id, harness_id, settings.classifier, input)
+                .run_classifier(chat_id, harness_id, settings.classifier, input, true)
                 .await
             {
                 Some(mut record) => {
