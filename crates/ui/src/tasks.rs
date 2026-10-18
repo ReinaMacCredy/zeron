@@ -131,7 +131,7 @@ struct Row {
 
 impl Row {
     fn orchestrated(&self) -> bool {
-        self.task.mode == TaskMode::Orchestrated
+        has_lead(&self.task)
     }
 
     fn marks(&self) -> Vec<Brand> {
@@ -1033,6 +1033,11 @@ impl TasksPage {
             )
             .into_any_element()
     }
+}
+
+/// A failed orchestrated start keeps the mode but drops the link, so the card starts it again.
+pub(crate) fn has_lead(task: &zeron_proto::Task) -> bool {
+    task.mode == TaskMode::Orchestrated && task.chat_id.is_some()
 }
 
 pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {

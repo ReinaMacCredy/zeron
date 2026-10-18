@@ -862,7 +862,7 @@ impl InboxPage {
                         })
                     }));
                 let open_id = task.id.clone();
-                let orchestrated = task.mode == zeron_proto::TaskMode::Orchestrated;
+                let orchestrated = crate::tasks::has_lead(task);
                 let is_selected = selected.as_deref() == Some(task.id.as_str());
                 div()
                     .id(SharedString::from(format!("inbox-task-{}", task.id)))
