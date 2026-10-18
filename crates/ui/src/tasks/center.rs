@@ -75,7 +75,7 @@ struct Thread {
 enum StepState {
     Working(Option<DateTime<Utc>>),
     Asked,
-    Failed(Option<String>),
+    Failed(&'static str, Option<String>),
     NeedsYou,
     Done,
     Planned,
@@ -273,7 +273,12 @@ impl TaskCenter {
                 } else if row.indicator == Some(ChatIndicator::Errored)
                     || delegation.is_some_and(|(status, _)| retryable(*status))
                 {
-                    StepState::Failed(delegation.and_then(|(_, summary)| summary.clone()))
+                    let label = match delegation.map(|(status, _)| *status) {
+                        Some(DelegationStatus::Cancelled) => "Stopped",
+                        Some(DelegationStatus::Interrupted) => "Interrupted",
+                        _ => "Failed",
+                    };
+                    StepState::Failed(label, delegation.and_then(|(_, summary)| summary.clone()))
                 } else {
                     StepState::NeedsYou
                 }
@@ -679,14 +684,16 @@ impl TaskCenter {
                     .text_color(tint.unwrap_or(theme.text_muted))
                     .into_any_element(),
             );
-            parts.push(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(thread.title.clone())
-                    .into_any_element(),
-            );
-            parts.push(div().child("·").into_any_element());
+            if thread.title != crate::transcript::single_line(&row.step.title) {
+                parts.push(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(thread.title.clone())
+                        .into_any_element(),
+                );
+                parts.push(div().flex_none().child("·").into_any_element());
+            }
         }
         let (_, _, working) = column_tone(TaskStatus::Working, theme);
         let (_, _, asked) = column_tone(TaskStatus::NeedsYou, theme);
@@ -707,15 +714,16 @@ impl TaskCenter {
                     )
                 })),
             StepState::Asked => div().text_color(asked).child("Asked you a question"),
-            StepState::Failed(summary) => div()
+            StepState::Failed(label, summary) => div()
+                .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_color(theme.warning)
                 .child(match summary {
                     Some(summary) => {
-                        format!("Failed · {}", crate::transcript::single_line(&summary))
+                        format!("{label} · {}", crate::transcript::single_line(&summary))
                     }
-                    None => "Failed".into(),
+                    None => label.into(),
                 }),
             StepState::NeedsYou => div().text_color(theme.warning).child("Needs you"),
             StepState::Done => div().text_color(complete).child("Done"),
@@ -730,6 +738,7 @@ impl TaskCenter {
         theme: &Theme,
         id: String,
         label: &'static str,
+        step: usize,
         group: SharedString,
     ) -> gpui::Stateful<gpui::Div> {
         let selector = id.clone();
@@ -737,6 +746,7 @@ impl TaskCenter {
             .id(SharedString::from(id))
             .debug_selector(move || selector.clone())
             .role(gpui::Role::Button)
+            .aria_label(format!("{label} step {step}"))
             .flex_none()
             .px(px(8.0))
             .py(px(2.0))
@@ -815,6 +825,7 @@ impl TaskCenter {
                     theme,
                     format!("task-center-rename-{step_id}"),
                     "Rename",
+                    index + 1,
                     group.clone(),
                 )
                 .on_click(cx.listener(move |center, _: &ClickEvent, window, cx| {
@@ -831,6 +842,7 @@ impl TaskCenter {
                     theme,
                     format!("task-center-remove-{step_id}"),
                     "Remove",
+                    index + 1,
                     group.clone(),
                 )
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
@@ -847,6 +859,7 @@ impl TaskCenter {
                     theme,
                     format!("task-center-skip-{step_id}"),
                     "Skip",
+                    index + 1,
                     group.clone(),
                 )
                 .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
@@ -863,6 +876,7 @@ impl TaskCenter {
                     theme,
                     format!("task-center-reopen-{step_id}"),
                     "Reopen",
+                    index + 1,
                     group.clone(),
                 )
                 .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
@@ -879,6 +893,7 @@ impl TaskCenter {
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
                 .role(gpui::Role::Button)
+                .aria_label(format!("Retry step {}", index + 1))
                 .flex_none()
                 .min_h(px(24.0))
                 .rounded_full()
@@ -902,6 +917,7 @@ impl TaskCenter {
             .debug_selector(move || format!("task-center-step-{step_id}"))
             .group(group)
             .role(gpui::Role::ListItem)
+            .aria_label(format!("Step {}: {}", index + 1, row.step.title))
             .aria_selected(selected)
             .relative()
             .flex()
@@ -1165,8 +1181,8 @@ impl Render for TaskCenter {
             return self.render_missing(&theme, cx);
         };
         let threads = self.threads(&plan, cx);
-        let (fill, filling) =
-            self.fill_at(plan.progress, motion::reduced_motion(cx), Instant::now());
+        let reduced = motion::reduced_motion(cx);
+        let (fill, filling) = self.fill_at(plan.progress, reduced, Instant::now());
         if filling {
             window.request_animation_frame();
         }
@@ -1187,6 +1203,9 @@ impl Render for TaskCenter {
                     &theme,
                     cx,
                 );
+                if reduced {
+                    return step;
+                }
                 div()
                     .relative()
                     .child(step)

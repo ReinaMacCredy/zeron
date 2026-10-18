@@ -60,7 +60,7 @@ An orchestrated task opens its center page instead of the card, from the list, t
 The header shows the task's status, **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
 
 - The lead, with its model and what it is doing: **Planning**, **Watching** its running steps, **Waiting on you**, or **Done**.
-- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Failed**, **Done**, or **Skipped**.
+- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**.
 
 Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
 
@@ -72,7 +72,7 @@ While the lead writes the plan, the page reads **The lead is planning**. Then **
 
 Steps that do not depend on each other run at the same time, each on its own thread under the lead. Like other [delegated tasks](zeron://docs/delegation), these threads stay out of the sidebar, and **Delegated tasks per chat** in Settings > General caps how many run at once.
 
-A step turns **Done** when its thread finishes, and the lead checks each result. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's thread failed or was stopped, **Retry** asks the lead to look at what happened and run the step again.
+A step turns **Done** when its thread finishes, and the lead checks each result. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's thread failed, was stopped, or was interrupted, **Retry** asks the lead to look at what happened and run the step again.
 
 When every step is done, the lead checks the whole result, tells you what was built, and marks the task done.
 
