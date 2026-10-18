@@ -2,6 +2,9 @@ use super::*;
 use crate::tasks::{LiveThread, TaskCenter, TaskCenterEvent};
 use zeron_proto::TaskPatch;
 
+const TASKS_VIEW_SEGMENT: f32 = 72.0;
+const TASKS_VIEW_THUMB: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_DRAWER);
+
 pub(super) struct TaskCenterPane {
     chat_id: String,
     transcript: Entity<Transcript>,
@@ -519,18 +522,64 @@ impl Shell {
     pub(super) fn render_tasks_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let view = settings::current(cx).tasks_view;
-        let toggle = crate::settings::widgets::segmented(
-            &theme,
-            "tasks-view-toggle",
-            &[
-                (settings::TasksView::List, "List"),
-                (settings::TasksView::Kanban, "Kanban"),
-            ],
-            view,
-            |view, _, cx| {
-                settings::update(settings::SavePolicy::Debounced, cx, |s| s.tasks_view = view);
-            },
+        let thumb = motion::state_t(
+            "tasks-view-thumb",
+            view == settings::TasksView::Kanban,
+            TASKS_VIEW_THUMB,
+            self.reduced_motion,
         );
+        let text = theme.text;
+        let toggle = div()
+            .id("tasks-view-toggle")
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .rounded(px(9.0))
+            .p(px(2.0))
+            .bg(crate::theme::ink(0.04))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .bottom(px(2.0))
+                    .left(px(2.0 + TASKS_VIEW_SEGMENT * thumb))
+                    .w(px(TASKS_VIEW_SEGMENT))
+                    .rounded(px(7.0))
+                    .bg(theme.bg)
+                    .border_1()
+                    .border_color(theme.border.opacity(0.8)),
+            )
+            .children(
+                [
+                    (settings::TasksView::List, "List"),
+                    (settings::TasksView::Kanban, "Kanban"),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (value, label))| {
+                    let chosen = value == view;
+                    div()
+                        .id(("tasks-view-toggle", ix))
+                        .w(px(TASKS_VIEW_SEGMENT))
+                        .py(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(if chosen { theme.text } else { theme.text_muted })
+                        .when(!chosen, |el| {
+                            el.cursor_pointer()
+                                .hover(move |s| s.text_color(text))
+                                .on_click(move |_, _, cx| {
+                                    settings::update(settings::SavePolicy::Debounced, cx, |s| {
+                                        s.tasks_view = value
+                                    });
+                                })
+                        })
+                        .child(label)
+                }),
+            );
         let inner = div()
             .size_full()
             .flex()
