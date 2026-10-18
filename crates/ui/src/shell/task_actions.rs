@@ -91,6 +91,7 @@ impl Shell {
     }
 
     /// Saves the card's unsaved edits first, so the agent's first turn carries them.
+    #[allow(clippy::too_many_arguments)]
     fn start_task(
         &mut self,
         card: &Entity<crate::tasks::TaskCard>,
@@ -99,6 +100,7 @@ impl Shell {
         space_id: Option<String>,
         harness: Option<HarnessId>,
         model: Option<String>,
+        orchestrate: Option<crate::tasks::Orchestrate>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.task_engine(cx) else {
@@ -117,6 +119,9 @@ impl Shell {
         let start = serde_json::json!({
             "op": "startTask", "taskId": task_id, "chatId": chat_id,
             "spaceId": space_id, "harness": harness, "model": model,
+            "orchestrate": orchestrate.is_some(),
+            "approvePlan": orchestrate.is_none_or(|o| o.approve_plan),
+            "sameAgents": orchestrate.is_some_and(|o| o.same_agents),
         });
         let (card, task_id) = (card.clone(), task_id.to_string());
         cx.spawn(async move |this, cx| {
@@ -136,6 +141,16 @@ impl Shell {
                     .ok();
                     return;
                 }
+            }
+            if orchestrate.is_some() {
+                this.update(cx, |shell, cx| {
+                    if card.read(cx).task_id() == Some(task_id.as_str()) {
+                        card.update(cx, |card, cx| card.close(cx));
+                    }
+                    shell.open_task_center(task_id.clone(), cx);
+                })
+                .ok();
+                return;
             }
             for _ in 0..100 {
                 let opened = this
@@ -262,6 +277,7 @@ impl Shell {
                 space_id,
                 harness,
                 model,
+                orchestrate,
             } => self.start_task(
                 card,
                 task_id,
@@ -269,6 +285,7 @@ impl Shell {
                 space_id.clone(),
                 *harness,
                 model.clone(),
+                *orchestrate,
                 cx,
             ),
             TaskCardEvent::CreateSpace {

@@ -35,6 +35,7 @@ pub enum TaskCardEvent {
         space_id: Option<String>,
         harness: Option<HarnessId>,
         model: Option<String>,
+        orchestrate: Option<Orchestrate>,
     },
     CreateSpace {
         space_id: String,
@@ -49,6 +50,12 @@ pub enum TaskCardEvent {
     },
     OpenChat(String),
     Refused(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Orchestrate {
+    pub approve_plan: bool,
+    pub same_agents: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,6 +80,7 @@ struct Open {
     assign: Entity<ComposerInput>,
     assign_pick: Option<(String, String)>,
     assign_send: bool,
+    orchestrate: Option<Orchestrate>,
     _subscriptions: [Subscription; 3],
 }
 
@@ -236,6 +244,7 @@ impl TaskCard {
             assign: assign_input,
             assign_pick: None,
             assign_send: true,
+            orchestrate: None,
             _subscriptions: subscriptions,
         });
         cx.notify();
@@ -387,12 +396,14 @@ impl TaskCard {
             .and_then(|open| open.run_in.clone())
             .flatten();
         let (harness, model) = self.agent.read(cx).task_harness_model();
+        let orchestrate = self.open.as_ref().and_then(|open| open.orchestrate);
         cx.emit(TaskCardEvent::Start {
             task_id,
             patch,
             space_id,
             harness,
             model,
+            orchestrate,
         });
         cx.notify();
     }
@@ -543,6 +554,13 @@ impl TaskCard {
         if let Some(open) = self.open.as_mut() {
             open.run_in = Some(Some(space_id));
             open.folder = Some(path);
+        }
+        cx.notify();
+    }
+
+    fn set_orchestrate(&mut self, orchestrate: Option<Orchestrate>, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            open.orchestrate = orchestrate;
         }
         cx.notify();
     }
@@ -715,9 +733,10 @@ impl TaskCard {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let assign = self.render_assign(theme, cx);
         let open = self.open.as_ref();
-        let picked = open.is_some_and(|open| open.assign_pick.is_some());
+        let orchestrate = open.and_then(|open| open.orchestrate);
+        let assign = orchestrate.is_none().then(|| self.render_assign(theme, cx));
+        let picked = orchestrate.is_none() && open.is_some_and(|open| open.assign_pick.is_some());
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
         let spaces: Vec<(String, String)> = state
@@ -807,9 +826,13 @@ impl TaskCard {
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.pick_folder(cx)));
 
         let starting = self.is_starting(task_id);
+        let (start_id, start_label) = match orchestrate {
+            Some(_) => ("task-card-orchestrate", "Orchestrate"),
+            None => ("task-card-start", "Start"),
+        };
         let start = widgets::action_button(theme, widgets::ActionTone::Solid)
-            .id("task-card-start")
-            .debug_selector(|| "task-card-start".into())
+            .id(start_id)
+            .debug_selector(move || start_id.into())
             .role(gpui::Role::Button)
             .track_focus(&self.start_focus)
             .tab_index(0)
@@ -817,7 +840,7 @@ impl TaskCard {
             .min_h(px(30.0))
             .px(px(14.0))
             .when(row.is_none() || starting, |el| el.opacity(0.5))
-            .child(if starting { "Starting…" } else { "Start" })
+            .child(if starting { "Starting…" } else { start_label })
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.start(cx)));
         let assign_button = widgets::action_button(theme, widgets::ActionTone::Solid)
             .id("task-card-assign-button")
@@ -846,30 +869,125 @@ impl TaskCard {
             })
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.toggle_more(cx)));
 
+        let weak = cx.entity().downgrade();
+        let mode = widgets::segmented(
+            theme,
+            "task-card-hand-off-mode",
+            &[(false, "One agent"), (true, "Orchestrate")],
+            orchestrate.is_some(),
+            move |orchestrated, _, cx| {
+                weak.update(cx, |card, cx| {
+                    let pick = orchestrated.then_some(Orchestrate {
+                        approve_plan: true,
+                        same_agents: false,
+                    });
+                    card.set_orchestrate(pick, cx)
+                })
+                .ok();
+            },
+        )
+        .debug_selector(|| "task-card-hand-off-mode".into());
+        let agents = div()
+            .ml(px(-6.0))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.0))
+            .child(div().min_w_0().child(self.agent.clone()))
+            .child(run_select)
+            .child(folder_button);
+        let label = |text: &'static str| {
+            div()
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let pane = match orchestrate {
+            None => agents,
+            Some(choice) => {
+                let weak = cx.entity().downgrade();
+                let step_agents = widgets::segmented(
+                    theme,
+                    "task-card-step-agents",
+                    &[(false, "Lead picks per step"), (true, "Same as the lead")],
+                    choice.same_agents,
+                    move |same_agents, _, cx| {
+                        weak.update(cx, |card, cx| {
+                            card.set_orchestrate(
+                                Some(Orchestrate {
+                                    same_agents,
+                                    ..choice
+                                }),
+                                cx,
+                            )
+                        })
+                        .ok();
+                    },
+                )
+                .debug_selector(|| "task-card-step-agents".into());
+                let on = choice.approve_plan;
+                let approve = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .text_size(ui_rems(12.5))
+                    .text_color(theme.text)
+                    .child("Show me the plan before it runs")
+                    .child(
+                        widgets::toggle_switch(theme, on, "task-card-approve-plan")
+                            .id("task-card-approve-plan")
+                            .debug_selector(|| "task-card-approve-plan".into())
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .role(gpui::Role::Switch)
+                            .aria_label("Show me the plan before it runs")
+                            .aria_toggled(if on {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            })
+                            .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
+                                card.set_orchestrate(
+                                    Some(Orchestrate {
+                                        approve_plan: !on,
+                                        ..choice
+                                    }),
+                                    cx,
+                                )
+                            })),
+                    );
+                div()
+                    .debug_selector(|| "task-card-orchestrate-pane".into())
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                "A lead agent plans the work into steps, runs each step on its \
+                                 own thread, checks the results and reports back here.",
+                            ),
+                    )
+                    .child(label("Lead"))
+                    .child(agents)
+                    .child(label("Step agents"))
+                    .child(div().flex().child(step_agents))
+                    .child(approve)
+            }
+        };
         div()
             .id("task-card-hand-off")
             .debug_selector(|| "task-card-hand-off".into())
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(ui_rems(12.5))
-                    .text_color(theme.text_muted)
-                    .child("Hand it to an agent"),
-            )
-            .child(
-                div()
-                    .ml(px(-6.0))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(div().min_w_0().child(self.agent.clone()))
-                    .child(run_select)
-                    .child(folder_button),
-            )
-            .child(assign)
+            .child(label("Hand it to an agent"))
+            .child(div().flex().child(mode))
+            .child(pane)
+            .children(assign)
             .child(
                 div()
                     .pt(px(2.0))
@@ -1272,11 +1390,9 @@ impl TaskCard {
                 let modifiers = &event.keystroke.modifiers;
                 if event.keystroke.key == "enter" && (modifiers.platform || modifiers.control) {
                     cx.stop_propagation();
-                    if card
-                        .open
-                        .as_ref()
-                        .is_some_and(|open| open.assign_pick.is_some())
-                    {
+                    if card.open.as_ref().is_some_and(|open| {
+                        open.orchestrate.is_none() && open.assign_pick.is_some()
+                    }) {
                         card.assign(cx);
                     } else {
                         card.start(cx);
@@ -1494,6 +1610,57 @@ mod tests {
             cx.run_until_parked();
         }
         assert_eq!(*events.borrow(), ["retry s1", "approve orch"]);
+    }
+
+    #[gpui::test]
+    fn orchestrate_starts_the_task_with_the_chosen_options(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let starts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = starts.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| {
+                if let TaskCardEvent::Start { orchestrate, .. } = event {
+                    sink.borrow_mut().push(*orchestrate);
+                }
+            })
+            .detach();
+        });
+        card.update(cx, |card, cx| {
+            card.open("plain".into(), None, CardFocus::Title, None, cx)
+        });
+        cx.run_until_parked();
+        let right_half = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            gpui::point(
+                bounds.origin.x + bounds.size.width * 0.75,
+                bounds.center().y,
+            )
+        };
+        assert!(cx.debug_bounds("task-card-assign").is_some());
+        let at = right_half(cx, "task-card-hand-off-mode");
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-card-assign").is_none());
+        assert!(cx.debug_bounds("task-card-start").is_none());
+        let at = cx.debug_bounds("task-card-approve-plan").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let at = right_half(cx, "task-card-step-agents");
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let at = cx.debug_bounds("task-card-orchestrate").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            *starts.borrow(),
+            [Some(Orchestrate {
+                approve_plan: false,
+                same_agents: true,
+            })]
+        );
     }
 
     #[gpui::test]

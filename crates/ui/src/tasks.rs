@@ -21,7 +21,7 @@ mod card;
 mod center;
 mod logic;
 
-pub use card::{CardFocus, TaskCard, TaskCardEvent};
+pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
 
