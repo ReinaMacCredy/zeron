@@ -41,6 +41,12 @@ pub enum TaskCardEvent {
         device_id: String,
         path: String,
     },
+    Assign {
+        task_id: String,
+        patch: Option<TaskPatch>,
+        chat_id: String,
+        send: bool,
+    },
     OpenChat(String),
     Refused(String),
 }
@@ -64,7 +70,10 @@ struct Open {
     run_in: Option<Option<String>>,
     folder: Option<String>,
     more: bool,
-    _subscriptions: [Subscription; 2],
+    assign: Entity<ComposerInput>,
+    assign_pick: Option<(String, String)>,
+    assign_send: bool,
+    _subscriptions: [Subscription; 3],
 }
 
 struct Fields {
@@ -167,9 +176,42 @@ impl TaskCard {
             ComposerInputEvent::Submitted => card.flush(cx),
             _ => {}
         };
+        let assign_input = cx.new(|cx| {
+            ComposerInput::new("@ a thread", cx)
+                .with_single_line()
+                .with_max_chars(200)
+        });
         let subscriptions = [
             cx.subscribe(&title_input, edits),
             cx.subscribe(&notes_input, edits),
+            cx.subscribe(&assign_input, |card: &mut Self, input, event, cx| {
+                match event {
+                    ComposerInputEvent::Edited => {
+                        let text = input.read(cx).text().to_string();
+                        if let Some(open) = card.open.as_mut()
+                            && open
+                                .assign_pick
+                                .as_ref()
+                                .is_some_and(|(_, title)| text != format!("@{title}"))
+                        {
+                            open.assign_pick = None;
+                        }
+                    }
+                    ComposerInputEvent::Submitted => {
+                        if card
+                            .open
+                            .as_ref()
+                            .is_some_and(|open| open.assign_pick.is_some())
+                        {
+                            card.assign(cx);
+                        } else if let Some(first) = card.assign_matches(cx).into_iter().next() {
+                            card.pick_thread(first.chat_id, first.title, cx);
+                        }
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            }),
         ];
         if let Some(window) = window {
             let target = match focus {
@@ -191,6 +233,9 @@ impl TaskCard {
             run_in: None,
             folder: None,
             more: false,
+            assign: assign_input,
+            assign_pick: None,
+            assign_send: true,
             _subscriptions: subscriptions,
         });
         cx.notify();
@@ -348,6 +393,78 @@ impl TaskCard {
             space_id,
             harness,
             model,
+        });
+        cx.notify();
+    }
+
+    fn assign_matches(&self, cx: &Context<Self>) -> Vec<crate::composer::ThreadMatch> {
+        let Some(open) = self.open.as_ref() else {
+            return Vec::new();
+        };
+        let text = open.assign.read(cx).text().trim();
+        if text.is_empty() || open.assign_pick.is_some() {
+            return Vec::new();
+        }
+        let query = text.strip_prefix('@').unwrap_or(text);
+        let state = self.state.read(cx);
+        let Some(device) = state.local_device_id.as_deref() else {
+            return Vec::new();
+        };
+        let space = state
+            .tasks
+            .iter()
+            .find(|task| task.id == open.task_id)
+            .and_then(|task| task.space_id.as_deref());
+        crate::composer::thread_matches(
+            state.visible_chats(),
+            query,
+            crate::composer::MentionScope {
+                device_id: device,
+                space_id: space,
+                exclude: None,
+            },
+            |id| state.is_draft(id),
+            |chat| {
+                state
+                    .space_for_chat(chat)
+                    .map(|space| space.display_name().to_string())
+                    .unwrap_or_default()
+            },
+            |_| Vec::new(),
+        )
+    }
+
+    fn pick_thread(&mut self, chat_id: String, title: String, cx: &mut Context<Self>) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let label = format!("@{title}");
+        open.assign_pick = Some((chat_id, title));
+        open.assign
+            .update(cx, |input, cx| input.set_text(label, cx));
+        cx.notify();
+    }
+
+    fn assign(&mut self, cx: &mut Context<Self>) {
+        let Some((task_id, (chat_id, _), send)) = self.open.as_ref().and_then(|open| {
+            Some((
+                open.task_id.clone(),
+                open.assign_pick.clone()?,
+                open.assign_send,
+            ))
+        }) else {
+            return;
+        };
+        let patch = self.take_patch(cx).map(|(_, patch)| patch);
+        if let Some(open) = self.open.as_mut() {
+            open.assign_pick = None;
+            open.assign.update(cx, |input, cx| input.set_text("", cx));
+        }
+        cx.emit(TaskCardEvent::Assign {
+            task_id,
+            patch,
+            chat_id,
+            send,
         });
         cx.notify();
     }
@@ -598,7 +715,9 @@ impl TaskCard {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let assign = self.render_assign(theme, cx);
         let open = self.open.as_ref();
+        let picked = open.is_some_and(|open| open.assign_pick.is_some());
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
         let spaces: Vec<(String, String)> = state
@@ -700,6 +819,16 @@ impl TaskCard {
             .when(row.is_none() || starting, |el| el.opacity(0.5))
             .child(if starting { "Starting…" } else { "Start" })
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.start(cx)));
+        let assign_button = widgets::action_button(theme, widgets::ActionTone::Solid)
+            .id("task-card-assign-button")
+            .debug_selector(|| "task-card-assign-button".into())
+            .role(gpui::Role::Button)
+            .tab_index(0)
+            .rounded_full()
+            .min_h(px(30.0))
+            .px(px(14.0))
+            .child("Assign")
+            .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.assign(cx)));
         let more_open = open.is_some_and(|open| open.more);
         let more = div()
             .id("task-card-more-options")
@@ -740,6 +869,7 @@ impl TaskCard {
                     .child(run_select)
                     .child(folder_button),
             )
+            .child(assign)
             .child(
                 div()
                     .pt(px(2.0))
@@ -747,8 +877,130 @@ impl TaskCard {
                     .items_center()
                     .justify_between()
                     .child(more)
-                    .child(start),
+                    .map(|el| {
+                        if picked {
+                            el.child(assign_button)
+                        } else {
+                            el.child(start)
+                        }
+                    }),
             )
+            .into_any_element()
+    }
+
+    fn render_assign(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(open) = self.open.as_ref() else {
+            return div().into_any_element();
+        };
+        let picked = open.assign_pick.is_some();
+        let send = open.assign_send;
+        let matches = self.assign_matches(cx);
+        let state = self.state.read(cx);
+        let now = Utc::now();
+        let rows: Vec<AnyElement> = matches
+            .into_iter()
+            .enumerate()
+            .map(|(ix, found)| {
+                let chat = state.chats.iter().find(|chat| chat.id == found.chat_id);
+                let (mark, tint) = crate::pickers::agent_brand_icon(
+                    chat.and_then(|chat| chat.config.as_ref().map(|config| config.harness)),
+                    chat.and_then(|chat| chat.config.as_ref()?.model.as_deref()),
+                );
+                let (label, _, tone) = chat
+                    .map(|chat| {
+                        crate::shell::chat_status_tone(state.display_status_for(chat, now), theme)
+                    })
+                    .unwrap_or((None, "", theme.text_muted));
+                let (chat_id, title) = (found.chat_id.clone(), found.title.clone());
+                div()
+                    .id(("task-card-assign-match", ix))
+                    .debug_selector(move || format!("task-card-assign-match-{ix}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(found.title.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .when(ix == 0, |el| el.bg(theme.wash(0.06)))
+                    .hover(|s| s.bg(theme.glass_hover()))
+                    .child(
+                        icon(mark)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(found.title))
+                    .when(!found.project.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(90.0))
+                                .truncate()
+                                .text_color(theme.text_muted)
+                                .child(found.project),
+                        )
+                    })
+                    .children(label.map(|label| div().flex_none().text_color(tone).child(label)))
+                    .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
+                        card.pick_thread(chat_id.clone(), title.clone(), cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let weak = cx.entity().downgrade();
+        let mode = widgets::segmented(
+            theme,
+            "task-card-assign-mode",
+            &[(true, "Send the task"), (false, "Link only")],
+            send,
+            move |send, _, cx| {
+                weak.update(cx, |card, cx| {
+                    if let Some(open) = card.open.as_mut() {
+                        open.assign_send = send;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            },
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .text_size(ui_rems(12.5))
+            .child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child("or assign to a thread"),
+            )
+            .child(
+                div()
+                    .id("task-card-assign")
+                    .debug_selector(|| "task-card-assign".into())
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(10.0))
+                    .bg(theme.wash(0.06))
+                    .child(open.assign.clone()),
+            )
+            .when(!rows.is_empty(), |el| {
+                el.child(
+                    div()
+                        .id("task-card-assign-matches")
+                        .debug_selector(|| "task-card-assign-matches".into())
+                        .p(px(4.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .flex()
+                        .flex_col()
+                        .children(rows),
+                )
+            })
+            .when(picked, |el| el.child(mode))
             .into_any_element()
     }
 
@@ -780,7 +1032,11 @@ impl TaskCard {
             .cursor_pointer()
             .text_color(theme.text_muted)
             .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-            .child(icon(icons::LUCIDE_X).size(px(14.0)))
+            .child(
+                icon(icons::LUCIDE_X)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.close(cx)));
         let header = div()
             .flex()
@@ -827,6 +1083,14 @@ impl TaskCard {
                     }))
             })
         };
+        let unassign_task = task_id.clone();
+        let linked_title = linked_chat_id
+            .as_deref()
+            .and_then(|id| self.state.read(cx).chats.iter().find(|chat| chat.id == id))
+            .map(|chat| {
+                crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+            })
+            .unwrap_or_default();
         let body = if done {
             None
         } else if linked_chat_id.is_some() {
@@ -852,6 +1116,14 @@ impl TaskCard {
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text)
+                                .child(linked_title.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
                                 .text_color(tone)
                                 .child(super::TasksPage::linked_label(linked.indicator)),
                         )
@@ -870,6 +1142,21 @@ impl TaskCard {
                         ),
                 )
             });
+            let unassign = widgets::text_action(theme, widgets::ActionTone::Quiet, "Unassign")
+                .id("task-card-unassign")
+                .debug_selector(|| "task-card-unassign".into())
+                .role(gpui::Role::Button)
+                .rounded_full()
+                .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
+                    card.update(
+                        &unassign_task,
+                        TaskPatch {
+                            chat_id: Some(None),
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                }));
             Some(
                 div()
                     .flex()
@@ -880,6 +1167,8 @@ impl TaskCard {
                         div()
                             .flex()
                             .justify_end()
+                            .gap(px(6.0))
+                            .child(unassign)
                             .children(open_chat("Open thread", cx)),
                     )
                     .into_any_element(),
@@ -955,7 +1244,15 @@ impl TaskCard {
                 let modifiers = &event.keystroke.modifiers;
                 if event.keystroke.key == "enter" && (modifiers.platform || modifiers.control) {
                     cx.stop_propagation();
-                    card.start(cx);
+                    if card
+                        .open
+                        .as_ref()
+                        .is_some_and(|open| open.assign_pick.is_some())
+                    {
+                        card.assign(cx);
+                    } else {
+                        card.start(cx);
+                    }
                 }
             }))
             .child(
@@ -1045,5 +1342,64 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-card-hand-off").is_none());
         assert!(cx.debug_bounds("task-card-toggle-done").is_some());
+    }
+
+    #[gpui::test]
+    fn typing_a_thread_name_picks_it_and_assign_sends_the_task(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let chat = |id: &str, title: &str, device: &str| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": title, "deviceId": device, "archived": false,
+                "createdAt": "2026-10-18T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.local_device_id = Some("mac".into());
+            state.tasks = vec![task("plain", false)];
+            state.chats = vec![
+                chat("fix", "Fix login bug", "mac"),
+                chat("far", "Fix login on the PC", "pc"),
+                chat("docs", "Write docs", "mac"),
+            ];
+        });
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| {
+                if let TaskCardEvent::Assign { chat_id, send, .. } = event {
+                    sink.borrow_mut().push((chat_id.clone(), *send));
+                }
+            })
+            .detach();
+        });
+        card.update(cx, |card, cx| {
+            card.open("plain".into(), None, CardFocus::Title, None, cx);
+            let input = card.open.as_ref().unwrap().assign.clone();
+            input.update(cx, |input, cx| input.set_text("@fix log", cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-card-assign-match-0").is_some());
+        assert!(cx.debug_bounds("task-card-assign-match-1").is_none());
+        assert!(cx.debug_bounds("task-card-assign-button").is_none());
+        let at = cx
+            .debug_bounds("task-card-assign-match-0")
+            .unwrap()
+            .center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-card-assign-matches").is_none());
+        assert!(cx.debug_bounds("task-card-start").is_none());
+        let at = cx.debug_bounds("task-card-assign-button").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec![("fix".to_string(), true)]);
     }
 }

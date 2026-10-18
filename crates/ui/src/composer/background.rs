@@ -1603,7 +1603,11 @@ impl Composer {
                 .text_color(theme.text_muted)
                 .hover(|s| s.text_color(theme.text))
                 .child("Jump to latest")
-                .child(icon(icons::ALT_ARROW_DOWN).size(px(10.0)))
+                .child(
+                    icon(icons::ALT_ARROW_DOWN)
+                        .size(px(10.0))
+                        .text_color(theme.text_muted),
+                )
                 .on_click(cx.listener(move |_, _, _, cx| {
                     scroll.scroll_to_bottom();
                     cx.notify();
@@ -1875,7 +1879,11 @@ fn stop_button(id: String, theme: &Theme) -> Stateful<Div> {
         .text_color(theme.text_faint)
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.danger))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(icon(icons::STOP).size(px(10.0)))
+        .child(
+            icon(icons::STOP)
+                .size(px(10.0))
+                .text_color(theme.text_faint),
+        )
 }
 
 fn glyph(key: impl Into<SharedString>, state: RunState, fade: f32, theme: &Theme) -> AnyElement {

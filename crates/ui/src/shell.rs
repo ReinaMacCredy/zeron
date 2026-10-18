@@ -14599,7 +14599,7 @@ impl Shell {
                         this.device_accounts
                             .update(cx, |accounts, cx| accounts.load(cx))
                     }))
-                    .child(icon(icons::REFRESH).size(px(10.0)))
+                    .child(icon(icons::REFRESH).size(px(10.0)).text_color(theme.text_muted.opacity(0.6)))
                     .child(SharedString::from(if refreshing {
                         "Refreshing…"
                     } else {

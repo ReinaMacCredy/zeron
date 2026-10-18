@@ -1109,7 +1109,11 @@ impl Composer {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(icons::QUEUE_PAPERCLIP).size(px(14.0)))
+                .child(
+                    icon(icons::QUEUE_PAPERCLIP)
+                        .size(px(14.0))
+                        .text_color(Theme::of(cx).text_muted),
+                )
                 .into_any_element(),
         }
     }
