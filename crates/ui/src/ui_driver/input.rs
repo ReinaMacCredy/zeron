@@ -437,15 +437,19 @@ pub(super) async fn press(
 ) -> Result<Value, String> {
     let action = ax_action(perform.as_deref().unwrap_or("click"))?;
     let mut driver = Driver::open(window, cx)?;
-    let (node, _) = tree::find(driver.window, &element, cx).await?;
+    let (node, viewport) = tree::find(driver.window, &element, cx).await?;
     let name = tree::lower_camel(&format!("{action:?}"));
-    // gpui answers an unlistened Click with a synthetic mouse click at the node's center.
-    if action != AxAction::Click && !node.supports(&name) {
-        return Err(format!(
-            "{} does not support `{name}`; it lists [{}]",
-            tree::line(&node),
-            node.actions.join(",")
-        ));
+    if !node.supports(&name) {
+        if action == AxAction::Click {
+            // gpui answers an unlistened Click with a synthetic mouse click at the node's center.
+            center(&node, viewport)?;
+        } else {
+            return Err(format!(
+                "{} does not support `{name}`; it lists [{}]",
+                tree::line(&node),
+                node.actions.join(",")
+            ));
+        }
     }
     let data = match (action, value) {
         (AxAction::SetValue, Some(value)) => Some(ActionData::Value(value.into())),
