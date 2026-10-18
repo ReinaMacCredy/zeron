@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const OBSERVE_ACTIONS: &[&str] = &[
     "state", "tree", "snapshot", "wait", "audit", "frames", "track",
@@ -47,10 +47,19 @@ pub fn run_dir() -> PathBuf {
     home.join(".zeron").join("run")
 }
 
-pub fn socket_path(pid: u32) -> PathBuf {
-    run_dir().join(format!("ui-{pid}.sock"))
+pub fn socket_path(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!("ui-{pid}.sock"))
 }
 
-pub fn descriptor_path(pid: u32) -> PathBuf {
-    run_dir().join(format!("ui-{pid}.json"))
+pub fn descriptor_path(dir: &Path, pid: u32) -> PathBuf {
+    dir.join(format!("ui-{pid}.json"))
+}
+
+pub fn descriptor_pid(path: &Path) -> Option<u32> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("ui-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()
 }

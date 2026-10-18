@@ -18,9 +18,9 @@ struct Job {
 
 pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
     super::epoch();
-    let pid = std::process::id();
-    let (socket, descriptor) = (socket_path(pid), descriptor_path(pid));
-    let listener = match listen(&run_dir(), &socket, &descriptor, data_dir, ipc_port) {
+    let (dir, pid) = (run_dir(), std::process::id());
+    let (socket, descriptor) = (socket_path(&dir, pid), descriptor_path(&dir, pid));
+    let listener = match listen(&dir, pid, data_dir, ipc_port) {
         Ok(listener) => listener,
         Err(error) => {
             tracing::warn!(%error, socket = %socket.display(), "ui driver disabled");
@@ -58,32 +58,27 @@ pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
         async {}
     })
     .detach();
-    tracing::info!(socket = %socket_path(pid).display(), "ui driver listening");
+    tracing::info!(socket = %socket_path(&dir, pid).display(), "ui driver listening");
 }
 
-fn listen(
-    dir: &Path,
-    socket: &Path,
-    descriptor: &Path,
-    data_dir: PathBuf,
-    ipc_port: u16,
-) -> std::io::Result<UnixListener> {
+fn listen(dir: &Path, pid: u32, data_dir: PathBuf, ipc_port: u16) -> std::io::Result<UnixListener> {
+    let (socket, descriptor) = (socket_path(dir, pid), descriptor_path(dir, pid));
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    match fs::remove_file(socket) {
+    match fs::remove_file(&socket) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    let listener = UnixListener::bind(socket)?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    let listener = UnixListener::bind(&socket)?;
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let bundle_path = std::env::current_exe().ok().and_then(|exe| {
         exe.ancestors()
             .find(|dir| dir.extension().is_some_and(|ext| ext == "app"))
             .map(Path::to_path_buf)
     });
     let record = UiDriverDescriptor {
-        pid: std::process::id(),
-        socket: socket.to_path_buf(),
+        pid,
+        socket,
         label: crate::window_title(),
         bundle_path,
         data_dir,
@@ -99,7 +94,7 @@ fn listen(
     };
     let tmp = descriptor.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
-    fs::rename(&tmp, descriptor)?;
+    fs::rename(&tmp, &descriptor)?;
     Ok(listener)
 }
 
@@ -154,7 +149,7 @@ mod tests {
         drop(UnixListener::bind(&socket).unwrap());
         assert!(UnixStream::connect(&socket).is_err());
 
-        let _listener = listen(&dir, &socket, &descriptor, "/data".into(), 49880).unwrap();
+        let _listener = listen(&dir, 1, "/data".into(), 49880).unwrap();
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&socket), 0o600);
@@ -162,7 +157,7 @@ mod tests {
         UnixStream::connect(&socket).unwrap();
         let record: UiDriverDescriptor =
             serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
-        assert_eq!(record.pid, std::process::id());
+        assert_eq!(record.pid, 1);
         assert_eq!(record.socket, socket);
         assert_eq!(record.ipc_port, 49880);
         assert_eq!(record.data_dir, Path::new("/data"));

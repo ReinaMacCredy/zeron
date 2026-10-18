@@ -6,7 +6,7 @@ use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{
     DRAG_STEPS, DRIVE_ACTIONS, MAX_WAIT_MS, OBSERVE_ACTIONS, STEP_CAP_MS, UiDriverBuild,
-    UiDriverDescriptor, run_dir,
+    UiDriverDescriptor, descriptor_pid, run_dir, socket_path,
 };
 
 pub const TOOL: &str = "ui_driver";
@@ -252,19 +252,14 @@ fn list_in(dir: &Path) -> Vec<UiDriverDescriptor> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            path.file_name()?
-                .to_str()?
-                .strip_prefix("ui-")?
-                .strip_suffix(".json")?
-                .parse::<u32>()
-                .ok()?;
+            let pid = descriptor_pid(&path)?;
             let app: UiDriverDescriptor =
                 serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
             if alive(&app) {
                 return Some(app);
             }
             let _ = std::fs::remove_file(&path);
-            let _ = std::fs::remove_file(path.with_extension("sock"));
+            let _ = std::fs::remove_file(socket_path(dir, pid));
             None
         })
         .collect();
@@ -466,6 +461,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
+    use zeron_proto::ui_driver::descriptor_path;
 
     fn app(
         pid: u32,
@@ -722,7 +718,7 @@ mod tests {
     async fn list_prunes_dead_apps_and_the_drive_tool_never_reaches_the_callers_own_app() {
         let dir = tempfile::tempdir().unwrap();
         let write = |app: &UiDriverDescriptor| {
-            let path = dir.path().join(format!("ui-{}.json", app.pid));
+            let path = descriptor_path(dir.path(), app.pid);
             std::fs::write(path, serde_json::to_vec(app).unwrap()).unwrap();
         };
         let mut own = app(
@@ -732,10 +728,10 @@ mod tests {
             27654,
             2,
         );
-        own.socket = dir.path().join(format!("ui-{}.sock", own.pid));
+        own.socket = socket_path(dir.path(), own.pid);
         write(&own);
         let mut dead = app(1, "Zeron Dev 3", UiDriverBuild::Debug, 49872, 1);
-        dead.socket = dir.path().join("ui-1.sock");
+        dead.socket = socket_path(dir.path(), 1);
         drop(std::os::unix::net::UnixListener::bind(&dead.socket).unwrap());
         write(&dead);
         let server = answering(
@@ -748,7 +744,7 @@ mod tests {
 
         let live: Vec<u32> = list_in(dir.path()).iter().map(|app| app.pid).collect();
         assert_eq!(live, [own.pid]);
-        assert!(!dead.socket.exists() && !dir.path().join("ui-1.json").exists());
+        assert!(!dead.socket.exists() && !descriptor_path(dir.path(), 1).exists());
 
         let click = json!({ "action": "click", "x": 1, "y": 2 });
         let mut aimed = click.clone();
