@@ -1,6 +1,6 @@
 use super::selector::Element;
 use super::tree::{self, Bounds};
-use super::{Drive, epoch, frame_count, target_window};
+use super::{Drive, Windowed, epoch, frame_count, target_window};
 use gpui::{AnyWindowHandle, AsyncApp};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -121,7 +121,7 @@ impl Drop for DrawTimes {
 pub(super) struct Frames {
     #[serde(default = "frames_ms")]
     ms: u64,
-    during: Option<Drive>,
+    during: Option<Windowed<Drive>>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -133,7 +133,7 @@ pub(super) struct Track {
     ms: u64,
     #[serde(default = "jump_px")]
     jump_px: f64,
-    during: Option<Drive>,
+    during: Option<Windowed<Drive>>,
 }
 
 fn frames_ms() -> u64 {
@@ -150,9 +150,13 @@ fn jump_px() -> f64 {
 
 type During = Option<gpui::Task<Result<Value, String>>>;
 
-fn start_during(window: Option<u64>, during: Option<Drive>, cx: &mut AsyncApp) -> During {
-    let drive = during?;
-    Some(cx.spawn(async move |cx| super::drive(window, drive, cx).await))
+fn start_during(window: Option<u64>, during: Option<Windowed<Drive>>, cx: &mut AsyncApp) -> During {
+    let Windowed {
+        window: own,
+        action,
+    } = during?;
+    let window = own.or(window);
+    Some(cx.spawn(async move |cx| super::drive(window, action, cx).await))
 }
 
 async fn finish_during(during: During, reply: &mut Value) -> Result<(), String> {

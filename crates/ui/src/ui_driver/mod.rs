@@ -98,7 +98,7 @@ enum Action {
     Drive(Drive),
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 struct Windowed<A> {
     #[serde(default)]
     window: Option<u64>,
@@ -754,6 +754,13 @@ mod tests {
                 "action": "track", "ref": "e3", "during": { "action": "key", "keys": "cmd-k" },
             }));
             assert!(ok.is_ok(), "{ok:?}");
+            let windowed = observed(json!({
+                "action": "frames", "window": 7, "during": { "action": "key", "keys": "escape", "window": 5 },
+            }));
+            assert!(
+                format!("{windowed:?}").contains("window: Some(5)"),
+                "{windowed:?}"
+            );
         }
         let null = parse(json!({ "action": "frames", "during": null }));
         assert!(null.is_ok(), "{null:?}");
