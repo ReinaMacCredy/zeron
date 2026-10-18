@@ -6,7 +6,7 @@ use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{
     DRAG_STEPS, DRIVE_ACTIONS, MAX_WAIT_MS, OBSERVE_ACTIONS, STEP_CAP_MS, UiDriverBuild,
-    UiDriverDescriptor, run_dir, socket_path,
+    UiDriverDescriptor, run_dir,
 };
 
 pub const TOOL: &str = "ui_driver";
@@ -192,6 +192,15 @@ pub fn text(value: &Value) -> String {
 }
 
 pub async fn run(args: &Value, own_port: Option<u16>, tool: Option<Tool>) -> Result<Value, String> {
+    run_in(&run_dir(), args, own_port, tool).await
+}
+
+async fn run_in(
+    dir: &Path,
+    args: &Value,
+    own_port: Option<u16>,
+    tool: Option<Tool>,
+) -> Result<Value, String> {
     let mut args = match args {
         Value::Object(args) => args.clone(),
         Value::Null => Map::new(),
@@ -212,7 +221,7 @@ pub async fn run(args: &Value, own_port: Option<u16>, tool: Option<Tool>) -> Res
     if let Some(tool) = tool {
         tool.admits(&action, &args)?;
     }
-    let live = list();
+    let live = list_in(dir);
     if action == "list" {
         return serde_json::to_value(live).map_err(|error| error.to_string());
     }
@@ -230,26 +239,30 @@ pub async fn run(args: &Value, own_port: Option<u16>, tool: Option<Tool>) -> Res
 }
 
 pub fn list() -> Vec<UiDriverDescriptor> {
-    let Ok(entries) = std::fs::read_dir(run_dir()) else {
+    list_in(&run_dir())
+}
+
+fn list_in(dir: &Path) -> Vec<UiDriverDescriptor> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut live: Vec<UiDriverDescriptor> = entries
         .flatten()
         .filter_map(|entry| {
-            let name = entry.file_name();
-            let pid: u32 = name
+            let path = entry.path();
+            path.file_name()?
                 .to_str()?
                 .strip_prefix("ui-")?
                 .strip_suffix(".json")?
-                .parse()
+                .parse::<u32>()
                 .ok()?;
             let app: UiDriverDescriptor =
-                serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+                serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
             if alive(&app) {
                 return Some(app);
             }
-            let _ = std::fs::remove_file(entry.path());
-            let _ = std::fs::remove_file(socket_path(pid));
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("sock"));
             None
         })
         .collect();
@@ -617,6 +630,130 @@ mod tests {
             unreachable!()
         };
         assert_eq!(Tool::Observe.admits("track", &null), Ok(()));
+    }
+
+    #[cfg(unix)]
+    fn answering(
+        socket: &Path,
+        replies: &'static [&'static str],
+    ) -> tokio::task::JoinHandle<Vec<Value>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            let mut requests = Vec::new();
+            while requests.len() < replies.len() {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(reader).read_line(&mut line).await.unwrap() == 0 {
+                    continue;
+                }
+                let reply = replies[requests.len()];
+                requests.push(serde_json::from_str::<Value>(&line).unwrap());
+                if !reply.is_empty() {
+                    let reply = format!("{reply}\n");
+                    writer.write_all(reply.as_bytes()).await.unwrap();
+                }
+            }
+            requests
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_turns_each_reply_into_its_value_or_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = app(1, "Zeron Dev", UiDriverBuild::Debug, 49871, 1);
+        target.socket = dir.path().join("ui-1.sock");
+        let server = answering(
+            &target.socket,
+            &[
+                r#"{"id":1,"ok":{"frame":3}}"#,
+                r#"{"id":2,"error":"no window"}"#,
+                r#"{"id":3,"error":{"code":1}}"#,
+                r#"{"id":4}"#,
+                "",
+                "not json",
+            ],
+        );
+        let mut replies = Vec::new();
+        for _ in 0..6 {
+            let state = Map::from_iter([("action".into(), json!("state"))]);
+            replies.push(request(&target, state).await);
+        }
+        assert_eq!(replies[0], Ok(json!({ "frame": 3 })));
+        assert_eq!(replies[1], Err("no window".into()));
+        assert_eq!(replies[2], Err(r#"{"code":1}"#.into()));
+        let error = |i: usize| replies[i].clone().unwrap_err();
+        assert!(
+            error(3).starts_with("reply has neither ok nor error"),
+            "{}",
+            error(3)
+        );
+        assert!(error(4).ends_with("closed without a reply"), "{}", error(4));
+        assert!(error(5).starts_with("reply is not JSON"), "{}", error(5));
+        let requests = server.await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["action"] == "state" && request["id"].is_u64()),
+            "{requests:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_prunes_dead_apps_and_the_drive_tool_never_reaches_the_callers_own_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |app: &UiDriverDescriptor| {
+            let path = dir.path().join(format!("ui-{}.json", app.pid));
+            std::fs::write(path, serde_json::to_vec(app).unwrap()).unwrap();
+        };
+        let mut own = app(
+            std::process::id(),
+            "Zeron Dev 7",
+            UiDriverBuild::Debug,
+            27654,
+            2,
+        );
+        own.socket = dir.path().join(format!("ui-{}.sock", own.pid));
+        write(&own);
+        let mut dead = app(1, "Zeron Dev 3", UiDriverBuild::Debug, 49872, 1);
+        dead.socket = dir.path().join("ui-1.sock");
+        drop(std::os::unix::net::UnixListener::bind(&dead.socket).unwrap());
+        write(&dead);
+        let server = answering(
+            &own.socket,
+            &[
+                r#"{"id":0,"ok":"drawn"}"#,
+                r#"{"id":0,"ok":{"windows":[]}}"#,
+            ],
+        );
+
+        let live: Vec<u32> = list_in(dir.path()).iter().map(|app| app.pid).collect();
+        assert_eq!(live, [own.pid]);
+        assert!(!dead.socket.exists() && !dir.path().join("ui-1.json").exists());
+
+        let click = json!({ "action": "click", "x": 1, "y": 2 });
+        let mut aimed = click.clone();
+        aimed["target"] = json!(own.pid);
+        for request in [&click, &aimed] {
+            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Drive))
+                .await
+                .unwrap_err();
+            assert!(
+                error.starts_with("ui_driver_drive does not drive Zeron Dev 7"),
+                "{error}"
+            );
+        }
+        let other_chat = run_in(dir.path(), &aimed, Some(49880), Some(Tool::Drive)).await;
+        assert_eq!(other_chat, Ok(json!("drawn")));
+        let state = json!({ "action": "state" });
+        let observed = run_in(dir.path(), &state, Some(27654), Some(Tool::Observe)).await;
+        assert_eq!(observed, Ok(json!({ "windows": [] })));
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0]["action"], "click");
+        assert_eq!(requests[1]["action"], "state");
     }
 
     #[test]

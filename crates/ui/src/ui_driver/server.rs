@@ -20,7 +20,7 @@ pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
     super::epoch();
     let pid = std::process::id();
     let (socket, descriptor) = (socket_path(pid), descriptor_path(pid));
-    let listener = match listen(&socket, &descriptor, data_dir, ipc_port) {
+    let listener = match listen(&run_dir(), &socket, &descriptor, data_dir, ipc_port) {
         Ok(listener) => listener,
         Err(error) => {
             tracing::warn!(%error, socket = %socket.display(), "ui driver disabled");
@@ -62,14 +62,14 @@ pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
 }
 
 fn listen(
+    dir: &Path,
     socket: &Path,
     descriptor: &Path,
     data_dir: PathBuf,
     ipc_port: u16,
 ) -> std::io::Result<UnixListener> {
-    let dir = run_dir();
-    fs::create_dir_all(&dir)?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     match fs::remove_file(socket) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
@@ -136,5 +136,61 @@ fn serve(stream: UnixStream, jobs: UnboundedSender<Job>) {
         if writeln!(writer, "{reply}").is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::FileTypeExt;
+
+    #[test]
+    fn listen_locks_the_run_dir_replaces_a_stale_socket_and_renames_the_descriptor_in() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("run");
+        let (socket, descriptor) = (dir.join("ui-1.sock"), dir.join("ui-1.json"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        drop(UnixListener::bind(&socket).unwrap());
+        assert!(UnixStream::connect(&socket).is_err());
+
+        let _listener = listen(&dir, &socket, &descriptor, "/data".into(), 49880).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&socket), 0o600);
+        assert!(fs::metadata(&socket).unwrap().file_type().is_socket());
+        UnixStream::connect(&socket).unwrap();
+        let record: UiDriverDescriptor =
+            serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(record.pid, std::process::id());
+        assert_eq!(record.socket, socket);
+        assert_eq!(record.ipc_port, 49880);
+        assert_eq!(record.data_dir, Path::new("/data"));
+        assert!(!descriptor.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn serve_answers_line_by_line_and_flags_a_line_that_is_not_json() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (jobs, mut queue) = unbounded::<Job>();
+        let served = std::thread::spawn(move || serve(server, jobs));
+        let mut writer = client.try_clone().unwrap();
+        let mut lines = BufReader::new(client).lines();
+        let mut reply =
+            || -> Value { serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap() };
+
+        writeln!(writer, "not json\n\n{{\"id\":7,\"action\":\"state\"}}").unwrap();
+        let first = reply();
+        assert_eq!(first["id"], Value::Null);
+        let error = first["error"].as_str().unwrap();
+        assert!(error.starts_with("request is not JSON"), "{error}");
+        let job = futures::executor::block_on(queue.next()).unwrap();
+        assert_eq!(job.request, json!({ "id": 7, "action": "state" }));
+        job.reply.send(json!({ "id": 7, "ok": "drawn" })).unwrap();
+        assert_eq!(reply(), json!({ "id": 7, "ok": "drawn" }));
+
+        drop(queue);
+        writeln!(writer, "{{\"id\":8,\"action\":\"state\"}}").unwrap();
+        served.join().unwrap();
     }
 }

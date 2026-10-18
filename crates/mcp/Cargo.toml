@@ -19,6 +19,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+tempfile.workspace = true
 zeron-doc.workspace = true
 zeron-visual.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
