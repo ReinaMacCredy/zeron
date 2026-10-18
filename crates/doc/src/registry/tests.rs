@@ -2613,18 +2613,18 @@ fn task_steps_sync_in_order_and_follow_their_task_out() {
         outcome: Some(Some(zeron_proto::StepOutcome::Done)),
         ..Default::default()
     };
-    assert!(b.update_task_step("s3", &to_front, ts(3_000)).unwrap());
-    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
-    assert_eq!(step_ids(&a, "t1"), ["s3", "s1", "s2"]);
-    let moved = a.task_step("s3").unwrap();
+    assert!(a.update_task_step("s3", &to_front, ts(3_000)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(step_ids(&b, "t1"), ["s3", "s1", "s2"]);
+    let moved = b.task_step("s3").unwrap();
     assert_eq!(moved.chat_id.as_deref(), Some("child-3"));
     assert_eq!(moved.outcome, Some(zeron_proto::StepOutcome::Done));
     let reopen = zeron_proto::TaskStepPatch {
         outcome: Some(None),
         ..Default::default()
     };
-    b.update_task_step("s3", &reopen, ts(3_001)).unwrap();
-    assert_eq!(b.task_step("s3").unwrap().outcome, None);
+    a.update_task_step("s3", &reopen, ts(3_001)).unwrap();
+    assert_eq!(a.task_step("s3").unwrap().outcome, None);
 
     assert!(a.delete_task_step("s2", ts(4_000)).unwrap());
     assert!(a.task_step("s2").is_none());
