@@ -1361,16 +1361,28 @@ mod tests {
         .unwrap()
     }
 
+    fn orchestrated(plan_pending: bool) -> zeron_proto::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+            "mode": "orchestrated", "planPending": plan_pending,
+        }))
+        .unwrap()
+    }
+
+    fn init(cx: &mut gpui::TestAppContext) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        dir
+    }
+
     #[test]
     fn an_orchestrated_task_rolls_its_steps_into_its_status() {
         let mut state = AppState::new();
-        state.tasks = vec![
-            serde_json::from_value(serde_json::json!({
-                "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
-                "mode": "orchestrated",
-            }))
-            .unwrap(),
-        ];
+        state.tasks = vec![orchestrated(false)];
         state.chats = vec![chat("lead", None), chat("child", Some("running"))];
         state.task_steps = vec![
             step("s1", "1", None, Some("done")),
@@ -1391,6 +1403,97 @@ mod tests {
         let plan = super::super::rollup(&state, &state.tasks[0], now);
         assert_eq!(plan.status, TaskStatus::NeedsYou);
         assert_eq!(super::super::needs_you_count(&state), 1);
+    }
+
+    #[gpui::test]
+    fn an_orchestrated_row_opens_the_center_instead_of_the_card(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![orchestrated(false), task("plain", false)];
+            state.chats = vec![chat("lead", None)];
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| super::super::TasksPage::new(state, cx));
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = opened.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &super::super::TasksEvent, _| {
+                if let super::super::TasksEvent::OpenCenter(id) = event {
+                    sink.borrow_mut().push(id.clone());
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-ring-orch").is_some());
+        let at = cx.debug_bounds("task-row-orch").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*opened.borrow(), ["orch"]);
+        assert!(!page.read_with(cx, |page, cx| page.card().read(cx).is_open()));
+        let at = cx.debug_bounds("task-row-plain").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*opened.borrow(), ["orch"]);
+        let open = page.read_with(cx, |page, cx| {
+            page.card().read(cx).task_id().map(str::to_owned)
+        });
+        assert_eq!(open.as_deref(), Some("plain"));
+    }
+
+    #[gpui::test]
+    fn the_center_shows_the_selected_steps_thread_or_else_the_lead(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![orchestrated(true)];
+            state.chats = vec![chat("lead", None), chat("child", Some("failed"))];
+            state.task_steps = vec![
+                step("s1", "1", Some("child"), None),
+                step("s2", "2", None, None),
+            ];
+        });
+        let (center, cx) =
+            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(
+                &center,
+                move |_, event: &super::super::TaskCenterEvent, _| {
+                    use super::super::TaskCenterEvent::*;
+                    match event {
+                        ApprovePlan(id) => sink.borrow_mut().push(format!("approve {id}")),
+                        RetryStep(id) => sink.borrow_mut().push(format!("retry {id}")),
+                        _ => {}
+                    }
+                },
+            )
+            .detach();
+        });
+        cx.run_until_parked();
+        let target = |cx: &mut gpui::VisualTestContext| {
+            center.read_with(cx, |center, cx| center.live_target(cx))
+        };
+        assert_eq!(target(cx).as_deref(), Some("lead"));
+        for (selector, expected) in [
+            ("task-center-step-s1", "child"),
+            ("task-center-step-s2", "lead"),
+            ("task-center-lead", "lead"),
+        ] {
+            let at = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(target(cx).as_deref(), Some(expected), "{selector}");
+        }
+        assert!(cx.debug_bounds("task-center-add-step").is_some());
+        assert!(cx.debug_bounds("task-center-retry-s2").is_none());
+        for selector in ["task-center-retry-s1", "task-center-approve"] {
+            let at = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        assert_eq!(*events.borrow(), ["retry s1", "approve orch"]);
     }
 
     #[gpui::test]

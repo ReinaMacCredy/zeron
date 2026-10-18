@@ -141,7 +141,12 @@ impl Shell {
     pub(super) fn selected_tab_id(&self, cx: &App) -> Option<String> {
         match self.route {
             Route::Terminal => self.active_terminal_tab.clone(),
-            Route::PullRequests | Route::Usage | Route::Inbox | Route::Tasks | Route::Docs => None,
+            Route::PullRequests
+            | Route::Usage
+            | Route::Inbox
+            | Route::Tasks
+            | Route::TaskCenter
+            | Route::Docs => None,
             _ => self.state.read(cx).focused_id(),
         }
     }

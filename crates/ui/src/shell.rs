@@ -966,6 +966,7 @@ pub enum Route {
     Settings(SettingsSection),
     Terminal,
     Tasks,
+    TaskCenter,
     Docs,
 }
 
@@ -1137,6 +1138,7 @@ pub enum NavEntry {
     Usage,
     Inbox,
     Tasks,
+    TaskCenter(String),
     Docs(Option<&'static str>),
 }
 
@@ -2611,6 +2613,9 @@ pub struct Shell {
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
     _tasks_events: Option<gpui::Subscription>,
+    task_center_task: Option<String>,
+    task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
+    task_center_pane: Option<task_actions::TaskCenterPane>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -3117,11 +3122,17 @@ impl Shell {
         // `settings` reopens the remembered section; a named one is
         // remembered like any other link to a section.
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
+        let open_task = open_route
+            .as_deref()
+            .and_then(|route| route.strip_prefix("tasks/"))
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
+            Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -3168,6 +3179,7 @@ impl Shell {
             Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
+            Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
             Route::Docs => NavEntry::Docs(None),
         });
         // Parent notifications carry presentation changes (session status,
@@ -3319,6 +3331,9 @@ impl Shell {
             inbox_page: None,
             tasks_page: None,
             _tasks_events: None,
+            task_center_task: open_task.clone(),
+            task_center: None,
+            task_center_pane: None,
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -5385,6 +5400,11 @@ impl Shell {
                     .as_ref()
                     .and_then(|split| split.composer_for(transcript))
             })
+            .or_else(|| {
+                self.task_center_pane
+                    .as_ref()
+                    .and_then(|pane| pane.composer_for(transcript))
+            })
             .unwrap_or_else(|| self.composer.clone())
     }
 
@@ -6127,7 +6147,8 @@ impl Shell {
             || self
                 .sidechat_tabs
                 .values()
-                .any(|tab| tab.chat_id == chat_id);
+                .any(|tab| tab.chat_id == chat_id)
+            || self.task_center_holds(chat_id);
         if !held {
             self.state
                 .update(cx, |state, _| state.unwatch_subagent_doc(chat_id));
@@ -7593,6 +7614,9 @@ impl Shell {
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.command_palette = None;
+        if matches!(self.route, Route::TaskCenter) && !matches!(route, Route::TaskCenter) {
+            self.close_task_center(cx);
+        }
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
@@ -8503,6 +8527,7 @@ impl Shell {
             NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
+            NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
@@ -10289,12 +10314,18 @@ impl Shell {
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
     fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if !matches!(self.route, Route::Tasks | Route::PullRequests) {
+        if !matches!(
+            self.route,
+            Route::Tasks | Route::TaskCenter | Route::PullRequests
+        ) {
             return self.render_session_title_bar(window, cx);
         }
         self.drop_hidden_chat_action_menus(cx);
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_title_bar(cx);
+        }
+        if matches!(self.route, Route::TaskCenter) {
+            return self.render_task_center_title_bar(cx);
         }
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
@@ -13934,7 +13965,7 @@ impl Shell {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
             RailItem::Inbox => matches!(self.route, Route::Inbox),
-            RailItem::Tasks => matches!(self.route, Route::Tasks),
+            RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
@@ -16038,6 +16069,10 @@ impl Shell {
 
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_page(window, cx);
+        }
+
+        if matches!(self.route, Route::TaskCenter) {
+            return self.render_task_center_page(window, cx);
         }
 
         if matches!(self.route, Route::Docs) {
@@ -19041,6 +19076,7 @@ impl Render for Shell {
                     | Route::Usage
                     | Route::Inbox
                     | Route::Tasks
+                    | Route::TaskCenter
                     | Route::Docs => {}
                 }),
             )
@@ -19589,7 +19625,12 @@ impl Render for Shell {
                 let page_route = pr_route
                     || matches!(
                         self.route,
-                        Route::Terminal | Route::Usage | Route::Inbox | Route::Tasks | Route::Docs
+                        Route::Terminal
+                            | Route::Usage
+                            | Route::Inbox
+                            | Route::Tasks
+                            | Route::TaskCenter
+                            | Route::Docs
                     );
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);

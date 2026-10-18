@@ -18,9 +18,11 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 
 mod card;
+mod center;
 mod logic;
 
 pub use card::{CardFocus, TaskCard, TaskCardEvent};
+pub use center::{LiveThread, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
@@ -87,6 +89,7 @@ type Brand = (&'static str, Option<Hsla>);
 pub(crate) struct StepRow {
     pub step: zeron_proto::TaskStep,
     pub status: StepStatus,
+    pub indicator: Option<ChatIndicator>,
     pub brand: Option<Brand>,
 }
 
@@ -1061,6 +1064,7 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
             StepRow {
                 step: step.clone(),
                 status: step_status(step, chat, indicator),
+                indicator,
                 brand: chat.map(chat_brand),
             }
         })
