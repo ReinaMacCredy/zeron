@@ -201,6 +201,8 @@ impl EngineRpc {
             {
                 let cleared = TaskPatch {
                     chat_id: Some(None),
+                    mode: lead.map(|_| task.mode),
+                    plan_pending: lead.map(|_| task.plan_pending),
                     ..Default::default()
                 };
                 self.workspace.update_task(task_id, &cleared).ok();
