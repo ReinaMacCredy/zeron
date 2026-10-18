@@ -856,6 +856,6 @@ impl Render for BrowserSurface {
             .child(body)
             .when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(5.0)).border_t_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_faint)
-                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0))).child("Opens in your default browser")))
+                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0)).text_color(theme.text_faint)).child("Opens in your default browser")))
     }
 }

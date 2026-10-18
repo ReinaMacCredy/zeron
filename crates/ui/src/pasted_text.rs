@@ -242,7 +242,11 @@ pub(crate) fn overlay(
         .cursor_pointer()
         .text_color(theme.text_muted)
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-        .child(icon(icons::LUCIDE_X).size(px(14.0)))
+        .child(
+            icon(icons::LUCIDE_X)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_close(window, cx);

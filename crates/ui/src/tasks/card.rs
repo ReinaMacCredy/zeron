@@ -1032,7 +1032,11 @@ impl TaskCard {
             .cursor_pointer()
             .text_color(theme.text_muted)
             .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-            .child(icon(icons::LUCIDE_X).size(px(14.0)))
+            .child(
+                icon(icons::LUCIDE_X)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.close(cx)));
         let header = div()
             .flex()
