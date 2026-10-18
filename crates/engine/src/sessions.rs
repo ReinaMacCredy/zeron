@@ -647,13 +647,10 @@ struct Inner {
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 fn spawned_text(call: &ToolCall) -> Option<&str> {
-    let create_thread = match call {
-        ToolCall::Mcp { tool, .. } => tool == "create_thread",
-        ToolCall::Unknown { name, .. } => name.ends_with("create_thread"),
-        _ => false,
-    };
     match call {
-        ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. } if create_thread => {
+        ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. }
+            if call.is_create_thread() =>
+        {
             input.as_ref()?.get("prompt")?.as_str().map(str::trim)
         }
         _ => call.delegate_task_text(),

@@ -521,6 +521,14 @@ impl ToolCall {
         }
     }
 
+    pub fn is_create_thread(&self) -> bool {
+        match self {
+            ToolCall::Mcp { tool, .. } => tool == "create_thread",
+            ToolCall::Unknown { name, .. } => name.ends_with("create_thread"),
+            _ => false,
+        }
+    }
+
     /// An agent-published HTML page (the `html_render` thread tool). Only
     /// zeron's own server: another MCP server may ship a same-named tool.
     pub fn is_html_render(&self) -> bool {
