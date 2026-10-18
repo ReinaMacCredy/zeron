@@ -3268,6 +3268,27 @@ pub(crate) mod keychain {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+pub(crate) mod keychain {
+    use crate::EngineError;
+
+    pub(crate) async fn read_secret(_service: &str, _account: &str) -> Option<String> {
+        None
+    }
+
+    pub(crate) async fn write_secret(
+        _service: &str,
+        _account: &str,
+        _secret: &str,
+    ) -> Result<(), EngineError> {
+        Err(EngineError::Other(
+            "Saving an API key needs the macOS Keychain".into(),
+        ))
+    }
+
+    pub(crate) async fn delete_secret(_service: &str, _account: &str) {}
+}
+
 // ── Antigravity ─────────────────────────────────────────────────────────────
 
 /// Antigravity's live login, as far as zeron can see it without its secret.
