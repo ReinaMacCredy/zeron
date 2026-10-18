@@ -848,6 +848,7 @@ impl From<RawSession> for Session {
             updated_at: dt(raw.updated_at),
             running_subagents: raw.running_subagents,
             compact_plan: None,
+            classifying: None,
         }
     }
 }
@@ -969,6 +970,7 @@ mod tests {
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
             compact_plan: None,
+            classifying: None,
             running_subagents: 0,
         }
     }

@@ -135,13 +135,12 @@ impl SessionFixture {
         tokio::process::ChildStdin,
         tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     ) {
-        self.spawn(prompt, resume, mcp).await
+        self.spawn(serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcp":mcp}))
+            .await
     }
     async fn spawn(
         &self,
-        prompt: &str,
-        resume: bool,
-        mcp: serde_json::Value,
+        frame: serde_json::Value,
     ) -> (
         tokio::process::Child,
         tokio::process::ChildStdin,
@@ -159,7 +158,6 @@ impl SessionFixture {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
-        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcp":mcp});
         stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -547,6 +545,25 @@ async fn mcp_injection_reaches_sdk_on_create_and_resume_with_fresh_identity() {
             serde_json::json!(["user", "team", "mdm", "plugins"])
         );
     }
+}
+
+#[tokio::test]
+async fn one_shot_runs_without_tools_settings_or_a_kept_store() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture
+        .spawn(serde_json::json!({"op":"run","prompt":"normal","cwd":fixture.dir.path(),"oneShot":true}))
+        .await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let options: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.dir.path().join("mcp-options.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(options["tools"], serde_json::json!([]));
+    assert_eq!(options["settingSources"], serde_json::json!([]));
+    assert!(!fixture.dir.path().join("state").exists());
 }
 
 #[tokio::test]

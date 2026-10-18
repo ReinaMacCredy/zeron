@@ -126,6 +126,7 @@ pub struct CodexHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    writers: ThreadWriters,
 }
 
 impl Default for CodexHarness {
@@ -135,7 +136,47 @@ impl Default for CodexHarness {
             launch: crate::LaunchOverrides::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            writers: ThreadWriters::default(),
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ThreadWriters(Arc<(std::sync::Mutex<HashSet<String>>, tokio::sync::Notify)>);
+
+struct WriterClaim {
+    writers: ThreadWriters,
+    thread_id: String,
+}
+
+impl ThreadWriters {
+    async fn claim(&self, thread_id: &str) -> WriterClaim {
+        let (held, released) = &*self.0;
+        loop {
+            let mut notified = std::pin::pin!(released.notified());
+            notified.as_mut().enable();
+            if held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(thread_id.to_owned())
+            {
+                return WriterClaim {
+                    writers: self.clone(),
+                    thread_id: thread_id.to_owned(),
+                };
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for WriterClaim {
+    fn drop(&mut self) {
+        let (held, released) = &*self.writers.0;
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.thread_id);
+        released.notify_waiters();
     }
 }
 
@@ -758,18 +799,17 @@ impl Harness for CodexHarness {
 
     async fn run_one_shot(
         &self,
-        mut request: RunRequest,
+        request: RunRequest,
         controls: RunControls,
         instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        request.resume = None;
-        request.worktree = None;
-        request.attachments.clear();
-        request.mcp = None;
-        request.model_options.clear();
-        request.auto_approve = false;
-        self.run_with_mode(request, controls, Some(instructions), false)
-            .await
+        self.run_with_mode(
+            crate::one_shot_request(request),
+            controls,
+            Some(instructions),
+            false,
+        )
+        .await
     }
 }
 
@@ -828,6 +868,7 @@ impl CodexHarness {
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            writers: self.writers.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -867,6 +908,7 @@ impl CodexHarness {
             thread_id,
             kill_grace: self.kill_grace,
             stderr_tail,
+            writers: self.writers.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -958,6 +1000,7 @@ struct Session {
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    writers: ThreadWriters,
 }
 
 /// Turn-routing state (port of codex.ts's activeTurnId/completedTurnIds): the
@@ -1061,10 +1104,19 @@ fn thread_params(
         p.insert("baseInstructions".into(), instructions.into());
         p.insert("developerInstructions".into(), instructions.into());
         p.insert("ephemeral".into(), true.into());
+        p.insert("environments".into(), json!([]));
         p.insert(
             "config".into(),
             json!({
                 "project_doc_max_bytes": 0,
+                "skills.include_instructions": false,
+                "include_permissions_instructions": false,
+                "include_collaboration_mode_instructions": false,
+                "include_environment_context": false,
+                "features.plugins": false,
+                "features.goals": false,
+                "features.sleep_tool": false,
+                "tools.experimental_request_user_input.enabled": false,
                 "web_search": "disabled",
                 "features.shell_tool": false,
                 "features.apply_patch_freeform": false,
@@ -1252,6 +1304,7 @@ async fn run_session(session: Session) {
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        writers,
     } = session;
     let RunControls {
         realtime,
@@ -1289,6 +1342,8 @@ async fn run_session(session: Session) {
     );
 
     // ---- handshake + thread + first turn (interruptible) ------------------
+    // Codex's thread writer is a flock its app-server holds until it exits.
+    let mut claim: Option<WriterClaim> = None;
     let setup = async {
         client
             .request(
@@ -1345,6 +1400,7 @@ async fn run_session(session: Session) {
                 )
                 .await?
         } else if let Some(resume) = &request.resume {
+            claim = Some(writers.claim(resume).await);
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
             match client.request("thread/resume", Value::Object(p)).await {
@@ -1369,15 +1425,22 @@ async fn run_session(session: Session) {
                 .await?
         };
         let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
+        if !thread_id.is_empty() && claim.as_ref().is_none_or(|c| c.thread_id != thread_id) {
+            claim = Some(writers.claim(&thread_id).await);
+        }
         let mut children = subagents::Subagents::new(thread_id.clone());
         children.restore(&thread["thread"]);
         let voice_context = realtime::ThreadContext {
             cwd: thread["cwd"].as_str().unwrap_or(&request.cwd).to_owned(),
             model_provider: thread["modelProvider"].as_str().map(str::to_owned),
         };
-        Ok::<_, HarnessError>((thread_id, children, voice_context))
+        let model = thread["model"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned);
+        Ok::<_, HarnessError>((thread_id, children, voice_context, model))
     };
-    let (thread_id, mut children, voice_context) = tokio::select! {
+    let (thread_id, mut children, voice_context, resolved_model) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -1446,7 +1509,9 @@ async fn run_session(session: Session) {
         &event_tx,
         AgentEvent::SessionStarted {
             harness: HarnessId::Codex,
-            model: request.model.clone().unwrap_or_default(),
+            model: resolved_model
+                .or_else(|| request.model.clone())
+                .unwrap_or_default(),
             tools: Vec::new(),
             cwd: request.cwd.clone(),
             session_id: thread_id.clone(),
@@ -2191,6 +2256,7 @@ struct CompactSession {
     thread_id: String,
     kill_grace: Duration,
     stderr_tail: crate::StderrTail,
+    writers: ThreadWriters,
 }
 
 /// How long the post-compaction `thread/tokenUsage/updated` is waited for
@@ -2221,6 +2287,7 @@ async fn compact_session(session: CompactSession) {
         thread_id,
         kill_grace,
         stderr_tail,
+        writers,
     } = session;
     let RunControls {
         request_input,
@@ -2230,6 +2297,7 @@ async fn compact_session(session: CompactSession) {
     } = controls;
     let request_input = Arc::new(request_input);
 
+    let mut claim: Option<WriterClaim> = None;
     let setup = async {
         client
             .request(
@@ -2257,6 +2325,7 @@ async fn compact_session(session: CompactSession) {
         // No fresh-thread fallback: compacting a thread the server could not
         // resume would compact nothing AND hand the engine a new session id to
         // remember, losing the chat's real thread.
+        claim = Some(writers.claim(&thread_id).await);
         let thread = client
             .request("thread/resume", Value::Object(resume_params))
             .await?;
@@ -2302,6 +2371,7 @@ async fn compact_session(session: CompactSession) {
 
     let mut pre_tokens: Option<u64> = None;
     let mut post_tokens: Option<u64> = None;
+    let mut compacting = false;
     let mut compacted = false;
     let mut interrupted = false;
     let mut error: Option<String> = None;
@@ -2344,7 +2414,11 @@ async fn compact_session(session: CompactSession) {
                                 post_tokens = post_tokens.or(tokens);
                                 break 'main;
                             }
-                            pre_tokens = tokens.or(pre_tokens);
+                            if compacting {
+                                post_tokens = tokens.or(post_tokens);
+                            } else {
+                                pre_tokens = tokens.or(pre_tokens);
+                            }
                         }
 
                         // Either shape settles the compaction: the thread-level
@@ -2353,12 +2427,23 @@ async fn compact_session(session: CompactSession) {
                             compacted = true;
                             grace = Some(tokio::time::Instant::now() + COMPACT_TOKEN_GRACE);
                         }
+                        // Codex 0.163 sends the post-compaction usage before the item completes.
+                        "item/started"
+                            if item_type(params.get("item").unwrap_or(&Value::Null))
+                                .to_ascii_lowercase()
+                                .contains("compact") =>
+                        {
+                            compacting = true;
+                        }
                         "item/completed"
                             if item_type(params.get("item").unwrap_or(&Value::Null))
                                 .to_ascii_lowercase()
                                 .contains("compact") =>
                         {
                             compacted = true;
+                            if post_tokens.is_some() {
+                                break 'main;
+                            }
                             grace = Some(tokio::time::Instant::now() + COMPACT_TOKEN_GRACE);
                         }
 

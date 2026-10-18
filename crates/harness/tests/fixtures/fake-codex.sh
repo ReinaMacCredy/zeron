@@ -58,10 +58,23 @@ if has "$line" '"method":"thread/resume"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
   elif has "$line" '"threadId":"resume-with-child-v2"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"subAgentActivity\",\"id\":\"spawn-alpha\",\"kind\":\"started\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"},{\"type\":\"subAgentActivity\",\"id\":\"subagent-completed-old\",\"kind\":\"completed\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"}]}]}}}"
+  elif has "$line" '"threadId":"compact-live"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-live\"}}}"
   elif has "$line" '"threadId":"compact-ok"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-ok\"}}}"
   elif has "$line" '"threadId":"compact-hang"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-hang\"}}}"
+  elif has "$line" '"threadId":"writer"'; then
+    # Codex's thread writer is a flock its app-server holds until it exits.
+    if [ -f writer.pid ] && kill -0 "$(cat writer.pid)" 2>/dev/null; then
+      emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"thread writer already has an active writer\"}}"
+      read -r line || exit 1
+      has "$line" '"method":"thread/start"' || exit 1
+      emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-fresh\"}}}"
+    else
+      printf '%s\n' "$$" > writer.pid
+      emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"writer\"}}}"
+    fi
   elif has "$line" '"threadId":"resume-fail"'; then
     # Missing/foreign rollout: reject, expect the fresh-start fallback.
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"rollout not found\"}}"
@@ -161,6 +174,16 @@ case "$turnline" in
     # Never answer: the driver must settle through its interrupt.
     exec sleep 60
   fi
+  if has "$turnline" '"threadId":"th-compact-live"'; then
+    # Codex 0.163's order: no thread/compacted, post usage inside the item.
+    emit "{\"id\":$tid,\"result\":{}}"
+    emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-live","tokenUsage":{"last":{"totalTokens":30398},"modelContextWindow":258400}}}'
+    emit '{"method":"item/started","params":{"threadId":"th-compact-live","item":{"type":"contextCompaction","id":"c-1"}}}'
+    emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-live","tokenUsage":{"last":{"totalTokens":18515},"modelContextWindow":258400}}}'
+    emit '{"method":"item/completed","params":{"threadId":"th-compact-live","item":{"type":"contextCompaction","id":"c-1"}}}'
+    emit '{"method":"turn/completed","params":{"threadId":"th-compact-live","turn":{"id":"t-c","status":"completed"}}}'
+    exec sleep 30
+  fi
   has "$turnline" '"threadId":"th-compact-ok"' || exit 1
   emit "{\"id\":$tid,\"result\":{}}"
   emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-ok","tokenUsage":{"last":{"totalTokens":120000},"modelContextWindow":200000}}}'
@@ -179,6 +202,14 @@ case "$turnline" in
   exec sleep 30
   ;;
 
+*scenario:writer*)
+  # Outlive SIGTERM until the kill grace, holding the thread's writer.
+  trap '' TERM
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/completed","params":{"threadId":"writer","turn":{"id":"t-1","status":"completed"}}}'
+  exec sleep 30
+  ;;
+
 *scenario:image-*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"in_progress","result":""}}}'
@@ -193,7 +224,7 @@ case "$turnline" in
   ;;
 
 *scenario:title*)
-  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false'; do
+  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false' '"environments":[]' '"skills.include_instructions":false' '"features.plugins":false'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "title restriction missing"; exit 0; }
   done
   has "$turnline" '"sandboxPolicy":{"type":"readOnly"}' || { fail_turn "$tid" "title turn not read-only"; exit 0; }

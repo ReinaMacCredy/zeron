@@ -564,8 +564,33 @@ impl Harness for OpencodeHarness {
 
     async fn run(
         &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, None).await
+    }
+
+    async fn run_one_shot(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        instructions: &'static str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(
+            crate::one_shot_request(request),
+            controls,
+            Some(instructions),
+        )
+        .await
+    }
+}
+
+impl OpencodeHarness {
+    async fn run_with_mode(
+        &self,
         mut request: RunRequest,
         controls: RunControls,
+        one_shot: Option<&'static str>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // The engine intentionally leaves OpenCode's canonical invocation
         // intact. Capture the selected identity before converting it to the
@@ -582,8 +607,10 @@ impl Harness for OpencodeHarness {
             request,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
-            known_commands: None, // Resolve the live session directory, never a global probe cache.
+            // Resolve the live session directory, never a global probe cache.
+            known_commands: one_shot.map(|_| Vec::new()),
             initial_native_command_selected,
+            one_shot,
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -1480,6 +1507,7 @@ struct Session {
     /// True only when the composer supplied a canonical leading command or
     /// provider-backed skill. Raw slash text deliberately stays false.
     initial_native_command_selected: bool,
+    one_shot: Option<&'static str>,
 }
 
 fn new_message_id() -> String {
@@ -1651,6 +1679,7 @@ async fn run_session(session: Session) {
         kill_grace,
         known_commands,
         initial_native_command_selected,
+        one_shot,
     } = session;
     let RunControls {
         realtime: _,
@@ -1861,6 +1890,7 @@ async fn run_session(session: Session) {
             model: model.as_ref(),
             variant: variant.as_deref(),
             attachments: &request.attachments,
+            one_shot,
         },
     )
     .await
@@ -2001,6 +2031,7 @@ async fn run_session(session: Session) {
                             model: model.as_ref(),
                             variant: variant.as_deref(),
                             attachments: &attachments,
+                            one_shot: None,
                         },
                     )
                     .await,
@@ -2260,6 +2291,7 @@ async fn run_session(session: Session) {
                                         model: model.as_ref(),
                                         variant: variant.as_deref(),
                                         attachments: &steer.attachments,
+                                        one_shot: None,
                                     },
                                 )
                                 .await,
@@ -2481,6 +2513,12 @@ async fn run_session(session: Session) {
         tracing::debug!(target: "zeron_harness::opencode", "run loop ended without settling");
     }
     bus_handle.abort();
+    if one_shot.is_some() && server.protocol().await == Protocol::V1 {
+        let req = server
+            .request(reqwest::Method::DELETE, &format!("/session/{session_id}"))
+            .timeout(CALL_TIMEOUT);
+        let _ = server.scoped(req, dir).await.send().await;
+    }
     server.shutdown(kill_grace).await;
 }
 
@@ -2762,6 +2800,7 @@ struct TurnSpec<'a> {
     model: Option<&'a (String, String)>,
     variant: Option<&'a str>,
     attachments: &'a [String],
+    one_shot: Option<&'a str>,
 }
 
 fn command_body_v2(
@@ -2806,6 +2845,7 @@ async fn post_prompt(
         model,
         variant,
         attachments,
+        one_shot,
     } = spec;
     let protocol = server.protocol().await;
     if let Some((name, arguments)) =
@@ -2870,18 +2910,28 @@ async fn post_prompt(
         return Ok(());
     }
     let (path, body) = match protocol {
-        Protocol::V1 => (
-            format!("/session/{session_id}/prompt_async"),
-            prompt_body(
+        Protocol::V1 => {
+            let mut body = prompt_body(
                 prompt,
                 model.map(|(provider, model)| (provider.as_str(), model.as_str())),
                 variant,
                 attachments,
-            ),
-        ),
+            );
+            if let Some(instructions) = one_shot {
+                body["system"] = json!(instructions);
+                body["tools"] = json!({ "*": false });
+            }
+            (format!("/session/{session_id}/prompt_async"), body)
+        }
         Protocol::V2 => (
             format!("/api/session/{session_id}/prompt"),
-            prompt_body_v2(prompt, attachments),
+            match one_shot {
+                Some(instructions) => prompt_body_v2(
+                    &crate::prepend_instructions(instructions, prompt),
+                    attachments,
+                ),
+                None => prompt_body_v2(prompt, attachments),
+            },
         ),
     };
     let server = Server {

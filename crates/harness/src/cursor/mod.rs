@@ -324,7 +324,29 @@ impl Harness for CursorHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let lease = if self.executable.is_none() {
+        self.run_with_mode(request, controls, false).await
+    }
+
+    async fn run_one_shot(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        instructions: &'static str,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut request = crate::one_shot_request(request);
+        request.prompt = crate::prepend_instructions(instructions, &request.prompt);
+        self.run_with_mode(request, controls, true).await
+    }
+}
+
+impl CursorHarness {
+    async fn run_with_mode(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        one_shot: bool,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let lease = if self.executable.is_none() && !one_shot {
             Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
         } else {
             None
@@ -385,6 +407,7 @@ impl Harness for CursorHarness {
             "resume": request.resume,
             "mcp": request.mcp,
             "storeDir": lease.as_ref().and_then(|lease| lease.store_dir.as_ref()),
+            "oneShot": one_shot,
         });
         let _ = stdin_tx.send(first.to_string());
 

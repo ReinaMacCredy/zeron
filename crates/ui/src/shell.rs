@@ -12177,6 +12177,28 @@ impl Shell {
                 )
                 .into_any_element()
         };
+        let pin_action = (hovered && !preview && !archived).then(|| {
+            let pinned = self.active_sidebar_pins(cx).contains(&id);
+            let (button, group) = action(
+                if pinned { "unpin" } else { "pin" },
+                if pinned { "Unpin" } else { "Pin" },
+                if pinned { "Unpin chat" } else { "Pin chat" },
+            );
+            let pin_id = id.clone();
+            button
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.chat_hover_resync = true;
+                    this.set_chat_pinned(pin_id.clone(), !pinned, cx);
+                }))
+                .child(
+                    icon(icons::PIN)
+                        .size(px(13.0))
+                        .text_color(if pinned { theme.text } else { sec })
+                        .group_hover(group, |s| s.text_color(theme.text)),
+                )
+                .into_any_element()
+        });
         let inbox = self.settings.sidebar_organization == SidebarOrganization::Inbox;
         let settle_action = |settled: bool| {
             let (button, group) = action(
@@ -12258,7 +12280,14 @@ impl Shell {
             let slot: AnyElement = if let Some(badge) = jump_badge {
                 badge
             } else if hovered && !preview {
-                settle_action.unwrap_or(archive_action)
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_stretch()
+                    .h_full()
+                    .children(pin_action)
+                    .child(settle_action.unwrap_or(archive_action))
+                    .into_any_element()
             } else {
                 div()
                     .whitespace_nowrap()
@@ -12352,6 +12381,7 @@ impl Shell {
                 .flex_row()
                 .items_stretch()
                 .h_full()
+                .children(pin_action)
                 .child(archive_action)
                 .children(settle_action)
                 .into_any_element()
@@ -20359,6 +20389,7 @@ mod tests {
             updated_at,
             running_subagents: 0,
             compact_plan: None,
+            classifying: None,
         }
     }
 

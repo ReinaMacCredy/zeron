@@ -157,6 +157,7 @@ impl TitleGenerator {
             settings.harness,
             settings.model,
             harness_id,
+            cheapest_model,
         )
         .await?;
         let title_prompt = format!(
@@ -179,6 +180,7 @@ impl TitleGenerator {
         )
         .await
         .ok()
+        .map(|reply| reply.text)
     }
 }
 
@@ -194,15 +196,16 @@ pub(crate) async fn one_shot_target(
     configured: Option<HarnessId>,
     model: Option<String>,
     session: HarnessId,
+    fallback: fn(&[Model]) -> Option<String>,
 ) -> Option<OneShotTarget> {
     let harness_id = configured.or_else(|| {
-        if zeron_harness::supports_titles(session) {
+        if zeron_harness::one_shot_by_default(session) {
             Some(session)
         } else {
             registry
                 .enabled_set()
                 .into_iter()
-                .find(|id| zeron_harness::supports_titles(*id))
+                .find(|id| zeron_harness::one_shot_by_default(*id))
         }
     })?;
     if !zeron_harness::supports_titles(harness_id) {
@@ -221,7 +224,7 @@ pub(crate) async fn one_shot_target(
     };
     let model = match model {
         Some(model) => Some(model),
-        None => cheapest_model(
+        None => fallback(
             &tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 registry.discover_models_with_lease(harness_id, lease.clone()),
@@ -248,12 +251,19 @@ pub(crate) struct OneShot {
     pub retry_delays_ms: &'static [u64],
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct OneShotReply {
+    pub text: String,
+    pub usage: Option<(u64, u64)>,
+    pub model: Option<String>,
+}
+
 pub(crate) async fn run_one_shot(
     harness: &dyn zeron_harness::Harness,
     execution_lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     run: OneShot,
     clean: fn(&str) -> String,
-) -> Result<String, EngineError> {
+) -> Result<OneShotReply, EngineError> {
     // No repository instructions, files, or active coding-session context.
     let scratch = tempfile::tempdir().map_err(|error| EngineError::Other(error.to_string()))?;
     let mut last_error = EngineError::Other("the model returned no text".into());
@@ -294,9 +304,13 @@ pub(crate) async fn run_one_shot(
             )))
         }) {
             Ok(raw) => {
-                let candidate = clean(&raw);
+                let candidate = clean(&raw.text);
                 if !candidate.is_empty() {
-                    return Ok(candidate);
+                    return Ok(OneShotReply {
+                        text: candidate,
+                        usage: raw.usage,
+                        model: raw.model,
+                    });
                 }
                 last_error = EngineError::Other("the model returned no text".into());
             }
@@ -329,6 +343,28 @@ pub(crate) fn cheapest_model(models: &[Model]) -> Option<String> {
     small.or(models.last()).map(|m| m.id.clone())
 }
 
+/// The newest Sonnet the harness offers, as the CLI's `sonnet` alias resolves; else its default model.
+pub(crate) fn mid_tier_model(models: &[Model]) -> Option<String> {
+    models
+        .iter()
+        .filter(|m| {
+            format!("{} {}", m.id, m.label)
+                .to_lowercase()
+                .contains("sonnet")
+        })
+        .max_by_key(|m| model_version(&m.id))
+        .map(|m| m.id.clone())
+}
+
+fn model_version(id: &str) -> Vec<u32> {
+    id.split('[')
+        .next()
+        .unwrap_or(id)
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
 /// First line, stripped of quote/heading dressing, capped at 60 chars.
 fn clean_title(raw: &str) -> String {
     let first = raw.trim().lines().next().unwrap_or("");
@@ -347,7 +383,7 @@ pub(crate) async fn collect_text(
     request: RunRequest,
     execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     instructions: &'static str,
-) -> Result<String, EngineError> {
+) -> Result<OneShotReply, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
     let _cancel_on_drop = interrupt.clone().drop_guard();
@@ -368,11 +404,24 @@ pub(crate) async fn collect_text(
     let mut stream = harness
         .run_one_shot(request, controls, instructions)
         .await?;
-    let mut text = String::new();
+    let mut reply = OneShotReply::default();
+    let (mut usage, mut cached) = (None, 0);
     let mut completed = false;
     while let Some(event) = stream.next().await {
         match event? {
-            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::TextDelta { text: delta } => reply.text.push_str(&delta),
+            AgentEvent::SessionStarted { model, .. } if !model.is_empty() => {
+                reply.model = Some(model)
+            }
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => usage = Some((input_tokens, output_tokens)),
+            AgentEvent::PromptCache {
+                read_tokens,
+                write_tokens,
+                ..
+            } => cached = read_tokens + write_tokens,
             AgentEvent::ToolCall { .. } => {
                 return Err(EngineError::Other(
                     "the model attempted to use a tool".into(),
@@ -396,7 +445,8 @@ pub(crate) async fn collect_text(
     }
     drop(steer_tx); // keep the mailbox open for the run's whole lifetime
     if completed {
-        Ok(text)
+        reply.usage = usage.map(|(input, output)| (input + cached, output));
+        Ok(reply)
     } else {
         Err(EngineError::Other(
             "the run ended without completing".into(),
@@ -430,6 +480,22 @@ mod tests {
         let no_small = vec![model("opus-4", "Opus"), model("sonnet-4", "Sonnet")];
         assert_eq!(cheapest_model(&no_small).as_deref(), Some("sonnet-4"));
         assert_eq!(cheapest_model(&[]), None);
+    }
+
+    #[test]
+    fn mid_tier_picks_the_newest_sonnet() {
+        let models = vec![
+            model("claude-opus-5-5", "Opus 5.5"),
+            model("claude-sonnet-5", "Sonnet 5"),
+            model("claude-sonnet-4-5-20250929", "Sonnet 4.5"),
+            model("claude-sonnet-5-5", "Sonnet 5.5"),
+            model("claude-haiku-5-5", "Haiku 5.5"),
+        ];
+        assert_eq!(
+            mid_tier_model(&models).as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(mid_tier_model(&[model("gpt-6-luna", "GPT-6 Luna")]), None);
     }
 
     #[tokio::test]

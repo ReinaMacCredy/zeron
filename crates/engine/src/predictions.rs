@@ -12,7 +12,7 @@ use zeron_proto::HarnessId;
 #[cfg(target_os = "macos")]
 use crate::agent_accounts::keychain;
 use crate::registry::{CustomPredictionApi, HarnessRegistry, PredictionSettings};
-use crate::titles::{OneShot, one_shot_target, run_one_shot};
+use crate::titles::{OneShot, cheapest_model, one_shot_target, run_one_shot};
 
 const KEY_SERVICE: &str = "Zeron prediction API key";
 const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -91,13 +91,13 @@ impl PredictionContext {
     }
 }
 
-fn is_person_prompt(entry: &SessionMessageEntry) -> bool {
+pub(crate) fn is_person_prompt(entry: &SessionMessageEntry) -> bool {
     entry.role == MessageRole::User
         && entry.from_chat_id.is_none()
         && entry.answers_request_id.is_none()
 }
 
-fn entry_text(entry: &SessionMessageEntry) -> String {
+pub(crate) fn entry_text(entry: &SessionMessageEntry) -> String {
     entry
         .parts
         .iter()
@@ -115,7 +115,7 @@ fn head(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
 }
 
-fn tail(text: &str, chars: usize) -> String {
+pub(crate) fn tail(text: &str, chars: usize) -> String {
     let skip = text.chars().count().saturating_sub(chars);
     text.chars().skip(skip).collect()
 }
@@ -377,7 +377,14 @@ impl Predictions {
         session_harness: HarnessId,
         context: &PredictionContext,
     ) -> Option<String> {
-        let target = one_shot_target(&self.registry, harness, model, session_harness).await?;
+        let target = one_shot_target(
+            &self.registry,
+            harness,
+            model,
+            session_harness,
+            cheapest_model,
+        )
+        .await?;
         match run_one_shot(
             target.harness.as_ref(),
             target.lease,
@@ -393,7 +400,7 @@ impl Predictions {
         )
         .await
         {
-            Ok(text) => Some(text),
+            Ok(reply) => Some(reply.text),
             Err(err) => {
                 tracing::debug!(error = %err, "composer prediction skipped");
                 None

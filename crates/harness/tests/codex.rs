@@ -1455,15 +1455,12 @@ async fn skills_are_not_advertised_as_commands() {
     );
 }
 
-#[tokio::test]
-async fn compaction_is_native_and_compact_maps_thread_compacted() {
-    let h = harness();
-    assert_eq!(h.compaction(), Compaction::Native);
+async fn compact_events(h: &CodexHarness, resume: &str) -> Vec<AgentEvent> {
     let (controls, _steer, _token) = controls("Yes");
     let mut req = request("");
-    req.resume = Some("compact-ok".into());
+    req.resume = Some(resume.into());
     let mut stream = h.compact(req, controls).await.expect("compaction starts");
-    let events = tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
             let event = event.expect("stream event");
@@ -1476,30 +1473,42 @@ async fn compaction_is_native_and_compact_maps_thread_compacted() {
         events
     })
     .await
-    .expect("compaction finished in time");
-    assert!(
-        matches!(
-            events.first(),
-            Some(AgentEvent::Compacted {
-                pre_tokens: Some(120_000),
-                post_tokens: Some(18_000),
-            })
-        ),
-        "the boundary carries the tokenUsage seen either side of it: {events:?}"
-    );
-    assert!(
-        matches!(
-            events.last(),
-            Some(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                session_id: Some(id),
-                error: None,
-                ..
-            }) if id == "th-compact-ok"
-        ),
-        "Done reports the resumed thread: {events:?}"
-    );
-    assert_eq!(events.len(), 2, "no turn content leaks out: {events:?}");
+    .expect("compaction finished in time")
+}
+
+#[tokio::test]
+async fn compaction_is_native_and_compact_maps_thread_compacted() {
+    let h = harness();
+    assert_eq!(h.compaction(), Compaction::Native);
+    for (resume, pre, post) in [
+        ("compact-ok", 120_000, 18_000),
+        ("compact-live", 30_398, 18_515),
+    ] {
+        let events = compact_events(&h, resume).await;
+        assert!(
+            matches!(
+                events.first(),
+                Some(AgentEvent::Compacted {
+                    pre_tokens: Some(p),
+                    post_tokens: Some(q),
+                }) if *p == pre && *q == post
+            ),
+            "the boundary carries the tokenUsage seen either side of it: {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    session_id: Some(id),
+                    error: None,
+                    ..
+                }) if *id == format!("th-{resume}")
+            ),
+            "Done reports the resumed thread: {events:?}"
+        );
+        assert_eq!(events.len(), 2, "no turn content leaks out: {events:?}");
+    }
 }
 
 #[tokio::test]
@@ -1556,6 +1565,68 @@ async fn compact_that_never_answers_settles_through_the_interrupt() {
             .iter()
             .any(|e| matches!(e, AgentEvent::Compacted { .. })),
         "an unanswered compaction never claims a boundary: {events:?}"
+    );
+}
+
+async fn retire_writer(harness: &CodexHarness, cwd: &std::path::Path) -> RunRequest {
+    let mut req = request("scenario:writer");
+    req.cwd = cwd.display().to_string();
+    req.resume = Some("writer".into());
+    let (controls, _steer, token) = controls("Yes");
+    let mut stream = harness.run(req.clone(), controls).await.unwrap();
+    let mut settled = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::Done { status, .. } = event.unwrap() {
+                settled.push(status);
+                if settled.len() == 2 {
+                    break;
+                }
+                token.cancel();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(settled, [DoneStatus::Completed, DoneStatus::Interrupted]);
+    req
+}
+
+#[tokio::test]
+async fn a_run_after_a_retired_one_resumes_its_thread_once_the_old_server_exits() {
+    let temp = tempfile::tempdir().unwrap();
+    let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
+    let req = retire_writer(&harness, temp.path()).await;
+    let (controls, _steer, _token) = controls("Yes");
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let started = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let AgentEvent::SessionStarted { session_id, .. } =
+                stream.next().await.unwrap().unwrap()
+            {
+                break session_id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        started, "writer",
+        "the conversation's thread, not a fresh one"
+    );
+}
+
+#[tokio::test]
+async fn compaction_after_a_retired_run_waits_for_the_old_server_to_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
+    let mut req = retire_writer(&harness, temp.path()).await;
+    req.prompt = String::new();
+    let (controls, _steer, _token) = controls("Yes");
+    let events = collect_until_done(harness.compact(req, controls).await.unwrap()).await;
+    assert!(
+        matches!(events.first(), Some(AgentEvent::Compacted { .. })),
+        "{events:?}"
     );
 }
 

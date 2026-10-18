@@ -154,6 +154,8 @@ struct DocPartJson {
     to_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    classifier: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -208,6 +210,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_chat_id: route.source_chat_id.clone(),
             source_title: route.source_title.clone(),
             handoff_kind: (route.kind == HandoffKind::Pointer).then(|| "pointer".into()),
+            ..Default::default()
+        },
+        MessagePart::Classifier { id, record } => DocPartJson {
+            id: id.clone(),
+            kind: "classifier".into(),
+            classifier: Some(serde_json::to_value(record)?),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -367,6 +375,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 text: String::new(),
             },
         },
+        "classifier" => match p.classifier.and_then(|c| serde_json::from_value(c).ok()) {
+            Some(record) => MessagePart::Classifier { id: p.id, record },
+            None => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
+        },
         "fork" => MessagePart::Fork {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
@@ -407,6 +422,9 @@ fn image_part(
         },
     }
 }
+
+const CONTEXT_BASELINE: &str = "contextBaseline";
+const BASELINE_PENDING: i64 = -1;
 
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
@@ -504,6 +522,38 @@ impl SessionDoc {
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
         self.doc.commit();
+        Ok(())
+    }
+
+    /// What a compaction cannot reclaim: the first context reading after a reset.
+    pub fn context_baseline(&self) -> u64 {
+        match self.doc.get_map("meta").get(CONTEXT_BASELINE) {
+            Some(loro::ValueOrContainer::Value(LoroValue::I64(value))) => value.max(0) as u64,
+            _ => 0,
+        }
+    }
+
+    pub fn reset_context_baseline(&self) -> Result<(), DocError> {
+        self.doc
+            .get_map("meta")
+            .insert(CONTEXT_BASELINE, BASELINE_PENDING)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    pub fn settle_context_baseline(&self, tokens: u64) -> Result<(), DocError> {
+        let pending = matches!(
+            self.doc.get_map("meta").get(CONTEXT_BASELINE),
+            Some(loro::ValueOrContainer::Value(LoroValue::I64(
+                BASELINE_PENDING
+            )))
+        );
+        if pending && tokens > 0 {
+            self.doc
+                .get_map("meta")
+                .insert(CONTEXT_BASELINE, tokens as i64)?;
+            self.doc.commit();
+        }
         Ok(())
     }
 
@@ -1191,6 +1241,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(html_render) = &doc_part.html_render {
         map.insert("htmlRender", loro_value_from_json(html_render))?;
     }
+    if let Some(classifier) = &doc_part.classifier {
+        map.insert("classifier", loro_value_from_json(classifier))?;
+    }
     Ok(())
 }
 
@@ -1724,18 +1777,37 @@ mod tests {
     use crate::parts::fold_event_into_parts;
 
     #[test]
-    fn fork_seam_round_trips_through_the_doc() {
+    fn system_parts_round_trip_through_the_doc() {
         let doc = SessionDoc::init("fork").unwrap();
-        let seam = MessagePart::Fork {
-            id: "fork:side".into(),
-            source_chat_id: "main".into(),
-            source_title: "Main conversation".into(),
-        };
+        let seam = vec![
+            MessagePart::Fork {
+                id: "fork:side".into(),
+                source_chat_id: "main".into(),
+                source_title: "Main conversation".into(),
+            },
+            MessagePart::Classifier {
+                id: "classifier".into(),
+                record: crate::parts::ClassifierRecord {
+                    harness: Some(HarnessId::ClaudeCode),
+                    model: Some("sonnet".into()),
+                    verdict: crate::parts::ClassifierVerdict::Carry,
+                    classifier_verdict: None,
+                    decided_by: crate::parts::DecidedBy::Stage2,
+                    duration_ms: 3400,
+                    context_tokens: 136_000,
+                    input: "Recent conversation:".into(),
+                    reply: "CONTINUE".into(),
+                    stage2_reply: Some("CARRY".into()),
+                    input_tokens: Some(2100),
+                    output_tokens: Some(2),
+                },
+            },
+        ];
         doc.push_message(&SessionMessageEntry {
             duration_ms: None,
             id: "fork:side".into(),
             role: MessageRole::System,
-            parts: vec![seam.clone()],
+            parts: seam.clone(),
             created_at: 1,
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
@@ -1748,7 +1820,7 @@ mod tests {
         let entries = doc.read_entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
-        assert_eq!(entries[0].parts, vec![seam]);
+        assert_eq!(entries[0].parts, seam);
     }
     use zeron_proto::{AgentEvent, ToolCall};
 
@@ -2621,6 +2693,22 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+
+    #[test]
+    fn the_baseline_is_the_first_reading_after_a_reset() {
+        let doc = SessionDoc::init("baseline-chat").unwrap();
+        doc.settle_context_baseline(90_000).unwrap();
+        assert_eq!(doc.context_baseline(), 0, "no reset seen: raw context");
+        doc.reset_context_baseline().unwrap();
+        assert_eq!(doc.context_baseline(), 0);
+        doc.settle_context_baseline(0).unwrap();
+        doc.settle_context_baseline(61_000).unwrap();
+        doc.settle_context_baseline(75_000).unwrap();
+        assert_eq!(doc.context_baseline(), 61_000);
+        doc.reset_context_baseline().unwrap();
+        doc.settle_context_baseline(58_000).unwrap();
+        assert_eq!(doc.context_baseline(), 58_000);
     }
 }
 

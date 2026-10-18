@@ -2294,6 +2294,7 @@ mod tests {
             updated_at: at,
             running_subagents: 0,
             compact_plan: None,
+            classifying: None,
         }
     }
 
