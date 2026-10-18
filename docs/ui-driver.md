@@ -582,4 +582,5 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `the window drew no frame after the accessibility tree was enabled` | The window is minimized or fully hidden, so gpui does not draw. Bring it back on screen and retry. |
 | `give one of ref, select, or x and y` | The request mixed target kinds, or gave `x` without `y` or `nth` without `select`. |
 | `` `path` must end in .png `` / `is not a regular file` | Snapshot paths are absolute `.png` files; pick a new file name, not a link or folder. |
+| `` ui_driver never writes where the caller picks, so it takes no `path` `` | Drop `path`: the tool saves under `~/.zeron/run/shots` and returns the PNG, or its path with `inline: false`. Only `zeron ui snapshot` takes `path`. |
 | Little Snitch prompts for an unsigned dev binary | Expected for `target/debug` and ad-hoc signed bundles; allow the rule for any process with no code requirement, or the prompt returns after each rebuild. |
