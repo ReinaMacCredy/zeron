@@ -3,8 +3,8 @@ mod capture;
 mod frames;
 #[cfg(debug_assertions)]
 mod input;
-#[cfg(unix)]
 mod selector;
+#[cfg(unix)]
 mod server;
 mod tree;
 
