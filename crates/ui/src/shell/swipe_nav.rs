@@ -334,6 +334,9 @@ impl Shell {
             NavEntry::Usage => "Usage".into(),
             NavEntry::Inbox => "Inbox".into(),
             NavEntry::Tasks => "Tasks".into(),
+            NavEntry::Docs(article) => article
+                .and_then(crate::docs::article)
+                .map_or_else(|| "Docs".into(), |article| article.title.clone().into()),
         }
     }
 
