@@ -28,6 +28,7 @@ pub(super) fn snapshot(
     path: Option<PathBuf>,
     cx: &mut App,
 ) -> Result<Value, String> {
+    use crate::window_capture;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -45,10 +46,10 @@ pub(super) fn snapshot(
             )),
     };
     let number = handle
-        .update(cx, |_, window, _| window_number(window))
+        .update(cx, |_, window, _| window_capture::window_number(window))
         .map_err(|error| format!("window is gone: {error}"))?
         .ok_or("this window has no window-server id")?;
-    let frame = crate::shell::switcher::capture_window_number(number)
+    let frame = window_capture::capture_window_number(number)
         .ok_or_else(|| format!("the window server returned no image for window {number}"))?;
     let (x, y, w, h) = crop(frame.width, frame.height, rect)?;
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
@@ -89,18 +90,6 @@ fn check_path(path: &std::path::Path) -> Result<(), String> {
         }
         _ => Ok(()),
     }
-}
-
-#[cfg(target_os = "macos")]
-fn window_number(window: &gpui::Window) -> Option<u32> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
-    else {
-        return None;
-    };
-    // SAFETY: gpui's AppKit handle points at the window's live content view; we are on the main thread.
-    let view = unsafe { handle.ns_view.cast::<objc2_app_kit::NSView>().as_ref() };
-    u32::try_from(view.window()?.windowNumber()).ok()
 }
 
 #[cfg(target_os = "macos")]

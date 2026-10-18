@@ -8,6 +8,7 @@
 //! message.
 
 use super::*;
+use crate::window_capture::CapturedFrame;
 use std::sync::Arc;
 use zeron_proto::ChatIndicator;
 
@@ -17,14 +18,6 @@ const THUMB_HEIGHT: f32 = 140.0;
 /// Thumbnail pixel width — twice the card for Retina; the source column is
 /// wider than this at nominal resolution, so it is always a downscale.
 const THUMB_WIDTH: u32 = 440;
-
-/// One window frame as the window server holds it: tightly packed BGRA at
-/// nominal (1px per point) resolution — the byte order `RenderImage` consumes.
-pub(crate) struct CapturedFrame {
-    pub width: u32,
-    pub height: u32,
-    pub bgra: Vec<u8>,
-}
 
 /// The open switcher: sessions in MRU order (the current session first) and
 /// the highlighted index.
@@ -46,48 +39,7 @@ pub(super) fn capture_window() -> Option<CapturedFrame> {
         .keyWindow()
         .or_else(|| app.mainWindow())
         .or_else(|| app.windows().firstObject())?;
-    capture_window_number(u32::try_from(window.windowNumber()).ok()?)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn capture_window_number(id: u32) -> Option<CapturedFrame> {
-    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-    use core_graphics::window::{
-        create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowImageNominalResolution,
-        kCGWindowImageShouldBeOpaque, kCGWindowListOptionIncludingWindow,
-    };
-    // CGRectNull: the image takes the window's own bounds.
-    let null_rect = CGRect::new(
-        &CGPoint::new(f64::INFINITY, f64::INFINITY),
-        &CGSize::new(0.0, 0.0),
-    );
-    // Opaque: the glass shell's translucent regions would otherwise carry
-    // their alpha into the card and show the card's own fill through.
-    let image = create_image(
-        null_rect,
-        kCGWindowListOptionIncludingWindow,
-        id,
-        kCGWindowImageNominalResolution
-            | kCGWindowImageBoundsIgnoreFraming
-            | kCGWindowImageShouldBeOpaque,
-    )?;
-    let (width, height) = (image.width(), image.height());
-    let stride = image.bytes_per_row();
-    if image.bits_per_pixel() != 32 || width == 0 || height == 0 {
-        return None;
-    }
-    let data = image.data();
-    let bytes = data.bytes();
-    let mut bgra = Vec::with_capacity(width * height * 4);
-    for row in 0..height {
-        let start = row * stride;
-        bgra.extend_from_slice(bytes.get(start..start + width * 4)?);
-    }
-    Some(CapturedFrame {
-        width: width as u32,
-        height: height as u32,
-        bgra,
-    })
+    crate::window_capture::capture_window_number(u32::try_from(window.windowNumber()).ok()?)
 }
 
 #[cfg(not(target_os = "macos"))]

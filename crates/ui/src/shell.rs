@@ -110,7 +110,7 @@ pub(crate) mod spaces;
 mod split;
 mod summary;
 mod swipe_nav;
-pub(crate) mod switcher;
+mod switcher;
 mod whats_new;
 mod task_actions;
 mod thread_search;
