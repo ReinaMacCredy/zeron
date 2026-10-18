@@ -1324,19 +1324,25 @@ impl Render for InboxPage {
                             .children(usage_card),
                     ),
             );
-        let card = self.card.read(cx).is_open().then(|| {
+        let frame = {
+            let card = self.card.read(cx);
+            card.frame(Instant::now())
+                .filter(|frame| card.is_open() || frame.panel > 0.0)
+        };
+        let card = frame.map(|frame| {
             div()
                 .absolute()
                 .top(px(Theme::TITLEBAR_HEIGHT + 16.0))
-                .right(px(16.0))
+                .right(px(16.0 - frame.shift))
                 .bottom(px(16.0))
                 .w(px(CARD_WIDTH))
                 .flex()
                 .flex_col()
+                .opacity(frame.panel)
                 .occlude()
                 .child(crate::frost::frosted(
                     24.0,
-                    crate::frost::MENU_BLUR,
+                    crate::frost::MENU_BLUR * frame.panel,
                     self.card.clone(),
                 ))
         });
@@ -1344,10 +1350,11 @@ impl Render for InboxPage {
             .id("inbox-root")
             .relative()
             .size_full()
-            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
                     cx.stop_propagation();
-                    page.card.update(cx, |card, cx| card.close(cx));
+                    page.card
+                        .update(cx, |card, cx| card.close(Some(window), cx));
                 }
             }))
             .child(widgets::scroll_faded(

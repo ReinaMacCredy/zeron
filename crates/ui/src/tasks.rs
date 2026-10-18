@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Edges, Entity, EventEmitter, FocusHandle, Focusable,
-    Hsla, IntoElement, KeyDownEvent, Pixels, Render, SharedString, Subscription, Task, Window, div,
+    Hsla, IntoElement, KeyDownEvent, Pixels, Render, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
 use zeron_proto::{
@@ -172,7 +172,6 @@ pub struct TasksPage {
     morph: Option<Morph>,
     painted: Painted,
     body: Rc<Cell<Option<Bounds<Pixels>>>>,
-    _cycle: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -213,21 +212,6 @@ impl TasksPage {
                 s.tasks_view = TasksView::Kanban;
             });
         }
-        let cycle = std::env::var("ZERON_TASKS_CYCLE_MS")
-            .ok()
-            .and_then(|ms| ms.parse::<u64>().ok())
-            .map(|ms| {
-                cx.spawn(async move |page, cx| {
-                    for step in 0.. {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(ms))
-                            .await;
-                        if page.update(cx, |page, cx| page.cycle(step, cx)).is_err() {
-                            break;
-                        }
-                    }
-                })
-            });
         let mut page = Self {
             state,
             add,
@@ -239,7 +223,6 @@ impl TasksPage {
             morph: None,
             painted: Painted::default(),
             body: Rc::default(),
-            _cycle: cycle,
             _subscriptions: vec![
                 add_events,
                 state_changes,
@@ -272,35 +255,6 @@ impl TasksPage {
             self.card.update(cx, |card, cx| {
                 card.open(id, None, CardFocus::Title, None, cx)
             });
-        }
-    }
-
-    fn cycle(&mut self, step: usize, cx: &mut Context<Self>) {
-        let singles: Vec<String> = {
-            let state = self.state.read(cx);
-            let (open, _) = logic::split_tasks(&state.tasks);
-            open.iter()
-                .filter(|task| !has_lead(&state.chats, task))
-                .map(|task| task.id.clone())
-                .collect()
-        };
-        match step % 5 {
-            pick @ (0 | 1) => {
-                if let Some(id) = singles.get(pick).cloned() {
-                    self.card.update(cx, |card, cx| {
-                        card.open(id, None, CardFocus::Title, None, cx)
-                    });
-                }
-            }
-            2 => self.card.update(cx, |card, cx| card.close(cx)),
-            _ => {
-                settings::update(settings::SavePolicy::Debounced, cx, |s| {
-                    s.tasks_view = match s.tasks_view {
-                        TasksView::List => TasksView::Kanban,
-                        TasksView::Kanban => TasksView::List,
-                    };
-                });
-            }
         }
     }
 
@@ -1220,7 +1174,7 @@ impl TasksPage {
     }
 }
 
-/// A failed orchestrated start or a deleted lead leaves the mode without a lead, so the card starts it again.
+/// A deleted lead leaves the mode without a lead, so the card starts it again.
 pub(crate) fn has_lead(chats: &[zeron_proto::Chat], task: &zeron_proto::Task) -> bool {
     task.mode == TaskMode::Orchestrated && linked_chat(chats, task).is_some()
 }
@@ -1630,10 +1584,11 @@ impl Render for TasksPage {
             .size_full()
             .flex()
             .flex_row()
-            .on_key_down(cx.listener(|page, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
                     cx.stop_propagation();
-                    page.card.update(cx, |card, cx| card.close(cx));
+                    page.card
+                        .update(cx, |card, cx| card.close(Some(window), cx));
                 }
             }))
             .child(

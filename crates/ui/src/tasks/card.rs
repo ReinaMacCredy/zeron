@@ -132,6 +132,7 @@ pub struct TaskCard {
     run_select: widgets::SelectState,
     starting: HashMap<String, Instant>,
     agent: Entity<Pickers>,
+    focus: FocusHandle,
     start_focus: FocusHandle,
     folder_prompt: Option<Task<()>>,
     _state_changes: Subscription,
@@ -160,6 +161,7 @@ impl TaskCard {
             due_select: widgets::SelectState::default(),
             run_select: widgets::SelectState::default(),
             starting: HashMap::new(),
+            focus: cx.focus_handle(),
             start_focus: cx.focus_handle(),
             folder_prompt: None,
             _state_changes: state_changes,
@@ -199,7 +201,12 @@ impl TaskCard {
             || !self.content.settled_at(now)
     }
 
-    fn dismiss(&mut self, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        if let Some(window) = window
+            && self.focus.contains_focused(window, cx)
+        {
+            window.blur();
+        }
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
         if let Some(mut open) = self.open.take() {
@@ -356,9 +363,9 @@ impl TaskCard {
         cx.notify();
     }
 
-    pub fn close(&mut self, cx: &mut Context<Self>) {
+    pub fn close(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.flush(cx);
-        self.dismiss(cx);
+        self.dismiss(window, cx);
         cx.notify();
     }
 
@@ -392,7 +399,7 @@ impl TaskCard {
         if present {
             open.seen = true;
         } else if open.seen {
-            self.dismiss(cx);
+            self.dismiss(None, cx);
         }
     }
 
@@ -1262,7 +1269,7 @@ impl TaskCard {
                     .size(px(14.0))
                     .text_color(theme.text_muted),
             )
-            .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.close(cx)));
+            .on_click(cx.listener(|card, _: &ClickEvent, window, cx| card.close(Some(window), cx)));
         let header = div()
             .flex()
             .items_start()
@@ -1460,8 +1467,8 @@ impl TaskCard {
                     .text_color(theme.text_muted),
             )
             .child("Delete")
-            .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                card.dismiss(cx);
+            .on_click(cx.listener(move |card, _: &ClickEvent, window, cx| {
+                card.dismiss(Some(window), cx);
                 cx.emit(TaskCardEvent::Delete(delete_task.clone()));
                 cx.notify();
             }));
@@ -1479,6 +1486,7 @@ impl TaskCard {
         div()
             .id("task-card")
             .debug_selector(|| "task-card".into())
+            .track_focus(&self.focus)
             .w_full()
             .max_h_full()
             .overflow_y_scroll()
@@ -1829,6 +1837,31 @@ mod tests {
                 approve_plan: false,
                 same_agents: true,
             })]
+        );
+    }
+
+    #[gpui::test]
+    fn a_closing_card_lets_go_of_focus(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        card.update_in(cx, |card, window, cx| {
+            card.open("plain".into(), None, CardFocus::Title, Some(window), cx)
+        });
+        cx.run_until_parked();
+        let focused = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.focused(cx));
+        let title = card.read_with(cx, |card, cx| {
+            card.open.as_ref().unwrap().title.focus_handle(cx)
+        });
+        assert_eq!(focused(cx), Some(title));
+        let at = cx.debug_bounds("task-card-close").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        assert!(card.read_with(cx, |card, _| card.leaving.is_some()));
+        assert_eq!(
+            focused(cx),
+            None,
+            "keys typed while it slides out reach nothing"
         );
     }
 

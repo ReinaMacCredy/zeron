@@ -148,7 +148,7 @@ impl Shell {
             if orchestrate.is_some() {
                 this.update(cx, |shell, cx| {
                     if card.read(cx).task_id() == Some(task_id.as_str()) {
-                        card.update(cx, |card, cx| card.close(cx));
+                        card.update(cx, |card, cx| card.close(None, cx));
                     }
                     shell.open_task_center(task_id.clone(), cx);
                 })

@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnimationExt, AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div, prelude::*, px,
+    relative,
 };
 use zeron_proto::{
     ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, TaskPatch, TaskStatus,
@@ -90,6 +91,7 @@ pub struct TaskCenter {
     add: Entity<ComposerInput>,
     live: Option<LiveThread>,
     fill: Option<Tween>,
+    arrivals: Option<HashMap<String, Tween>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -123,6 +125,7 @@ impl TaskCenter {
             add,
             live: None,
             fill: None,
+            arrivals: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![add_events, state_changes],
         }
@@ -1164,6 +1167,26 @@ impl TaskCenter {
         }
         (fill.value_at(now), !fill.settled_at(now))
     }
+
+    /// Steps on screen when the page first draws are already there; only later ones rise in.
+    fn arrivals_at(&mut self, steps: &[StepRow], reduced: bool, now: Instant) -> Vec<Tween> {
+        let first = self.arrivals.is_none();
+        let previous = self.arrivals.take().unwrap_or_default();
+        let arrivals: HashMap<String, Tween> = steps
+            .iter()
+            .map(|row| {
+                let tween = previous.get(&row.step.id).copied().unwrap_or_else(|| {
+                    let mut tween = Tween::at(if first { 1.0 } else { 0.0 }, now);
+                    tween.retarget(1.0, STEP_IN, reduced, now);
+                    tween
+                });
+                (row.step.id.clone(), tween)
+            })
+            .collect();
+        let tweens = steps.iter().map(|row| arrivals[&row.step.id]).collect();
+        self.arrivals = Some(arrivals);
+        tweens
+    }
 }
 
 impl Render for TaskCenter {
@@ -1182,8 +1205,10 @@ impl Render for TaskCenter {
         };
         let threads = self.threads(&plan, cx);
         let reduced = motion::reduced_motion(cx);
-        let (fill, filling) = self.fill_at(plan.progress, reduced, Instant::now());
-        if filling {
+        let now = Instant::now();
+        let (fill, filling) = self.fill_at(plan.progress, reduced, now);
+        let arrivals = self.arrivals_at(&plan.steps, reduced, now);
+        if filling || arrivals.iter().any(|tween| !tween.settled_at(now)) {
             window.request_animation_frame();
         }
         let editable = task.plan_pending && task.completed_at.is_none();
@@ -1192,8 +1217,9 @@ impl Render for TaskCenter {
             .steps
             .iter()
             .zip(&threads)
+            .zip(&arrivals)
             .enumerate()
-            .map(|(ix, (row, thread))| {
+            .map(|(ix, ((row, thread), arrival))| {
                 let step = self.render_step(
                     ix,
                     ix == last && !editable,
@@ -1203,17 +1229,12 @@ impl Render for TaskCenter {
                     &theme,
                     cx,
                 );
-                if reduced {
-                    return step;
-                }
+                let shown = arrival.value_at(now);
                 div()
                     .relative()
+                    .top(px(STEP_RISE * (1.0 - shown)))
+                    .opacity(shown)
                     .child(step)
-                    .with_animation(
-                        SharedString::from(format!("task-center-step-in-{}", row.step.id)),
-                        STEP_IN.animation(),
-                        |el, t| el.top(px(STEP_RISE * (1.0 - t))).opacity(t),
-                    )
                     .into_any_element()
             })
             .collect();
