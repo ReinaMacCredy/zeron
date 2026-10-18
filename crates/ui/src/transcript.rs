@@ -1238,6 +1238,75 @@ pub enum RowKind {
     },
 }
 
+fn runs_plain_text(runs: &[InlineRun]) -> String {
+    runs.iter().map(|run| run.text.as_str()).collect()
+}
+
+fn block_plain_text(block: &Block) -> String {
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => runs_plain_text(runs),
+        Block::CodeBlock { code, .. } => code.clone(),
+        Block::BlockQuote { children } => children
+            .iter()
+            .map(block_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::List { items, .. } => items
+            .iter()
+            .map(|item| {
+                item.iter()
+                    .map(block_plain_text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::Table { header, rows, .. } => std::iter::once(header)
+            .chain(rows)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| runs_plain_text(cell))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::Rule => String::new(),
+    }
+}
+
+fn a11y_clip(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
+fn row_a11y(kind: &RowKind) -> Option<(SharedString, SharedString)> {
+    let (prefix, text) = match kind {
+        RowKind::User { text, .. } => ("You: ", text.to_string()),
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+            ("", block_plain_text(&tree.blocks.get(*block_ix)?.block))
+        }
+        RowKind::InputChip { header, resolved } => (
+            "Question: ",
+            if *resolved {
+                header.to_string()
+            } else {
+                "Awaiting your answer…".to_owned()
+            },
+        ),
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| {
+        (
+            format!("{prefix}{}", a11y_clip(text, 200)).into(),
+            a11y_clip(text, 4000).into(),
+        )
+    })
+}
+
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
     let mut devices = Vec::new();
     for device in std::iter::once(owner).chain(fallback.iter().map(String::as_str)) {
@@ -10130,8 +10199,17 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        let a11y = window
+            .is_a11y_active()
+            .then(|| row_a11y(&row.kind))
+            .flatten();
         let outer = div()
             .id(row.id.clone())
+            .when_some(a11y, |el, (label, value)| {
+                el.role(gpui::Role::Group)
+                    .aria_label(label)
+                    .aria_value(value)
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -11285,10 +11363,24 @@ impl Transcript {
             reduce_motion,
         );
         let toggle_id = row_id.clone();
+        let header_expanded = if compact_shell {
+            fold.open.unwrap_or(false)
+        } else {
+            open
+        };
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
         let header = div()
             .id(SharedString::from(format!("{row_id}-hdr")))
+            .role(gpui::Role::Button)
+            .aria_label(match worked_secs {
+                Some(secs) => SharedString::from(worked_for_label(secs)),
+                None => summary.clone(),
+            })
+            .when(worked_secs.is_some(), |el| {
+                el.aria_description(summary.clone())
+            })
+            .when(collapses, |el| el.aria_expanded(header_expanded))
             .relative()
             .flex()
             .flex_row()
@@ -11465,6 +11557,7 @@ impl Transcript {
                 if detail.is_none() && invocation.is_none() && !chip_has_images(tool) {
                     return reveal_tool_row(
                         tool_chip(
+                            SharedString::from(format!("{row_id}#c{ix}")),
                             tool,
                             collapses,
                             ix > 0,
@@ -11517,6 +11610,12 @@ impl Transcript {
                         div()
                             .id(key.clone())
                             .debug_selector(|| format!("tool-chip-header-{ix}"))
+                            .role(gpui::Role::Button)
+                            .aria_label(chip_a11y_label(tool))
+                            .when_some(chip_a11y_description(tool), |el, description| {
+                                el.aria_description(description)
+                            })
+                            .aria_expanded(open)
                             .h(px(if collapses {
                                 CHIP_CARD_HEIGHT
                             } else {
@@ -13063,16 +13162,8 @@ fn device_chip_content(tool: &ToolItem) -> Option<(SharedString, String)> {
     ))
 }
 
-fn chip_header_row(
-    tool: &ToolItem,
-    mark: Option<(&'static str, Option<gpui::Hsla>, Option<SharedString>)>,
-    trail: Option<ChipTrail>,
-    file_opener: Option<&ToolFileOpener>,
-    theme: &Theme,
-    view: gpui::EntityId,
-    cx: &mut gpui::App,
-) -> gpui::Div {
-    let (label, detail): (SharedString, String) = match tool.kind {
+fn chip_label(tool: &ToolItem) -> (SharedString, String) {
+    match tool.kind {
         ToolItemKind::Thought => ("Thought process".into(), String::new()),
         ToolItemKind::Note => ("Wrote".into(), note_chip_detail(tool)),
         ToolItemKind::Call => match computer_call(&tool.call) {
@@ -13091,7 +13182,39 @@ fn chip_header_row(
                 (label.into(), detail)
             }),
         },
+    }
+}
+
+fn chip_a11y_label(tool: &ToolItem) -> SharedString {
+    match chip_label(tool) {
+        (label, detail) if detail.is_empty() => label,
+        (label, detail) => format!("{label} {detail}").into(),
+    }
+}
+
+fn chip_a11y_description(tool: &ToolItem) -> Option<SharedString> {
+    let Some(ToolDetail::Thought { lines }) = tool.detail.as_deref() else {
+        return None;
     };
+    let text = lines
+        .iter()
+        .flatten()
+        .flat_map(|run| run.text.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.is_empty()).then(|| a11y_clip(&text, 200).into())
+}
+
+fn chip_header_row(
+    tool: &ToolItem,
+    mark: Option<(&'static str, Option<gpui::Hsla>, Option<SharedString>)>,
+    trail: Option<ChipTrail>,
+    file_opener: Option<&ToolFileOpener>,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
+    let (label, detail) = chip_label(tool);
     let activity = !is_agent_tool(tool);
     let skill = match tool.kind {
         ToolItemKind::Call => tool.call.skill_name(),
@@ -13665,6 +13788,7 @@ fn activity_ribbon(path: &mut PathBuilder, points: &[Point<Pixels>]) {
 
 /// A plain activity row, or a card for a subagent without a linked document.
 fn tool_chip(
+    id: SharedString,
     tool: &ToolItem,
     rail: bool,
     has_predecessor: bool,
@@ -13683,6 +13807,9 @@ fn tool_chip(
         CHIP_HEIGHT
     };
     div()
+        .id(id)
+        .role(gpui::Role::Group)
+        .aria_label(chip_a11y_label(tool))
         .h(px(row_height))
         .w_full()
         .flex_none()
@@ -13802,6 +13929,7 @@ fn delegate_chip(
         .into(),
         _ => delegate_status_text(view.status).into(),
     };
+    let a11y_label = SharedString::from(format!("{label} {} {state}", view.title));
     let header = div()
         .h(px(CHIP_HEADER_HEIGHT))
         .w_full()
@@ -13895,7 +14023,7 @@ fn delegate_chip(
                         .text_color(theme.text_muted.opacity(0.8)),
                 ),
         );
-    agent_chip_card(id, Some("delegate-chip"), rail, on_open, header)
+    agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
 }
 
 pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
@@ -13950,6 +14078,7 @@ fn subagent_chip(
 ) -> AnyElement {
     agent_chip_card(
         id,
+        chip_a11y_label(tool),
         None,
         rail,
         on_open,
@@ -13967,6 +14096,7 @@ fn subagent_chip(
 
 fn agent_chip_card(
     id: SharedString,
+    label: SharedString,
     debug_selector: Option<&'static str>,
     rail: bool,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -13992,6 +14122,8 @@ fn agent_chip_card(
         .child(
             div()
                 .id(id)
+                .role(gpui::Role::Button)
+                .aria_label(label)
                 .when_some(debug_selector, |el, selector| {
                     el.debug_selector(move || selector.into())
                 })
