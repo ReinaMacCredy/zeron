@@ -140,10 +140,15 @@ fn options() -> Options {
 
 /// Parse a whole source into a [`BlockTree`].
 pub fn parse_full(source: &str) -> BlockTree {
-    parse_at(source, 0)
+    parse_at(source, 0, false)
 }
 
-fn parse_at(source: &str, offset: usize) -> BlockTree {
+/// A newline typed into a chat box means a new line, not a soft wrap.
+pub fn parse_full_line_breaks(source: &str) -> BlockTree {
+    parse_at(source, 0, true)
+}
+
+fn parse_at(source: &str, offset: usize, line_breaks: bool) -> BlockTree {
     let (text, insertions) = match rewrite_absolute_destinations(source) {
         Some((text, insertions)) => (Cow::Owned(text), Some(insertions)),
         None => (Cow::Borrowed(source), None),
@@ -151,6 +156,10 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
     let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options())
         .into_offset_iter()
         .map(|(event, range)| {
+            let event = match event {
+                Event::SoftBreak if line_breaks => Event::HardBreak,
+                event => event,
+            };
             // Inserted angle brackets shift every following offset; ranges
             // come from the rewritten text and must point into the original.
             let range = match &insertions {
@@ -1050,7 +1059,7 @@ impl IncrementalParser {
             .map(|i| i + 1)
             .unwrap_or(0);
 
-        let tail = parse_at(&self.source[boundary..], boundary);
+        let tail = parse_at(&self.source[boundary..], boundary, false);
         self.last_parse_bytes = self.source.len() - boundary;
         self.tree.blocks.retain(|b| b.range.start < boundary);
         self.stable_prefix_blocks = self.tree.blocks.len();
@@ -1086,7 +1095,7 @@ impl IncrementalParser {
         // Count toward the O(tail) instrumentation — this is real parse work,
         // in the same bound as the reparse that produced the block.
         self.last_parse_bytes += mended.len();
-        let mut tail = parse_at(&mended, start).blocks;
+        let mut tail = parse_at(&mended, start, false).blocks;
         for top in &mut tail {
             let top = Arc::make_mut(top);
             // Display ranges point back into the unmended source; synthetic
