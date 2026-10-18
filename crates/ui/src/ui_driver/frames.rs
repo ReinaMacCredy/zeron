@@ -1,5 +1,5 @@
 use super::tree::{self, Bounds, Element};
-use super::{epoch, frame_count, target_window};
+use super::{Drive, epoch, frame_count, target_window};
 use gpui::{AnyWindowHandle, AsyncApp};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,12 +15,6 @@ const JUMP_PX: f64 = 40.0;
 const LONG_CAP: usize = 20;
 const JUMP_CAP: usize = 20;
 const POLL: Duration = Duration::from_millis(2);
-#[cfg(debug_assertions)]
-const SETTLE_CAP: Duration = Duration::from_millis(1000);
-#[cfg(debug_assertions)]
-const QUIET: Duration = Duration::from_millis(50);
-#[cfg(debug_assertions)]
-const STILL_PT: f64 = 0.5;
 
 pub(super) static LAST_US: AtomicU64 = AtomicU64::new(0);
 static STAMPS: Mutex<Stamps> = Mutex::new(Stamps {
@@ -126,8 +120,7 @@ impl Drop for DrawTimes {
 pub(super) struct Frames {
     #[serde(default = "frames_ms")]
     ms: u64,
-    #[cfg(debug_assertions)]
-    during: Option<Value>,
+    during: Option<Drive>,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -139,8 +132,7 @@ pub(super) struct Track {
     ms: u64,
     #[serde(default = "jump_px")]
     jump_px: f64,
-    #[cfg(debug_assertions)]
-    during: Option<Value>,
+    during: Option<Drive>,
 }
 
 fn frames_ms() -> u64 {
@@ -157,13 +149,9 @@ fn jump_px() -> f64 {
 
 type During = Option<gpui::Task<Result<Value, String>>>;
 
-#[cfg(debug_assertions)]
-fn start_during(window: Option<u64>, during: Option<Value>, cx: &mut AsyncApp) -> During {
-    let mut raw = during?;
-    if let (Some(window), Some(object)) = (window, raw.as_object_mut()) {
-        object.entry("window").or_insert(json!(window));
-    }
-    Some(cx.spawn(async move |cx| Box::pin(super::run(raw, cx)).await))
+fn start_during(window: Option<u64>, during: Option<Drive>, cx: &mut AsyncApp) -> During {
+    let drive = during?;
+    Some(cx.spawn(async move |cx| super::drive(window, drive, cx).await))
 }
 
 async fn finish_during(during: During, reply: &mut Value) -> Result<(), String> {
@@ -192,10 +180,7 @@ pub(super) async fn frames(
     let recorder = Recorder::start();
     let mut draws = DrawTimes::start();
     let t0 = now_us();
-    #[cfg(debug_assertions)]
     let during = start_during(window, request.during, cx);
-    #[cfg(not(debug_assertions))]
-    let during: During = None;
     cx.background_executor().timer(span).await;
     let times = recorder.times();
     let draw = draws.take(handle.window_id());
@@ -214,11 +199,7 @@ pub(super) async fn track(
     request.element.selector()?;
     let handle = cx.update(|cx| target_window(window, cx))?;
     let first = tree::read(handle, cx).await?;
-    #[cfg(debug_assertions)]
-    let appears = request.during.is_some();
-    #[cfg(not(debug_assertions))]
-    let appears = false;
-    let start = if appears {
+    let start = if request.during.is_some() {
         request.element.find_or_absent(&first)?
     } else {
         Some(request.element.find(&first)?)
@@ -226,10 +207,7 @@ pub(super) async fn track(
     let start_ref = start.map(|node| node.id.clone());
     let start_line = start.map(tree::line);
     let (t0, mark, started) = (now_us(), frame_count(), Instant::now());
-    #[cfg(debug_assertions)]
     let during = start_during(window, request.during, cx);
-    #[cfg(not(debug_assertions))]
-    let during: During = None;
     let mut sampler = Sampler::new(start_ref.clone(), first.frame);
     let mut read_ms = Vec::new();
     let mut seen = mark;
@@ -248,7 +226,7 @@ pub(super) async fn track(
     Ok(reply)
 }
 
-async fn next_tree(
+pub(super) async fn next_tree(
     handle: AnyWindowHandle,
     seen: &mut u64,
     until: Instant,
@@ -267,37 +245,6 @@ async fn next_tree(
     let read_at = Instant::now();
     let tree = tree::read(handle, cx).await?;
     Ok(Some((tree, read_at.elapsed().as_secs_f64() * 1000.0)))
-}
-
-#[cfg(debug_assertions)]
-pub(super) async fn settled(
-    handle: AnyWindowHandle,
-    element: &Element,
-    cx: &mut AsyncApp,
-) -> Result<(tree::Node, (f32, f32), bool), String> {
-    let started = Instant::now();
-    let mut seen = frame_count();
-    let mut tree = tree::read(handle, cx).await?;
-    let mut last = element.find(&tree).cloned();
-    loop {
-        let until = (Instant::now() + QUIET).min(started + SETTLE_CAP);
-        let Some((next, _)) = next_tree(handle, &mut seen, until, cx).await? else {
-            let unsettled = started.elapsed() >= SETTLE_CAP;
-            return last.map(|node| (node, tree.size, unsettled));
-        };
-        if next.frame == tree.frame {
-            continue;
-        }
-        let found = element.find(&next).cloned();
-        let still = matches!((&last, &found), (Ok(a), Ok(b)) if match (a.bounds, b.bounds) {
-            (Some(a), Some(b)) => delta(&a, &b) < STILL_PT,
-            (a, b) => a == b,
-        });
-        (tree, last) = (next, found);
-        if still || started.elapsed() >= SETTLE_CAP {
-            return last.map(|node| (node, tree.size, !still));
-        }
-    }
 }
 
 struct Sampler {
@@ -431,7 +378,7 @@ fn collapse(samples: &[Sample]) -> Vec<Vec<i64>> {
         .collect()
 }
 
-fn delta(from: &Bounds, to: &Bounds) -> f64 {
+pub(super) fn delta(from: &Bounds, to: &Bounds) -> f64 {
     [to.x - from.x, to.y - from.y, to.w - from.w, to.h - from.h]
         .into_iter()
         .map(|d| f64::from(d.abs()))

@@ -21,7 +21,31 @@ use std::time::{Duration, Instant};
 use zeron_proto::ui_driver::{DRIVE_ACTIONS as DRIVE, MAX_WAIT_MS, OBSERVE_ACTIONS as OBSERVE};
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
-static DRIVING: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
+
+#[cfg(debug_assertions)]
+use input::{Drive, run as drive};
+
+#[cfg(not(debug_assertions))]
+#[derive(Debug, PartialEq)]
+enum Drive {}
+
+#[cfg(not(debug_assertions))]
+impl<'de> Deserialize<'de> for Drive {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom(observe_only("during")))
+    }
+}
+
+#[cfg(not(debug_assertions))]
+async fn drive(_: Option<u64>, drive: Drive, _: &mut AsyncApp) -> Result<Value, String> {
+    match drive {}
+}
+
+fn observe_only(name: &str) -> String {
+    format!(
+        "`{name}` drives the UI and exists only in debug builds (Zeron Dev bundles); this build is observe-only"
+    )
+}
 
 fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -61,12 +85,24 @@ async fn next_frame(after: u64, cap: Duration, cx: &AsyncApp) -> Option<u64> {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq)]
 struct Request {
+    window: Option<u64>,
+    action: Action,
+}
+
+#[derive(Debug, PartialEq)]
+enum Action {
+    Observe(Observe),
+    Drive(Drive),
+}
+
+#[derive(Deserialize)]
+struct Windowed<A> {
     #[serde(default)]
     window: Option<u64>,
     #[serde(flatten)]
-    action: Action,
+    action: A,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -75,7 +111,7 @@ struct Request {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-enum Action {
+enum Observe {
     State,
     Tree(tree::View),
     Audit,
@@ -86,69 +122,6 @@ enum Action {
     Wait(Until),
     Frames(frames::Frames),
     Track(frames::Track),
-    #[cfg(debug_assertions)]
-    Set(input::Set),
-    #[cfg(debug_assertions)]
-    Click {
-        #[serde(flatten)]
-        at: input::Target,
-        #[serde(default)]
-        button: input::Button,
-        #[serde(default = "one")]
-        count: usize,
-        #[serde(default)]
-        modifiers: Vec<input::Modifier>,
-    },
-    #[cfg(debug_assertions)]
-    Move {
-        #[serde(flatten)]
-        at: input::Target,
-    },
-    #[cfg(debug_assertions)]
-    Drag {
-        from: input::Target,
-        to: input::Target,
-        #[serde(default = "drag_steps")]
-        steps: u32,
-        #[serde(default)]
-        hold_ms: u64,
-        #[serde(default)]
-        modifiers: Vec<input::Modifier>,
-    },
-    #[cfg(debug_assertions)]
-    Scroll {
-        #[serde(flatten)]
-        at: input::Target,
-        #[serde(default)]
-        dx: f32,
-        #[serde(default)]
-        dy: f32,
-        #[serde(default)]
-        trackpad: bool,
-    },
-    #[cfg(debug_assertions)]
-    Key {
-        keys: input::Keys,
-    },
-    #[cfg(debug_assertions)]
-    Type {
-        text: String,
-        #[serde(flatten)]
-        into: input::TypeAt,
-    },
-    #[cfg(debug_assertions)]
-    Press {
-        #[serde(flatten)]
-        element: tree::Element,
-        #[serde(rename = "do")]
-        perform: Option<String>,
-        value: Option<String>,
-    },
-    #[cfg(debug_assertions)]
-    Action {
-        name: String,
-        args: Option<Value>,
-    },
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -169,16 +142,6 @@ enum Until {
     },
     #[serde(untagged)]
     Seen(tree::Seen),
-}
-
-#[cfg(debug_assertions)]
-fn one() -> usize {
-    1
-}
-
-#[cfg(debug_assertions)]
-fn drag_steps() -> u32 {
-    zeron_proto::ui_driver::DRAG_STEPS
 }
 
 fn quiet() -> u64 {
@@ -203,10 +166,9 @@ fn parse(raw: Value) -> Result<Request, String> {
         .and_then(Value::as_str)
         .ok_or("a request needs an \"action\" string")?
         .to_owned();
-    if !cfg!(debug_assertions) && DRIVE.contains(&name.as_str()) {
-        return Err(format!(
-            "`{name}` drives the UI and exists only in debug builds (Zeron Dev bundles); this build is observe-only"
-        ));
+    let drives = DRIVE.contains(&name.as_str());
+    if drives && !cfg!(debug_assertions) {
+        return Err(observe_only(&name));
     }
     if !valid_actions().contains(&name.as_str()) {
         return Err(format!(
@@ -214,15 +176,33 @@ fn parse(raw: Value) -> Result<Request, String> {
             valid_actions().join(", ")
         ));
     }
-    if let Some(during) = raw.get("during").filter(|during| !during.is_null()) {
-        check_during(during)?;
+    if let Some(inner) = raw
+        .get("during")
+        .and_then(|during| during.get("action"))
+        .and_then(Value::as_str)
+        .filter(|inner| !DRIVE.contains(inner))
+    {
+        return Err(format!(
+            "`during` must be a drive request ({}), not `{inner}`",
+            DRIVE.join(", ")
+        ));
     }
-    let request: Request = serde_json::from_value(raw)
-        .map_err(|error| format!("invalid `{name}` request: {error}"))?;
-    if let Action::Wait(until) = &request.action {
+    let invalid = |error: serde_json::Error| format!("invalid `{name}` request: {error}");
+    if drives {
+        let Windowed { window, action } = serde_json::from_value(raw).map_err(invalid)?;
+        return Ok(Request {
+            window,
+            action: Action::Drive(action),
+        });
+    }
+    let Windowed { window, action } = serde_json::from_value(raw).map_err(invalid)?;
+    if let Observe::Wait(until) = &action {
         until.check()?;
     }
-    Ok(request)
+    Ok(Request {
+        window,
+        action: Action::Observe(action),
+    })
 }
 
 impl Until {
@@ -245,22 +225,6 @@ impl Until {
     }
 }
 
-fn check_during(during: &Value) -> Result<(), String> {
-    if !cfg!(debug_assertions) {
-        return Err(
-            "`during` drives the UI and exists only in debug builds (Zeron Dev bundles); this build is observe-only".into(),
-        );
-    }
-    let name = during.get("action").and_then(Value::as_str).unwrap_or("");
-    if !DRIVE.contains(&name) {
-        return Err(format!(
-            "`during` must be a drive request ({}), not {during}",
-            DRIVE.join(", ")
-        ));
-    }
-    parse(during.clone()).map(drop)
-}
-
 async fn handle(raw: Value, cx: &mut AsyncApp) -> Value {
     let id = raw.get("id").cloned().unwrap_or(Value::Null);
     match run(raw, cx).await {
@@ -270,23 +234,18 @@ async fn handle(raw: Value, cx: &mut AsyncApp) -> Value {
 }
 
 async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
-    let drives = raw
-        .get("action")
-        .and_then(Value::as_str)
-        .is_some_and(|name| DRIVE.contains(&name));
     let Request { window, action } = parse(raw)?;
-    let _driving = if drives {
-        Some(DRIVING.lock().await)
-    } else {
-        None
+    let observe = match action {
+        Action::Drive(action) => return drive(window, action, cx).await,
+        Action::Observe(observe) => observe,
     };
-    match action {
-        Action::State => cx.update(state),
-        Action::Tree(view) => {
+    match observe {
+        Observe::State => cx.update(state),
+        Observe::Tree(view) => {
             let handle = cx.update(|cx| target_window(window, cx))?;
             tree::render(&tree::read(handle, cx).await?, &view)
         }
-        Action::Audit => {
+        Observe::Audit => {
             let handle = cx.update(|cx| target_window(window, cx))?;
             let tree = tree::read(handle, cx).await?;
             let focus_held = cx
@@ -294,7 +253,7 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
                 .map_err(|error| format!("window is gone: {error}"))?;
             Ok(audit::audit(&tree, focus_held))
         }
-        Action::Snapshot { rect, path } => {
+        Observe::Snapshot { rect, path } => {
             let handle = cx.update(|cx| target_window(window, cx))?;
             // The window server holds the frame before the last one drawn until another presents.
             let drawn = fresh_frame(handle, Duration::from_millis(500), cx).await?;
@@ -304,47 +263,9 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
             }
             Ok(reply)
         }
-        Action::Wait(until) => wait(window, until, cx).await,
-        Action::Frames(request) => frames::frames(window, request, cx).await,
-        Action::Track(request) => frames::track(window, request, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Set(set) => input::set(window, set, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Click {
-            at,
-            button,
-            count,
-            modifiers,
-        } => input::click(window, at, button, count, &modifiers, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Move { at } => input::hover(window, at, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Drag {
-            from,
-            to,
-            steps,
-            hold_ms,
-            modifiers,
-        } => input::drag(window, from, to, steps, hold_ms, &modifiers, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Scroll {
-            at,
-            dx,
-            dy,
-            trackpad,
-        } => input::scroll(window, at, dx, dy, trackpad, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Key { keys } => input::keys(window, keys, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Type { text, into } => input::type_text(window, &text, into, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Press {
-            element,
-            perform,
-            value,
-        } => input::press(window, element, perform, value, cx).await,
-        #[cfg(debug_assertions)]
-        Action::Action { name, args } => input::action(window, &name, args, cx).await,
+        Observe::Wait(until) => wait(window, until, cx).await,
+        Observe::Frames(request) => frames::frames(window, request, cx).await,
+        Observe::Track(request) => frames::track(window, request, cx).await,
     }
 }
 
@@ -511,7 +432,7 @@ mod tests {
             request,
             Request {
                 window: Some(7),
-                action: Action::State
+                action: Action::Observe(Observe::State)
             }
         );
     }
@@ -521,10 +442,10 @@ mod tests {
         let request = parse(json!({ "id": "a", "action": "wait", "for": "idle" })).unwrap();
         assert_eq!(
             request.action,
-            Action::Wait(Until::Idle {
+            Action::Observe(Observe::Wait(Until::Idle {
                 quiet_ms: 300,
                 timeout_ms: 5000
-            })
+            }))
         );
         let error = parse(json!({ "action": "wait", "for": "forever" })).unwrap_err();
         assert!(error.starts_with("invalid `wait` request"), "{error}");
@@ -575,32 +496,70 @@ mod tests {
         assert!(parse(json!({ "id": 3 })).is_err());
     }
 
+    fn variants<T: std::fmt::Debug + for<'de> Deserialize<'de>>() -> Vec<String> {
+        let error = serde_json::from_value::<T>(json!({ "action": "zzz" }))
+            .unwrap_err()
+            .to_string();
+        let (_, variants) = error.split_once("expected one of ").expect(&error);
+        let mut variants: Vec<String> = variants
+            .split(", ")
+            .map(|variant| {
+                variant
+                    .trim_matches(|c: char| c == '`' || c.is_whitespace())
+                    .to_owned()
+            })
+            .collect();
+        variants.sort_unstable();
+        variants
+    }
+
+    fn sorted(names: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|&name| name.to_owned()).collect();
+        names.sort_unstable();
+        names
+    }
+
     #[test]
     fn every_listed_action_is_a_variant() {
         for &name in OBSERVE.iter().chain(DRIVE) {
             match parse(json!({ "action": name })) {
-                Err(error) if !cfg!(debug_assertions) && DRIVE.contains(&name) => {
-                    assert!(error.contains("only in debug builds"), "{name}: {error}");
-                }
                 Err(error) => assert!(
                     !error.contains("unknown variant") && !error.contains("unknown action"),
                     "{name}: {error}"
                 ),
-                Ok(_) => {}
+                Ok(request) => assert!(
+                    cfg!(debug_assertions) || matches!(request.action, Action::Observe(_)),
+                    "{name} parsed as a drive request in a release build"
+                ),
             }
         }
-        let error = serde_json::from_value::<Request>(json!({ "action": "zzz" }))
-            .unwrap_err()
-            .to_string();
-        let (_, variants) = error.split_once("expected one of ").expect(&error);
-        let mut variants: Vec<&str> = variants
-            .split(", ")
-            .map(|variant| variant.trim_matches(|c: char| c == '`' || c.is_whitespace()))
-            .collect();
-        let mut listed = valid_actions();
-        variants.sort_unstable();
-        listed.sort_unstable();
-        assert_eq!(variants, listed, "{error}");
+        assert_eq!(variants::<Observe>(), sorted(OBSERVE));
+        #[cfg(debug_assertions)]
+        assert_eq!(variants::<Drive>(), sorted(DRIVE));
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_build_refuses_every_drive_request_and_during() {
+        for &name in DRIVE {
+            let error = parse(json!({ "action": name, "x": 1, "y": 2 })).unwrap_err();
+            assert!(
+                error.starts_with(&format!(
+                    "`{name}` drives the UI and exists only in debug builds"
+                )),
+                "{name}: {error}"
+            );
+        }
+        for measure in ["frames", "track"] {
+            let error = parse(json!({
+                "action": measure, "ref": "e1", "during": { "action": "click", "x": 1, "y": 2 },
+            }))
+            .unwrap_err();
+            assert!(
+                error.contains("`during` drives the UI and exists only in debug builds"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -608,15 +567,15 @@ mod tests {
         let tree = parse(json!({ "action": "tree", "query": "send", "depth": 2 })).unwrap();
         assert_eq!(
             tree.action,
-            Action::Tree(tree::View {
+            Action::Observe(Observe::Tree(tree::View {
                 query: Some("send".into()),
                 depth: Some(2),
                 ..tree::View::default()
-            })
+            }))
         );
         assert_eq!(
             parse(json!({ "action": "audit" })).unwrap().action,
-            Action::Audit
+            Action::Observe(Observe::Audit)
         );
         let select = parse(json!({
             "action": "wait", "for": "select", "select": "Button \"Send\"", "nth": 1,
@@ -624,40 +583,54 @@ mod tests {
         .unwrap();
         assert_eq!(
             select.action,
-            Action::Wait(Until::Seen(tree::Seen::Select {
+            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Select {
                 element: tree::Element::Select {
                     select: "Button \"Send\"".into(),
                     nth: Some(1)
                 },
                 timeout_ms: 5000,
-            }))
+            })))
         );
         let gone = parse(json!({ "action": "wait", "for": "gone", "ref": "e4", "timeoutMs": 9 }));
         assert_eq!(
             gone.unwrap().action,
-            Action::Wait(Until::Seen(tree::Seen::Gone {
+            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Gone {
                 element: tree::Element::Ref { id: "e4".into() },
                 timeout_ms: 9,
-            }))
+            })))
         );
         let text = parse(json!({ "action": "wait", "for": "text", "text": "Done" })).unwrap();
         assert_eq!(
             text.action,
-            Action::Wait(Until::Seen(tree::Seen::Text {
+            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Text {
                 text: "Done".into(),
                 timeout_ms: 5000,
-            }))
+            })))
         );
         assert!(parse(json!({ "action": "wait", "for": "gone" })).is_err());
     }
 
     #[cfg(debug_assertions)]
+    fn driven(raw: Value) -> Drive {
+        match parse(raw).unwrap().action {
+            Action::Drive(drive) => drive,
+            other => panic!("not a drive request: {other:?}"),
+        }
+    }
+
+    fn observed(raw: Value) -> Observe {
+        match parse(raw).unwrap().action {
+            Action::Observe(observe) => observe,
+            other => panic!("not an observe request: {other:?}"),
+        }
+    }
+
+    #[cfg(debug_assertions)]
     #[test]
     fn parses_element_targets_and_press() {
-        let click = parse(json!({ "action": "click", "select": "Tab \"Git\"", "nth": 0 }));
         assert_eq!(
-            click.unwrap().action,
-            Action::Click {
+            driven(json!({ "action": "click", "select": "Tab \"Git\"", "nth": 0 })),
+            Drive::Click {
                 at: input::Target::Element(tree::Element::Select {
                     select: "Tab \"Git\"".into(),
                     nth: Some(0)
@@ -667,8 +640,8 @@ mod tests {
                 modifiers: vec![],
             }
         );
-        let drag = parse(json!({ "action": "drag", "from": { "ref": "e3" }, "to": [5, 6] }));
-        let Action::Drag { from, to, .. } = drag.unwrap().action else {
+        let drag = driven(json!({ "action": "drag", "from": { "ref": "e3" }, "to": [5, 6] }));
+        let Drive::Drag { from, to, .. } = drag else {
             panic!("not a drag");
         };
         assert_eq!(
@@ -676,31 +649,28 @@ mod tests {
             input::Target::Element(tree::Element::Ref { id: "e3".into() })
         );
         assert_eq!(to, input::Target::Pair([5.0, 6.0]));
-        let typed = parse(json!({ "action": "type", "text": "hi" })).unwrap();
         assert_eq!(
-            typed.action,
-            Action::Type {
+            driven(json!({ "action": "type", "text": "hi" })),
+            Drive::Type {
                 text: "hi".into(),
                 into: input::TypeAt::Focused
             }
         );
-        let typed = parse(json!({ "action": "type", "text": "hi", "ref": "e7" })).unwrap();
         assert_eq!(
-            typed.action,
-            Action::Type {
+            driven(json!({ "action": "type", "text": "hi", "ref": "e7" })),
+            Drive::Type {
                 text: "hi".into(),
                 into: input::TypeAt::Target(input::Target::Element(tree::Element::Ref {
                     id: "e7".into()
                 }))
             }
         );
-        let press = parse(json!({
+        let press = driven(json!({
             "action": "press", "ref": "e7", "do": "setValue", "value": "hello",
-        }))
-        .unwrap();
+        }));
         assert_eq!(
-            press.action,
-            Action::Press {
+            press,
+            Drive::Press {
                 element: tree::Element::Ref { id: "e7".into() },
                 perform: Some("setValue".into()),
                 value: Some("hello".into()),
@@ -732,10 +702,9 @@ mod tests {
             error.contains("give one of ref, select, or x and y"),
             "{error}"
         );
-        let point = parse(json!({ "id": 9, "action": "type", "text": "hi", "x": 1, "y": 2 }));
         assert_eq!(
-            point.unwrap().action,
-            Action::Type {
+            driven(json!({ "id": 9, "action": "type", "text": "hi", "x": 1, "y": 2 })),
+            Drive::Type {
                 text: "hi".into(),
                 into: input::TypeAt::Target(input::Target::Point { x: 1.0, y: 2.0 })
             }
@@ -744,13 +713,12 @@ mod tests {
 
     #[test]
     fn parses_frames_and_track() {
-        let frames = parse(json!({ "action": "frames" })).unwrap();
-        let Action::Frames(frames) = frames.action else {
+        let Observe::Frames(frames) = observed(json!({ "action": "frames" })) else {
             panic!("not frames");
         };
         assert!(format!("{frames:?}").contains("ms: 1000"), "{frames:?}");
-        let track = parse(json!({ "action": "track", "select": "Button \"Go\"", "nth": 1 }));
-        let Action::Track(track) = track.unwrap().action else {
+        let track = observed(json!({ "action": "track", "select": "Button \"Go\"", "nth": 1 }));
+        let Observe::Track(track) = track else {
             panic!("not track");
         };
         let shown = format!("{track:?}");
@@ -765,16 +733,15 @@ mod tests {
     fn during_takes_only_a_valid_drive_request() {
         let observe = parse(json!({ "action": "frames", "during": { "action": "state" } }));
         let error = observe.unwrap_err();
+        assert!(error.contains("must be a drive request"), "{error}");
         if cfg!(debug_assertions) {
-            assert!(error.contains("must be a drive request"), "{error}");
             let bad = parse(json!({ "action": "frames", "during": { "action": "click" } }));
-            assert!(bad.unwrap_err().starts_with("invalid `click` request"));
+            let error = bad.unwrap_err();
+            assert!(error.starts_with("invalid `frames` request"), "{error}");
             let ok = parse(json!({
                 "action": "track", "ref": "e3", "during": { "action": "key", "keys": "cmd-k" },
             }));
             assert!(ok.is_ok(), "{ok:?}");
-        } else {
-            assert!(error.contains("only in debug builds"), "{error}");
         }
         let null = parse(json!({ "action": "frames", "during": null }));
         assert!(null.is_ok(), "{null:?}");
@@ -784,8 +751,8 @@ mod tests {
     #[test]
     fn parses_set() {
         let set =
-            parse(json!({ "action": "set", "theme": "dark", "size": { "w": 1200, "h": 800 } }));
-        let Action::Set(set) = set.unwrap().action else {
+            driven(json!({ "action": "set", "theme": "dark", "size": { "w": 1200, "h": 800 } }));
+        let Drive::Set(set) = set else {
             panic!("not set");
         };
         let shown = format!("{set:?}");
@@ -800,7 +767,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn parses_a_drive_actions_args() {
-        let request = parse(json!({
+        let request = driven(json!({
             "id": 4,
             "action": "click",
             "x": 12,
@@ -808,22 +775,19 @@ mod tests {
             "button": "right",
             "count": 2,
             "modifiers": ["cmd", "shift"],
-        }))
-        .unwrap();
+        }));
         assert_eq!(
-            request.action,
-            Action::Click {
+            request,
+            Drive::Click {
                 at: input::Target::Point { x: 12.0, y: 40.5 },
                 button: input::Button::Right,
                 count: 2,
                 modifiers: vec![input::Modifier::Cmd, input::Modifier::Shift],
             }
         );
-        let drag =
-            parse(json!({ "action": "drag", "from": [1, 2], "to": [3, 4], "holdMs": 50 })).unwrap();
         assert_eq!(
-            drag.action,
-            Action::Drag {
+            driven(json!({ "action": "drag", "from": [1, 2], "to": [3, 4], "holdMs": 50 })),
+            Drive::Drag {
                 from: input::Target::Pair([1.0, 2.0]),
                 to: input::Target::Pair([3.0, 4.0]),
                 steps: 12,
@@ -831,8 +795,8 @@ mod tests {
                 modifiers: vec![],
             }
         );
-        let keys = parse(json!({ "action": "key", "keys": ["cmd-k", "down enter"] })).unwrap();
-        let Action::Key { keys } = keys.action else {
+        let keys = driven(json!({ "action": "key", "keys": ["cmd-k", "down enter"] }));
+        let Drive::Key { keys } = keys else {
             panic!("not a key action");
         };
         assert_eq!(keys.strokes(), ["cmd-k", "down", "enter"]);

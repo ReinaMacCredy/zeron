@@ -7,11 +7,156 @@ use gpui::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const STEP_CAP: Duration = Duration::from_millis(zeron_proto::ui_driver::STEP_CAP_MS);
 const SETTLE_CAP: Duration = Duration::from_millis(500);
 const TRACKPAD_STEPS: u32 = 6;
+const STILL_CAP: Duration = Duration::from_millis(1000);
+const STILL_QUIET: Duration = Duration::from_millis(50);
+const STILL_PT: f64 = 0.5;
+
+static DRIVING: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(super) enum Drive {
+    Set(Set),
+    Click {
+        #[serde(flatten)]
+        at: Target,
+        #[serde(default)]
+        button: Button,
+        #[serde(default = "one")]
+        count: usize,
+        #[serde(default)]
+        modifiers: Vec<Modifier>,
+    },
+    Move {
+        #[serde(flatten)]
+        at: Target,
+    },
+    Drag {
+        from: Target,
+        to: Target,
+        #[serde(default = "drag_steps")]
+        steps: u32,
+        #[serde(default)]
+        hold_ms: u64,
+        #[serde(default)]
+        modifiers: Vec<Modifier>,
+    },
+    Scroll {
+        #[serde(flatten)]
+        at: Target,
+        #[serde(default)]
+        dx: f32,
+        #[serde(default)]
+        dy: f32,
+        #[serde(default)]
+        trackpad: bool,
+    },
+    Key {
+        keys: Keys,
+    },
+    Type {
+        text: String,
+        #[serde(flatten)]
+        into: TypeAt,
+    },
+    Press {
+        #[serde(flatten)]
+        element: tree::Element,
+        #[serde(rename = "do")]
+        perform: Option<String>,
+        value: Option<String>,
+    },
+    Action {
+        name: String,
+        args: Option<Value>,
+    },
+}
+
+fn one() -> usize {
+    1
+}
+
+fn drag_steps() -> u32 {
+    zeron_proto::ui_driver::DRAG_STEPS
+}
+
+pub(super) async fn run(
+    window: Option<u64>,
+    drive: Drive,
+    cx: &mut AsyncApp,
+) -> Result<Value, String> {
+    let _driving = DRIVING.lock().await;
+    match drive {
+        Drive::Set(set) => self::set(window, set, cx).await,
+        Drive::Click {
+            at,
+            button,
+            count,
+            modifiers,
+        } => click(window, at, button, count, &modifiers, cx).await,
+        Drive::Move { at } => hover(window, at, cx).await,
+        Drive::Drag {
+            from,
+            to,
+            steps,
+            hold_ms,
+            modifiers,
+        } => drag(window, from, to, steps, hold_ms, &modifiers, cx).await,
+        Drive::Scroll {
+            at,
+            dx,
+            dy,
+            trackpad,
+        } => scroll(window, at, dx, dy, trackpad, cx).await,
+        Drive::Key { keys } => self::keys(window, keys, cx).await,
+        Drive::Type { text, into } => type_text(window, &text, into, cx).await,
+        Drive::Press {
+            element,
+            perform,
+            value,
+        } => press(window, element, perform, value, cx).await,
+        Drive::Action { name, args } => action(window, &name, args, cx).await,
+    }
+}
+
+async fn settled(
+    handle: AnyWindowHandle,
+    element: &tree::Element,
+    cx: &mut AsyncApp,
+) -> Result<(tree::Node, (f32, f32), bool), String> {
+    let started = Instant::now();
+    let mut seen = frame_count();
+    let mut tree = tree::read(handle, cx).await?;
+    let mut last = element.find(&tree).cloned();
+    loop {
+        let until = (Instant::now() + STILL_QUIET).min(started + STILL_CAP);
+        let Some((next, _)) = frames::next_tree(handle, &mut seen, until, cx).await? else {
+            let unsettled = started.elapsed() >= STILL_CAP;
+            return last.map(|node| (node, tree.size, unsettled));
+        };
+        if next.frame == tree.frame {
+            continue;
+        }
+        let found = element.find(&next).cloned();
+        let still = matches!((&last, &found), (Ok(a), Ok(b)) if match (a.bounds, b.bounds) {
+            (Some(a), Some(b)) => frames::delta(&a, &b) < STILL_PT,
+            (a, b) => a == b,
+        });
+        (tree, last) = (next, found);
+        if still || started.elapsed() >= STILL_CAP {
+            return last.map(|node| (node, tree.size, !still));
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(try_from = "RawTarget")]
@@ -202,7 +347,7 @@ impl Driver {
         element: &tree::Element,
         cx: &mut AsyncApp,
     ) -> Result<(tree::Node, (f32, f32)), String> {
-        let (node, viewport, unsettled) = frames::settled(self.window, element, cx).await?;
+        let (node, viewport, unsettled) = settled(self.window, element, cx).await?;
         self.unsettled |= unsettled;
         Ok((node, viewport))
     }
@@ -286,7 +431,7 @@ fn mouse_press(
     ]
 }
 
-pub(super) async fn click(
+async fn click(
     window: Option<u64>,
     at: Target,
     button: Button,
@@ -312,11 +457,7 @@ pub(super) async fn click(
     driver.settle(cx).await
 }
 
-pub(super) async fn hover(
-    window: Option<u64>,
-    at: Target,
-    cx: &mut AsyncApp,
-) -> Result<Value, String> {
+async fn hover(window: Option<u64>, at: Target, cx: &mut AsyncApp) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
     let position = at.point(&mut driver, cx).await?;
     driver
@@ -325,7 +466,7 @@ pub(super) async fn hover(
     driver.settle(cx).await
 }
 
-pub(super) async fn drag(
+async fn drag(
     window: Option<u64>,
     from: Target,
     to: Target,
@@ -365,7 +506,7 @@ pub(super) async fn drag(
     driver.settle(cx).await
 }
 
-pub(super) async fn scroll(
+async fn scroll(
     window: Option<u64>,
     at: Target,
     dx: f32,
@@ -405,11 +546,7 @@ pub(super) async fn scroll(
     driver.settle(cx).await
 }
 
-pub(super) async fn keys(
-    window: Option<u64>,
-    keys: Keys,
-    cx: &mut AsyncApp,
-) -> Result<Value, String> {
+async fn keys(window: Option<u64>, keys: Keys, cx: &mut AsyncApp) -> Result<Value, String> {
     let strokes = keys
         .strokes()
         .into_iter()
@@ -445,7 +582,7 @@ fn typed(ch: char) -> Keystroke {
     }
 }
 
-pub(super) async fn type_text(
+async fn type_text(
     window: Option<u64>,
     text: &str,
     into: TypeAt,
@@ -487,7 +624,7 @@ pub(super) async fn type_text(
     driver.settle(cx).await
 }
 
-pub(super) async fn action(
+async fn action(
     window: Option<u64>,
     name: &str,
     args: Option<Value>,
@@ -537,7 +674,7 @@ fn performable(
     Ok(name)
 }
 
-pub(super) async fn press(
+async fn press(
     window: Option<u64>,
     element: tree::Element,
     perform: Option<String>,
@@ -589,7 +726,7 @@ pub(super) struct Set {
     motion_scale: Option<f32>,
 }
 
-pub(super) async fn set(window: Option<u64>, set: Set, cx: &mut AsyncApp) -> Result<Value, String> {
+async fn set(window: Option<u64>, set: Set, cx: &mut AsyncApp) -> Result<Value, String> {
     if set.theme.is_none() && set.size.is_none() && set.motion_scale.is_none() {
         return Err("`set` needs `theme`, `size` or `motionScale`".into());
     }
