@@ -2602,20 +2602,42 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
         // (and when reduced motion turns the active shimmer off).
         return text.into_any_element();
     };
+    shimmer_label(
+        text,
+        shimmer_phase,
+        theme.font_sans_fixed.clone(),
+        px(TOOL_LABEL_SIZE).into(),
+        Some(px(TOOL_LABEL_LINE_HEIGHT)),
+        theme,
+    )
+    .h_full()
+    .flex_1()
+    .into_any_element()
+}
+
+fn shimmer_label(
+    text: SharedString,
+    shimmer_phase: f32,
+    font_family: SharedString,
+    font_size: gpui::AbsoluteLength,
+    line_height: Option<Pixels>,
+    theme: &Theme,
+) -> gpui::Div {
     // Keep the title as ONE normal text run. Splitting it per character copies
     // the gradient stops, but also splits shaping/kerning and makes the sweep
     // visibly hop one glyph at a time. The overlay repaints the intact shaped
     // line through narrow moving clips, which is the native equivalent of
     // CSS `background-clip: text` without duplicating accessible text.
     let overlay_text = text.clone();
-    let overlay_font = gpui::font(theme.font_sans_fixed.clone());
+    let overlay_font = gpui::font(font_family);
     let base = theme.text_muted;
     let peak = theme.text;
     let overlay = canvas(
         move |bounds, window, _| {
+            let font_size = font_size.to_pixels(window.rem_size());
             let probe = window.text_system().shape_line(
                 overlay_text.clone(),
-                px(TOOL_LABEL_SIZE),
+                font_size,
                 &[TextRun {
                     len: overlay_text.len(),
                     font: overlay_font.clone(),
@@ -2639,7 +2661,7 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
                 }
                 let line = window.text_system().shape_line(
                     overlay_text.clone(),
-                    px(TOOL_LABEL_SIZE),
+                    font_size,
                     &[TextRun {
                         len: overlay_text.len(),
                         font: overlay_font.clone(),
@@ -2663,10 +2685,9 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
                     },
                 };
                 window.with_content_mask(Some(mask), |window| {
-                    let line_height = px(TOOL_LABEL_LINE_HEIGHT);
                     let _ = line.paint(
                         bounds.origin,
-                        line_height,
+                        line_height.unwrap_or(bounds.size.height),
                         TextAlign::Left,
                         None,
                         window,
@@ -2680,13 +2701,10 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
     .inset_0();
     div()
         .relative()
-        .h_full()
         .min_w_0()
-        .flex_1()
         .overflow_hidden()
         .child(text)
         .child(overlay)
-        .into_any_element()
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
@@ -2807,6 +2825,19 @@ impl HandoffSide {
             None => self.harness.to_string(),
         }
     }
+}
+
+#[derive(Clone, PartialEq)]
+enum CompactionWait {
+    Queued {
+        background: bool,
+    },
+    Classifying {
+        harness: zeron_proto::HarnessId,
+        model: Option<String>,
+        agent_note: bool,
+    },
+    Compacting(Option<(u64, bool)>),
 }
 
 fn boundary_compaction(transcript: &[SessionMessageEntry]) -> Option<(u64, bool)> {
@@ -3967,6 +3998,7 @@ pub struct Transcript {
     /// Last live elapsed (seconds) per assistant entry, used if `duration_ms`
     /// has not landed on the doc yet when the turn settles.
     compact_last_elapsed: HashMap<String, i64>,
+    compaction_wait_since: Option<(String, CompactionWait, Instant)>,
     /// When a compact work group first settled this session, so "Worked for"
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
@@ -4511,6 +4543,7 @@ impl Transcript {
             hidden_fence: None,
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
+            compaction_wait_since: None,
             compact_worked_fade_at: HashMap::new(),
             compact_fold_heights: HashMap::new(),
             compact_fold_settle: None,
@@ -8959,6 +8992,10 @@ impl Transcript {
                         .into_any_element(),
                 );
             }
+            match self.compaction_wait(&chat_id, now, cx) {
+                Some(wait) => return Some(self.render_compaction_wait(chat_id, wait, cx)),
+                None => self.compaction_wait_since = None,
+            }
             let (sending, queued, elapsed, turn) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
@@ -9019,49 +9056,10 @@ impl Transcript {
                 None => &state.transcript,
             })
         };
-        // A compaction holds the session Working with nothing streaming: a
-        // rotating flavour word over it reads as a stalled run.
-        let compacting = self.doc_override.is_none()
-            && self
-                .chat_id
-                .as_deref()
-                .is_some_and(|id| self.state.read(cx).chat_compacting(id));
-        let (classifying, boundary) = match (self.doc_override.is_none(), self.chat_id.as_deref()) {
-            (true, Some(id)) => {
-                let state = self.state.read(cx);
-                let classifying = state.session_for(id).and_then(|session| {
-                    let run = session.classifying.as_ref()?;
-                    Some(match &run.model {
-                        Some(model) => crate::pickers::model_display_label(run.harness, model, cx),
-                        None => crate::composer::harness_display_name(run.harness).to_string(),
-                    })
-                });
-                let boundary = compacting
-                    .then(|| boundary_compaction(&state.transcript))
-                    .flatten();
-                (classifying, boundary)
-            }
-            _ => (None, None),
-        };
         let word: std::borrow::Cow<'static, str> = if queued {
             "Queued — will send automatically".into()
-        } else if let Some(model) = classifying {
-            format!("Classifier · {model} · checking if this is a new task").into()
         } else if sending {
             "Sending".into()
-        } else if let Some((tokens, carry)) = boundary {
-            format!(
-                "Compacting {} {}",
-                crate::composer::background::compact_count(tokens),
-                if carry {
-                    "and carrying the last turns over"
-                } else {
-                    "before the new task"
-                }
-            )
-            .into()
-        } else if compacting {
-            "Compacting context".into()
         } else if consulting {
             "Consulting advisor".into()
         } else {
@@ -9136,6 +9134,170 @@ impl Transcript {
                 })
                 .into_any_element(),
         )
+    }
+
+    fn compaction_wait(
+        &self,
+        chat_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &gpui::App,
+    ) -> Option<CompactionWait> {
+        if self.doc_override.is_some() {
+            return None;
+        }
+        let state = self.state.read(cx);
+        if state.chat_compacting(chat_id) {
+            return Some(CompactionWait::Compacting(boundary_compaction(
+                &state.transcript,
+            )));
+        }
+        let session = state.session_for(chat_id)?;
+        let agent = session.compact_plan == Some(zeron_proto::CompactPlan::Agent);
+        if let Some(run) = &session.classifying {
+            return Some(CompactionWait::Classifying {
+                harness: run.harness,
+                model: run.model.clone(),
+                agent_note: agent,
+            });
+        }
+        // The agent's compaction runs after its turn settles, with the chat idle.
+        (agent && state.indicator_for(chat_id, now) == crate::state::Indicator::None).then(|| {
+            CompactionWait::Queued {
+                background: !session.background_tasks.is_empty() || session.running_subagents > 0,
+            }
+        })
+    }
+
+    /// Drawn where the classifier row or compaction note lands, so the result replaces it in place.
+    fn render_compaction_wait(
+        &mut self,
+        chat_id: String,
+        wait: CompactionWait,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = Instant::now();
+        let since = match &self.compaction_wait_since {
+            Some((id, last, at)) if *id == chat_id && *last == wait => *at,
+            _ => {
+                self.compaction_wait_since = Some((chat_id, wait.clone(), now));
+                now
+            }
+        };
+        let theme = Theme::of(cx).clone();
+        let shimmer_phase = (!cx.reduce_motion()).then(|| {
+            motion::pulse_lease(cx.entity_id(), cx);
+            tool_title_shimmer_phase(since, now)
+        });
+        let size = crate::typography::ui_rems(11.5);
+        let label = |text: &str| -> AnyElement {
+            let text = SharedString::from(text.to_string());
+            match shimmer_phase {
+                Some(phase) => shimmer_label(
+                    text,
+                    phase,
+                    theme.font_sans.clone(),
+                    size.into(),
+                    None,
+                    &theme,
+                )
+                .flex_none()
+                .into_any_element(),
+                None => text.into_any_element(),
+            }
+        };
+        let (lead, chip, tail, timed) = match &wait {
+            CompactionWait::Queued { background } => (
+                if *background {
+                    "Compaction queued · starts when background work ends".to_string()
+                } else {
+                    "Compaction queued · starts when the turn settles".to_string()
+                },
+                None,
+                None,
+                false,
+            ),
+            CompactionWait::Classifying {
+                harness,
+                model,
+                agent_note,
+            } => (
+                "Classifier".to_string(),
+                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme)),
+                Some(if *agent_note {
+                    "· checking the agent's note"
+                } else {
+                    "· checking if this is a new task"
+                }),
+                true,
+            ),
+            CompactionWait::Compacting(boundary) => (
+                match boundary {
+                    Some((tokens, carry)) => format!(
+                        "Compacting {}{}",
+                        crate::composer::background::compact_count(*tokens),
+                        if *carry {
+                            ", carrying the last turns over"
+                        } else {
+                            " before the new task"
+                        }
+                    ),
+                    None => "Compacting context".to_string(),
+                },
+                None,
+                None,
+                true,
+            ),
+        };
+        let elapsed = format!(
+            "· {}",
+            format_elapsed(now.duration_since(since).as_secs() as i64)
+        );
+        let rule = || {
+            div()
+                .flex_1()
+                .min_w(px(12.0))
+                .h(px(1.0))
+                .bg(crate::theme::hairline(0.08))
+        };
+        let spinner =
+            crate::loaders::gradient_spinner("compaction-wait", &theme, 2.5, cx.entity_id(), cx);
+        div()
+            .pt(px(Theme::SPACE_LG))
+            .child(
+                div()
+                    .py(px(4.0))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(rule())
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(gpui::relative(0.9))
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .font_family(theme.font_sans.clone())
+                            .text_size(size)
+                            .text_color(theme.text_muted)
+                            .child(spinner)
+                            .child(label(&lead))
+                            .children(chip)
+                            .children(tail.map(&label))
+                            .when(timed, |el| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from(elapsed)),
+                                )
+                            }),
+                    )
+                    .child(rule()),
+            )
+            .into_any_element()
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
