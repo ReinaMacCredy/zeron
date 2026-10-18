@@ -732,6 +732,7 @@ pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStat
             Some(ChatIndicator::AwaitingInput | ChatIndicator::Errored)
         )
         || steps.contains(&StepStatus::NeedsYou)
+        || (steps.contains(&StepStatus::Failed) && !lead_working)
         || (task.plan_pending && !steps.is_empty() && !lead_working)
     {
         return TaskStatus::NeedsYou;
@@ -2250,6 +2251,20 @@ mod tests {
             TaskStatus::NeedsYou
         );
         assert_eq!(task_status(&task, None, &[Working]), TaskStatus::Working);
+        assert_eq!(
+            task_status(&task, lead, &[Failed, Working]),
+            TaskStatus::NeedsYou,
+            "a failed step waits on the person while the lead is idle"
+        );
+        assert_eq!(
+            task_status(&task, None, &[Done, Failed]),
+            TaskStatus::NeedsYou
+        );
+        assert_eq!(
+            task_status(&task, Some(ChatIndicator::Working), &[Failed]),
+            TaskStatus::Working,
+            "the lead is handling the failed step"
+        );
         task.plan_pending = true;
         assert_eq!(
             task_status(&task, Some(ChatIndicator::Working), &[Planned]),
