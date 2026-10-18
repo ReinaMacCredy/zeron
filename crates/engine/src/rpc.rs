@@ -813,8 +813,9 @@ struct ReadAttachmentChunkParams {
 const _: () = assert!(zeron_proto::VISUAL_MAX_BYTES == zeron_visual::MAX_SCRIPT_BYTES);
 const _: () = assert!(zeron_proto::VISUAL_MAX_ASSETS == zeron_visual::assets::MAX_ASSETS);
 const _: () = assert!(zeron_proto::VISUAL_MAX_ASSET_BYTES == zeron_visual::assets::MAX_ASSET_BYTES);
-const _: () =
-    assert!(zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES);
+const _: () = assert!(
+    zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES
+);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -829,7 +830,8 @@ struct PublishVisualParams {
 
 fn no_turn_for_visual() -> RpcError {
     RpcError::Failed(
-        "This chat has no running turn on this device; show_visual only works from inside a turn.".into(),
+        "This chat has no running turn on this device; show_visual only works from inside a turn."
+            .into(),
     )
 }
 
@@ -1035,6 +1037,15 @@ enum MutateParams {
         harness: Option<HarnessId>,
         #[serde(default)]
         model: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AssignTask {
+        task_id: String,
+        chat_id: String,
+        #[serde(default)]
+        send: bool,
+        #[serde(default)]
+        from_chat_id: Option<String>,
     },
 }
 
@@ -2258,6 +2269,15 @@ impl EngineRpc {
                 self.start_task(&task_id, &chat_id, space_id, harness, model)
                     .await
             }
+            MutateParams::AssignTask {
+                task_id,
+                chat_id,
+                send,
+                from_chat_id,
+            } => {
+                self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref())
+                    .await
+            }
         }
     }
 }
@@ -3327,7 +3347,7 @@ impl RpcService for EngineRpc {
                 let p: SendThreadMessageParams = parse_params(params)?;
                 let id = self
                     .doc_host
-                    .queue_thread_message(&p.chat_id, &p.from_chat_id, &p.text)
+                    .queue_thread_message(&p.chat_id, Some(&p.from_chat_id), &p.text)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))

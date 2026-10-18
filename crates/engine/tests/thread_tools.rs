@@ -654,7 +654,7 @@ async fn self_and_cross_device_sends_are_refused_but_a_cross_project_send_is_del
     let err = rig
         .core
         .doc_host
-        .queue_thread_message("lead", "lead", "hi")
+        .queue_thread_message("lead", Some("lead"), "hi")
         .await
         .expect_err("self-send");
     assert!(err.to_string().contains("cannot message itself"), "{err}");
@@ -667,14 +667,14 @@ async fn self_and_cross_device_sends_are_refused_but_a_cross_project_send_is_del
     let err = rig
         .core
         .doc_host
-        .queue_thread_message("remote", "lead", "hi")
+        .queue_thread_message("remote", Some("lead"), "hi")
         .await
         .expect_err("cross-device send");
     assert!(err.to_string().contains("same device"), "{err}");
     let err = rig
         .core
         .doc_host
-        .queue_thread_message("nope", "lead", "hi")
+        .queue_thread_message("nope", Some("lead"), "hi")
         .await
         .expect_err("unknown target");
     assert!(err.to_string().contains("no such chat: nope"), "{err}");
@@ -692,7 +692,7 @@ async fn self_and_cross_device_sends_are_refused_but_a_cross_project_send_is_del
         .unwrap();
     rig.core
         .doc_host
-        .queue_thread_message("elsewhere", "lead", "hi")
+        .queue_thread_message("elsewhere", Some("lead"), "hi")
         .await
         .expect("cross-project send");
     wait_for(
@@ -736,7 +736,7 @@ async fn a_message_to_a_working_peer_steers_its_turn_when_the_agent_takes_mid_tu
     let queued = rig
         .core
         .doc_host
-        .queue_thread_message(&peer, "lead", "also cover the refresh race")
+        .queue_thread_message(&peer, Some("lead"), "also cover the refresh race")
         .await
         .unwrap();
     assert!(
@@ -801,7 +801,7 @@ async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript
     let queued = rig
         .core
         .doc_host
-        .queue_thread_message(&peer, "lead", "also cover the refresh race")
+        .queue_thread_message(&peer, Some("lead"), "also cover the refresh race")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -854,7 +854,7 @@ async fn a_held_message_runs_at_turn_end_when_nobody_took_it() {
         .unwrap();
     rig.core
         .doc_host
-        .queue_thread_message("lead", "peer", "done, 4 tests")
+        .queue_thread_message("lead", Some("peer"), "done, 4 tests")
         .await
         .unwrap();
     assert_eq!(queue_len(&rig.core, "lead"), 1);
@@ -909,7 +909,7 @@ async fn a_message_to_an_idle_peer_with_history_opens_its_next_turn() {
 
     rig.core
         .doc_host
-        .queue_thread_message("peer", "lead", "now cover the refresh race")
+        .queue_thread_message("peer", Some("lead"), "now cover the refresh race")
         .await
         .unwrap();
     wait_for(

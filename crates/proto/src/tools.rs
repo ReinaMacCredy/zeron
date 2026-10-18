@@ -94,8 +94,8 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
     },
     ToolGroupInfo {
         group: ToolGroup::Workspace,
-        title: "Questions, terminal and actions",
-        summary: "Reach the person watching, the terminal panel and the project Actions menu.",
+        title: "Questions, terminal, actions and tasks",
+        summary: "Reach the person watching, the terminal panel, the project Actions menu and the Tasks list.",
         tools: &[
             tool(
                 "ask_user",
@@ -108,6 +108,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "project_actions",
                 "Manage the saved commands in the project's Actions menu.",
+            ),
+            tool(
+                "tasks",
+                "Write, update and assign tasks on the person's Tasks list.",
             ),
             tool(
                 "context_settings",

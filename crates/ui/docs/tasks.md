@@ -32,6 +32,19 @@ Under **Hand it to an agent**, pick the agent and model, and choose where it run
 
 Zeron creates a chat named after the task, sends the title and notes as the first message, and opens the chat. The card then shows the chat's status and an **Open thread** button.
 
+## Assign a task to a thread
+
+To give a task to a chat you already have, type **@** and part of its name in **or assign to a thread** under **Hand it to an agent**. Pick the chat from the list, or press Enter for the first match. Then choose:
+
+- **Send the task**: the title and notes go to that chat as a message. If the chat is working, the message steers its current turn.
+- **Link only**: nothing is sent. The task just follows that chat's status.
+
+Click **Assign** or press Cmd+Enter. A task has one chat at a time. The × next to the chat's status unassigns it, so you can start or assign the task again.
+
+## Tasks from agents
+
+Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. See [Agent tools](zeron://docs/agent-tools).
+
 ## Kanban columns
 
 | Column | Holds |

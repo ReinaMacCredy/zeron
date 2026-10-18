@@ -7,7 +7,7 @@ The tools come in six groups, the same ones you see in Settings > Tools:
 | Group | What the agent can do |
 | --- | --- |
 | **Threads** | List, read, and rename your chats, start a new chat, message another chat, wait for or watch chats, stop a chat's turn, archive or settle chats, and answer another chat's pending question. |
-| **Questions, terminal and actions** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, change this chat's auto-compact window, and compact its own context. |
+| **Questions, terminal, actions and tasks** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, write and assign tasks on your Tasks list, change this chat's auto-compact window, and compact its own context. |
 | **Delegation** | Run child agents on any installed provider and model, check on or cancel them, start a code review, report what it did about review findings, and manage agent profiles when you ask. |
 | **Pages and visuals** | Show live HTML pages and native charts, tables, and mockups inline in the thread. |
 | **Device hub** | Open iOS Simulators and Android Emulators in the Device panel and take screenshots of them. |

@@ -9,6 +9,13 @@ fn failed(error: crate::EngineError) -> RpcError {
     RpcError::Failed(error.to_string())
 }
 
+fn task_prompt(task: &Task) -> String {
+    match task.notes.trim() {
+        "" => task.title.clone(),
+        notes => format!("{}\n\n{notes}", task.title),
+    }
+}
+
 struct Starting<'a> {
     tasks: &'a std::sync::Mutex<std::collections::HashSet<String>>,
     task_id: String,
@@ -158,6 +165,46 @@ impl EngineRpc {
         started
     }
 
+    pub(super) async fn assign_task(
+        &self,
+        task_id: &str,
+        chat_id: &str,
+        send: bool,
+        from_chat_id: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let task = self
+            .workspace
+            .task(task_id)
+            .ok_or_else(|| refused("Task no longer exists"))?;
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(failed)?
+            .ok_or_else(|| refused("That thread no longer exists"))?;
+        if chat.device_id != self.doc_host.device_id() {
+            return Err(refused("Assign the task to a thread on this device"));
+        }
+        if send && from_chat_id == Some(chat_id) {
+            return Err(refused("A thread cannot send a task to itself"));
+        }
+        self.update_task(
+            task_id,
+            &TaskPatch {
+                chat_id: Some(Some(chat_id.to_string())),
+                space_id: chat.space_id.filter(|_| task.space_id.is_none()).map(Some),
+                completed: task.completed_at.is_some().then_some(false),
+                ..Default::default()
+            },
+        )?;
+        if send {
+            self.doc_host
+                .queue_thread_message(chat_id, from_chat_id, &task_prompt(&task))
+                .await
+                .map_err(failed)?;
+        }
+        Ok(())
+    }
+
     fn link_and_send(
         &self,
         task: &Task,
@@ -175,10 +222,7 @@ impl EngineRpc {
                 ..Default::default()
             },
         )?;
-        let prompt = match task.notes.trim() {
-            "" => task.title.clone(),
-            notes => format!("{}\n\n{notes}", task.title),
-        };
+        let prompt = task_prompt(task);
         self.doc_host
             .request_from_chat_row(chat_id, &prompt)
             .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))

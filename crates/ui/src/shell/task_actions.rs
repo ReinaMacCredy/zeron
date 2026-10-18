@@ -143,6 +143,47 @@ impl Shell {
         .detach();
     }
 
+    fn assign_task(
+        &mut self,
+        card: &Entity<crate::tasks::TaskCard>,
+        task_id: &str,
+        patch: Option<TaskPatch>,
+        chat_id: &str,
+        send: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.task_engine(cx) else {
+            if let Some(patch) = &patch {
+                card.update(cx, |card, cx| card.save_failed(task_id, patch, cx));
+            }
+            return;
+        };
+        let update = patch.clone().map(
+            |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+        );
+        let assign = serde_json::json!({
+            "op": "assignTask", "taskId": task_id, "chatId": chat_id, "send": send,
+        });
+        let (card, task_id) = (card.clone(), task_id.to_string());
+        cx.spawn(async move |this, cx| {
+            let saving = update.is_some();
+            for (step, params) in update.into_iter().chain([assign]).enumerate() {
+                if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                    this.update(cx, |shell, cx| {
+                        shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
+                        if let Some(patch) = patch.as_ref().filter(|_| saving && step == 0) {
+                            card.update(cx, |card, cx| card.save_failed(&task_id, patch, cx));
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn render_tasks_page(
         &mut self,
         window: &mut Window,
@@ -225,6 +266,12 @@ impl Shell {
                 }),
                 cx,
             ),
+            TaskCardEvent::Assign {
+                task_id,
+                patch,
+                chat_id,
+                send,
+            } => self.assign_task(card, task_id, patch.clone(), chat_id, *send, cx),
             TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);

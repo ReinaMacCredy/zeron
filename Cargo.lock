@@ -13801,6 +13801,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
  "zeron-doc",
  "zeron-proto",
  "zeron-rpc",
