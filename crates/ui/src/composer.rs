@@ -12671,12 +12671,23 @@ impl Composer {
         let Some((body, footer)) = self.wizard_body(&wizard, &input, WizardHost::Own, cx) else {
             return gpui::Empty.into_any_element();
         };
+        let (header, question) = wizard
+            .current()
+            .map(|q| (q.header.clone(), q.question.clone()))
+            .unwrap_or_default();
 
         // Stands in for the composer pill, so it is the same frosted surface:
         // without the backdrop blur the translucent fill let the transcript
         // show through unblurred.
         let panel = div()
             .id("question-panel")
+            .role(Role::Group)
+            .aria_label(if header.trim().is_empty() {
+                "Question".to_owned()
+            } else {
+                header
+            })
+            .aria_description(question)
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(WizardHost::Own, event, window, cx)
@@ -12716,6 +12727,18 @@ impl Composer {
             let picked = wizard.is_picked(ix) && typed_empty;
             div()
                 .id(("wizard-option", ix))
+                .role(if question.multi_select {
+                    Role::CheckBox
+                } else {
+                    Role::RadioButton
+                })
+                .aria_label(SharedString::from(label.clone()))
+                .aria_toggled(if picked {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .when(ix < 9, |el| el.aria_keyshortcuts(format!("{}", ix + 1)))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -12838,6 +12861,13 @@ impl Composer {
             })
             .child(
                 div()
+                    .id("wizard-options")
+                    .role(if question.multi_select {
+                        Role::Group
+                    } else {
+                        Role::RadioGroup
+                    })
+                    .aria_label(SharedString::from(question.question.clone()))
                     .mt(px(12.0))
                     .flex()
                     .flex_col()
@@ -12866,6 +12896,8 @@ impl Composer {
             .child(if page > 0 {
                 crate::popover::btn_ghost(&theme, "Back", "wizard-back")
                     .id("wizard-back")
+                    .role(Role::Button)
+                    .aria_label("Back")
                     .on_click(cx.listener(move |this, _, _, cx| match host {
                         WizardHost::Own => this.wizard_back(cx),
                         WizardHost::Ask => this.ask_back(cx),
@@ -12877,6 +12909,8 @@ impl Composer {
             .child(
                 crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                     .id("wizard-submit")
+                    .role(Role::Button)
+                    .aria_label(if last { "Submit" } else { "Next" })
                     .px(px(16.0))
                     .when(!can_advance, |el| el.opacity(0.4))
                     .on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx))),
@@ -13404,6 +13438,8 @@ impl Composer {
         match mode {
             SendButtonMode::Stop => div()
                 .id("composer-stop")
+                .role(Role::Button)
+                .aria_label("Stop")
                 .size(px(28.0))
                 .flex_none()
                 .rounded_full()
@@ -13419,6 +13455,8 @@ impl Composer {
                 .into_any_element(),
             SendButtonMode::Resume => div()
                 .id("composer-resume")
+                .role(Role::Button)
+                .aria_label("Resume")
                 .size(px(28.0))
                 .flex_none()
                 .rounded_full()
@@ -13441,6 +13479,9 @@ impl Composer {
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
                 send_circle("composer-send", blocked, theme)
+                    .when(mode == SendButtonMode::Queue, |el| {
+                        el.aria_label("Queue message")
+                    })
                     .when(!blocked, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
@@ -13468,6 +13509,8 @@ pub(crate) fn send_circle(
     div()
         .id(id)
         .debug_selector(move || id.into())
+        .role(Role::Button)
+        .aria_label("Send message")
         .size(px(28.0))
         .flex_none()
         .rounded_full()
