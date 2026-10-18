@@ -1,0 +1,11 @@
+[
+  { "type": "reasoningDelta", "text": "The demo needs an accent color. Look at the palette, then ask." },
+  { "type": "textDelta", "text": "Checking the palette before I pick one.\n\n" },
+  { "type": "toolCall", "id": "mq-exec-1", "call": { "kind": "exec", "command": "ls palette" } },
+  { "sleep": 300 },
+  { "type": "toolResult", "id": "mq-exec-1", "isError": false, "output": "blue.css\ngreen.css\n" },
+  { "ask": [{ "id": "accent", "header": "Accent", "question": "Which accent color should the demo use?", "options": ["Blue", "Green"], "multiSelect": false }] },
+  { "echoAnswers": "Picked: " },
+  { "type": "textDelta", "text": ". The demo uses it from now on." },
+  { "type": "done", "status": "completed", "result": null, "error": null, "sessionId": null }
+]

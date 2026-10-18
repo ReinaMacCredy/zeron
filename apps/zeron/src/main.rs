@@ -62,15 +62,19 @@ enum Command {
         port: Option<u16>,
     },
     /// Inspect and drive a running Zeron app through its UI driver:
-    /// `zeron ui list`, or `zeron ui <action> ['<json args>'] [--target <t>]`.
+    /// `zeron ui list`, `zeron ui <action> ['<json args>'] [--target <t>]`,
+    /// or `zeron ui scenario <file.json> [--target <t>] [--out <dir>]`.
     Ui {
-        /// `list`, or a driver action such as state, tree, snapshot, wait, click or key.
+        /// `list`, `scenario`, or a driver action such as state, tree, snapshot, wait, click or key.
         action: String,
-        /// The action's arguments as one JSON object, such as '{"keys":"cmd-k"}'.
+        /// The action's arguments as one JSON object, such as '{"keys":"cmd-k"}'; for `scenario`, the scenario file.
         args: Option<String>,
         /// A pid or label from `zeron ui list` (exact, or a unique substring), or a socket path.
         #[arg(long)]
         target: Option<String>,
+        /// For `scenario`: the report directory (default ~/.zeron/run/scenarios/<name>-<time>).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
     },
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
@@ -313,10 +317,30 @@ fn main() -> anyhow::Result<()> {
             action,
             args,
             target,
+            out,
         }) => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
+            if action == "scenario" {
+                let file = args.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "usage: zeron ui scenario <file.json> [--target <t>] [--out <dir>]"
+                    )
+                })?;
+                match runtime.block_on(zeron_mcp::ui_scenario::run(
+                    std::path::Path::new(&file),
+                    target.as_deref(),
+                    out,
+                )) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => std::process::exit(1),
+                    Err(message) => {
+                        eprintln!("{message}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             runtime.block_on(ui_cli(action, args, target))
         }
         #[cfg(target_os = "linux")]
