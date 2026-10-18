@@ -33,7 +33,7 @@ fn lead_brief(task_id: &str, lead: Lead) -> String {
         );
     }
     lines.push(
-        "Run each step with delegate_task and taskStepId set to the step's id. Steps that do not depend on each other can run at the same time.",
+        "Run each step with delegate_task: task set to what the step must do, taskStepId set to the step's id. Steps that do not depend on each other can run at the same time.",
     );
     lines.push(if lead.same_agents {
         "Run every step on your own harness and model: do not pass harness or model to delegate_task."

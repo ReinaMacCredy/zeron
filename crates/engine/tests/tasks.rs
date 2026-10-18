@@ -224,7 +224,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
             "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the tasks tool: action \"plan\", taskId \"{id}\", steps [{{title, notes}}]. Keep each step small enough for one agent.\n"
         )
     };
-    let run = "Run each step with delegate_task and taskStepId set to the step's id. Steps that do not depend on each other can run at the same time.";
+    let run = "Run each step with delegate_task: task set to what the step must do, taskStepId set to the step's id. Steps that do not depend on each other can run at the same time.";
     let tail = "When a step's thread finishes, check its result. Mark a step done or skipped with the tasks tool, action \"step\", or run it again with delegate_task and the same taskStepId.\n{n}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
     assert_eq!(
         prompts.lock().unwrap().as_slice(),
