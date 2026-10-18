@@ -200,7 +200,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level, permission mode, model options and tool set, but never this chat's agent profile or its instructions. `profile` starts it on an agent profile from orchestrator_capabilities instead: that profile's harness, model, reasoning, model options, instructions and tool set (added to this chat's), and its permission mode when that is no higher than this chat's. `harness`, `model` or `reasoning` override this chat's or the profile's; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model, reasoning level or profile is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). Counts against this turn's send budget.",
+            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level, permission mode, model options and tool set, but never this chat's agent profile or its instructions. `profile` starts it on an agent profile from orchestrator_capabilities instead: that profile's harness, model, reasoning, model options, instructions and tool set (added to this chat's), and its permission mode when that is no higher than this chat's. `harness`, `model` or `reasoning` override this chat's or the profile's; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model, reasoning level or profile is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). `taskStepId` runs that step of an orchestrated task this chat leads (an id from the tasks tool) and binds the new thread to it: the thread takes the step's title unless `title` is set, and Zeron messages this chat when the thread finishes a turn or fails, so it cannot be combined with `wait`. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -212,6 +212,7 @@ fn thread_tool_list() -> Value {
                     "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." },
                     "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
+                    "taskStepId": { "type": "string", "description": "A step id from the tasks tool: runs that step of a task this chat leads on the new thread." },
                     "wait": wait,
                     "timeoutSeconds": timeout
                 },
@@ -379,7 +380,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. An orchestrated task (`mode` orchestrated) has a lead thread and steps, each run on its own delegate_task child: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `steps` with their status (planned, working, needsYou, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}]: steps that have not started are replaced, the rest are kept, and the new ones follow them. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with delegate_task and its `taskStepId`.",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. An orchestrated task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}]: steps that have not started are replaced, the rest are kept, and the new ones follow them. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -577,8 +578,7 @@ fn thread_tool_list() -> Value {
                     "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
-                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] },
-                    "taskStepId": { "type": "string", "description": "A step id from the tasks tool: runs that step of a task this chat leads and binds the child to it. The child takes the step's title unless title is set." }
+                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -1122,6 +1122,13 @@ impl ThreadTools {
             .as_str()
             .filter(|p| !p.trim().is_empty())
             .ok_or("prompt is required")?;
+        let task_step_id = args["taskStepId"].as_str();
+        if task_step_id.is_some() && args["wait"].as_bool() == Some(true) {
+            return Err(
+                "wait cannot run a task step: Zeron messages you when the step's thread finishes a turn"
+                    .into(),
+            );
+        }
         let (caller, _) = self.peers().await?;
         let space_id = match args["project"].as_str() {
             Some(key) => Some(project_of(&self.projects(&caller).await?, key)?.id.clone()),
@@ -1134,6 +1141,7 @@ impl ThreadTools {
         run["title"] = json!(args["title"].as_str());
         run["spaceId"] = json!(space_id);
         run["cwd"] = json!(args["cwd"].as_str());
+        run["taskStepId"] = json!(task_step_id);
         let created = self.call_engine(methods::CREATE_THREAD, run).await?;
         let thread_id = created["chatId"]
             .as_str()
@@ -1405,7 +1413,6 @@ impl ThreadTools {
         run["role"] = json!(args["role"].as_str());
         run["wait"] = json!(wait);
         run["clientRequestId"] = json!(args["clientRequestId"].as_str());
-        run["taskStepId"] = json!(args["taskStepId"].as_str());
         let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
         if !wait {
             view["waitTimedOut"] = json!(false);
@@ -3792,7 +3799,8 @@ mod tests {
                 json!({ "id": "s2", "taskId": "t1", "title": "Schema", "outcome": "done", "chatId": "e" }),
                 json!({ "id": "s3", "taskId": "t1", "title": "Docs" }),
                 json!({ "id": "s4", "taskId": "t1", "title": "Ads", "outcome": "skipped" }),
-                json!({ "id": "s5", "taskId": "t1", "title": "Deploy", "chatId": "c" }),
+                json!({ "id": "s5", "taskId": "t1", "title": "Deploy", "chatId": "c", "turn": { "ended": "stopped" } }),
+                json!({ "id": "s6", "taskId": "t1", "title": "Launch", "chatId": "c", "turn": { "ended": "failed", "turn": "m4" } }),
             ],
         }
     }
@@ -4858,7 +4866,7 @@ mod tests {
         };
         assert_eq!(lead["mode"], "orchestrated");
         assert_eq!(lead["planPending"], true);
-        assert_eq!(lead["progress"], json!({ "done": 1, "total": 4 }));
+        assert_eq!(lead["progress"], json!({ "done": 1, "total": 5 }));
         assert!(lead.get("steps").is_none(), "the list leaves steps out");
         assert_eq!(single["mode"], "single");
         assert_eq!(single["sendError"], "offline");
@@ -4883,6 +4891,7 @@ mod tests {
                 ("s3", "planned"),
                 ("s4", "skipped"),
                 ("s5", "needsYou"),
+                ("s6", "failed"),
             ]
         );
         assert_eq!(one["task"]["steps"][0]["threadId"], "b");
@@ -4896,7 +4905,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(planned["task"]["steps"].as_array().unwrap().len(), 5);
+        assert_eq!(planned["task"]["steps"].as_array().unwrap().len(), 6);
         rig.tools
             .call(
                 "tasks",
@@ -4934,15 +4943,25 @@ mod tests {
 
         rig.tools
             .call(
-                "delegate_task",
-                &json!({ "task": "build the API", "taskStepId": "s1" }),
+                "create_thread",
+                &json!({ "prompt": "build the API", "taskStepId": "s3" }),
             )
             .await
             .unwrap();
         assert_eq!(
-            logged(&rig.calls, methods::DELEGATE_TASK)[0]["taskStepId"],
-            "s1"
+            logged(&rig.calls, methods::CREATE_THREAD)[0]["taskStepId"],
+            "s3"
         );
+        let err = rig
+            .tools
+            .call(
+                "create_thread",
+                &json!({ "prompt": "build the API", "taskStepId": "s3", "wait": true }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("Zeron messages you"), "{err}");
+        assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 1);
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ use serde::Deserialize;
 use zeron_proto::{
     Chat, ChatConfig, Delegation, DelegationDelivery, DelegationStatus, DelegationWake,
     FindingOutcome, FindingOutcomeKind, PermissionMode, ReasoningLevel, Session, SessionStatus,
-    TaskStep, TaskStepPatch, UserInputQuestion,
+    UserInputQuestion,
 };
 
 use super::*;
@@ -16,7 +16,7 @@ The `zeron` MCP server runs child agents on any installed harness and model. Tre
 - A delegated task is child work owned by this chat. Call `orchestrator_capabilities` for the harnesses and models available, from the same catalog as the composer; a native subagent tool's model list is not the full list. When it lists agent profiles, pick the one whose `whenToUse` fits the task and pass its id as `profile`. Prefer native subagent tools for same-harness work only when they support the chosen model. Use `delegate_task` with that harness and model when native tools cannot, including for same-harness work, for a different harness, or when the user asks for a Zeron child task. Keep each returned `taskId` and use `task_status` or `task_cancel` with it. Its `childThreadId` is backing storage for the child; do not replace delegation with `create_thread`.
 - An async child's completion wakes this chat with a message naming its taskId, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers, then read the result with `task_status`. Use mode `wait` only when this turn needs the result before it can continue.
 - A child that blocks on a question or a tool approval wakes this chat the same way, as does any thread this chat watches with `watch_threads`. Answer with `respond_to_input` when the answer follows from the task or an earlier decision (a tool approval needs this chat at Full access); anything irreversible or that only the person can decide goes to them with `ask_user`.
-- `create_thread` opens an ordinary top-level chat. Use it only when the user asks for separate/new threads or conversations, never merely because they said \"subagent\" or asked for parallel delegated work.
+- `create_thread` opens an ordinary top-level chat. Use it only when the user asks for separate/new threads or conversations, never merely because they said \"subagent\" or asked for parallel delegated work. The exception is a task's lead: it runs each step with `create_thread` and that step's `taskStepId`, as its brief says.
 
 Tool names may carry a harness prefix such as `mcp__zeron__delegate_task`; the semantics are the same. Use a stable `clientRequestId` when retrying `delegate_task`.";
 
@@ -54,8 +54,6 @@ pub struct DelegateTaskParams {
     pub wake: Option<DelegationWake>,
     #[serde(default)]
     pub client_request_id: Option<String>,
-    #[serde(default)]
-    pub task_step_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -133,46 +131,8 @@ fn resolve_next(task_id: &str) -> String {
     )
 }
 
-fn failure(code: &str, message: impl std::fmt::Display) -> EngineError {
+pub(super) fn failure(code: &str, message: impl std::fmt::Display) -> EngineError {
     EngineError::Other(format!("{code}: {message}"))
-}
-
-fn runnable_step(
-    workspace: &WorkspaceHost,
-    chats: &[Chat],
-    owner_id: &str,
-    step_id: &str,
-) -> Result<TaskStep, EngineError> {
-    let refused = |message: &str| failure("invalid_request", message);
-    let step = workspace
-        .task_step(step_id)
-        .ok_or_else(|| refused("That task step no longer exists"))?;
-    let task = workspace
-        .task(&step.task_id)
-        .ok_or_else(|| refused("That step's task no longer exists"))?;
-    if task.chat_id.as_deref() != Some(owner_id) {
-        return Err(refused("Only the task's lead runs its steps"));
-    }
-    if task.plan_pending {
-        return Err(failure(
-            "plan_pending",
-            "The person has not approved the plan yet. Stop and wait for the approval message.",
-        ));
-    }
-    if step.outcome.is_some() {
-        return Err(refused(
-            "This step is already marked done or skipped; reopen it with the tasks tool first",
-        ));
-    }
-    let running = step.chat_id.as_deref().is_some_and(|bound| {
-        chats.iter().any(|chat| {
-            chat.id == bound && chat.delegation.as_ref().is_some_and(Delegation::is_running)
-        })
-    });
-    if running {
-        return Err(refused("This step's thread is still running"));
-    }
-    Ok(step)
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -454,7 +414,7 @@ impl DocHost {
 
     pub async fn delegate_task(
         &self,
-        mut params: DelegateTaskParams,
+        params: DelegateTaskParams,
         limits: DelegationSettings,
     ) -> Result<TaskView, EngineError> {
         let task = params.task.trim();
@@ -521,18 +481,6 @@ impl DocHost {
                 ),
             ));
         }
-        let step = match params.task_step_id.as_deref() {
-            Some(step_id) => Some(runnable_step(workspace, &chats, &owner.id, step_id)?),
-            None => None,
-        };
-        if let Some(step) = &step
-            && params
-                .title
-                .as_deref()
-                .is_none_or(|title| title.trim().is_empty())
-        {
-            params.title = Some(step.title.clone());
-        }
         let config = self.derived_config(
             &owner,
             params.harness,
@@ -574,27 +522,11 @@ impl DocHost {
             owner.cwd.clone(),
             delegation,
         )?;
-        let bound = match &step {
-            Some(step) => workspace
-                .update_task_step(
-                    &step.id,
-                    &TaskStepPatch {
-                        chat_id: Some(Some(chat_id.clone())),
-                        ..Default::default()
-                    },
-                )
-                .map(drop),
-            None => Ok(()),
-        };
         drop(admitting);
-        let started = match bound {
-            Ok(()) => {
-                self.start_child(&params, task, role, &owner.id, &chat_id, anchor)
-                    .await
-            }
-            Err(err) => Err(err),
-        };
-        if let Err(err) = started {
+        if let Err(err) = self
+            .start_child(&params, task, role, &owner.id, &chat_id, anchor)
+            .await
+        {
             workspace.update_chat_delegation(&chat_id, |d| {
                 d.status = DelegationStatus::Failed;
                 d.summary = Some(clip(&err.to_string(), SUMMARY_CHARS));
@@ -1215,6 +1147,8 @@ impl DocHost {
             .thread_watches()
             .map(|watches| watches.watchers_of(chat_id))
             .unwrap_or_default()
+            .into_iter()
+            .chain(self.step_lead_of(chat_id))
         {
             if !targets.contains(&watcher) {
                 targets.push(watcher);
@@ -1338,6 +1272,7 @@ impl DocHost {
         self.spawn_worker(async move {
             while statuses.changed().await.is_ok() {
                 host.settle_delegations(None).await;
+                host.settle_task_steps().await;
             }
         });
     }
@@ -1348,6 +1283,7 @@ impl DocHost {
         let booted_at = Utc::now();
         self.spawn_worker(async move {
             host.settle_delegations(Some(booted_at)).await;
+            host.settle_task_steps_after_boot().await;
         });
     }
 

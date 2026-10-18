@@ -179,6 +179,8 @@ struct CreateThreadParams {
     space_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    task_step_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1504,7 +1506,6 @@ impl EngineRpc {
                     wait: false,
                     wake: Some(p.wake.unwrap_or(zeron_proto::DelegationWake::Never)),
                     client_request_id: Some(request),
-                    task_step_id: None,
                 },
                 self.registry.delegation_settings(),
             )
@@ -3409,7 +3410,7 @@ impl RpcService for EngineRpc {
                 let p: CreateThreadParams = parse_params(params)?;
                 let chat_id = self
                     .doc_host
-                    .create_thread(
+                    .create_step_thread(
                         &p.from_chat_id,
                         &p.prompt,
                         p.title.as_deref(),
@@ -3419,6 +3420,9 @@ impl RpcService for EngineRpc {
                         &p.profile,
                         p.space_id.as_deref(),
                         p.cwd.as_deref(),
+                        p.task_step_id
+                            .as_deref()
+                            .map(|id| (id, self.registry.delegation_settings())),
                     )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
