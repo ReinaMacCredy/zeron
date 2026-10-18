@@ -336,7 +336,6 @@ icon_assets![
     (LUCIDE_CIRCLE_HELP, "lucide-circle-help"),
     (LUCIDE_GIFT, "lucide-gift"),
     (LUCIDE_KEYBOARD, "lucide-keyboard"),
-    (LUCIDE_MESSAGE_SQUARE_TEXT, "lucide-message-square-text"),
     (LUCIDE_HAMMER, "lucide-hammer"),
     (LUCIDE_PICTURE_IN_PICTURE_2, "lucide-picture-in-picture-2"),
     (LUCIDE_BOX, "lucide-box"),

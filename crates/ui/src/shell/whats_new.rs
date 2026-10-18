@@ -19,8 +19,6 @@ const DIALOG_WIDTH: f32 = 480.0;
 const DIALOG_BODY_MAX: f32 = 520.0;
 const HELP_RELEASES: usize = 3;
 const HELP_MENU_WIDTH: f32 = 264.0;
-const FEEDBACK_URL: &str = "https://github.com/ReinaMacCredy/zeron/issues/new";
-const DOCS_URL: &str = "https://github.com/ReinaMacCredy/zeron#readme";
 
 pub(super) struct WhatsNewCard {
     entry: &'static Entry,
@@ -318,26 +316,6 @@ impl Shell {
                     this.close_help_menu(cx);
                     this.open_settings(SettingsSection::Shortcuts, cx);
                 })),
-            )
-            .child(
-                help_row(
-                    theme,
-                    "help-feedback",
-                    icons::LUCIDE_MESSAGE_SQUARE_TEXT,
-                    "Send feedback",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_help_menu(cx);
-                    cx.open_url(FEEDBACK_URL);
-                })),
-            )
-            .child(
-                help_row(theme, "help-docs", icons::LUCIDE_BOOK_OPEN, "Docs").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.close_help_menu(cx);
-                        cx.open_url(DOCS_URL);
-                    }),
-                ),
             )
             .into_any_element();
         trigger
