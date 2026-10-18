@@ -1599,7 +1599,7 @@ impl Render for TasksPage {
             )
         });
         let measured = self.body.clone();
-        let card = self.card.read(cx).is_open().then(|| self.card.clone());
+        let card = self.card.read(cx).frame(now);
         div()
             .id("tasks-page")
             .debug_selector(|| "tasks-page".into())
@@ -1631,15 +1631,25 @@ impl Render for TasksPage {
                     .child(body)
                     .children(ghosts),
             )
-            .children(card.map(|card| {
+            .children(card.map(|frame| {
                 div()
+                    .relative()
                     .flex_none()
-                    .w(px(CARD_WIDTH))
+                    .w(px(CARD_WIDTH * frame.slot))
                     .h_full()
-                    .pt(px(Theme::TITLEBAR_HEIGHT + 12.0))
-                    .pr(px(16.0))
-                    .pb(px(16.0))
-                    .child(card)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(-frame.shift))
+                            .w(px(CARD_WIDTH))
+                            .pt(px(Theme::TITLEBAR_HEIGHT + 12.0))
+                            .pr(px(16.0))
+                            .pb(px(16.0))
+                            .opacity(frame.panel)
+                            .child(self.card.clone()),
+                    )
             }))
     }
 }

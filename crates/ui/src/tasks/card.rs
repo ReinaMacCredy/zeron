@@ -13,6 +13,7 @@ use super::logic::{self, DuePick};
 use super::{Row, SAVE_DEBOUNCE, START_PENDING, linked_chat, patched, row_for};
 use crate::composer::{ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
+use crate::motion::{self, MotionSpec, Tween};
 use crate::pickers::Pickers;
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -21,6 +22,16 @@ use crate::typography::ui_rems;
 
 const PILL_HEIGHT: f32 = 28.0;
 const CARD_RADIUS: f32 = 24.0;
+const PANEL_IN: MotionSpec = MotionSpec::new(300, motion::EASE_DRAWER);
+const PANEL_OUT: MotionSpec = MotionSpec::new(220, motion::EASE_IN_SHARP);
+const SLOT_SHIFT: MotionSpec = MotionSpec::new(320, motion::EASE_DRAWER);
+const CONTENT_IN: MotionSpec = MotionSpec::new(200, motion::LINEAR).with_delay(80);
+const SWAP_OUT: MotionSpec = MotionSpec::new(90, motion::LINEAR);
+const SWAP_IN: MotionSpec = MotionSpec::new(180, motion::EASE_DRAWER).with_delay(90);
+const PANEL_SHIFT_IN: f32 = 28.0;
+const PANEL_SHIFT_OUT: f32 = 20.0;
+const SWAP_OUT_RISE: f32 = 4.0;
+const SWAP_IN_DROP: f32 = 6.0;
 
 #[derive(Clone)]
 pub enum TaskCardEvent {
@@ -90,9 +101,32 @@ struct Fields {
     notes: Entity<ComposerInput>,
 }
 
+struct Leaving {
+    open: Open,
+    swap_out: Option<Tween>,
+}
+
+#[derive(Clone, Copy)]
+struct Content {
+    opacity: f32,
+    rise: f32,
+    inert: bool,
+}
+
+pub struct CardFrame {
+    pub slot: f32,
+    pub panel: f32,
+    pub shift: f32,
+}
+
 pub struct TaskCard {
     state: Entity<AppState>,
     open: Option<Open>,
+    leaving: Option<Leaving>,
+    presence: Tween,
+    slot: Tween,
+    content: Tween,
+    content_drop: f32,
     project_select: widgets::SelectState,
     due_select: widgets::SelectState,
     run_select: widgets::SelectState,
@@ -112,10 +146,16 @@ impl TaskCard {
             cx.notify();
         });
         let agent = cx.new(|cx| Pickers::new_for_tasks(state.clone(), cx));
+        let now = Instant::now();
         Self {
             agent,
             state,
             open: None,
+            leaving: None,
+            presence: Tween::at(0.0, now),
+            slot: Tween::at(0.0, now),
+            content: Tween::at(1.0, now),
+            content_drop: 0.0,
             project_select: widgets::SelectState::default(),
             due_select: widgets::SelectState::default(),
             run_select: widgets::SelectState::default(),
@@ -132,6 +172,45 @@ impl TaskCard {
 
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    pub fn frame(&self, now: Instant) -> Option<CardFrame> {
+        let shown =
+            self.open.is_some() || !self.presence.settled_at(now) || !self.slot.settled_at(now);
+        shown.then(|| {
+            let panel = self.presence.value_at(now);
+            let shift = if self.presence.target() > 0.0 {
+                PANEL_SHIFT_IN
+            } else {
+                PANEL_SHIFT_OUT
+            };
+            CardFrame {
+                slot: self.slot.value_at(now),
+                panel,
+                shift: shift * (1.0 - panel),
+            }
+        })
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        self.leaving.is_some()
+            || !self.presence.settled_at(now)
+            || !self.slot.settled_at(now)
+            || !self.content.settled_at(now)
+    }
+
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let reduced = motion::reduced_motion(cx);
+        if let Some(mut open) = self.open.take() {
+            open.save = None;
+            self.leaving = (!reduced).then_some(Leaving {
+                open,
+                swap_out: None,
+            });
+        }
+        self.presence.retarget(0.0, PANEL_OUT, reduced, now);
+        self.slot.retarget(0.0, SLOT_SHIFT, reduced, now);
     }
 
     /// `title` seeds the card of a task whose row has not arrived yet.
@@ -229,7 +308,9 @@ impl TaskCard {
             };
             window.focus(&target, cx);
         }
-        self.open = Some(Open {
+        let now = Instant::now();
+        let reduced = motion::reduced_motion(cx);
+        let previous = self.open.replace(Open {
             task_id,
             title: title_input,
             notes: notes_input,
@@ -247,12 +328,37 @@ impl TaskCard {
             orchestrate: None,
             _subscriptions: subscriptions,
         });
+        match previous {
+            Some(mut open) if !reduced => {
+                open.save = None;
+                let mut fade = Tween::at(1.0, now);
+                fade.retarget(0.0, SWAP_OUT, false, now);
+                self.leaving = Some(Leaving {
+                    open,
+                    swap_out: Some(fade),
+                });
+                self.content = Tween::at(0.0, now);
+                self.content.retarget(1.0, SWAP_IN, false, now);
+                self.content_drop = SWAP_IN_DROP;
+            }
+            Some(_) => {}
+            None => {
+                self.leaving = None;
+                if self.presence.value_at(now) == 0.0 {
+                    self.content = Tween::at(0.0, now);
+                    self.content.retarget(1.0, CONTENT_IN, reduced, now);
+                    self.content_drop = 0.0;
+                }
+                self.presence.retarget(1.0, PANEL_IN, reduced, now);
+                self.slot.retarget(1.0, SLOT_SHIFT, reduced, now);
+            }
+        }
         cx.notify();
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.flush(cx);
-        self.open = None;
+        self.dismiss(cx);
         cx.notify();
     }
 
@@ -286,7 +392,7 @@ impl TaskCard {
         if present {
             open.seen = true;
         } else if open.seen {
-            self.open = None;
+            self.dismiss(cx);
         }
     }
 
@@ -1126,6 +1232,7 @@ impl TaskCard {
         &self,
         fields: Fields,
         row: Option<&Row>,
+        content: Content,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1354,10 +1461,7 @@ impl TaskCard {
             )
             .child("Delete")
             .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
-                if let Some(open) = card.open.as_mut() {
-                    open.save = None;
-                }
-                card.open = None;
+                card.dismiss(cx);
                 cx.emit(TaskCardEvent::Delete(delete_task.clone()));
                 cx.notify();
             }));
@@ -1379,9 +1483,6 @@ impl TaskCard {
             .max_h_full()
             .overflow_y_scroll()
             .p(px(16.0))
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
             .rounded(px(CARD_RADIUS))
             .bg(theme.surface_raised)
             .border_1()
@@ -1401,21 +1502,89 @@ impl TaskCard {
             }))
             .child(
                 div()
+                    .relative()
+                    .top(px(content.rise))
+                    .opacity(content.opacity)
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
-                    .child(header)
-                    .child(note),
+                    .gap(px(14.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(header)
+                            .child(note),
+                    )
+                    .child(chips)
+                    .children(body)
+                    .children(actions),
             )
-            .child(chips)
-            .children(body)
-            .children(actions)
+            .when(content.inert, |el| {
+                el.child(div().absolute().inset_0().occlude())
+            })
             .into_any_element()
     }
 }
 
 impl Render for TaskCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let expired = self.leaving.as_ref().is_some_and(|leaving| {
+            leaving
+                .swap_out
+                .map_or(self.presence.settled_at(now), |fade| fade.settled_at(now))
+        });
+        if expired {
+            self.leaving = None;
+        }
+        if self.animating(now) {
+            window.request_animation_frame();
+        }
+        let swap_out = self
+            .leaving
+            .as_ref()
+            .and_then(|leaving| leaving.swap_out)
+            .map(|fade| fade.value_at(now));
+        let content = match (swap_out, &self.open, &self.leaving) {
+            (Some(fade), _, _) => Content {
+                opacity: fade,
+                rise: -SWAP_OUT_RISE * (1.0 - fade),
+                inert: true,
+            },
+            (None, Some(_), _) => {
+                let shown = self.content.value_at(now);
+                Content {
+                    opacity: shown,
+                    rise: self.content_drop * (1.0 - shown),
+                    inert: false,
+                }
+            }
+            (None, None, Some(_)) => Content {
+                opacity: 1.0,
+                rise: 0.0,
+                inert: true,
+            },
+            (None, None, None) => return div().into_any_element(),
+        };
+        if !content.inert {
+            return self.render_open(content, cx);
+        }
+        let Some(mut leaving) = self.leaving.take() else {
+            return div().into_any_element();
+        };
+        let current = std::mem::replace(&mut self.open, Some(leaving.open));
+        let element = self.render_open(content, cx);
+        if let Some(open) = std::mem::replace(&mut self.open, current) {
+            leaving.open = open;
+            self.leaving = Some(leaving);
+        }
+        element
+    }
+}
+
+impl TaskCard {
+    fn render_open(&mut self, content: Content, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(open) = self.open.as_ref() else {
             return div().into_any_element();
@@ -1434,7 +1603,7 @@ impl Render for TaskCard {
             title: open.title.clone(),
             notes: open.notes.clone(),
         };
-        self.render_card(fields, row.as_ref(), &theme, cx)
+        self.render_card(fields, row.as_ref(), content, &theme, cx)
     }
 }
 
@@ -1670,6 +1839,7 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::motion::set_reduced_motion(cx, true);
         });
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
