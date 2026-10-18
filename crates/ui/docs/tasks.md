@@ -70,7 +70,7 @@ While the lead writes the plan, the page reads **The lead is planning**. Then **
 
 ## While the steps run
 
-Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: they show in the sidebar, and you can open one and write to it like any other chat. **Delegated tasks per chat** in Settings > General caps how many steps one lead runs at once.
+Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > General caps how many steps one lead runs at once.
 
 A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
 
