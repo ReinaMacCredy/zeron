@@ -1186,17 +1186,27 @@ pub fn state_morphs_active() -> bool {
 /// Dev/measurement knob (`ZERON_MOTION_SCALE`, default 1): stretches every
 /// catalog timeline by this factor — e.g. `ZERON_MOTION_SCALE=10` slows the
 /// 200ms pane tweens to 2s so screenshot bursts can sample the geometry
-/// per frame. Read once; never set in production.
+/// per frame. The env var is the initial value; the UI driver's `set
+/// motionScale` changes it at runtime. Never set in production.
 pub fn speed_scale() -> f32 {
-    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *SCALE.get_or_init(|| {
-        std::env::var("ZERON_MOTION_SCALE")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|s| s.is_finite())
-            .map(|s| s.clamp(0.01, 100.0))
-            .unwrap_or(1.0)
-    })
+    match SPEED_SCALE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => set_speed_scale(
+            std::env::var("ZERON_MOTION_SCALE")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|s| s.is_finite())
+                .unwrap_or(1.0),
+        ),
+        bits => f32::from_bits(bits),
+    }
+}
+
+static SPEED_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_speed_scale(scale: f32) -> f32 {
+    let scale = scale.clamp(0.01, 100.0);
+    SPEED_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    scale
 }
 
 /// Global reduced-motion flag. gpui snaps every `with_animation` element when

@@ -736,16 +736,6 @@ pub(super) async fn read(handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<T
     Ok(tree)
 }
 
-#[cfg(debug_assertions)]
-pub(super) async fn find(
-    handle: AnyWindowHandle,
-    element: &Element,
-    cx: &mut AsyncApp,
-) -> Result<(Node, (f32, f32)), String> {
-    let tree = read(handle, cx).await?;
-    Ok((element.find(&tree)?.clone(), tree.size))
-}
-
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "for", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(super) enum Seen {

@@ -1,5 +1,6 @@
 mod audit;
 mod capture;
+mod frames;
 #[cfg(debug_assertions)]
 mod input;
 #[cfg(unix)]
@@ -18,9 +19,11 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-const OBSERVE: &[&str] = &["state", "tree", "snapshot", "wait", "audit"];
+const OBSERVE: &[&str] = &[
+    "state", "tree", "snapshot", "wait", "audit", "frames", "track",
+];
 const DRIVE: &[&str] = &[
-    "click", "move", "drag", "scroll", "key", "type", "press", "action",
+    "click", "move", "drag", "scroll", "key", "type", "press", "action", "set",
 ];
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -32,9 +35,10 @@ fn epoch() -> Instant {
 }
 
 pub(crate) fn frame_drawn() {
-    let at = epoch().elapsed().as_millis() as u64 + 1;
+    let elapsed = epoch().elapsed();
     FRAMES.fetch_add(1, Ordering::Relaxed);
-    LAST_DRAW_MS.store(at, Ordering::Relaxed);
+    LAST_DRAW_MS.store(elapsed.as_millis() as u64 + 1, Ordering::Relaxed);
+    frames::stamp(elapsed.as_micros() as u64);
 }
 
 fn frame_count() -> u64 {
@@ -91,6 +95,10 @@ enum Action {
         path: Option<PathBuf>,
     },
     Wait(Until),
+    Frames(frames::Frames),
+    Track(frames::Track),
+    #[cfg(debug_assertions)]
+    Set(input::Set),
     #[cfg(debug_assertions)]
     Click {
         #[serde(flatten)]
@@ -217,7 +225,26 @@ fn parse(raw: Value) -> Result<Request, String> {
             valid_actions().join(", ")
         ));
     }
+    if let Some(during) = raw.get("during") {
+        check_during(during)?;
+    }
     serde_json::from_value(raw).map_err(|error| format!("invalid `{name}` request: {error}"))
+}
+
+fn check_during(during: &Value) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Err(
+            "`during` drives the UI and exists only in debug builds (Zeron Dev bundles); this build is observe-only".into(),
+        );
+    }
+    let name = during.get("action").and_then(Value::as_str).unwrap_or("");
+    if !DRIVE.contains(&name) {
+        return Err(format!(
+            "`during` must be a drive request ({}), not {during}",
+            DRIVE.join(", ")
+        ));
+    }
+    parse(during.clone()).map(drop)
 }
 
 async fn handle(raw: Value, cx: &mut AsyncApp) -> Value {
@@ -251,6 +278,10 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
             cx.update(|cx| capture::snapshot(handle, rect, path, cx))
         }
         Action::Wait(until) => wait(window, until, cx).await,
+        Action::Frames(request) => frames::frames(window, request, cx).await,
+        Action::Track(request) => frames::track(window, request, cx).await,
+        #[cfg(debug_assertions)]
+        Action::Set(set) => input::set(window, set, cx).await,
         #[cfg(debug_assertions)]
         Action::Click {
             at,
@@ -352,7 +383,20 @@ fn state(cx: &mut App) -> Result<Value, String> {
         "windows": windows,
         "route": route,
         "frames": frames_json(),
+        "motionScale": crate::motion::speed_scale(),
+        "theme": theme_json(cx),
     }))
+}
+
+fn theme_json(cx: &mut App) -> Value {
+    let painted = cx.try_global::<crate::theme::Theme>().map(|theme| {
+        if theme.appearance.is_dark() {
+            "dark"
+        } else {
+            "light"
+        }
+    });
+    json!({ "mode": crate::appearance::mode(cx), "appearance": painted })
 }
 
 fn route_json((route, selected_chat): (Route, Option<String>)) -> Value {
@@ -583,6 +627,59 @@ mod tests {
         );
         let error = parse(json!({ "action": "press", "do": "click" })).unwrap_err();
         assert!(error.starts_with("invalid `press` request"), "{error}");
+    }
+
+    #[test]
+    fn parses_frames_and_track() {
+        let frames = parse(json!({ "action": "frames" })).unwrap();
+        let Action::Frames(frames) = frames.action else {
+            panic!("not frames");
+        };
+        assert!(format!("{frames:?}").contains("ms: 1000"), "{frames:?}");
+        let track = parse(json!({ "action": "track", "select": "Button \"Go\"", "nth": 1 }));
+        let Action::Track(track) = track.unwrap().action else {
+            panic!("not track");
+        };
+        let shown = format!("{track:?}");
+        assert!(
+            shown.contains("ms: 800") && shown.contains("jump_px: 40.0"),
+            "{shown}"
+        );
+        assert!(parse(json!({ "action": "track", "ms": 50 })).is_err());
+    }
+
+    #[test]
+    fn during_takes_only_a_valid_drive_request() {
+        let observe = parse(json!({ "action": "frames", "during": { "action": "state" } }));
+        let error = observe.unwrap_err();
+        if cfg!(debug_assertions) {
+            assert!(error.contains("must be a drive request"), "{error}");
+            let bad = parse(json!({ "action": "frames", "during": { "action": "click" } }));
+            assert!(bad.unwrap_err().starts_with("invalid `click` request"));
+            let ok = parse(json!({
+                "action": "track", "ref": "e3", "during": { "action": "key", "keys": "cmd-k" },
+            }));
+            assert!(ok.is_ok(), "{ok:?}");
+        } else {
+            assert!(error.contains("only in debug builds"), "{error}");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn parses_set() {
+        let set =
+            parse(json!({ "action": "set", "theme": "dark", "size": { "w": 1200, "h": 800 } }));
+        let Action::Set(set) = set.unwrap().action else {
+            panic!("not set");
+        };
+        let shown = format!("{set:?}");
+        assert!(
+            shown.contains("Dark") && shown.contains("1200.0"),
+            "{shown}"
+        );
+        assert!(parse(json!({ "action": "set", "size": [900, 700], "motionScale": 5 })).is_ok());
+        assert!(parse(json!({ "action": "set", "theme": "sepia" })).is_err());
     }
 
     #[cfg(debug_assertions)]

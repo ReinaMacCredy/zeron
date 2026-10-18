@@ -18,7 +18,7 @@ const REPLY_SLACK: Duration = Duration::from_secs(10);
 
 pub fn tool() -> Value {
     let field = |kind: &str, description: &str| json!({ "type": kind, "description": description });
-    let point = json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "Window point [x, y]." });
+    let end = |which: &str| json!({ "type": ["array", "object"], "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": format!("Drag {which}: a window point [x, y], or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}.") });
     let properties: Map<String, Value> = [
         ("action", json!({ "type": "string", "enum": ACTIONS })),
         ("target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
@@ -26,7 +26,7 @@ pub fn tool() -> Value {
         ("x", field("number", "Window point in logical pixels.")),
         ("y", field("number", "Window point in logical pixels.")),
         ("ref", field("string", "Element ref from `tree`, such as `e12`.")),
-        ("select", field("string", "Selector: `Role \"label substring\"` or `\"label substring\"`.")),
+        ("select", field("string", "Selector: `#e12`, `Role`, `Role \"label\"` or `\"label\"`. An exact label match beats a substring match, which beats value, then placeholder or description.")),
         ("nth", field("integer", "Which match of `select` when several match.")),
         ("text", field("string", "Text to type, or to wait for.")),
         ("keys", field("string", "Keystrokes separated by spaces, such as `cmd-k` or `down enter`.")),
@@ -34,8 +34,13 @@ pub fn tool() -> Value {
         ("args", field("object", "Arguments of the gpui action, for `action`.")),
         ("rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
         ("path", field("string", "Absolute path for the snapshot PNG. Defaults to a file under ~/.zeron/run/shots.")),
-        ("from", point.clone()),
-        ("to", point),
+        ("from", end("start")),
+        ("to", end("end")),
+        ("do", json!({ "type": "string", "enum": ["click", "focus", "setValue", "increment", "decrement", "expand", "collapse", "showContextMenu", "scrollIntoView"], "description": "For `press`: the accessibility action to perform. Defaults to click." })),
+        ("value", field("string", "For `press` with `do: setValue`: the new value.")),
+        ("full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
+        ("during", field("object", "For `frames` and `track` (Dev builds only): a drive request such as {\"action\": \"click\", \"select\": \"Button \\\"Settings\\\"\"} that runs once recording has started.")),
+        ("jumpPx", field("number", "For `track`: a per-frame move larger than this counts as a jump. Defaults to 40.")),
         ("dx", field("number", "Horizontal scroll in pixels.")),
         ("dy", field("number", "Vertical scroll in pixels.")),
         ("trackpad", field("boolean", "Scroll as a trackpad instead of a mouse wheel.")),
@@ -45,22 +50,22 @@ pub fn tool() -> Value {
         ("for", json!({ "type": "string", "enum": ["idle", "frame", "ms", "text", "select", "gone"], "description": "What `wait` waits for." })),
         ("quietMs", field("integer", "For `wait` idle: how long no frame may draw.")),
         ("timeoutMs", field("integer", "Longest wait.")),
-        ("ms", field("integer", "Duration of `wait` ms, `frames` and `track`.")),
+        ("ms", field("integer", "Duration of `wait` ms; the window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
         ("query", field("string", "Keep only `tree` lines that match this text.")),
         ("root", field("string", "Ref the `tree` starts from.")),
         ("depth", field("integer", "Levels of `tree` to print.")),
         ("json", field("boolean", "`tree` as JSON instead of text lines.")),
         ("inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
-        ("theme", field("string", "For `set`: the theme to switch to.")),
-        ("size", json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "For `set`: window size [w, h] in points." })),
-        ("motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal.")),
+        ("theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
+        ("size", json!({ "type": ["object", "array"], "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "For `set`: window content size {w, h} or [w, h] in points." })),
+        ("motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal, 5 is five times slower. Applies to animations started afterwards; loaders, pulses and disclosure rows ignore it.")),
     ]
     .into_iter()
     .map(|(name, schema)| (name.to_owned(), schema))
     .collect();
     json!({
         "name": TOOL,
-        "description": "Inspect and drive a running Zeron app from inside it: read its UI as text, act on elements, wait for it, and snapshot it. `list` shows the running apps (pid, label, build, ipcPort, input). Omit `target` for the app serving this chat; a release build is observe-only and refuses drive actions. To drive, pass a Zeron Dev bundle's label or pid from `list` as `target`. Prefer `tree` with `query` over snapshots: it is cheap text, and each line carries a `ref`. Act on an element by `ref` from `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Drive actions (click, move, drag, scroll, key, type, press, action, set) reply after the next frame is drawn. Use `wait` (`for`: idle, frame, ms, text, select, gone) instead of sleeping. Take a `snapshot` only for a visual check: it returns the PNG, or only its path with `inline: false`.",
+        "description": "Inspect and drive a running Zeron app from inside it: read its UI as text, act on elements, wait for it, and snapshot it. `list` shows the running apps (pid, label, build, ipcPort, input). Omit `target` for the app serving this chat; a release build is observe-only and refuses drive actions. To drive, pass a Zeron Dev bundle's label or pid from `list` as `target`. Prefer `tree` with `query` over snapshots: it is cheap text, and each line carries a `ref`. Act on an element by `ref` from `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Drive actions (click, move, drag, scroll, key, type, press, action, set) reply after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` measures drawn frames for `ms` (fps, interval percentiles, long frames, draw time); `track` samples one element's bounds every drawn frame and reports jumps and when it settled. Give either one a `during` drive request to measure the transition it starts. `set` changes theme, window size or motion scale at runtime. Use `wait` (`for`: idle, frame, ms, text, select, gone) instead of sleeping. Take a `snapshot` only for a visual check: it returns the PNG, or only its path with `inline: false`.",
         "inputSchema": {
             "type": "object",
             "properties": properties,

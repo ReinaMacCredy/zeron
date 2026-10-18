@@ -1,5 +1,4 @@
-use super::tree;
-use super::{frame_count, next_frame, target_window};
+use super::{frame_count, frames, next_frame, target_window, tree};
 use gpui::accesskit::{Action as AxAction, ActionData, NodeId};
 use gpui::{
     AnyWindowHandle, AppContext as _, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
@@ -26,15 +25,11 @@ pub(super) enum Target {
 }
 
 impl Target {
-    async fn point(
-        &self,
-        window: AnyWindowHandle,
-        cx: &mut AsyncApp,
-    ) -> Result<Point<Pixels>, String> {
+    async fn point(&self, driver: &mut Driver, cx: &mut AsyncApp) -> Result<Point<Pixels>, String> {
         match self {
             Target::Point { x, y } | Target::Pair([x, y]) => Ok(point(px(*x), px(*y))),
             Target::Element(element) => {
-                let (node, viewport) = tree::find(window, element, cx).await?;
+                let (node, viewport) = driver.find(element, cx).await?;
                 center(&node, viewport)
             }
         }
@@ -115,6 +110,7 @@ fn modifiers(list: &[Modifier]) -> Modifiers {
 struct Driver {
     window: AnyWindowHandle,
     mark: u64,
+    unsettled: bool,
 }
 
 impl Driver {
@@ -123,7 +119,18 @@ impl Driver {
         Ok(Self {
             window,
             mark: frame_count(),
+            unsettled: false,
         })
+    }
+
+    async fn find(
+        &mut self,
+        element: &tree::Element,
+        cx: &mut AsyncApp,
+    ) -> Result<(tree::Node, (f32, f32)), String> {
+        let (node, viewport, unsettled) = frames::settled(self.window, element, cx).await?;
+        self.unsettled |= unsettled;
+        Ok((node, viewport))
     }
 
     fn apply<R>(
@@ -159,7 +166,11 @@ impl Driver {
 
     async fn settle(self, cx: &AsyncApp) -> Result<Value, String> {
         next_frame(self.mark, SETTLE_CAP.saturating_sub(STEP_CAP), cx).await;
-        Ok(json!({ "frame": frame_count() }))
+        let mut reply = json!({ "frame": frame_count() });
+        if self.unsettled {
+            reply["unsettled"] = json!(true);
+        }
+        Ok(reply)
     }
 }
 
@@ -207,7 +218,7 @@ pub(super) async fn click(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
-    let (position, modifiers) = (at.point(driver.window, cx).await?, modifiers(held));
+    let (position, modifiers) = (at.point(&mut driver, cx).await?, modifiers(held));
     let button = match button {
         Button::Left => MouseButton::Left,
         Button::Right => MouseButton::Right,
@@ -230,7 +241,7 @@ pub(super) async fn hover(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
-    let position = at.point(driver.window, cx).await?;
+    let position = at.point(&mut driver, cx).await?;
     driver
         .send(cx, [mouse_move(position, None, Modifiers::default())])
         .await?;
@@ -249,8 +260,8 @@ pub(super) async fn drag(
     let mut driver = Driver::open(window, cx)?;
     let modifiers = modifiers(held);
     let (from, to) = (
-        from.point(driver.window, cx).await?,
-        to.point(driver.window, cx).await?,
+        from.point(&mut driver, cx).await?,
+        to.point(&mut driver, cx).await?,
     );
     let at = |t: f32| from + (to - from) * t;
     let [down, _] = mouse_press(at(0.0), MouseButton::Left, modifiers, 1);
@@ -286,7 +297,7 @@ pub(super) async fn scroll(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let mut driver = Driver::open(window, cx)?;
-    let position = at.point(driver.window, cx).await?;
+    let position = at.point(&mut driver, cx).await?;
     let wheel = |dx: f32, dy: f32, touch_phase| {
         PlatformInput::ScrollWheel(ScrollWheelEvent {
             position,
@@ -367,7 +378,7 @@ pub(super) async fn type_text(
     let position = match into {
         TypeAt::Focused {} => None,
         TypeAt::Target(Target::Element(element)) => {
-            let (node, viewport) = tree::find(driver.window, &element, cx).await?;
+            let (node, viewport) = driver.find(&element, cx).await?;
             if node.supports("focus") {
                 let id = NodeId(node.accesskit_id);
                 driver.apply(cx, |window, cx| {
@@ -379,7 +390,7 @@ pub(super) async fn type_text(
                 Some(center(&node, viewport)?)
             }
         }
-        TypeAt::Target(at) => Some(at.point(driver.window, cx).await?),
+        TypeAt::Target(at) => Some(at.point(&mut driver, cx).await?),
     };
     if let Some(position) = position {
         driver
@@ -437,7 +448,7 @@ pub(super) async fn press(
 ) -> Result<Value, String> {
     let action = ax_action(perform.as_deref().unwrap_or("click"))?;
     let mut driver = Driver::open(window, cx)?;
-    let (node, viewport) = tree::find(driver.window, &element, cx).await?;
+    let (node, viewport) = driver.find(&element, cx).await?;
     let name = tree::lower_camel(&format!("{action:?}"));
     if !node.supports(&name) {
         if action == AxAction::Click {
@@ -463,5 +474,85 @@ pub(super) async fn press(
     })?;
     let mut reply = driver.settle(cx).await?;
     reply["ref"] = json!(node.id);
+    Ok(reply)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a window size: {\"w\", \"h\"} or [w, h] in points"
+)]
+pub(super) enum Size {
+    Object { w: f32, h: f32 },
+    Pair([f32; 2]),
+}
+
+impl Size {
+    fn points(self) -> (f32, f32) {
+        match self {
+            Size::Object { w, h } | Size::Pair([w, h]) => (w, h),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Set {
+    theme: Option<crate::appearance::AppearanceMode>,
+    size: Option<Size>,
+    motion_scale: Option<f32>,
+}
+
+pub(super) async fn set(window: Option<u64>, set: Set, cx: &mut AsyncApp) -> Result<Value, String> {
+    if set.theme.is_none() && set.size.is_none() && set.motion_scale.is_none() {
+        return Err("`set` needs `theme`, `size` or `motionScale`".into());
+    }
+    if let Some(scale) = set.motion_scale.filter(|s| !s.is_finite() || *s <= 0.0) {
+        return Err(format!(
+            "`motionScale` must be a positive number, not {scale}"
+        ));
+    }
+    let wanted = set.size.map(Size::points);
+    if let Some((w, h)) =
+        wanted.filter(|(w, h)| !(w.is_finite() && h.is_finite() && *w >= 1.0 && *h >= 1.0))
+    {
+        return Err(format!("`size` must be positive points, not {w}x{h}"));
+    }
+    let mut driver = Driver::open(window, cx)?;
+    driver.apply(cx, |window, cx| {
+        if let Some(mode) = set.theme {
+            crate::appearance::set_mode(mode, cx);
+        }
+        if let Some(scale) = set.motion_scale {
+            crate::motion::set_speed_scale(scale);
+        }
+        if let Some((w, h)) = wanted {
+            window.resize(gpui::size(px(w), px(h)));
+        }
+        window.refresh();
+    })?;
+    let handle = driver.window;
+    let viewport = |cx: &mut AsyncApp| {
+        cx.update_window(handle, |_, window, _| {
+            let size = window.viewport_size();
+            (f32::from(size.width), f32::from(size.height))
+        })
+        .map_err(|error| format!("window is gone: {error}"))
+    };
+    let mut reply = driver.settle(cx).await?;
+    if let Some(wanted) = wanted {
+        for _ in 0..5 {
+            if viewport(cx)? == wanted {
+                break;
+            }
+            let mark = frame_count();
+            next_frame(mark, STEP_CAP, cx).await;
+            reply["frame"] = json!(frame_count());
+        }
+    }
+    let (w, h) = viewport(cx)?;
+    reply["size"] = json!({ "w": w, "h": h });
+    reply["motionScale"] = json!(crate::motion::speed_scale());
+    reply["theme"] = cx.update(super::theme_json);
     Ok(reply)
 }
