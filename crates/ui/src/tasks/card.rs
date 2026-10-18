@@ -1142,6 +1142,33 @@ impl TaskCard {
                         ),
                 )
             });
+            let not_sent = row
+                .and_then(|row| row.task.send_error.clone())
+                .zip(linked_chat_id.clone())
+                .map(|(error, chat_id)| {
+                    let retry_task = task_id.clone();
+                    widgets::warning_strip(theme, format!("Not sent: {error}"))
+                        .debug_selector(|| "task-card-not-sent".into())
+                        .mt_0()
+                        .child(div().flex_1())
+                        .child(
+                            widgets::text_action(theme, widgets::ActionTone::Filled, "Retry")
+                                .id("task-card-retry-send")
+                                .debug_selector(|| "task-card-retry-send".into())
+                                .role(gpui::Role::Button)
+                                .flex_none()
+                                .min_h(px(24.0))
+                                .rounded_full()
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                    cx.emit(TaskCardEvent::Assign {
+                                        task_id: retry_task.clone(),
+                                        patch: None,
+                                        chat_id: chat_id.clone(),
+                                        send: true,
+                                    });
+                                })),
+                        )
+                });
             let unassign = widgets::text_action(theme, widgets::ActionTone::Quiet, "Unassign")
                 .id("task-card-unassign")
                 .debug_selector(|| "task-card-unassign".into())
@@ -1163,6 +1190,7 @@ impl TaskCard {
                     .flex_col()
                     .gap(px(8.0))
                     .children(linked_block)
+                    .children(not_sent)
                     .child(
                         div()
                             .flex()
@@ -1306,6 +1334,63 @@ mod tests {
             "completedAt": completed.then(|| "2026-10-17T00:00:00Z"),
         }))
         .unwrap()
+    }
+
+    fn chat(id: &str, delegation: Option<&str>) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "deviceId": "mac", "archived": false,
+            "createdAt": "2026-10-18T00:00:00Z",
+            "delegation": delegation.map(|status| serde_json::json!({
+                "delegatedByChatId": "lead", "depth": 1, "anchor": "m",
+                "wake": "always", "status": status, "startedAt": "2026-10-18T00:00:00Z",
+            })),
+        }))
+        .unwrap()
+    }
+
+    fn step(
+        id: &str,
+        key: &str,
+        chat: Option<&str>,
+        outcome: Option<&str>,
+    ) -> zeron_proto::TaskStep {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "taskId": "orch", "title": id, "orderKey": key,
+            "chatId": chat, "outcome": outcome,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_orchestrated_task_rolls_its_steps_into_its_status() {
+        let mut state = AppState::new();
+        state.tasks = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+                "mode": "orchestrated",
+            }))
+            .unwrap(),
+        ];
+        state.chats = vec![chat("lead", None), chat("child", Some("running"))];
+        state.task_steps = vec![
+            step("s1", "1", None, Some("done")),
+            step("s2", "2", Some("child"), None),
+            step("s3", "3", None, None),
+            step("s4", "4", None, Some("skipped")),
+        ];
+        let now = Utc::now();
+        let plan = super::super::rollup(&state, &state.tasks[0], now);
+        let statuses: Vec<_> = plan.steps.iter().map(|row| row.status).collect();
+        use zeron_proto::StepStatus::*;
+        assert_eq!(statuses, [Done, Working, Planned, Skipped]);
+        assert_eq!(plan.status, TaskStatus::Working);
+        assert_eq!((plan.progress.done, plan.progress.total), (1, 3));
+        assert_eq!(super::super::needs_you_count(&state), 0);
+
+        state.chats[1] = chat("child", Some("failed"));
+        let plan = super::super::rollup(&state, &state.tasks[0], now);
+        assert_eq!(plan.status, TaskStatus::NeedsYou);
+        assert_eq!(super::super::needs_you_count(&state), 1);
     }
 
     #[gpui::test]

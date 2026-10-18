@@ -225,6 +225,7 @@ impl Shell {
                 self.update_card_task(&card, task_id, patch, cx)
             }
             TasksEvent::Card(event) => self.on_task_card_event(&card, event, cx),
+            TasksEvent::OpenCenter(_) => {}
         }
     }
 

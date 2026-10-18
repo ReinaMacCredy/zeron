@@ -783,6 +783,7 @@ pub struct AppState {
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     pub tasks: Vec<zeron_proto::Task>,
+    pub task_steps: Vec<zeron_proto::TaskStep>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
@@ -985,6 +986,7 @@ impl AppState {
             connectivity_observed: false,
             spaces: Vec::new(),
             tasks: Vec::new(),
+            task_steps: Vec::new(),
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
@@ -1404,6 +1406,14 @@ impl AppState {
             return false;
         }
         self.tasks = tasks;
+        true
+    }
+
+    pub fn apply_task_steps(&mut self, steps: Vec<zeron_proto::TaskStep>) -> bool {
+        if self.task_steps == steps {
+            return false;
+        }
+        self.task_steps = steps;
         true
     }
 
@@ -3088,6 +3098,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_TASKS,
                 AppState::apply_tasks,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_TASK_STEPS,
+                AppState::apply_task_steps,
             ),
             spawn_watch(
                 cx,
