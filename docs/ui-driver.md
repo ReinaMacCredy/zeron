@@ -144,7 +144,7 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 | `audit` | none | `{counts{nodes,interactive,tabStops,unlabeledInteractive},issues[{ref,rule,role,label?,bounds?,view?,source?}]}` |
 
 `route.kind` is one of `newChat`, `chat`, `pullRequests`, `usage`, `inbox`, `settings` (with
-`section`, such as `"General"`), `terminal`, `tasks`, `docs`.
+`section`, such as `"General"`), `terminal`, `tasks`, `taskCenter`, `docs`.
 
 ```sh
 zui state
