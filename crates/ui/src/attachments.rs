@@ -1024,7 +1024,7 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
 /// The uploadId fragment a committed upload's basename starts with
 /// (`{id8}-{name}` per the engine's `Uploads::pending_target`). `None` when
 /// the path can't be a committed upload.
-fn upload_alias_id8(path: &str) -> Option<String> {
+pub(crate) fn upload_alias_id8(path: &str) -> Option<String> {
     let base = std::path::Path::new(path).file_name()?.to_str()?;
     let (id8, _) = base.split_at_checked(8)?;
     (base.as_bytes().get(8) == Some(&b'-') && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
@@ -1140,11 +1140,13 @@ pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image
     store_loaded(device_id, path, name.to_string().into(), image);
 }
 
-/// [`seed_attachment`] for a staged attachment; a file that is not an image
-/// has no thumbnail to seed.
+/// [`seed_attachment`] for a staged attachment; pasted text seeds its
+/// preview, and any other file has nothing to seed.
 pub fn seed_staged(device_id: &str, path: &str, att: &StagedAttachment) {
     if let Some(image) = att.image() {
         seed_attachment(device_id, path, &att.name, image.clone());
+    } else if att.is_pasted_text() {
+        crate::pasted_text::seed(device_id, path, att.bytes());
     }
 }
 
@@ -1152,6 +1154,8 @@ pub fn seed_staged(device_id: &str, path: &str, att: &StagedAttachment) {
 pub fn seed_staged_alias(device_id: &str, upload_id: &str, att: &StagedAttachment) {
     if let Some(image) = att.image() {
         seed_attachment_alias(device_id, upload_id, &att.name, image.clone());
+    } else if att.is_pasted_text() {
+        crate::pasted_text::seed_alias(device_id, upload_id, att.bytes());
     }
 }
 

@@ -4100,6 +4100,8 @@ pub struct Transcript {
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
+    pasted_text_preview: Option<crate::pasted_text::PastedTextPreview>,
+    pasted_text_load: Option<Task<()>>,
     /// Mermaid fences drawn as diagrams in settled Markdown blocks. Each
     /// row's media handler requests its fences while laying out, so only
     /// painted diagrams are rendered (see [`MermaidCache`]).
@@ -4591,6 +4593,8 @@ impl Transcript {
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
+            pasted_text_preview: None,
+            pasted_text_load: None,
             diagrams: Rc::default(),
             diagram_media: None,
             diagram_worker: None,
@@ -7122,6 +7126,116 @@ impl Transcript {
         }
     }
 
+    fn pasted_text_pill(
+        &self,
+        row_id: &SharedString,
+        aix: usize,
+        att: &crate::attachments::UserImageAttachment,
+        device_ids: &[String],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let index = zeron_proto::attachment_mentions::pasted_text_index_from_name(&att.path)?;
+        let lines = crate::pasted_text::cached(device_ids, &att.path).map(|text| text.lines);
+        let title = SharedString::from(crate::pasted_text::pill_label(index, None));
+        let path = SharedString::from(att.path.clone());
+        let theme = Theme::of(cx);
+        let accent = theme.accent;
+        let hover = theme.ink(0.1);
+        Some(
+            user_file_pill(
+                &att.name,
+                crate::pasted_text::pill_label(index, lines).into(),
+                theme,
+            )
+            .id(SharedString::from(format!("{row_id}-pasted-{aix}")))
+            .role(gpui::Role::Button)
+            .aria_label(format!("Preview {title}"))
+            .tab_index(0)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .focus_visible(move |style| style.border_2().border_color(accent))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_pasted_text(path.clone(), title.clone(), window, cx);
+            }))
+            .into_any_element(),
+        )
+    }
+
+    fn open_pasted_text(
+        &mut self,
+        path: SharedString,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let device_ids = self.attachment_device_ids(cx);
+        let selection_prefix = format!("md-preview-pasted-{}|", cx.entity_id());
+        self.attachment_preview_return_focus = window.focused(cx);
+        self.pasted_text_preview = Some(crate::pasted_text::PastedTextPreview::new(
+            path.clone(),
+            title,
+            selection_prefix,
+        ));
+        window.focus(&self.attachment_preview_focus, cx);
+        cx.notify();
+        self.pasted_text_load = None;
+        if crate::pasted_text::cached(&device_ids, &path).is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            if let Some(preview) = self.pasted_text_preview.as_mut() {
+                preview.failed = true;
+            }
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        self.pasted_text_load = Some(cx.spawn(async move |this, cx| {
+            let mut loaded = false;
+            for device in &device_ids {
+                let target = (local.as_deref() != Some(device.as_str())).then_some(device.as_str());
+                let Some((_, _, bytes)) = crate::attachments::read_attachment_bytes(
+                    &engine,
+                    cx.background_executor(),
+                    target,
+                    &path,
+                    None,
+                )
+                .await
+                else {
+                    continue;
+                };
+                let text = cx
+                    .background_executor()
+                    .spawn(async move { crate::pasted_text::PastedText::decode(&bytes) })
+                    .await;
+                crate::pasted_text::store(device, &path, Arc::new(text));
+                loaded = true;
+                break;
+            }
+            this.update(cx, |this, cx| {
+                if let Some(preview) = this
+                    .pasted_text_preview
+                    .as_mut()
+                    .filter(|preview| preview.path == path)
+                {
+                    preview.failed = !loaded;
+                }
+                this.pasted_text_load = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn close_pasted_text(&mut self, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+        if let Some(preview) = self.pasted_text_preview.take() {
+            render::clear_selection_surface(&preview.selection_prefix);
+        }
+        self.pasted_text_load = None;
+        cx.notify();
+        self.attachment_preview_return_focus.take()
+    }
+
     /// Whether an attachment ref is still crossing to the chat's host, and
     /// how far along it is. Two ref shapes mean "still crossing": the queued
     /// flow's `pending://` (bytes ship engine-side after the send; the host
@@ -8616,8 +8730,17 @@ impl Transcript {
             .pt(px(4.0))
             .pb(px(6.0));
         for (aix, att) in atts.iter().enumerate() {
+            if let Some(pill) = self.pasted_text_pill(row_id, aix, att, &device_ids, cx) {
+                strip = strip.child(pill);
+                continue;
+            }
             if !crate::attachments::is_image_path(&att.path) {
-                strip = strip.child(user_file_pill(&att.name, Theme::of(cx)));
+                let label = crate::attachments::attachment_display_name(&att.name);
+                strip = strip.child(user_file_pill(
+                    &att.name,
+                    label.to_owned().into(),
+                    Theme::of(cx),
+                ));
                 continue;
             }
             let state = self.attachment_state(&device_ids, &att.path, None, cx);
@@ -11838,10 +11961,9 @@ impl gpui::Element for ChipOverlays {
     }
 }
 
-/// A sent message's non-image attachment: the file's icon and name on the
-/// same soft pill the transcript uses for file badges. Its bytes are never
-/// read back to the transcript, so there is no thumbnail to wait for.
-fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
+/// A sent message's non-image attachment: the file's icon and a label on the
+/// same soft pill the transcript uses for file badges.
+fn user_file_pill(name: &str, label: SharedString, theme: &Theme) -> gpui::Div {
     let name = crate::attachments::attachment_display_name(name);
     div()
         .h(px(28.0))
@@ -11873,13 +11995,7 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
                     .size(px(16.0)),
                 ),
         )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .child(SharedString::from(name.to_owned())),
-        )
-        .into_any_element()
+        .child(div().min_w_0().truncate().child(label))
 }
 
 impl Transcript {
@@ -14054,6 +14170,23 @@ impl Render for Transcript {
                 cx,
             ));
         }
+        if let Some(preview) = &self.pasted_text_preview {
+            let text = crate::pasted_text::cached(&self.attachment_device_ids(cx), &preview.path);
+            let weak = cx.weak_entity();
+            return root.child(crate::pasted_text::overlay(
+                window,
+                preview,
+                text,
+                &self.attachment_preview_focus,
+                move |window, cx| {
+                    if let Ok(Some(focus)) = weak.update(cx, |this, cx| this.close_pasted_text(cx))
+                    {
+                        window.focus(&focus, cx);
+                    }
+                },
+                cx,
+            ));
+        }
         root
     }
 }
@@ -15918,6 +16051,71 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
+        cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn pasted_text_pill_click_opens_preview_and_escape_restores_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("pasted-owner".into());
+            state
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let path = "/uploads/ab12cd34-Pasted_text_2.txt";
+        crate::pasted_text::seed("pasted-owner", path, b"first\nsecond\nthird");
+        struct PastedFixture(Entity<Transcript>);
+        impl Render for PastedFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                if self.0.read(cx).pasted_text_preview.is_some() {
+                    return self.0.clone().into_any_element();
+                }
+                let att = crate::attachments::UserImageAttachment {
+                    appshot: None,
+                    id: "a".into(),
+                    path: "/uploads/ab12cd34-Pasted_text_2.txt".into(),
+                    name: "ab12cd34-Pasted_text_2.txt".into(),
+                };
+                self.0.update(cx, |this, cx| {
+                    let devices = this.attachment_device_ids(cx);
+                    div()
+                        .children(this.pasted_text_pill(&"row".into(), 0, &att, &devices, cx))
+                        .into_any_element()
+                })
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| PastedFixture(transcript.clone()));
+        cx.run_until_parked();
+        cx.simulate_click(gpui::point(px(20.0), px(14.0)), gpui::Modifiers::default());
+        let return_focus = transcript.read_with(cx, |this, _| {
+            let preview = this
+                .pasted_text_preview
+                .as_ref()
+                .expect("pill opens preview");
+            assert_eq!(preview.title.as_ref(), "Pasted text 2");
+            assert!(this.pasted_text_load.is_none(), "seeded text needs no read");
+            this.attachment_preview_return_focus
+                .clone()
+                .expect("preview remembers the pill focus")
+        });
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert_eq!(
+                this.pasted_text_preview.as_ref().unwrap().list.item_count(),
+                1
+            );
+        });
+        cx.simulate_keystrokes("escape");
+        transcript.read_with(cx, |this, _| assert!(this.pasted_text_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
     }
 

@@ -64,6 +64,7 @@ mod notice;
 pub mod notify;
 pub mod orb;
 pub mod overscroll;
+mod pasted_text;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;

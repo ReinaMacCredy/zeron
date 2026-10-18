@@ -647,6 +647,7 @@ mod tests {
         for (id, name, bytes) in [
             ("u1", "notes.md", &b"# notes"[..]),
             ("u2", "empty.bin", b""),
+            ("u3", "Pasted text 1.txt", b"first\nsecond"),
         ] {
             uploads.append(id, &BASE64.encode(bytes), Some(0)).unwrap();
             let path = uploads.commit(id, name).unwrap();
