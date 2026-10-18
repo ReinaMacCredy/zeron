@@ -23,6 +23,15 @@ this build is observe-only. To drive, launch a Dev bundle (next sections). The s
 `/Applications/Zeron.app` hosts the person's running sessions, so observe it only. It serves the
 driver only once it runs a build that includes it.
 
+What each level exposes:
+
+- Observe reads what the app's windows show, text field values included (a key typed into
+  the Add provider form is in `tree` and in a `snapshot`), to any chat that has the `ui_driver`
+  tool on. Turn the tool off in Settings > Tools to withhold it.
+- Drive in a Dev bundle goes around the chat permission gates of that bundle: an agent can click
+  Approve on a pending request there, or type into its terminal panel. Keep Dev bundles on test
+  data.
+
 ## Reaching a target
 
 Each process listens on `~/.zeron/run/ui-<pid>.sock` (mode 0600, directory 0700) and writes a
@@ -62,8 +71,10 @@ which only observes. Pass the Dev bundle's label or pid to drive it.
 
 The wire format is newline-delimited JSON over the socket: request
 `{"id":1,"action":"state","window"?:<id>,...}`, reply `{"id":1,"ok":<value>}` or
-`{"id":1,"error":"<msg>"}`. The client sends one request per connection and waits up to
-`timeoutMs` + 10 s, else `ms` + 10 s, else 30 s.
+`{"id":1,"error":"<msg>"}`. The client sends one request per connection and waits for the
+longest the request can take plus 10 s, and at least 30 s. That estimate adds the largest of
+`timeoutMs`, `ms` and `quietMs` (at most 60000), `holdMs`, 100 ms per drag step or typed
+character, and the same for a nested `during`.
 
 ## Launching a Dev bundle to drive
 
@@ -81,8 +92,9 @@ background and poll `zeron ui list` until the label shows up (the first build ca
 | `ZERON_DEV_BUILD_ONLY=1` | unset | build and sign, do not launch |
 
 Passed through to the app when set: every `ZERON_MOCK_*`, `ZERON_HARNESS`,
-`ZERON_MOTION_SCALE`, `ZERON_AUTO_UPDATE`, `ZERON_OPEN_ROUTE`, `CODEX_EXECUTABLE`, and the
-`ZERON_CUA_*` probes. Arguments after the script go to the app.
+`ZERON_MOTION_SCALE`, `ZERON_OPEN_ROUTE`, `CODEX_EXECUTABLE`, and the `ZERON_CUA_*` probes.
+`ZERON_AUTO_UPDATE` is not passed, so an upstream release never replaces a Dev bundle.
+Arguments after the script go to the app.
 
 ```sh
 # In a worktree, build into its own target dir (AGENTS.md).
@@ -125,7 +137,7 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 |---|---|---|
 | `state` | none | `pid, build, input, windows[{id,title,kind,size{w,h},active,a11yForced}], route{kind,section,selectedChat}, frames{count,lastDrawAgoMs}, motionScale, theme{mode,appearance}` |
 | `tree` | `query`, `root` (ref), `depth`, `full` (false), `json` (false) | text lines, or `{window,title,size,focus,total,nodes[...]}` |
-| `snapshot` | `rect {x,y,w,h}` in points, `path` (absolute; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height}` |
+| `snapshot` | `rect {x,y,w,h}` in points, `path` (absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
 | `wait` | `for`, plus the fields below | depends on `for` |
 | `frames` | `ms` (1000, max 10000), `during` | `{frames,fps,intervalsMs{p50,p95,max},longFrames[{atMs,gapMs}],firstFrameAtMs,lastFrameAtMs,drawMs?,during?}` |
 | `track` | `ref` or `select`+`nth`, `ms` (800, max 5000), `jumpPx` (40), `during` | `{samples[[tMs,x,y,w,h]],framesSampled,missingFrames,jumps[{atMs,from,to,delta}],settledAtMs,reresolved,ref,node,framesDrawn,readMs,during?}` |
@@ -159,14 +171,20 @@ zui audit
 | `move` | target | `{frame}` |
 | `drag` | `from`, `to` (each `[x,y]`, `{x,y}`, `{ref}` or `{select,nth}`), `steps` (12), `holdMs` (0), `modifiers` | `{frame}` |
 | `scroll` | target, `dx`, `dy` (pixels, 0), `trackpad` (false) | `{frame}` |
-| `key` | `keys`: one string of space-separated strokes, or an array of them | `{frame,handled[bool per stroke]}` |
+| `key` | `keys`: an array of strokes, or one string of space-separated strokes | `{frame,handled[bool per stroke]}` |
 | `type` | `text`, optional target | `{frame}` |
 | `press` | `ref` or `select`+`nth`, `do` (`click`), `value` (for `setValue`) | `{frame,ref}` |
 | `action` | `name` (gpui action), `args` | `{frame}` |
 | `set` | `theme` (`light`, `dark`, `system`), `size` (`{w,h}` or `[w,h]`), `motionScale` | `{frame,size,motionScale,theme}` |
 
-"target" means one of `ref`, `select` (+`nth`), or `x`,`y`. Any element-addressed drive reply
-may also carry `"unsettled": true` (see Actionability).
+"target" means exactly one of `ref`, `select` (+`nth`), or `x` and `y`. Mixing them, `x`
+without `y`, or `nth` without `select` errors with `give one of ref, select, or x and y`. Any
+element-addressed drive reply may also carry `"unsettled": true`, and any drive reply
+`"stale": true` (see Actionability).
+
+The `ui_driver` tool schema gives every property one JSON type: `keys` is an array, `from`/`to`
+are objects, `size` is `{w,h}`. The CLI lines below use the short forms (`"cmd-k"`, `[x,y]`),
+which the app also accepts.
 
 ```sh
 zui click '{"select":"Button \"Settings\""}'
@@ -174,11 +192,11 @@ zui click '{"select":"Button \"Settings\""}'
 zui move '{"x":23,"y":189}'
 {"action":"move","x":23,"y":189,"target":"Zeron Dev 7"}
 zui drag '{"from":[301,500],"to":[400,500]}'
-{"action":"drag","from":[301,500],"to":[400,500],"target":"Zeron Dev 7"}
+{"action":"drag","from":{"x":301,"y":500},"to":{"x":400,"y":500},"target":"Zeron Dev 7"}
 zui scroll '{"select":"Group \"Settings\"","dy":-600}'
 {"action":"scroll","select":"Group \"Settings\"","dy":-600,"target":"Zeron Dev 7"}
 zui key '{"keys":"cmd-k"}'
-{"action":"key","keys":"cmd-k","target":"Zeron Dev 7"}
+{"action":"key","keys":["cmd-k"],"target":"Zeron Dev 7"}
 zui type '{"select":"MultilineTextInput \"mind\"","text":"hello"}'
 {"action":"type","select":"MultilineTextInput \"mind\"","text":"hello","target":"Zeron Dev 7"}
 zui press '{"select":"Switch \"Compact mode\"","do":"click"}'
@@ -186,7 +204,7 @@ zui press '{"select":"Switch \"Compact mode\"","do":"click"}'
 zui action '{"name":"shell::ToggleCommandPalette"}'
 {"action":"action","name":"shell::ToggleCommandPalette","target":"Zeron Dev 7"}
 zui set '{"theme":"dark","size":[1200,800]}'
-{"action":"set","theme":"dark","size":[1200,800],"target":"Zeron Dev 7"}
+{"action":"set","theme":"dark","size":{"w":1200,"h":800},"target":"Zeron Dev 7"}
 ```
 
 Input notes:
@@ -194,7 +212,8 @@ Input notes:
 - `click` moves the pointer, waits a frame, then sends `count` down/up pairs.
 - `scroll` sends one wheel event, or with `trackpad: true` a Started, six Moved and an Ended
   phase about 16 ms apart (that is enough to trigger swipe navigation with `dx`).
-- `type` without a target types into the focused element. With one, it focuses the element
+- `type` with no target key types into the focused element; a malformed target errors. With
+  one, it focuses the element
   through accessibility when the node lists `focus`, and otherwise clicks its center first.
   `\n` becomes `enter`, which sends the composer; use `key "shift-enter"` for a newline.
 - `key` strokes use gpui syntax: `cmd-k`, `shift-enter`, `escape`, `down down enter`.
@@ -250,18 +269,27 @@ e1 Window "Zeron Dev"
   or once no frame draws for 50 ms. After 1 s it acts anyway and adds `"unsettled": true`. Raw
   `x`,`y` skip this wait. An element that moves under about 0.5 pt per frame counts as still.
 - Every drive reply returns after the next drawn frame following its last event (capped at
-  500 ms). One frame is not a finished animation, so run `wait {"for":"idle"}` before you
-  judge a transition by a snapshot or a tree read.
+  500 ms); when no frame drew in that time it carries `"stale": true`. One frame is not a
+  finished animation, so run `wait {"for":"idle"}` before you judge a transition by a snapshot
+  or a tree read.
+- Drive actions run one at a time across connections: a second drive call (or a `during`
+  drive) waits until the first one replies. Observe actions run alongside each other and
+  alongside drive.
 - `wait` kinds: `frame` forces one redraw and returns `{frame}`; `idle` returns
   `{frame,quietMs}` once no frame has drawn for `quietMs` (300); `ms` sleeps `ms`; `select`
   returns `{ref,node,waitedMs}` once the element exists; `gone` returns `{gone,waitedMs}` once
   nothing matches; `text` returns `{ref,node,waitedMs}` once a label, value or description
-  contains `text`. `timeoutMs` defaults to 5000. A timeout reports what it last saw, for example
+  contains `text`. `timeoutMs` defaults to 5000. `timeoutMs`, `quietMs` and `ms` are at most
+  60000; a larger value errors at once. A timeout reports what it last saw, for example
   `not idle after 5000 ms: 120 frames drawn (24.0 fps), last 3 ms ago`.
 - The tree exists only while a window is forced to build it. The first `tree`, `audit`,
   element target or element wait forces it, which costs one or two frames (15-17 ms live). The
-  lease ends 60 s after the last use; `state.windows[].a11yForced` shows it.
-- `snapshot` forces one frame (30-130 ms) so the capture is current, and a full window is
+  lease ends 60 s after the last use; `state.windows[].a11yForced` shows it. A read never
+  answers from a tree older than the force, even when another call started the lease. When no
+  frame draws for about 1.5 s after the force (a minimized or fully hidden window), it errors
+  with `the window drew no frame after the accessibility tree was enabled`.
+- `snapshot` forces one frame (30-130 ms) so the capture is current; when that frame never
+  draws, the reply carries `"stale": true` and the PNG may show an older frame. A full window is
   about 150 KB of PNG against 1-2 KB for its `tree`. Prefer `tree` with `query`, and take a
   snapshot only for a visual check, cropped with `rect` to the node's bounds.
 
@@ -285,7 +313,9 @@ e1 Window "Zeron Dev"
   `motionScale` 5.
 - `during` takes one drive request (`{"action":"click",...}`) and starts it once recording
   has begun, so you measure the transition it causes. Its reply comes back under `during`.
-  With `during`, `track` may start before its element exists (a palette row).
+  With `during`, `track` may start before its element exists (a palette row); a malformed or
+  ambiguous selector, or a ref that is not in the tree, still errors before the action fires.
+  `during: null` counts as no `during`.
 - `set theme` goes through the same path as Settings > Appearance and is saved to the target's
   `ui-settings.json`; set it back to `system` when you finish. `size` resizes the window
   content and is not saved.
@@ -385,8 +415,7 @@ the script.
   paths and output; do not replay a private one in a shared demo.
 - `ZERON_MOCK_DELAY_MS` and `ZERON_MOCK_CHARS` still pace the script; other knobs are ignored.
 
-A scenario file seeds the engine, drives the UI, asserts and snapshots (format in
-`scripts/scenarios/README.md`):
+A scenario file seeds the engine, drives the UI, asserts and snapshots:
 
 ```json
 { "name": "pick-a-color", "steps": [
@@ -401,11 +430,26 @@ A scenario file seeds the engine, drives the UI, asserts and snapshots (format i
 ] }
 ```
 
-Step kinds are `engine` (RPC to the target's engine; `first: true` keeps a stream's first
-item, as with `WatchDocMessages`), `ui` (any driver action), `assert` (`select`/`text` with
-`exists` and `timeoutMs` 3000, or `saved` with `equals`/`contains`), `snapshot` and `sleep`. Any
-step takes `name` and `continueOnFail`. `${saved.path}`, `${env.NAME}`, `${target.ipcPort}` and
-`${run.shots}` substitute into strings.
+The file is `{"name": str, "target"?: pid|label, "steps": [step]}`, and a step has exactly one
+of these keys:
+
+| Step | Effect |
+|---|---|
+| `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. |
+| `{"ui": "<driver action>", ...args, "save"?: "n"}` | Sends one driver request, as `zeron ui <action>` would. |
+| `{"assert": {"select": "Role \"label\"", "nth"?: n, "exists"?: bool}}` | `true` waits for a match (`wait for:select`); `false` waits for none (`wait for:gone`, which ignores `nth`). |
+| `{"assert": {"text": "substring", "exists"?: bool}}` | `true` waits for a label, value or description that contains it; `false` reads the tree once, without waiting. |
+| `{"assert": {"saved": "n.path", "equals": json}}` | Compares a saved value. `"contains": "s"` searches its text instead (a JSON value is searched as compact JSON). |
+| `{"snapshot": "label"}` | Writes `shots/NN-label.png`. |
+| `{"sleep": ms}` | Waits. |
+
+- `select` and `text` asserts take `timeoutMs` (default 3000).
+- Any step may set `"name"` for the report, and `"continueOnFail": true`. Without it, the first
+  failure skips the remaining steps.
+- Strings in `params`, args and asserts may hold `${n.path.0.field}`: a saved result, `target`
+  (the app descriptor), `run.out`, `run.shots`, or `${env.NAME}`. A string that is exactly one
+  reference keeps the JSON type of the value. A reference that does not resolve fails the step.
+- A mock chat is created with `config.harness: "mock"`.
 
 ```sh
 scripts/ui-scenario.sh scripts/scenarios/mock-question.json --mock-script scripts/scenarios/mock-question.mock.json
@@ -415,14 +459,20 @@ scripts/ui-scenario.sh scripts/scenarios/journal-replay.json --mock-script scrip
 The launcher builds a fresh `target/ui-scenario/bundle/Zeron Scenario.app`
 (`sh.zeron.app.dev.scenario`, port 49880 or `--port`, `ZERON_HARNESS=mock`, empty data dir, a
 `git init`ed project exported as `ZERON_SCENARIO_PROJECT`), runs the scenario and quits the
-bundle unless you pass `--keep`. Against an app that is already running, use
-`zeron ui scenario <file> --target <t> --out <dir>`.
+bundle unless you pass `--keep`. Each run works in `target/ui-scenario/<name>/` and moves the
+previous run's folder to the Trash. It refuses to start while a `Zeron Scenario` app is still
+running (quit one kept with `--keep` first) or while a live app's data dir lies in that folder,
+and it only stops a pid whose executable is inside the scenario bundle. Against an app that is
+already running, use `zeron ui scenario <file> --target <t> --out <dir>`; without `--out` the
+report goes to `~/.zeron/run/scenarios/<name>-<time>/`.
 
 Reading the report: the last stdout line is `PASS n/n` or `FAIL k/n: step <i> <name>: <error>`
 (k counts passed steps), and the exit code is 0 or 1. `report.md` has a row per step with its
 result or error and links each snapshot; `report.json` holds the same steps (`index, kind,
-name, status, ms, result, error, shot`). After a failure the rest are `skipped` unless the
-failing step set `continueOnFail`. Open the snapshots: a step can pass while the screen is wrong.
+name, status, ms, result, error, warning, shot`). After a failure the rest are `skipped` unless
+the failing step set `continueOnFail`. A `ui` step whose reply says `unsettled: true` or has a
+`false` in `handled` still passes, with a `warning` (shown first in its `report.md` cell); read
+those as findings. Open the snapshots: a step can pass while the screen is wrong.
 
 ## Agent as user: handing QA to a child agent
 
@@ -450,10 +500,14 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 ## Limits
 
 - Elements without a11y nodes cannot be addressed by ref or selector, and `select`/`text`
-  waits cannot see them. In this branch that includes transcript text and tool chips, sidebar
-  session rows, question options and Submit, palette thread rows, the tab strip and some Home
-  pickers. Fall back to `x`,`y` read off a snapshot, and file the gap. The fix is an id, a role
-  and a label on the element (recipe d).
+  waits cannot see them. The sidebar (rows, group headers, search, filter), the tab strip, the
+  composer and its picker chips and popovers, the command palette and Add project lists, the
+  question card, transcript rows, tool groups and chips, and the welcome dialogs have nodes.
+  Still without: the Home widget cards, the sidecar column, and the "New task" and "Running
+  agents" tabs. Fall back to `x`,`y` read off a snapshot, and file the gap. The fix is an id, a
+  role and a label on the element (recipe d).
+- gpui has no disabled state in the tree, so a disabled button (Back or Forward with no history)
+  reads as a plain `Button`. Transcript row bounds include the row padding.
 - Refs re-key when an element is rebuilt with a new AccessKit id (the palette search field gets
   a new ref each time it opens). Re-resolve by selector after any view rebuild.
 - There is no virtual clock. Animations run on wall time; slow them with `motionScale`, and
@@ -461,8 +515,9 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 - `snapshot` exists on macOS only; elsewhere it replies with an error. The socket server is
   unix-only, so Windows has no driver.
 - Each connection is served by one thread and runs its requests in order. The CLI and the tool
-  open one connection per call, so separate calls run concurrently (a `wait` in one, a `key` in
-  another). Within one request, use `during`.
+  open one connection per call, so separate observe calls run concurrently (a `wait` in one, a
+  `key` in another), while drive calls queue behind each other. To act at a moment inside a
+  measurement, use `during`.
 - Frame stamps and `track` assume one Shell window; the frame counter is global across windows.
 - Release dumps carry no `view`, `elementId` or `source`, so `audit` has no source locations
   there.
@@ -479,5 +534,9 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `no element matches ...; near:` | Read the near list or `tree` with `query`; the element may lack a node. |
 | `... is outside the WxH window; scroll it into view first` | Scroll its container (`scroll` with `select` on the scroll area), then retry. |
 | `timed out after N ms; last seen: ...` / `not idle after ...` | The UI never reached the state, or an animation or spinner keeps drawing. Read the last-seen part, raise `timeoutMs`, or wait on an element instead of `idle`. |
-| `<label> (pid n) did not answer within N s` | The main thread is blocked, or a long request outlived the client timeout. Check `state` from a second call. |
+| `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. |
+| `` `timeoutMs` must be at most 60000 ms `` | Waits are capped at 60 s. Wait on an element or for `idle` in steps instead of one long wait. |
+| `the window drew no frame after the accessibility tree was enabled` | The window is minimized or fully hidden, so gpui does not draw. Bring it back on screen and retry. |
+| `give one of ref, select, or x and y` | The request mixed target kinds, or gave `x` without `y` or `nth` without `select`. |
+| `` `path` must end in .png `` / `is not a regular file` | Snapshot paths are absolute `.png` files; pick a new file name, not a link or folder. |
 | Little Snitch prompts for an unsigned dev binary | Expected for `target/debug` and ad-hoc signed bundles; allow the rule for any process with no code requirement, or the prompt returns after each rebuild. |
