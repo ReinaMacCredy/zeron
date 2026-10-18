@@ -4,6 +4,34 @@ use zeron_proto::TaskPatch;
 
 const TASKS_VIEW_SEGMENT: f32 = 72.0;
 const TASKS_VIEW_THUMB: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_DRAWER);
+const CENTER_SLIDE_IN: motion::MotionSpec = motion::MotionSpec::new(380, motion::EASE_DRAWER);
+const CENTER_SLIDE_OUT: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_DRAWER);
+const CENTER_FADE: motion::MotionSpec = motion::MotionSpec::new(150, motion::EASE);
+const UNDER_SHIFT: f32 = 0.24;
+const UNDER_DIM: f32 = 0.45;
+const CENTER_SHADOW: f32 = 0.55;
+
+pub(super) struct TaskSlide {
+    tween: motion::Tween,
+    under: Route,
+}
+
+impl TaskSlide {
+    pub(super) fn resting(route: Route) -> Self {
+        Self {
+            tween: motion::Tween::at(Self::rest(route), std::time::Instant::now()),
+            under: Route::Tasks,
+        }
+    }
+
+    fn rest(route: Route) -> f32 {
+        if route == Route::TaskCenter { 1.0 } else { 0.0 }
+    }
+}
+
+fn slides_under_center(route: Route) -> bool {
+    matches!(route, Route::Tasks | Route::Inbox)
+}
 
 pub(super) struct TaskCenterPane {
     chat_id: String,
@@ -334,6 +362,214 @@ impl Shell {
         cx.notify();
     }
 
+    fn back_to_tasks(&mut self, cx: &mut Context<Self>) {
+        if self.nav.previous() == Some(&NavEntry::Tasks) {
+            self.navigate_back(cx);
+        } else {
+            self.open_tasks(cx);
+        }
+    }
+
+    pub(super) fn route_task_slide(&mut self, to: Route, cx: &mut Context<Self>) {
+        let from = self.route;
+        if from == to {
+            return;
+        }
+        let under = match (from, to) {
+            (Route::TaskCenter, page) | (page, Route::TaskCenter) if slides_under_center(page) => {
+                page
+            }
+            _ => {
+                if to != Route::TaskCenter {
+                    self.close_task_center(cx);
+                }
+                self.task_slide = TaskSlide::resting(to);
+                return;
+            }
+        };
+        let spec = if self.reduced_motion {
+            CENTER_FADE
+        } else if to == Route::TaskCenter {
+            CENTER_SLIDE_IN
+        } else {
+            CENTER_SLIDE_OUT
+        };
+        self.task_slide.under = under;
+        self.task_slide
+            .tween
+            .retarget(TaskSlide::rest(to), spec, false, self.motion_time());
+        self.swipe.yield_to_slide();
+    }
+
+    fn task_slide_t(&self) -> Option<f32> {
+        if !matches!(self.route, Route::Tasks | Route::TaskCenter | Route::Inbox) {
+            return None;
+        }
+        let now = self.render_time.unwrap_or_else(|| self.motion_time());
+        if self.task_slide.tween.settled_at(now) {
+            return None;
+        }
+        self.motion_active.set(true);
+        Some(self.task_slide.tween.value_at(now))
+    }
+
+    pub(super) fn render_task_slide(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Some(t) = self.task_slide_t() else {
+            if self.route != Route::TaskCenter && self.task_center.is_some() {
+                self.close_task_center(cx);
+            }
+            return None;
+        };
+        let under = match self.task_slide.under {
+            Route::Inbox => self.render_inbox_page(cx),
+            _ => self.render_tasks_page(window, cx),
+        };
+        let center = self.render_task_center_page(window, cx);
+        let entering = self.route == Route::TaskCenter;
+        let travel = !self.reduced_motion;
+        let inset = self.settings.inset_shell;
+        // A flush shell has no opaque body to cover the page under the center, so it fades.
+        let opaque = travel && inset;
+        let body = Theme::of(cx).inset_tones().body;
+        let card = |el: gpui::Div| {
+            if inset {
+                el.top(px(Theme::TITLEBAR_HEIGHT)).rounded(px(CARD_RADIUS))
+            } else {
+                el.top_0()
+            }
+        };
+        let layer = |left: f32| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w_full()
+                .left(gpui::relative(left))
+                .flex()
+        };
+        let blocker = || div().absolute().inset_0().occlude();
+        let under = layer(if travel { -UNDER_SHIFT * t } else { 0.0 })
+            .opacity(if opaque { 1.0 } else { 1.0 - t })
+            .child(under)
+            .when(entering, |el| el.child(blocker()));
+        let scrim = opaque.then(|| {
+            card(div().absolute().left_0().right_0().bottom_0())
+                .bg(gpui::black().opacity(UNDER_DIM * t))
+        });
+        let backdrop = inset.then(|| {
+            card(div().absolute().left_0().right_0().bottom_0())
+                .bg(body)
+                .when(travel, |el| {
+                    el.shadow(vec![gpui::BoxShadow {
+                        color: gpui::black().opacity(CENTER_SHADOW * t),
+                        offset: gpui::point(px(-20.0), px(0.0)),
+                        blur_radius: px(40.0),
+                        spread_radius: px(0.0),
+                        inset: false,
+                    }])
+                })
+        });
+        let center = layer(if travel { 1.0 - t } else { 0.0 })
+            .opacity(if travel { 1.0 } else { t })
+            .children(backdrop)
+            .child(center)
+            .when(!entering, |el| el.child(blocker()));
+        Some(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .relative()
+                .overflow_hidden()
+                .child(under)
+                .children(scrim)
+                .child(center)
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_task_slide_title_bar(
+        &mut self,
+        column: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let t = self.task_slide_t()?;
+        let under = match self.task_slide.under {
+            Route::Inbox => self.render_session_title_bar(window, cx),
+            _ => self.render_tasks_title_bar(cx),
+        };
+        let center = self.render_task_center_title_bar(cx);
+        let entering = self.route == Route::TaskCenter;
+        let reduced = self.reduced_motion;
+        let width = self.viewport_width - self.content_inset();
+        let edge = self.sidebar_edge() + 1.0;
+        let split = edge + column * (1.0 - t);
+        let layer =
+            |bar: AnyElement, clip: Option<(f32, f32)>, shift: f32, alpha: f32, live: bool| {
+                let (left, right) = clip.unwrap_or((0.0, width));
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(left))
+                    .w(px((right - left).max(0.0)))
+                    .overflow_hidden()
+                    .opacity(alpha)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(shift - left))
+                            .w(px(width))
+                            .child(bar),
+                    )
+                    .when(!live, |el| el.child(div().absolute().inset_0().occlude()))
+            };
+        let (under, center) = if reduced {
+            (
+                layer(under, None, 0.0, 1.0 - t, !entering),
+                layer(center, None, 0.0, t, entering),
+            )
+        } else {
+            (
+                layer(
+                    under,
+                    Some((edge.max(self.title_bar_content_start()), split)),
+                    -UNDER_SHIFT * column * t,
+                    1.0 - UNDER_DIM * t,
+                    !entering,
+                ),
+                layer(
+                    center,
+                    Some((split, width)),
+                    column * (1.0 - t),
+                    1.0,
+                    entering,
+                ),
+            )
+        };
+        let (back, front) = if entering {
+            (under, center)
+        } else {
+            (center, under)
+        };
+        Some(
+            div()
+                .relative()
+                .w_full()
+                .h(px(Theme::TITLEBAR_HEIGHT))
+                .when(!reduced, |el| el.children(self.titlebar_seam_divider(cx)))
+                .child(back)
+                .child(front)
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn task_center_holds(&self, chat_id: &str) -> bool {
         self.task_center_pane
             .as_ref()
@@ -470,7 +706,7 @@ impl Shell {
                 "title": title, "notes": "", "orderKey": null,
             }),
             TaskCenterEvent::OpenChat(chat_id) => return self.open_chat(chat_id.clone(), cx),
-            TaskCenterEvent::Back => return self.open_tasks(cx),
+            TaskCenterEvent::Back => return self.back_to_tasks(cx),
             TaskCenterEvent::Selected => return cx.notify(),
         };
         self.mutate_task_row(params, cx);
@@ -500,7 +736,7 @@ impl Shell {
                     .text_color(theme.text_muted),
             )
             .child("Tasks")
-            .on_click(cx.listener(|shell, _: &gpui::ClickEvent, _, cx| shell.open_tasks(cx)));
+            .on_click(cx.listener(|shell, _: &gpui::ClickEvent, _, cx| shell.back_to_tasks(cx)));
         let inner = div()
             .size_full()
             .flex()

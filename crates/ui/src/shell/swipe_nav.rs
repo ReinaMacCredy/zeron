@@ -18,7 +18,7 @@ pub(super) struct SwipeNav {
     input: swipe::Swipe,
     travel: Option<f32>,
     armed: bool,
-    release: Option<(f32, std::time::Instant)>,
+    release: Option<(f32, bool, std::time::Instant)>,
     enter: Option<(SwipeDir, std::time::Instant)>,
     watchdog: Option<Task<()>>,
 }
@@ -27,6 +27,12 @@ pub(super) struct SwipeLayers {
     pub(super) shift: f32,
     pub(super) alpha: f32,
     pub(super) pill: Option<AnyElement>,
+}
+
+impl SwipeNav {
+    pub(super) fn yield_to_slide(&mut self) {
+        self.enter = None;
+    }
 }
 
 struct SwipePill {
@@ -168,18 +174,22 @@ impl Shell {
                 let travel = self.swipe.travel.take().unwrap_or_default();
                 let armed = std::mem::take(&mut self.swipe.armed);
                 if self.swipe_target(dir).is_none() {
-                    self.swipe.release = Some((travel, now));
+                    self.swipe.release = Some((travel, false, now));
                 } else {
                     if !armed {
                         crate::haptics::selection_step();
                     }
                     self.step_history(dir, cx);
+                    if self.swipe.enter.is_none() {
+                        self.swipe.release = Some((travel, true, now));
+                    }
                 }
             }
             Step::Cancel => {
                 self.swipe.armed = false;
                 if let Some(travel) = self.swipe.travel.take() {
-                    self.swipe.release = Some((travel, now));
+                    let has_target = self.swipe_target(SwipeDir::of(travel)).is_some();
+                    self.swipe.release = Some((travel, has_target, now));
                 }
             }
         }
@@ -247,12 +257,11 @@ impl Shell {
                 right_inset,
                 cx,
             ));
-        } else if let Some((travel, started)) = self.swipe.release
+        } else if let Some((travel, has_target, started)) = self.swipe.release
             && !self.reduced_motion
             && let Some(t) = self.tween_t(started, SPRING_BACK)
         {
             let dir = SwipeDir::of(travel);
-            let has_target = self.swipe_target(dir).is_some();
             let (offset, progress) = Self::pill_at(travel, has_target);
             frame.shift = motion::lerp(Self::swipe_shift(travel, has_target), 0.0, t);
             frame.pill = Some(self.render_swipe_pill(

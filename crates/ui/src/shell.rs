@@ -2616,6 +2616,7 @@ pub struct Shell {
     task_center_task: Option<String>,
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
     task_center_pane: Option<task_actions::TaskCenterPane>,
+    task_slide: task_actions::TaskSlide,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -3334,6 +3335,7 @@ impl Shell {
             task_center_task: open_task.clone(),
             task_center: None,
             task_center_pane: None,
+            task_slide: task_actions::TaskSlide::resting(route),
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -7614,9 +7616,7 @@ impl Shell {
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.command_palette = None;
-        if matches!(self.route, Route::TaskCenter) && !matches!(route, Route::TaskCenter) {
-            self.close_task_center(cx);
-        }
+        self.route_task_slide(route, cx);
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
@@ -10320,7 +10320,16 @@ impl Shell {
 
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
-    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_title_bar(
+        &mut self,
+        column: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some(bar) = self.render_task_slide_title_bar(column, window, cx) {
+            self.drop_hidden_chat_action_menus(cx);
+            return bar;
+        }
         if !matches!(
             self.route,
             Route::Tasks | Route::TaskCenter | Route::PullRequests
@@ -16064,6 +16073,18 @@ impl Shell {
             )
     }
 
+    fn render_inbox_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let accounts = crate::account_usage::local_snapshot(cx).cloned();
+        let page = self.inbox_page(cx);
+        page.update(cx, |page, cx| page.set_accounts(accounts, cx));
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(page)
+            .into_any_element()
+    }
+
     fn render_main(
         &mut self,
         window: &mut Window,
@@ -16076,16 +16097,12 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
+        if let Some(page) = self.render_task_slide(window, cx) {
+            return page;
+        }
+
         if matches!(self.route, Route::Inbox) {
-            let accounts = crate::account_usage::local_snapshot(cx).cloned();
-            let page = self.inbox_page(cx);
-            page.update(cx, |page, cx| page.set_accounts(accounts, cx));
-            return div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .child(page)
-                .into_any_element();
+            return self.render_inbox_page(cx);
         }
 
         if matches!(self.route, Route::Usage) {
@@ -19974,7 +19991,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(window, cx);
+                let title_bar = self.render_title_bar(column, window, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
