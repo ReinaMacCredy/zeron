@@ -8,8 +8,8 @@ use gpui::{
     relative,
 };
 use zeron_proto::{
-    ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, TaskPatch, TaskStatus,
-    TaskStepPatch,
+    ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, StepTurnEnd, TaskPatch,
+    TaskStatus, TaskStepPatch,
 };
 
 use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
@@ -70,6 +70,7 @@ struct Rename {
 struct Thread {
     title: String,
     delegation: Option<(DelegationStatus, Option<String>)>,
+    preview: Option<String>,
     since: Option<DateTime<Utc>>,
 }
 
@@ -254,6 +255,7 @@ impl TaskCenter {
                 Some(Thread {
                     title: crate::transcript::single_line(&crate::home::chat_title(chat)),
                     delegation: delegation.map(|d| (d.status, d.summary.clone())),
+                    preview: chat.last_message_preview.clone(),
                     since: state
                         .session_for(&chat.id)
                         .and_then(|session| session.started_at)
@@ -269,20 +271,27 @@ impl TaskCenter {
             StepStatus::Skipped => StepState::Skipped,
             StepStatus::Planned => StepState::Planned,
             StepStatus::Working => StepState::Working(thread.and_then(|t| t.since)),
-            StepStatus::Failed => StepState::Failed("Failed", None),
+            StepStatus::Failed => {
+                StepState::Failed("Failed", thread.and_then(|t| t.preview.clone()))
+            }
             StepStatus::NeedsYou => {
                 let delegation = thread.and_then(|t| t.delegation.as_ref());
+                let stopped = delegation.is_none()
+                    && row.step.turn.as_ref().map(|turn| turn.ended) == Some(StepTurnEnd::Stopped);
                 if row.indicator == Some(ChatIndicator::AwaitingInput) {
                     StepState::Asked
-                } else if row.indicator == Some(ChatIndicator::Errored)
-                    || delegation.is_some_and(|(status, _)| retryable(*status))
+                } else if let Some((status, summary)) =
+                    delegation.filter(|(status, _)| retryable(*status))
                 {
-                    let label = match delegation.map(|(status, _)| *status) {
-                        Some(DelegationStatus::Cancelled) => "Stopped",
-                        Some(DelegationStatus::Interrupted) => "Interrupted",
+                    let label = match status {
+                        DelegationStatus::Cancelled => "Stopped",
+                        DelegationStatus::Interrupted => "Interrupted",
                         _ => "Failed",
                     };
-                    StepState::Failed(label, delegation.and_then(|(_, summary)| summary.clone()))
+                    StepState::Failed(label, summary.clone())
+                } else if row.indicator == Some(ChatIndicator::Errored) || stopped {
+                    let label = if stopped { "Stopped" } else { "Failed" };
+                    StepState::Failed(label, thread.and_then(|t| t.preview.clone()))
                 } else {
                     StepState::NeedsYou
                 }
@@ -729,7 +738,11 @@ impl TaskCenter {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(theme.warning)
+                .text_color(if row.status == StepStatus::Failed {
+                    theme.danger
+                } else {
+                    theme.warning
+                })
                 .child(match summary {
                     Some(summary) => {
                         format!("{label} · {}", crate::transcript::single_line(&summary))
@@ -791,11 +804,12 @@ impl TaskCenter {
             .filter(|rename| rename.step_id == step_id)
             .map(|rename| rename.input.clone());
         let retry = row.step.outcome.is_none()
-            && thread
-                .and_then(|t| t.delegation.as_ref())
-                .is_some_and(|(status, _)| retryable(*status));
+            && matches!(Self::step_state(row, thread), StepState::Failed(..));
         let skip = row.step.outcome.is_none()
-            && matches!(row.status, StepStatus::Planned | StepStatus::NeedsYou);
+            && matches!(
+                row.status,
+                StepStatus::Planned | StepStatus::NeedsYou | StepStatus::Failed
+            );
         let reopen = row.step.outcome.is_some();
         let remove = editable && thread.is_none();
         let title_color = if row.status == StepStatus::Skipped {

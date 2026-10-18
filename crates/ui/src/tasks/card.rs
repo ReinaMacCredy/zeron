@@ -1629,16 +1629,19 @@ mod tests {
         .unwrap()
     }
 
-    fn chat(id: &str, delegation: Option<&str>) -> zeron_proto::Chat {
+    fn chat(id: &str) -> zeron_proto::Chat {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "mac", "archived": false,
             "createdAt": "2026-10-18T00:00:00Z",
-            "delegation": delegation.map(|status| serde_json::json!({
-                "delegatedByChatId": "lead", "depth": 1, "anchor": "m",
-                "wake": "always", "status": status, "startedAt": "2026-10-18T00:00:00Z",
-            })),
         }))
         .unwrap()
+    }
+
+    fn failed_turn() -> Option<zeron_proto::StepTurn> {
+        Some(zeron_proto::StepTurn {
+            ended: zeron_proto::StepTurnEnd::Failed,
+            turn: None,
+        })
     }
 
     fn step(
@@ -1676,7 +1679,7 @@ mod tests {
     fn an_orchestrated_task_rolls_its_steps_into_its_status() {
         let mut state = AppState::new();
         state.tasks = vec![orchestrated(false)];
-        state.chats = vec![chat("lead", None), chat("child", Some("running"))];
+        state.chats = vec![chat("lead"), chat("child")];
         state.task_steps = vec![
             step("s1", "1", None, Some("done")),
             step("s2", "2", Some("child"), None),
@@ -1692,8 +1695,9 @@ mod tests {
         assert_eq!((plan.progress.done, plan.progress.total), (1, 3));
         assert_eq!(super::super::needs_you_count(&state), 0);
 
-        state.chats[1] = chat("child", Some("failed"));
+        state.task_steps[1].turn = failed_turn();
         let plan = super::super::rollup(&state, &state.tasks[0], now);
+        assert_eq!(plan.steps[1].status, Failed);
         assert_eq!(plan.status, TaskStatus::NeedsYou);
         assert_eq!(super::super::needs_you_count(&state), 1);
     }
@@ -1704,7 +1708,7 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
             state.tasks = vec![orchestrated(false), task("plain", false)];
-            state.chats = vec![chat("lead", None)];
+            state.chats = vec![chat("lead")];
         });
         let (page, cx) = cx.add_window_view(|_, cx| super::super::TasksPage::new(state, cx));
         let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1740,11 +1744,12 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
             state.tasks = vec![orchestrated(true)];
-            state.chats = vec![chat("lead", None), chat("child", Some("failed"))];
+            state.chats = vec![chat("lead"), chat("child")];
             state.task_steps = vec![
                 step("s1", "1", Some("child"), None),
                 step("s2", "2", None, None),
             ];
+            state.task_steps[0].turn = failed_turn();
         });
         let (center, cx) =
             cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
