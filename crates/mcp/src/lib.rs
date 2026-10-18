@@ -95,7 +95,7 @@ pub fn tool_list() -> Value {
 fn compact_tool() -> Value {
     json!({
         "name": "compact",
-        "description": "Compact this chat's own context: the conversation so far is replaced by a summary, so later turns are cheaper and the context window has room again. Use it at a natural boundary (a slice done and verified, before the next phase), not in the middle of an edit. It cannot run under the turn that asks for it: it is queued and runs once this turn ends and no sub-agents or background shells are running, so finish your reply after calling it. Any message that reaches you before it runs (from the person, another thread, or a finished task) cancels it; call it again then if it still fits. `focus` tells the summary what to keep: the plan, files being changed, open failures, decisions. `continueWith` is sent to you as your next message once the compaction is done, so the work goes on without the person; leave it out to stop and wait for them.",
+        "description": "Compact this chat's own context: the conversation so far is replaced by a summary, so later turns are cheaper and the context window has room again. Use it at a natural boundary (a slice done and verified, before the next phase), not in the middle of an edit. It cannot run under the turn that asks for it: it runs as soon as this turn ends, so finish your reply after calling it. Sub-agents and background shells you started keep running and report back after the compaction, so say in `continueWith` what they are doing and what to do with their results. Any message that reaches you before it runs cancels it; call it again then if it still fits. `focus` tells the summary what to keep: the plan, files being changed, open failures, decisions. `continueWith` is sent to you as your next message once the compaction is done, so the work goes on without the person; leave it out to stop and wait for them.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2043,7 +2043,10 @@ impl ThreadTools {
         let runs = if waits.is_empty() {
             "when this turn ends".to_string()
         } else {
-            format!("after this turn ends and {} finish", waits.join(" and "))
+            format!(
+                "when this turn ends, with {} still running",
+                waits.join(" and ")
+            )
         };
         Ok(json!({
             "queued": true,
