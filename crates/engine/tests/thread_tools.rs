@@ -1689,26 +1689,42 @@ impl Harness for DelegatingHarness {
             };
             let _ = tx.send(Ok(started)).await;
             if owner {
-                let call = zeron_proto::ToolCall::Mcp {
-                    server: "zeron".into(),
-                    tool: "delegate_task".into(),
-                    input: Some(serde_json::json!({ "task": "probe the cache" })),
-                };
-                let _ = tx
-                    .send(Ok(AgentEvent::ToolCall {
-                        id: "tc-1".into(),
-                        call,
-                    }))
-                    .await;
+                let calls = [
+                    (
+                        "tc-1",
+                        "delegate_task",
+                        serde_json::json!({ "task": "probe the cache" }),
+                    ),
+                    (
+                        "tc-2",
+                        "create_thread",
+                        serde_json::json!({ "prompt": "draft the notes" }),
+                    ),
+                ];
+                for (id, tool, input) in calls.clone() {
+                    let call = zeron_proto::ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: tool.into(),
+                        input: Some(input),
+                    };
+                    let _ = tx
+                        .send(Ok(AgentEvent::ToolCall {
+                            id: id.into(),
+                            call,
+                        }))
+                        .await;
+                }
                 release.notified().await;
-                let _ = tx
-                    .send(Ok(AgentEvent::ToolResult {
-                        id: "tc-1".into(),
-                        is_error: false,
-                        output: None,
-                        diff: None,
-                    }))
-                    .await;
+                for (id, _, _) in calls {
+                    let _ = tx
+                        .send(Ok(AgentEvent::ToolResult {
+                            id: id.into(),
+                            is_error: false,
+                            output: None,
+                            diff: None,
+                        }))
+                        .await;
+                }
             }
             let _ = tx
                 .send(Ok(AgentEvent::TextDelta { text: "ok".into() }))
@@ -1730,7 +1746,7 @@ impl Harness for DelegatingHarness {
 }
 
 #[tokio::test]
-async fn the_delegate_task_chip_links_to_the_child_it_opened() {
+async fn the_delegate_task_and_create_thread_chips_link_to_the_threads_they_opened() {
     let release = Arc::new(tokio::sync::Notify::new());
     let rig = rig_on(Arc::new(DelegatingHarness {
         release: release.clone(),
@@ -1746,19 +1762,39 @@ async fn the_delegate_task_chip_links_to_the_child_it_opened() {
         .await
         .unwrap()
         .task_id;
+    let peer = core
+        .doc_host
+        .create_thread(
+            "lead",
+            " draft the notes ",
+            None,
+            None,
+            None,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     release.notify_one();
-    let chip_ref = || {
+    let chip_ref = |tool: &str| {
         entries(&core, "lead").iter().find_map(|entry| {
             entry.parts.iter().find_map(|part| match part {
                 zeron_doc::MessagePart::Tool {
                     id, subagent_ref, ..
-                } if id == "tc-1" => Some(subagent_ref.clone()),
+                } if id == tool => Some(subagent_ref.clone()),
                 _ => None,
             })
         })
     };
-    wait_for(|| chip_ref().flatten().is_some(), "the chip binding").await;
-    assert_eq!(chip_ref().flatten().as_deref(), Some(child.as_str()));
+    wait_for(
+        || chip_ref("tc-1").flatten().is_some() && chip_ref("tc-2").flatten().is_some(),
+        "the chip bindings",
+    )
+    .await;
+    assert_eq!(chip_ref("tc-1").flatten().as_deref(), Some(child.as_str()));
+    assert_eq!(chip_ref("tc-2").flatten().as_deref(), Some(peer.as_str()));
     core.shutdown().await;
 }
 
