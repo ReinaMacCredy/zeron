@@ -143,7 +143,7 @@ struct Row {
 
 impl Row {
     fn orchestrated(&self) -> bool {
-        has_lead(&self.task)
+        self.task.mode == TaskMode::Orchestrated && self.linked.is_some()
     }
 
     fn marks(&self) -> Vec<Brand> {
@@ -277,9 +277,10 @@ impl TasksPage {
 
     fn cycle(&mut self, step: usize, cx: &mut Context<Self>) {
         let singles: Vec<String> = {
-            let (open, _) = logic::split_tasks(&self.state.read(cx).tasks);
+            let state = self.state.read(cx);
+            let (open, _) = logic::split_tasks(&state.tasks);
             open.iter()
-                .filter(|task| !has_lead(task))
+                .filter(|task| !has_lead(&state.chats, task))
                 .map(|task| task.id.clone())
                 .collect()
         };
@@ -1219,9 +1220,9 @@ impl TasksPage {
     }
 }
 
-/// A failed orchestrated start keeps the mode but drops the link, so the card starts it again.
-pub(crate) fn has_lead(task: &zeron_proto::Task) -> bool {
-    task.mode == TaskMode::Orchestrated && task.chat_id.is_some()
+/// A failed orchestrated start or a deleted lead leaves the mode without a lead, so the card starts it again.
+pub(crate) fn has_lead(chats: &[zeron_proto::Chat], task: &zeron_proto::Task) -> bool {
+    task.mode == TaskMode::Orchestrated && linked_chat(chats, task).is_some()
 }
 
 pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {

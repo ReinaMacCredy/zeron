@@ -862,7 +862,7 @@ impl InboxPage {
                         })
                     }));
                 let open_id = task.id.clone();
-                let orchestrated = crate::tasks::has_lead(task);
+                let orchestrated = crate::tasks::has_lead(&state.chats, task);
                 let is_selected = selected.as_deref() == Some(task.id.as_str());
                 div()
                     .id(SharedString::from(format!("inbox-task-{}", task.id)))
