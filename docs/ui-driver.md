@@ -241,7 +241,8 @@ e1 Window "Zeron Dev"
 ```
 
 - `query` keeps matching lines (role, label, value, description, placeholder) plus their
-  ancestors. `root: "e12"` starts at a node, `depth: 0` prints only the start node.
+  ancestors. `root: "e12"` starts at a node, `depth: 0` prints only the start node. A query
+  with no match prints only the header (`nodes=0/43`) and still exits 0, so read the count.
 - Unlabeled generic containers and zero-size unlabeled nodes are hoisted out of the way;
   `full: true` prints them. `json: true` adds `view`, `elementId` and `source` (file:line) in
   debug builds.
@@ -261,6 +262,27 @@ e1 Window "Zeron Dev"
   point, so a pixel you read off a PNG is a click coordinate.
 - Pointer actions refuse an element whose center is outside the window:
   `... is outside the 1502x903 window; scroll it into view first`.
+
+### Common surfaces
+
+Labels as the tree reports them. Quote a prefix: `"Do anything"` matches `Do anything…`.
+
+| Surface | Nodes |
+|---|---|
+| Sidebar | a chat row is `Button "<title>"`; its open tab is `Tab "<title>"` in `TabList "Sessions"`, so give the role. |
+| Composer | `MultilineTextInput "What's on your mind?"` on New chat, `MultilineTextInput "Do anything…"` in a chat; `Button "Send message"`, which becomes `Button "Stop"` while a turn runs. |
+| Command palette | `Dialog "Command palette"` with `SearchInput "Search threads, commands and files…"`, `TabList "Result type"`, and rows `ListBoxOption "<title>"` in `ListBox "Results"`. |
+| Question card | `Group "<header>"` holding `RadioGroup "<question>"` with one `RadioButton "<option>"` each, `MultilineTextInput "Type your own answer…"` and `Button "Submit"`. On a card with one single-select question, clicking an option submits it. While a card is open the composer is not in the tree. |
+| Transcript | `Group "You: <text>"`, the assistant's text as `Group "<text>"`, `Group "Question: Awaiting your answer…"` that becomes `Group "Question: <header>"`, `Button "Thought process"`, `Button "Ran 1 command"` with a row per call such as `Button "Run ls palette"`, and on a finished turn `Button "Worked for 24s"` folding the turn. |
+
+A turn has finished when the composer's `Button "Send message"` is back and `Button "Stop"` is
+gone. Wait for the first, then the second: while a question card is open neither is in the
+tree, so `gone` on Stop alone passes too early.
+
+```sh
+zui wait '{"for":"select","select":"Button \"Send message\"","timeoutMs":30000}'
+zui wait '{"for":"gone","select":"Button \"Stop\""}'
+```
 
 ### Actionability, frames, and the a11y lease
 
@@ -359,8 +381,8 @@ Write the path as selector steps and re-read state after each one:
 
 ```sh
 zui key '{"keys":"cmd-k"}'
-zui wait '{"for":"select","select":"MultilineTextInput \"Search threads\""}'
-zui click '{"select":"Button \"New chat\""}'
+zui wait '{"for":"select","select":"SearchInput \"Search threads\""}'
+zui click '{"select":"ListBoxOption \"New chat\""}'
 zui state          # route.kind should be newChat
 ```
 
@@ -422,7 +444,7 @@ A scenario file seeds the engine, drives the UI, asserts and snapshots:
   { "engine": "LocalDevice", "save": "device" },
   { "ui": "key", "keys": "cmd-k" },
   { "ui": "wait", "for": "idle" },
-  { "ui": "click", "select": "Button \"New chat\"" },
+  { "ui": "click", "select": "ListBoxOption \"New chat\"" },
   { "ui": "state", "save": "home" },
   { "assert": { "saved": "home.route.kind", "equals": "newChat" } },
   { "assert": { "select": "MultilineTextInput \"Type your own answer\"", "exists": false } },
@@ -502,12 +524,17 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 - Elements without a11y nodes cannot be addressed by ref or selector, and `select`/`text`
   waits cannot see them. The sidebar (rows, group headers, search, filter), the tab strip, the
   composer and its picker chips and popovers, the command palette and Add project lists, the
-  question card, transcript rows, tool groups and chips, and the welcome dialogs have nodes.
-  Still without: the Home widget cards, the sidecar column, and the "New task" and "Running
-  agents" tabs. Fall back to `x`,`y` read off a snapshot, and file the gap. The fix is an id, a
-  role and a label on the element (recipe d).
-- gpui has no disabled state in the tree, so a disabled button (Back or Forward with no history)
-  reads as a plain `Button`. Transcript row bounds include the row padding.
+  question card, transcript rows, tool group and tool row buttons, and the welcome dialogs have
+  nodes. Still without: the Home widget cards, the sidecar column, the "New task" and "Running
+  agents" tabs, an expanded tool row's body (command text and output), the answer on an
+  answered question row, and a message's footer (time, copy, branch). Read those from a
+  snapshot, fall back to `x`,`y` for clicks, and file the gap. The fix is an id, a role and a
+  label on the element (recipe d).
+- gpui has no disabled state in the tree, so a disabled button (Back or Forward with no history,
+  a question card's Submit before an answer) reads as a plain `Button`.
+- Transcript row bounds include the row padding, and an open question row spans the card below
+  it (937x396 with the card inside its lower part). Address a card's controls by selector, never
+  by a row's center.
 - Refs re-key when an element is rebuilt with a new AccessKit id (the palette search field gets
   a new ref each time it opens). Re-resolve by selector after any view rebuild.
 - There is no virtual clock. Animations run on wall time; slow them with `motionScale`, and
