@@ -767,7 +767,7 @@ pub(super) enum Seen {
     },
     Gone {
         #[serde(flatten)]
-        element: Element,
+        absent: Absent,
         #[serde(default = "super::wait_timeout")]
         timeout_ms: u64,
     },
@@ -776,6 +776,16 @@ pub(super) enum Seen {
         #[serde(default = "super::wait_timeout")]
         timeout_ms: u64,
     },
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "what must be gone: \"ref\", \"select\" (with optional \"nth\") or \"text\""
+)]
+pub(super) enum Absent {
+    Element(Element),
+    Text { text: String },
 }
 
 impl Seen {
@@ -793,9 +803,14 @@ fn check(seen: &Seen, tree: &Tree) -> Result<Value, String> {
         Seen::Select { element, .. } => element
             .find(tree)
             .map(|node| json!({ "ref": node.id, "node": line(node) })),
-        Seen::Gone { element, .. } => {
-            let (selector, _, raw) = element.selector()?;
-            let hits = selector.hits(&tree.nodes);
+        Seen::Gone { absent, .. } => {
+            let (hits, raw) = match absent {
+                Absent::Element(element) => {
+                    let (selector, _, raw) = element.selector()?;
+                    (selector.hits(&tree.nodes), raw)
+                }
+                Absent::Text { text } => (holding(&tree.nodes, text).collect(), text.clone()),
+            };
             if hits.is_empty() {
                 Ok(json!({ "gone": raw }))
             } else {
@@ -806,24 +821,26 @@ fn check(seen: &Seen, tree: &Tree) -> Result<Value, String> {
                 ))
             }
         }
-        Seen::Text { text, .. } => {
-            let needle = text.to_lowercase();
-            tree.nodes
-                .iter()
-                .find(|node| {
-                    [&node.label, &node.value, &node.description]
-                        .into_iter()
-                        .any(|field| contains(field, &needle))
-                })
-                .map(|node| json!({ "ref": node.id, "node": line(node) }))
-                .ok_or_else(|| {
-                    format!(
-                        "no label, value or description among {} nodes contains {text:?}",
-                        tree.nodes.len()
-                    )
-                })
-        }
+        Seen::Text { text, .. } => holding(&tree.nodes, text)
+            .next()
+            .map(|i| json!({ "ref": tree.nodes[i].id, "node": line(&tree.nodes[i]) }))
+            .ok_or_else(|| {
+                format!(
+                    "no label, value or description among {} nodes contains {text:?}",
+                    tree.nodes.len()
+                )
+            }),
     }
+}
+
+fn holding<'a>(nodes: &'a [Node], text: &str) -> impl Iterator<Item = usize> + 'a {
+    let needle = text.to_lowercase();
+    (0..nodes.len()).filter(move |&i| {
+        let node = &nodes[i];
+        [&node.label, &node.value, &node.description]
+            .into_iter()
+            .any(|field| contains(field, &needle))
+    })
 }
 
 pub(super) async fn wait(
@@ -832,7 +849,12 @@ pub(super) async fn wait(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let timeout_ms = seen.timeout_ms();
-    if let Seen::Select { element, .. } | Seen::Gone { element, .. } = &seen {
+    if let Seen::Select { element, .. }
+    | Seen::Gone {
+        absent: Absent::Element(element),
+        ..
+    } = &seen
+    {
         element.selector()?;
     }
     let started = Instant::now();
@@ -958,6 +980,47 @@ pub(super) mod tests {
         ];
         assert_eq!(sel("Switch \"compact MODE\"").hits(&switches), vec![1]);
         assert_eq!(sel("Switch \"compact\"").hits(&switches), vec![0, 1]);
+    }
+
+    #[test]
+    fn text_and_gone_text_read_label_value_and_description() {
+        let mut button = node("e1", "Button", Some("Send"));
+        button.placeholder = Some("Ask anything".into());
+        let mut status = node("e2", "StaticText", None);
+        status.value = Some("Picked: Blue".into());
+        let tree = tree_of(&[(0, button), (0, status)]);
+        let gone = |text: &str| {
+            let absent = Absent::Text { text: text.into() };
+            check(
+                &Seen::Gone {
+                    absent,
+                    timeout_ms: 0,
+                },
+                &tree,
+            )
+        };
+        let seen = |text: &str| {
+            let text = text.into();
+            check(
+                &Seen::Text {
+                    text,
+                    timeout_ms: 0,
+                },
+                &tree,
+            )
+        };
+        for present in ["picked: blue", "send"] {
+            let error = gone(present).unwrap_err();
+            assert!(
+                error.starts_with(&format!("`{present}` still matches 1:")),
+                "{error}"
+            );
+            assert!(seen(present).is_ok());
+        }
+        for absent in ["ask anything", "Button"] {
+            assert_eq!(gone(absent), Ok(json!({ "gone": absent })));
+            assert!(seen(absent).is_err());
+        }
     }
 
     #[test]

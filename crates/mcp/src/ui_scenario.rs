@@ -513,26 +513,14 @@ async fn check(
         }
         Assert::Text {
             text,
-            exists: true,
+            exists,
             timeout_ms,
         } => {
             let text = substitute_str(text, saved)?;
-            io.ui(wait("text", json!({ "text": text }), *timeout_ms))
+            let until = if *exists { "text" } else { "gone" };
+            io.ui(wait(until, json!({ "text": text }), *timeout_ms))
                 .await
                 .map(Some)
-        }
-        Assert::Text {
-            text,
-            exists: false,
-            ..
-        } => {
-            let text = substitute_str(text, saved)?;
-            let mut request = Map::new();
-            request.insert("action".into(), json!("tree"));
-            request.insert("json".into(), json!(true));
-            request.insert("full".into(), json!(true));
-            let tree = io.ui(request).await?;
-            text_absent(&tree, &text).map(|()| None)
         }
         Assert::Saved { path, expect } => {
             let expect = match expect {
@@ -567,27 +555,6 @@ fn reply_warning(reply: &Value) -> Option<String> {
         }
     }
     (!warnings.is_empty()).then(|| warnings.join("; "))
-}
-
-fn text_absent(tree: &Value, text: &str) -> Result<(), String> {
-    let needle = text.to_lowercase();
-    let nodes = tree["nodes"]
-        .as_array()
-        .ok_or("the tree reply has no nodes array")?;
-    let hit = nodes.iter().find(|node| {
-        ["label", "value", "description"].into_iter().any(|field| {
-            node[field]
-                .as_str()
-                .is_some_and(|value| value.to_lowercase().contains(&needle))
-        })
-    });
-    match hit {
-        None => Ok(()),
-        Some(node) => Err(format!(
-            "{text:?} is present: {}",
-            serde_json::to_string(node).unwrap_or_default()
-        )),
-    }
 }
 
 fn saved_matches(saved: &Map<String, Value>, path: &str, expect: &Expect) -> Result<Value, String> {
@@ -954,18 +921,6 @@ mod tests {
             error.starts_with("`dev` does not contain \"Picked\""),
             "{error}"
         );
-    }
-
-    #[test]
-    fn absent_text_checks_the_fields_the_driver_wait_reads() {
-        let tree = json!({ "nodes": [
-            { "role": "Button", "label": "Send", "placeholder": "Ask anything" },
-            { "role": "StaticText", "value": "Picked: Blue" },
-        ] });
-        assert!(text_absent(&tree, "picked: blue").is_err());
-        assert!(text_absent(&tree, "send").is_err());
-        assert_eq!(text_absent(&tree, "ask anything"), Ok(()));
-        assert_eq!(text_absent(&tree, "Button"), Ok(()));
     }
 
     struct Fake {

@@ -596,8 +596,18 @@ mod tests {
         assert_eq!(
             gone.unwrap().action,
             Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Gone {
-                element: tree::Element::Ref { id: "e4".into() },
+                absent: tree::Absent::Element(tree::Element::Ref { id: "e4".into() }),
                 timeout_ms: 9,
+            })))
+        );
+        let gone = parse(json!({ "action": "wait", "for": "gone", "text": "Working" }));
+        assert_eq!(
+            gone.unwrap().action,
+            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Gone {
+                absent: tree::Absent::Text {
+                    text: "Working".into()
+                },
+                timeout_ms: 5000,
             })))
         );
         let text = parse(json!({ "action": "wait", "for": "text", "text": "Done" })).unwrap();
