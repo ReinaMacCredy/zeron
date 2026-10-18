@@ -9,7 +9,6 @@ use tokio::sync::watch;
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use zeron_proto::HarnessId;
 
-#[cfg(target_os = "macos")]
 use crate::agent_accounts::keychain;
 use crate::registry::{CustomPredictionApi, HarnessRegistry, PredictionSettings};
 use crate::titles::{OneShot, cheapest_model, one_shot_target, run_one_shot};
@@ -111,7 +110,7 @@ pub(crate) fn entry_text(entry: &SessionMessageEntry) -> String {
         .to_string()
 }
 
-fn head(text: &str, chars: usize) -> String {
+pub(crate) fn head(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
 }
 
@@ -163,11 +162,18 @@ pub struct PredictionSettingsState {
     pub has_api_key: bool,
 }
 
-fn valid_api_key(key: &str) -> bool {
+pub(crate) fn valid_api_key(key: &str) -> bool {
     (1..=512).contains(&key.len())
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._~+/=-".contains(c))
+}
+
+/// One key per engine data dir, so a Dev bundle never replaces the app's.
+pub(crate) fn key_account(registry: &HarnessRegistry) -> Option<String> {
+    registry
+        .data_dir()
+        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 fn completion_text(reply: &serde_json::Value) -> Option<&str> {
@@ -192,15 +198,8 @@ impl Predictions {
         })
     }
 
-    /// One key per engine data dir, so a Dev bundle never replaces the app's.
-    fn key_account(&self) -> Option<String> {
-        self.registry
-            .data_dir()
-            .map(|dir| dir.to_string_lossy().into_owned())
-    }
-
     async fn api_key(&self) -> Option<String> {
-        keychain::read_secret(KEY_SERVICE, &self.key_account()?).await
+        keychain::read_secret(KEY_SERVICE, &key_account(&self.registry)?).await
     }
 
     pub(crate) async fn settings_state(&self) -> PredictionSettingsState {
@@ -223,8 +222,7 @@ impl Predictions {
         }
         self.registry.set_prediction_settings(update.settings)?;
         if let Some(key) = api_key {
-            let account = self
-                .key_account()
+            let account = key_account(&self.registry)
                 .ok_or_else(|| "The engine has no data directory".to_string())?;
             if key.is_empty() {
                 keychain::delete_secret(KEY_SERVICE, &account).await;
@@ -416,25 +414,6 @@ impl Predictions {
             }
         }
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod keychain {
-    const UNSUPPORTED: &str = "Saving a prediction API key needs the macOS Keychain";
-
-    pub(super) async fn read_secret(_service: &str, _account: &str) -> Option<String> {
-        None
-    }
-
-    pub(super) async fn write_secret(
-        _service: &str,
-        _account: &str,
-        _secret: &str,
-    ) -> Result<(), &'static str> {
-        Err(UNSUPPORTED)
-    }
-
-    pub(super) async fn delete_secret(_service: &str, _account: &str) {}
 }
 
 #[cfg(test)]

@@ -27,6 +27,8 @@ With **Let agents compact themselves** on, agents get a compact tool and can sum
 - **Classifier** (default): a model reads each message and compacts first when it starts a new task. **Check from** sets the context size where checking starts, and **Classifier model** picks the model.
 - **Reminder**: each message carries a reminder and the agent decides. **Remind at** sets when the reminders start.
 
+In Classifier mode, the **Classifier** row picks who reads the messages: **Agent model**, or TypeSafe's Jev 1.14 classifier through **Jev · TypeSafe** or **Jev · OpenRouter**. Jev answers in about a second for a fraction of a cent. It needs an API key from the source you picked: copy the key and press **Paste key** to save it in the Keychain, or **Remove key** to delete it. With Jev, an agent's own compaction note is not sent anywhere: the chat compacts and carries the last two turns over.
+
 ## Settings
 
 In [Settings > General](zeron://settings/general):

@@ -6646,20 +6646,20 @@ fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ThreadMatch {
-    chat_id: String,
-    title: String,
+pub(crate) struct ThreadMatch {
+    pub(crate) chat_id: String,
+    pub(crate) title: String,
     marks: Vec<crate::provider_instances::InstanceIcon>,
-    project: String,
+    pub(crate) project: String,
 }
 
 /// Where the prompt will run and read from: the device `read_thread`
 /// resolves ids on, the project whose threads list first, and the chat
 /// being composed for (which can't mention itself).
-struct MentionScope<'a> {
-    device_id: &'a str,
-    space_id: Option<&'a str>,
-    exclude: Option<&'a str>,
+pub(crate) struct MentionScope<'a> {
+    pub(crate) device_id: &'a str,
+    pub(crate) space_id: Option<&'a str>,
+    pub(crate) exclude: Option<&'a str>,
 }
 
 const THREAD_MENTION_LIMIT: usize = 6;
@@ -6674,7 +6674,7 @@ fn chat_mention_title(chat: &zeron_proto::Chat) -> String {
 /// starts with it, on the scope's device, minus the composed-for chat and
 /// drafts (nothing to read). The scope's own project lists first, then the
 /// rest, each in sidebar (recency) order. An empty query lists the first few.
-fn thread_matches<'a>(
+pub(crate) fn thread_matches<'a>(
     chats: impl Iterator<Item = &'a zeron_proto::Chat>,
     query: &str,
     scope: MentionScope<'_>,
@@ -8019,9 +8019,6 @@ impl Composer {
                 crate::draft_store::set(&key, entry, cx);
             }
         }
-        if capture.send && key == self.current_key {
-            self.submit(false, cx);
-        }
     }
 
     pub fn show_appshot_error(&mut self, message: String, cx: &mut Context<Self>) {
@@ -8964,7 +8961,7 @@ impl Composer {
                     )
                     .into_any_element(),
             };
-            card = card.child(
+            card = card.child(gpui::deferred(
                 div()
                     .absolute()
                     .left_0()
@@ -8978,7 +8975,7 @@ impl Composer {
                             .flex()
                             .flex_col()
                             .child(scrim(0.0, 0.55))
-                            .child(scrim(0.55, 0.9)),
+                            .child(scrim(0.55, 0.9).rounded_b(px(11.0))),
                     )
                     .child(
                         div()
@@ -9004,7 +9001,7 @@ impl Composer {
                                     .child(provenance),
                             ),
                     ),
-            );
+            ));
             // `AttachmentRemoveButton size="sm"`: a 14px solid disc at 70%,
             // full opacity while the card or the disc is hovered.
             let remove_opacity = motion::lerp(0.7, 1.0, hover_t);

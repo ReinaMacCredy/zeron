@@ -494,7 +494,11 @@ impl UsagePage {
                                 }
                             }))
                             .tooltip(widgets::text_tooltip("Refresh usage"))
-                            .child(icon(icons::REFRESH).size(px(14.0))),
+                            .child(
+                                icon(icons::REFRESH)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
                     ),
             )
             .into_any_element()

@@ -74,12 +74,8 @@ interface StyleChange {
   value: string;
 }
 
-type Submission = "attach" | "send";
-
-const resolveAnnotationSubmission = (event: KeyboardEvent): Submission | null => {
-  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return null;
-  return event.metaKey || event.ctrlKey ? "send" : "attach";
-};
+const isSubmitKey = (event: KeyboardEvent): boolean =>
+  event.key === "Enter" && !event.shiftKey && !event.isComposing;
 
 const OVERLAY_ATTRIBUTE = "data-zeron-annotation-ui";
 const ELEMENT_ATTRIBUTE = "data-zeron-annotate";
@@ -110,7 +106,7 @@ interface AnnotationDemo {
   select: (element: Element) => void;
   comment: (text: string) => void;
   fontSize: (px: number) => void;
-  submit: (submission: Submission) => void;
+  submit: () => void;
 }
 
 let activeSession: AnnotationSession | null = null;
@@ -271,7 +267,8 @@ function updateSelectedVisual(target: SelectedElement): void {
   positionBox(target.outline, rectFromDomRect(rect));
   target.label.textContent = describeRawElement(target.element);
   target.label.style.display = "block";
-  target.label.style.transform = `translate(${Math.max(4, rect.left)}px, ${Math.max(4, rect.top - 22)}px)`;
+  const left = Math.max(4, Math.min(rect.left, window.innerWidth - target.label.offsetWidth - 4));
+  target.label.style.transform = `translate(${left}px, ${Math.max(4, rect.top - 22)}px)`;
 }
 
 const HTML_PREVIEW_MAX_CHARS = 500;
@@ -1216,7 +1213,7 @@ function startAnnotation(resolve: (result: string) => void): void {
     refreshToolButtons();
   };
 
-  const submitAnnotation = (submission: Submission): void => {
+  const submitAnnotation = (): void => {
     if (pendingCapture || (selected.size === 0 && regions.length === 0 && strokes.length === 0))
       return;
     pendingCapture = true;
@@ -1250,23 +1247,26 @@ function startAnnotation(resolve: (result: string) => void): void {
     editor.style.display = "none";
     toolbar.style.display = "none";
     hoverOutline.style.display = "none";
+    const labelRects = Array.from(selected.values(), (target) =>
+      rectFromDomRect(target.label.getBoundingClientRect()),
+    ).filter(isUsableRect);
     const screenshotRect = unionRects([
       ...elements.map((target) => target.rect),
+      ...labelRects,
       ...submittedRegions.map((region) => region.rect),
       ...submittedStrokes.map((stroke) => stroke.bounds),
     ]);
-    window.requestAnimationFrame(() => settle({ annotation, cropRect: screenshotRect, submission }));
+    window.requestAnimationFrame(() => settle({ annotation, cropRect: screenshotRect }));
   };
   submit.addEventListener("click", (event) => {
-    if (event.isTrusted) submitAnnotation("attach");
+    if (event.isTrusted) submitAnnotation();
   });
   root.addEventListener("keydown", (event) => {
-    const submission =
-      event.isTrusted && event.target === comment ? resolveAnnotationSubmission(event) : null;
+    const submits = event.isTrusted && event.target === comment && isSubmitKey(event);
     event.stopImmediatePropagation();
-    if (!submission) return;
+    if (!submits) return;
     event.preventDefault();
-    submitAnnotation(submission);
+    submitAnnotation();
   });
 
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });

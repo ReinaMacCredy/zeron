@@ -207,6 +207,13 @@ pub enum CompactionMode {
     Classifier,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JevSource {
+    TypeSafe,
+    OpenRouter,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CompactionSettings {
@@ -217,6 +224,7 @@ pub struct CompactionSettings {
     pub mode: CompactionMode,
     /// None model picks a Sonnet-class model of the harness.
     pub classifier: TitleSettings,
+    pub jev: Option<JevSource>,
 }
 
 impl Default for CompactionSettings {
@@ -227,6 +235,7 @@ impl Default for CompactionSettings {
             nudge_tokens: 150_000,
             mode: CompactionMode::default(),
             classifier: TitleSettings::default(),
+            jev: None,
         }
     }
 }

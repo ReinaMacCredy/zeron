@@ -61,7 +61,8 @@ pub mod methods {
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
-    /// `CompactionSettings` → `CompactionSettings`.
+    /// `CompactionSettingsUpdate` (settings plus a write-only `jevApiKey`) →
+    /// `CompactionSettingsState`.
     pub const GET_COMPACTION_SETTINGS: &str = "GetCompactionSettings";
     pub const SET_COMPACTION_SETTINGS: &str = "SetCompactionSettings";
     pub const GET_REVIEW_SETTINGS: &str = "GetReviewSettings";

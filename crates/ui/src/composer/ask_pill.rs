@@ -579,7 +579,11 @@ impl Composer {
                     .text_color(theme.text_muted)
                     .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
                     .child("Open thread")
-                    .child(icon(icons::ARROW_UP_RIGHT).size(px(11.0)))
+                    .child(
+                        icon(icons::ARROW_UP_RIGHT)
+                            .size(px(11.0))
+                            .text_color(theme.text_muted),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.close_ask_tray(cx);
                         cx.emit(ComposerEvent::OpenChat(open_id.clone()));

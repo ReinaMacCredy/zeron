@@ -94,8 +94,8 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
     },
     ToolGroupInfo {
         group: ToolGroup::Workspace,
-        title: "Questions, terminal and actions",
-        summary: "Reach the person watching, the terminal panel, the project Actions menu and Zeron's own UI.",
+        title: "Questions, terminal, actions and tasks",
+        summary: "Reach the person watching, the terminal panel, the project Actions menu, the Tasks list and Zeron's own UI.",
         tools: &[
             tool(
                 "ask_user",
@@ -112,6 +112,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "ui_driver",
                 "Inspect a running Zeron app's UI, and drive a Dev build's.",
+            ),
+            tool(
+                "tasks",
+                "Write, update and assign tasks on the person's Tasks list.",
             ),
             tool(
                 "context_settings",

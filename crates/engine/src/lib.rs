@@ -38,6 +38,7 @@ mod html_render;
 pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
+pub mod jev;
 pub mod local_import;
 mod model_catalogs;
 mod model_prices;

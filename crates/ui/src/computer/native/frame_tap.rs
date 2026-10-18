@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use zeron_proto::computer::{CuaComputerTask, CuaPreviewTarget};
@@ -7,6 +8,8 @@ use zeron_proto::computer::{CuaComputerTask, CuaPreviewTarget};
 use crate::computer::host::ComputerFrameTapHost;
 
 const MAX_DEAD_TARGETS: usize = 256;
+// The engine ends the task only when the whole turn ends, which can be long after the last action.
+const IDLE_STOP: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputerPreviewFrame {
@@ -89,6 +92,7 @@ struct Active<T> {
     key: TargetKey,
     generation: u64,
     stream: Option<T>,
+    touched: Instant,
 }
 
 struct TapState<T> {
@@ -113,6 +117,7 @@ struct Inner<S: FrameSource> {
     source: S,
     sink: PreviewSink,
     state: Mutex<TapState<S::Stream>>,
+    idle_stop: Duration,
 }
 
 impl<S: FrameSource> Inner<S> {
@@ -127,14 +132,24 @@ impl<S: FrameSource> Inner<S> {
             StreamSignal::Frame(jpeg) => {
                 let frame = {
                     let mut state = self.lock();
-                    let Some((thread_id, window_id)) = state
+                    let Some(active) = state
                         .active
                         .as_ref()
                         .filter(|active| active.generation == generation)
-                        .map(|active| (active.key.thread_id.clone(), active.key.window_id))
                     else {
                         return;
                     };
+                    if active.touched.elapsed() >= self.idle_stop {
+                        let stream = state.active.take().and_then(|active| active.stream);
+                        drop(state);
+                        if let Some(stream) = stream {
+                            self.source.stop(stream);
+                        }
+                        tracing::info!(target: "desktop_cua", "computer frame tap idle, stopped");
+                        return;
+                    }
+                    let (thread_id, window_id) =
+                        (active.key.thread_id.clone(), active.key.window_id);
                     state.sequence += 1;
                     ComputerPreviewFrame {
                         thread_id,
@@ -194,6 +209,7 @@ impl<S: FrameSource> ComputerFrameTap<S> {
                     generation: 0,
                     sequence: 0,
                 }),
+                idle_stop: IDLE_STOP,
             }),
         }
     }
@@ -202,12 +218,11 @@ impl<S: FrameSource> ComputerFrameTap<S> {
         let key = TargetKey::of(target);
         let (previous, generation) = {
             let mut state = self.inner.lock();
-            if state.dead.contains(&key)
-                || state
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.key == key)
-            {
+            if state.dead.contains(&key) {
+                return Ok(());
+            }
+            if let Some(active) = state.active.as_mut().filter(|active| active.key == key) {
+                active.touched = Instant::now();
                 return Ok(());
             }
             state.generation += 1;
@@ -216,6 +231,7 @@ impl<S: FrameSource> ComputerFrameTap<S> {
                 key: key.clone(),
                 generation,
                 stream: None,
+                touched: Instant::now(),
             });
             (previous.and_then(|active| active.stream), generation)
         };
@@ -490,6 +506,21 @@ mod tests {
         assert_eq!(source.log().last().unwrap(), "start 3 42:7");
         tap.end_task(task("a", None)).await.unwrap();
         assert_eq!(source.log().last().unwrap(), "stop 3");
+    }
+
+    #[test]
+    fn an_idle_stream_stops_on_its_next_frame_and_the_next_action_restarts_it() {
+        let (source, mut tap, events) = tap();
+        Arc::get_mut(&mut tap.inner).unwrap().idle_stop = Duration::ZERO;
+        tap.update(target("a", Some("1"), 7)).unwrap();
+        source.emit(0, StreamSignal::Frame(vec![1]));
+        assert_eq!(source.log(), vec!["start 1 42:7", "stop 1"]);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "an idle frame is dropped"
+        );
+        tap.update(target("a", Some("1"), 7)).unwrap();
+        assert_eq!(source.log().last().unwrap(), "start 2 42:7");
     }
 
     #[tokio::test]

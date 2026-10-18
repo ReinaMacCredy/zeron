@@ -3735,10 +3735,10 @@ impl DocHost {
     pub async fn queue_thread_message(
         &self,
         chat_id: &str,
-        from_chat_id: &str,
+        from_chat_id: Option<&str>,
         text: &str,
     ) -> Result<String, EngineError> {
-        if chat_id == from_chat_id {
+        if from_chat_id == Some(chat_id) {
             return Err(EngineError::Other("a thread cannot message itself".into()));
         }
         let workspace = self
@@ -3749,8 +3749,10 @@ impl DocHost {
                 .chat(id)?
                 .ok_or_else(|| EngineError::Other(format!("no such chat: {id}")))
         };
-        let (target, from) = (row(chat_id)?, row(from_chat_id)?);
-        if target.device_id != from.device_id {
+        let target = row(chat_id)?;
+        if let Some(from) = from_chat_id
+            && row(from)?.device_id != target.device_id
+        {
             return Err(EngineError::Other(
                 "threads can only message peers on the same device".into(),
             ));
@@ -3766,7 +3768,7 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
-            from_chat_id: Some(from_chat_id.to_string()),
+            from_chat_id: from_chat_id.map(str::to_owned),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
             input_request: None,
@@ -3989,7 +3991,7 @@ impl DocHost {
         if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
             workspace.rename_chat(&chat_id, title)?;
         }
-        self.queue_thread_message(&chat_id, from_chat_id, prompt)
+        self.queue_thread_message(&chat_id, Some(from_chat_id), prompt)
             .await?;
         Ok(chat_id)
     }

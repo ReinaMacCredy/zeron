@@ -505,7 +505,7 @@ async fn an_agent_delivered_slash_never_activates_while_settings_on_covers_every
     let rig = rig();
     rig.core
         .doc_host
-        .queue_thread_message(CHAT, LEAD, "/computer-use open Calculator")
+        .queue_thread_message(CHAT, Some(LEAD), "/computer-use open Calculator")
         .await
         .unwrap();
     let delivered = rig.saw(1).await;
@@ -1547,7 +1547,7 @@ async fn a_thread_message_held_for_a_computer_flip_leaves_no_delivered_entry() {
     let row = rig
         .core
         .doc_host
-        .queue_thread_message(CHAT, LEAD, "note from lead")
+        .queue_thread_message(CHAT, Some(LEAD), "note from lead")
         .await
         .unwrap();
     assert!(

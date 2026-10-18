@@ -11,6 +11,8 @@
 //! respond_to_input answers its pending question. Delegated tasks (d67) are
 //! owned children, not peers: task_cancel stops one.
 
+#![recursion_limit = "256"]
+
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -28,7 +30,7 @@ use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
     AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId, PermissionMode,
-    ReasoningLevel, Session, Space, UserInputAnswer,
+    ReasoningLevel, Session, Space, Task, UserInputAnswer,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -48,6 +50,8 @@ const DEFAULT_TERMINAL_LINES: usize = 80;
 const MAX_TERMINAL_LINES: usize = 400;
 const DEFAULT_TERMINAL_WAIT_MS: u64 = 500;
 const MAX_TERMINAL_WAIT_MS: u64 = 30_000;
+const MAX_LISTED_TASKS: usize = 200;
+const LISTED_NOTES_PREVIEW_CHARS: usize = 500;
 /// Outgoing messages (sends and creates) one server process — one turn —
 /// may issue. A ping-pong between two agents ends in a tool error instead of
 /// a silent token burn.
@@ -368,6 +372,27 @@ fn thread_tool_list() -> Value {
                     "command": { "type": "string", "maxLength": 16384 },
                     "icon": { "type": "string", "enum": ["play", "test", "lint", "configure", "build", "debug"], "description": "Defaults to play." },
                     "runOnWorktreeCreate": { "type": "boolean", "description": "Defaults to false." }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "tasks",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "create", "update", "assign", "unassign", "delete"] },
+                    "taskId": { "type": "string" },
+                    "includeDone": { "type": "boolean" },
+                    "title": { "type": "string", "maxLength": 500 },
+                    "notes": { "type": "string", "maxLength": 10000 },
+                    "dueOn": { "type": "string" },
+                    "projectId": { "type": "string" },
+                    "completed": { "type": "boolean" },
+                    "threadId": { "type": "string" },
+                    "send": { "type": "boolean" }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -718,6 +743,7 @@ impl ThreadTools {
             "ask_user" => self.ask_user(args).await,
             "terminal" => self.terminal(args).await,
             "project_actions" => self.project_actions(args).await,
+            "tasks" => self.tasks(args).await,
             "agent_profiles" => self.manage_agent_profiles(args).await,
             "context_settings" => self.context_settings(args).await,
             "compact" => self.compact(args).await,
@@ -1866,6 +1892,124 @@ impl ThreadTools {
         }
     }
 
+    pub async fn tasks(&self, args: &Value) -> Result<Value, String> {
+        let task_id = args["taskId"].as_str().filter(|id| !id.is_empty());
+        let required = || task_id.ok_or("taskId is required");
+        match args["action"].as_str().unwrap_or_default() {
+            "list" => {
+                let tasks: Vec<Task> = self.snapshot(methods::WATCH_TASKS, json!({})).await?;
+                if let Some(id) = task_id {
+                    let task = tasks
+                        .iter()
+                        .find(|task| task.id == id)
+                        .ok_or_else(|| format!("no task {id}"))?;
+                    return Ok(json!({ "task": task_json(task, false) }));
+                }
+                let include_done = args["includeDone"].as_bool().unwrap_or(false);
+                let listed: Vec<Value> = tasks
+                    .iter()
+                    .filter(|task| include_done || task.completed_at.is_none())
+                    .map(|task| task_json(task, true))
+                    .collect();
+                let truncated = listed.len() > MAX_LISTED_TASKS;
+                let listed: Vec<Value> = listed.into_iter().take(MAX_LISTED_TASKS).collect();
+                Ok(json!({ "tasks": listed, "truncated": truncated }))
+            }
+            "create" => {
+                let title = args["title"]
+                    .as_str()
+                    .filter(|title| !title.trim().is_empty())
+                    .ok_or("title is required")?;
+                let space_id = match args["projectId"].as_str() {
+                    Some(id) => Some(id).filter(|id| !id.is_empty()).map(str::to_owned),
+                    None => self.peers().await?.0.space_id,
+                };
+                let task_id = uuid::Uuid::new_v4().to_string();
+                self.call_engine(
+                    methods::MUTATE,
+                    json!({
+                        "op": "createTask",
+                        "taskId": task_id,
+                        "title": title,
+                        "notes": args["notes"].as_str().unwrap_or_default(),
+                        "spaceId": space_id,
+                        "dueOn": args["dueOn"].as_str().filter(|day| !day.is_empty()),
+                    }),
+                )
+                .await?;
+                Ok(json!({ "taskId": task_id }))
+            }
+            "update" => {
+                let mut patch = serde_json::Map::new();
+                for key in ["title", "notes", "completed"] {
+                    if !args[key].is_null() {
+                        patch.insert(key.into(), args[key].clone());
+                    }
+                }
+                if let Some(day) = args["dueOn"].as_str() {
+                    patch.insert(
+                        "dueOn".into(),
+                        json!(Some(day).filter(|day| !day.is_empty())),
+                    );
+                }
+                if patch.is_empty() {
+                    return Err("nothing to update: pass title, notes, dueOn or completed".into());
+                }
+                self.update_task_row(required()?, Value::Object(patch))
+                    .await
+            }
+            "assign" => {
+                let task_id = required()?;
+                let thread_id = args["threadId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or(&self.chat_id);
+                if thread_id != self.chat_id {
+                    self.peer(thread_id).await?;
+                }
+                let send = args["send"].as_bool().unwrap_or(thread_id != self.chat_id);
+                if send {
+                    self.spend_send()?;
+                }
+                self.call_engine(
+                    methods::MUTATE,
+                    json!({
+                        "op": "assignTask",
+                        "taskId": task_id,
+                        "chatId": thread_id,
+                        "send": send,
+                        "fromChatId": self.chat_id,
+                    }),
+                )
+                .await?;
+                Ok(json!({ "taskId": task_id, "threadId": thread_id, "sent": send }))
+            }
+            "unassign" => {
+                self.update_task_row(required()?, json!({ "chatId": null }))
+                    .await
+            }
+            "delete" => {
+                let task_id = required()?;
+                self.call_engine(
+                    methods::MUTATE,
+                    json!({ "op": "deleteTask", "taskId": task_id }),
+                )
+                .await?;
+                Ok(json!({ "taskId": task_id, "deleted": true }))
+            }
+            _ => Err("action must be list, create, update, assign, unassign or delete".into()),
+        }
+    }
+
+    async fn update_task_row(&self, task_id: &str, patch: Value) -> Result<Value, String> {
+        self.call_engine(
+            methods::MUTATE,
+            json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+        )
+        .await?;
+        Ok(json!({ "taskId": task_id, "updated": true }))
+    }
+
     pub async fn manage_agent_profiles(&self, args: &Value) -> Result<Value, String> {
         let profile_id = args["profileId"].as_str().filter(|id| !id.is_empty());
         match args["action"].as_str().unwrap_or_default() {
@@ -2933,6 +3077,31 @@ fn error(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+fn task_json(task: &Task, preview: bool) -> Value {
+    let cut = preview && task.notes.chars().count() > LISTED_NOTES_PREVIEW_CHARS;
+    let notes: String = if cut {
+        task.notes
+            .chars()
+            .take(LISTED_NOTES_PREVIEW_CHARS)
+            .collect()
+    } else {
+        task.notes.clone()
+    };
+    let mut row = json!({
+        "id": task.id,
+        "title": task.title,
+        "notes": notes,
+        "projectId": task.space_id,
+        "dueOn": task.due_on,
+        "threadId": task.chat_id,
+        "completed": task.completed_at.is_some(),
+    });
+    if cut {
+        row["notesTruncated"] = json!(true);
+    }
+    row
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -2943,7 +3112,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 34] = [
+    const THREAD_TOOLS: [&str; 35] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2959,6 +3128,7 @@ mod tests {
         "terminal",
         "project_actions",
         "ui_driver",
+        "tasks",
         "agent_profiles",
         "context_settings",
         "compact",
@@ -4439,6 +4609,57 @@ mod tests {
                 .is_err()
         );
         assert!(logged(&projectless.calls, methods::LIST_PROJECT_ACTIONS).is_empty());
+    }
+
+    #[tokio::test]
+    async fn tasks_land_in_the_callers_project_and_assign_sends_only_to_peers() {
+        let rig = rig(fixture());
+        let created = rig
+            .tools
+            .call(
+                "tasks",
+                &json!({ "action": "create", "title": "Fix the redirect" }),
+            )
+            .await
+            .unwrap();
+        rig.tools
+            .call(
+                "tasks",
+                &json!({ "action": "create", "title": "Loose", "projectId": "" }),
+            )
+            .await
+            .unwrap();
+        let task_id = created["taskId"].as_str().unwrap();
+        rig.tools
+            .call(
+                "tasks",
+                &json!({ "action": "assign", "taskId": task_id, "threadId": "b" }),
+            )
+            .await
+            .unwrap();
+        rig.tools
+            .call("tasks", &json!({ "action": "assign", "taskId": task_id }))
+            .await
+            .unwrap();
+        assert!(
+            rig.tools
+                .call(
+                    "tasks",
+                    &json!({ "action": "assign", "taskId": task_id, "threadId": "far" })
+                )
+                .await
+                .is_err()
+        );
+        let mutations = logged(&rig.calls, methods::MUTATE);
+        assert_eq!(mutations[0]["spaceId"], "s1");
+        assert_eq!(mutations[1]["spaceId"], Value::Null);
+        assert_eq!(
+            mutations[2..],
+            [
+                json!({ "op": "assignTask", "taskId": task_id, "chatId": "b", "send": true, "fromChatId": "a" }),
+                json!({ "op": "assignTask", "taskId": task_id, "chatId": "a", "send": false, "fromChatId": "a" }),
+            ]
+        );
     }
 
     #[tokio::test]

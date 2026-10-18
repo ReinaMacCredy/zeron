@@ -1,7 +1,8 @@
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, div, prelude::*, px};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use zeron_engine::registry::{CompactionMode, CompactionSettings, TitleSettings};
+use zeron_engine::jev::{CompactionSettingsState, CompactionSettingsUpdate};
+use zeron_engine::registry::{CompactionMode, CompactionSettings, JevSource, TitleSettings};
 use zeron_proto::tools::{ToolSettings, ToolSettingsState};
 use zeron_rpc::methods;
 
@@ -17,7 +18,7 @@ const COMPACT_TOOL: &str = "compact";
 
 pub struct CompactionCard {
     state: Entity<AppState>,
-    settings: Loadable<CompactionSettings>,
+    settings: Loadable<CompactionSettingsState>,
     tools: Loadable<ToolSettingsState>,
     picker: Entity<Pickers>,
     error: Option<String>,
@@ -35,7 +36,7 @@ impl CompactionCard {
         let picked = cx.subscribe(
             &picker,
             |this: &mut Self, _, event: &TitleModelPicked, cx| {
-                let Some(current) = this.settings.ready().cloned() else {
+                let Some(current) = this.current() else {
                     return;
                 };
                 this.save(
@@ -81,8 +82,50 @@ impl CompactionCard {
         );
     }
 
+    fn current(&self) -> Option<CompactionSettings> {
+        self.settings.ready().map(|state| state.settings.clone())
+    }
+
     fn save(&mut self, settings: CompactionSettings, cx: &mut Context<Self>) {
-        let params = serde_json::to_value(settings).unwrap_or_default();
+        self.update(
+            CompactionSettingsUpdate {
+                settings,
+                jev_api_key: None,
+            },
+            cx,
+        );
+    }
+
+    fn save_key(&mut self, key: String, cx: &mut Context<Self>) {
+        let Some(settings) = self.current() else {
+            return;
+        };
+        self.update(
+            CompactionSettingsUpdate {
+                settings,
+                jev_api_key: Some(key),
+            },
+            cx,
+        );
+    }
+
+    fn paste_key(&mut self, cx: &mut Context<Self>) {
+        let key = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        match key {
+            Some(key) => self.save_key(key, cx),
+            None => {
+                self.error = Some("Copy the API key first, then press Paste key.".into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn update(&mut self, update: CompactionSettingsUpdate, cx: &mut Context<Self>) {
+        let params = serde_json::to_value(update).unwrap_or_default();
         self.call(
             methods::SET_COMPACTION_SETTINGS,
             params,
@@ -134,7 +177,7 @@ impl CompactionCard {
                         if let Some(classifier) = card
                             .settings
                             .ready()
-                            .map(|settings| settings.classifier.clone())
+                            .map(|state| state.settings.classifier.clone())
                         {
                             card.picker
                                 .update(cx, |picker, cx| picker.set_title_settings(classifier, cx));
@@ -183,11 +226,58 @@ fn switch(
         })
 }
 
+fn key_row(
+    theme: &Theme,
+    source: JevSource,
+    has_key: bool,
+    cx: &mut Context<CompactionCard>,
+) -> gpui::Div {
+    let status = match (has_key, source) {
+        (true, _) => "Key saved in the Keychain.",
+        (false, JevSource::TypeSafe) => "No key. Get one at console.typesafe.ai/keys",
+        (false, JevSource::OpenRouter) => "No key. Get one at openrouter.ai/settings/keys",
+    };
+    widgets::card_row(theme, false).child(
+        div()
+            .flex_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(theme.text_muted)
+                    .text_size(px(12.0))
+                    .child(status),
+            )
+            .child(
+                widgets::text_action(theme, widgets::ActionTone::Quiet, "Paste key")
+                    .id("compaction-jev-paste-key")
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label("Save the API key on the clipboard to the Keychain")
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(|card, _, _, cx| card.paste_key(cx))),
+            )
+            .when(has_key, |row| {
+                row.child(
+                    widgets::text_action(theme, widgets::ActionTone::Quiet, "Remove key")
+                        .id("compaction-jev-remove-key")
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(|card, _, _, cx| card.save_key(String::new(), cx))),
+                )
+            }),
+    )
+}
+
 impl Render for CompactionCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let card = widgets::section_card(&theme);
-        let (Some(settings), Some(tools)) = (self.settings.ready().cloned(), self.tools.ready())
+        let (Some(state), Some(tools)) = (self.settings.ready().cloned(), self.tools.ready())
         else {
             let note = match (&self.settings, &self.tools) {
                 (Loadable::Error(error), _) | (_, Loadable::Error(error)) => error.clone(),
@@ -201,6 +291,10 @@ impl Render for CompactionCard {
                 ),
             );
         };
+        let CompactionSettingsState {
+            settings,
+            has_jev_key,
+        } = state;
         let agent_on = !tools.disabled.iter().any(|tool| tool == COMPACT_TOOL);
         let entity = cx.entity();
         let pick = |mutate: fn(&mut CompactionSettings, u64)| {
@@ -222,6 +316,21 @@ impl Render for CompactionCard {
                     card.save(
                         CompactionSettings {
                             mode,
+                            ..settings.clone()
+                        },
+                        cx,
+                    );
+                });
+            }
+        };
+        let pick_source = {
+            let entity = entity.clone();
+            let settings = settings.clone();
+            move |jev: Option<JevSource>, _: &mut gpui::Window, cx: &mut gpui::App| {
+                entity.update(cx, |card, cx| {
+                    card.save(
+                        CompactionSettings {
+                            jev,
                             ..settings.clone()
                         },
                         cx,
@@ -311,18 +420,40 @@ impl Render for CompactionCard {
                 ))
                 .into_any_element(),
         ];
-        let model_row = classifier.then(|| {
+        let source_row = classifier.then(|| {
             widgets::card_row(&theme, false)
+                .child(row_text(
+                    &theme,
+                    "Classifier",
+                    "An agent's model, or TypeSafe's Jev classifier with your API key.",
+                ))
+                .child(widgets::segmented(
+                    &theme,
+                    "compaction-classifier-source",
+                    &[
+                        (None, "Agent model"),
+                        (Some(JevSource::TypeSafe), "Jev · TypeSafe"),
+                        (Some(JevSource::OpenRouter), "Jev · OpenRouter"),
+                    ],
+                    settings.jev,
+                    pick_source,
+                ))
+                .into_any_element()
+        });
+        let detail_row = classifier.then(|| match settings.jev {
+            None => widgets::card_row(&theme, false)
                 .child(row_text(
                     &theme,
                     "Classifier model",
                     "Sonnet-class by default; a small model compacted follow-ups in testing.",
                 ))
                 .child(self.picker.clone())
-                .into_any_element()
+                .into_any_element(),
+            Some(source) => key_row(&theme, source, has_jev_key, cx).into_any_element(),
         });
         card.children(rows)
-            .children(model_row)
+            .children(source_row)
+            .children(detail_row)
             .when_some(self.error.clone(), |card, error| {
                 card.child(
                     widgets::card_row(&theme, false).child(widgets::error_strip(&theme, error)),
