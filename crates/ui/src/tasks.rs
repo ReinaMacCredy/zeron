@@ -1022,6 +1022,7 @@ impl TasksPage {
                             StepStatus::Done => column_tone(TaskStatus::Done, theme).2,
                             StepStatus::Working => column_tone(TaskStatus::Working, theme).2,
                             StepStatus::NeedsYou => theme.warning,
+                            StepStatus::Failed => theme.danger,
                             StepStatus::Planned | StepStatus::Skipped => theme.wash(0.10),
                         };
                         div().flex_1().h(px(4.0)).rounded(px(2.0)).bg(fill)

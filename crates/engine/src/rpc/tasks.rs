@@ -330,6 +330,7 @@ impl EngineRpc {
                 created_at: now,
                 updated_at: now,
                 deleted: false,
+                turn: None,
             })
             .collect();
         self.workspace
@@ -366,6 +367,7 @@ impl EngineRpc {
                 created_at: now,
                 updated_at: now,
                 deleted: false,
+                turn: None,
             })
             .map_err(failed)
             .map(drop)

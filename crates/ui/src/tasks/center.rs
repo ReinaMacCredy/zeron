@@ -269,6 +269,7 @@ impl TaskCenter {
             StepStatus::Skipped => StepState::Skipped,
             StepStatus::Planned => StepState::Planned,
             StepStatus::Working => StepState::Working(thread.and_then(|t| t.since)),
+            StepStatus::Failed => StepState::Failed("Failed", None),
             StepStatus::NeedsYou => {
                 let delegation = thread.and_then(|t| t.delegation.as_ref());
                 if row.indicator == Some(ChatIndicator::AwaitingInput) {
@@ -645,6 +646,13 @@ impl TaskCenter {
                     icon(icons::LUCIDE_CIRCLE_ALERT)
                         .size(px(15.0))
                         .text_color(theme.warning),
+                )
+                .into_any_element(),
+            StepStatus::Failed => slot
+                .child(
+                    icon(icons::LUCIDE_CIRCLE_ALERT)
+                        .size(px(15.0))
+                        .text_color(theme.danger),
                 )
                 .into_any_element(),
             StepStatus::Done => slot

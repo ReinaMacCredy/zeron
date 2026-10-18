@@ -1,7 +1,7 @@
 use super::tasks::{at, check_notes, check_order_key, check_row_fits, checked_title, invalid};
 use super::*;
 use zeron_proto::{
-    StepOutcome, TaskStep, TaskStepPatch, pin_order_key_between, valid_pin_order_key,
+    StepOutcome, StepTurn, TaskStep, TaskStepPatch, pin_order_key_between, valid_pin_order_key,
 };
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +26,8 @@ struct RawTaskStep {
     updated_at: i64,
     #[serde(default)]
     deleted: bool,
+    #[serde(default)]
+    turn: Option<StepTurn>,
 }
 
 impl From<RawTaskStep> for TaskStep {
@@ -41,6 +43,7 @@ impl From<RawTaskStep> for TaskStep {
             created_at: at(raw.created_at),
             updated_at: at(raw.updated_at),
             deleted: raw.deleted,
+            turn: raw.turn,
         }
     }
 }
@@ -57,6 +60,7 @@ fn step_fields(step: &TaskStep, title: String, order_key: String) -> BTreeMap<St
         ("createdAt", json!(step.created_at.timestamp_millis())),
         ("updatedAt", json!(step.updated_at.timestamp_millis())),
         ("deleted", json!(false)),
+        ("turn", json!(step.turn)),
     ])
 }
 
@@ -236,6 +240,9 @@ impl RegistryDoc {
         }
         if let Some(chat_id) = &patch.chat_id {
             set.insert("chatId".into(), opt_str(chat_id.as_deref()));
+        }
+        if let Some(turn) = &patch.turn {
+            set.insert("turn".into(), json!(turn));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let op = RowOp {
