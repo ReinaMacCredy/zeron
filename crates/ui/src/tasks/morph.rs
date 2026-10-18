@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{Bounds, IntoElement, Pixels, Styled};
+use gpui::{Bounds, Edges, IntoElement, Pixels, Styled, px};
 
 use crate::motion::{self, CubicBezier};
 
@@ -33,7 +33,8 @@ pub(super) enum Key {
 pub(super) type Rects = HashMap<Key, Bounds<Pixels>>;
 pub(super) type Painted = Rc<RefCell<Rects>>;
 
-pub(super) fn measure(painted: &Painted, key: Key) -> impl IntoElement {
+/// Taffy lays an absolute child out inside the parent's border, so the insets pin it to the border box.
+pub(super) fn measure(painted: &Painted, key: Key, border: Edges<f32>) -> impl IntoElement {
     let painted = painted.clone();
     gpui::canvas(
         move |bounds, _, _| {
@@ -42,7 +43,10 @@ pub(super) fn measure(painted: &Painted, key: Key) -> impl IntoElement {
         |_, _, _, _| {},
     )
     .absolute()
-    .size_full()
+    .top(px(-border.top))
+    .right(px(-border.right))
+    .bottom(px(-border.bottom))
+    .left(px(-border.left))
 }
 
 pub(super) fn visible(rects: &Rects, key: &Key, body: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
