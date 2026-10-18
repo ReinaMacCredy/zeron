@@ -283,6 +283,7 @@ impl Predictions {
         self: &Arc<Self>,
         chat_id: &str,
         session_harness: HarnessId,
+        instance: Option<Arc<dyn zeron_harness::Harness>>,
         entries: impl FnOnce() -> Vec<SessionMessageEntry>,
     ) {
         let settings = self.registry.prediction_settings();
@@ -316,8 +317,14 @@ impl Predictions {
             let text = match settings.custom {
                 Some(api) => this.generate_with_api(&api, &context).await,
                 None => {
-                    this.generate(settings.harness, settings.model, session_harness, &context)
-                        .await
+                    this.generate(
+                        settings.harness,
+                        settings.model,
+                        session_harness,
+                        instance,
+                        &context,
+                    )
+                    .await
                 }
             };
             let mut chats = this.chats();
@@ -375,6 +382,7 @@ impl Predictions {
         harness: Option<HarnessId>,
         model: Option<String>,
         session_harness: HarnessId,
+        instance: Option<Arc<dyn zeron_harness::Harness>>,
         context: &PredictionContext,
     ) -> Option<String> {
         let target = one_shot_target(
@@ -382,6 +390,7 @@ impl Predictions {
             harness,
             model,
             session_harness,
+            instance,
             cheapest_model,
         )
         .await?;
@@ -560,7 +569,7 @@ mod tests {
             .unwrap();
         let predictions = Predictions::new(registry);
         let mut rx = predictions.watch("c");
-        predictions.refresh("c", HarnessId::Mock, completed_turn);
+        predictions.refresh("c", HarnessId::Mock, None, completed_turn);
         tokio::time::timeout(std::time::Duration::from_secs(10), rx.changed())
             .await
             .unwrap()
@@ -579,7 +588,9 @@ mod tests {
         let registry = mock_registry("next");
         let predictions = Predictions::new(registry.clone());
         let rx = predictions.watch("c");
-        predictions.refresh("c", HarnessId::Mock, || panic!("disabled reads no entries"));
+        predictions.refresh("c", HarnessId::Mock, None, || {
+            panic!("disabled reads no entries")
+        });
         drop(rx);
         registry
             .set_prediction_settings(crate::registry::PredictionSettings {
@@ -587,7 +598,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        predictions.refresh("c", HarnessId::Mock, || {
+        predictions.refresh("c", HarnessId::Mock, None, || {
             panic!("unwatched reads no entries")
         });
     }
@@ -665,7 +676,7 @@ mod tests {
             .unwrap();
         let predictions = Predictions::new(registry);
         let mut rx = predictions.watch("c");
-        predictions.refresh("c", HarnessId::Mock, completed_turn);
+        predictions.refresh("c", HarnessId::Mock, None, completed_turn);
         tokio::time::timeout(std::time::Duration::from_secs(10), rx.changed())
             .await
             .unwrap()

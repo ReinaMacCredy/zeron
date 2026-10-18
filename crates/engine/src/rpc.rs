@@ -2613,6 +2613,7 @@ fn forwardable(method: &str) -> bool {
             | methods::REORDER_AGENT_PROFILES
             // Provider instances name paths on the device that runs them.
             | methods::LIST_PROVIDER_INSTANCES
+            | methods::WATCH_PROVIDER_INSTANCES
             | methods::UPSERT_PROVIDER_INSTANCE
             | methods::DELETE_PROVIDER_INSTANCE
             | methods::LIST_ACP_AUTH_METHODS
@@ -2707,6 +2708,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
             | methods::WATCH_LIMIT_RESUMES
+            | methods::WATCH_PROVIDER_INSTANCES
     )
 }
 
@@ -5335,6 +5337,9 @@ impl RpcService for EngineRpc {
             methods::LIST_PROVIDER_INSTANCES => {
                 RpcReply::value(&self.provider_instances_store()?.snapshot())
             }
+            methods::WATCH_PROVIDER_INSTANCES => Ok(RpcReply::Stream(watch_stream(
+                self.provider_instances_store()?.watch(),
+            ))),
             methods::UPSERT_PROVIDER_INSTANCE => {
                 let p: UpsertProviderInstanceParams = parse_params(params)?;
                 let store = self.provider_instances_store()?;
@@ -6880,6 +6885,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_WORKSPACE_GIT_STATUS));
         assert!(forwardable(methods::WATCH_HARNESS_UPDATES));
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
+        assert!(forwardable(methods::WATCH_PROVIDER_INSTANCES));
+        assert!(is_stream_method(methods::WATCH_PROVIDER_INSTANCES));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));

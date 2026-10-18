@@ -172,6 +172,18 @@ async fn provider_instances_live_in_the_device_data_dir_and_survive_a_restart() 
     };
     let core = assemble();
     let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut watch = client
+        .subscribe(methods::WATCH_PROVIDER_INSTANCES, json!({}))
+        .await
+        .unwrap();
+    let mut next = async || -> ProviderInstancesSnapshot {
+        let value = tokio::time::timeout(std::time::Duration::from_secs(10), watch.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        serde_json::from_value(value).unwrap()
+    };
+    assert!(next().await.instances.is_empty());
     let saved: ProviderInstancesSnapshot = client
         .call_as(
             methods::UPSERT_PROVIDER_INSTANCE,
@@ -181,6 +193,7 @@ async fn provider_instances_live_in_the_device_data_dir_and_survive_a_restart() 
         .await
         .unwrap();
     assert_eq!(saved.instances.len(), 1);
+    assert_eq!(next().await, saved);
     assert!(
         client
             .call(

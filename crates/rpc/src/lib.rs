@@ -298,6 +298,8 @@ pub mod methods {
     pub const LIST_PROVIDER_INSTANCES: &str = "ListProviderInstances";
     pub const UPSERT_PROVIDER_INSTANCE: &str = "UpsertProviderInstance";
     pub const DELETE_PROVIDER_INSTANCE: &str = "DeleteProviderInstance";
+    /// `ProviderInstancesSnapshot` stream: current set first, then one per write.
+    pub const WATCH_PROVIDER_INSTANCES: &str = "WatchProviderInstances";
     pub const LIST_ACP_AUTH_METHODS: &str = "ListAcpAuthMethods";
     pub const SEARCH_ACP_REGISTRY: &str = "SearchAcpRegistry";
     pub const PREPARE_ACP_AGENT: &str = "PrepareAcpAgent";

@@ -122,6 +122,7 @@ struct RuntimeConfig {
     request: RunRequest,
     harness: Arc<dyn Harness>,
     instructions: String,
+    instance: Option<zeron_proto::InstanceConfig>,
 }
 
 impl RuntimeConfig {
@@ -137,6 +138,7 @@ impl RuntimeConfig {
             request: request.clone(),
             harness,
             instructions: String::new(),
+            instance: None,
         }
     }
 
@@ -160,8 +162,11 @@ impl RuntimeConfig {
         instance_id: Option<&str>,
         request: &RunRequest,
         instructions: &str,
+        instance: Option<&zeron_proto::InstanceConfig>,
     ) -> Option<bool> {
-        if self.instructions != instructions && self.harness.launch_reads_instructions() {
+        if (self.instructions != instructions && self.harness.launch_reads_instructions())
+            || self.instance.as_ref() != instance
+        {
             None
         } else if self.can_route(harness_id, instance_id, request) {
             Some(false)
@@ -1052,6 +1057,7 @@ impl SessionsEngine {
         }
         let instructions = request.map(|_| self.inner.instructions_for(chat_id));
         let instance = request.and_then(|(id, _)| self.inner.chat_instance(chat_id, id));
+        let launch = self.inner.instance_launch(instance.as_deref());
         let live = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.runtime_config.harness_id,
@@ -1059,7 +1065,7 @@ impl SessionsEngine {
                     && request.is_none_or(|(id, r)| {
                         let instructions = instructions.as_deref().unwrap_or_default();
                         h.runtime_config
-                            .route(id, instance.as_deref(), r, instructions)
+                            .route(id, instance.as_deref(), r, instructions, launch.as_ref())
                             .is_some()
                     }),
             )
@@ -1106,13 +1112,17 @@ impl SessionsEngine {
                     .config
                     .map(|config| config.harness)
             });
-        if let Some(harness) = harness {
-            self.inner.predictions.refresh(chat_id, harness, || {
-                self.doc_handle(chat_id)
-                    .ok()
-                    .and_then(|handle| handle.doc().read_entries().ok())
-                    .unwrap_or_default()
-            });
+        if let Some(harness) = harness
+            && let Ok(instance) = self.inner.instance_harness(chat_id, harness)
+        {
+            self.inner
+                .predictions
+                .refresh(chat_id, harness, instance, || {
+                    self.doc_handle(chat_id)
+                        .ok()
+                        .and_then(|handle| handle.doc().read_entries().ok())
+                        .unwrap_or_default()
+                });
         }
         rx
     }
@@ -1344,12 +1354,18 @@ impl SessionsEngine {
                 .await;
         }
         let instructions = self.inner.instructions_for(chat_id);
+        let launch = self.inner.instance_launch(instance_id.as_deref());
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
                 h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
-                h.runtime_config
-                    .route(harness_id, instance_id.as_deref(), &request, &instructions),
+                h.runtime_config.route(
+                    harness_id,
+                    instance_id.as_deref(),
+                    &request,
+                    &instructions,
+                    launch.as_ref(),
+                ),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
@@ -1515,6 +1531,7 @@ impl SessionsEngine {
         }
         self.inner.inject_branch(chat_id, &mut request);
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
+        let title_instance = instance_id.as_ref().map(|_| harness.clone());
 
         let RunSetup {
             handle: mut run,
@@ -1537,6 +1554,7 @@ impl SessionsEngine {
             &instructions,
         );
         run.runtime_config.instructions = instructions;
+        run.runtime_config.instance = launch;
         let run_computer = run.computer.clone();
         let fork_history_sent = run.fork_history_sent.clone();
         let run_id = run.run_id.clone();
@@ -1566,7 +1584,13 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if !idle && let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(
+                chat_id,
+                harness_id,
+                title_instance,
+                &request.prompt,
+                &request.cwd,
+            );
         }
 
         tokio::spawn(drive_run(
@@ -1609,16 +1633,15 @@ impl SessionsEngine {
         }
     }
 
-    fn harness_display_name(&self, harness_id: HarnessId) -> String {
+    fn harness_display_name(&self, chat_id: &str, harness_id: HarnessId) -> String {
         self.inner
-            .registry
-            .resolve(harness_id)
-            .map(|harness| harness.display_name().to_owned())
+            .resolve_for_chat(chat_id, harness_id)
+            .map(|(harness, _)| harness.display_name().to_owned())
             .unwrap_or_else(|_| "This agent".into())
     }
 
     fn note_computer_unreachable(&self, chat_id: &str, harness_id: HarnessId) {
-        let name = self.harness_display_name(harness_id);
+        let name = self.harness_display_name(chat_id, harness_id);
         let hint = format!(
             "{name} does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer."
         );
@@ -1630,7 +1653,7 @@ impl SessionsEngine {
     }
 
     fn note_computer_unavailable(&self, chat_id: &str, harness_id: HarnessId) {
-        let name = self.harness_display_name(harness_id);
+        let name = self.harness_display_name(chat_id, harness_id);
         let hint = format!(
             "{name} cannot reload its session, so Zeron cannot restart it with the Computer tools without losing the conversation. Start a new chat to use Computer with it."
         );
@@ -2127,6 +2150,7 @@ impl SessionsEngine {
             &self.inner.registry,
             classifier,
             harness_id,
+            self.inner.instance_harness(chat_id, harness_id).ok()?,
         )
         .await?;
         self.inner.set_classifying(
@@ -4339,6 +4363,22 @@ impl Inner {
             .and_then(|ws| ws.chat_config(chat_id))
             .filter(|config| config.harness == harness_id)
             .and_then(|config| config.instance_id)
+    }
+
+    fn instance_harness(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+    ) -> Result<Option<Arc<dyn Harness>>, EngineError> {
+        if self.chat_instance(chat_id, harness_id).is_none() {
+            return Ok(None);
+        }
+        self.resolve_for_chat(chat_id, harness_id)
+            .map(|(harness, _)| Some(harness))
+    }
+
+    fn instance_launch(&self, instance_id: Option<&str>) -> Option<zeron_proto::InstanceConfig> {
+        self.provider_instances.get()?.launch_config(instance_id?)
     }
 
     fn instance_codex_home(&self, chat_id: &str) -> Option<std::path::PathBuf> {
@@ -6779,14 +6819,22 @@ async fn drive_run(
             // Exchange completed on an untitled chat → name it (fire-and-forget;
             // interrupted/errored turns never trigger naming).
             if *status == DoneStatus::Completed
-                && let Some(titles) = inner.titles.get()
+                && let Ok(instance) = inner.instance_harness(&chat_id, harness_id)
             {
-                titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
-            }
-            if *status == DoneStatus::Completed {
-                inner.predictions.refresh(&chat_id, harness_id, || {
-                    doc_ref.read_entries().unwrap_or_default()
-                });
+                if let Some(titles) = inner.titles.get() {
+                    titles.maybe_generate(
+                        &chat_id,
+                        harness_id,
+                        instance.clone(),
+                        &user_prompt,
+                        &run_cwd,
+                    );
+                }
+                inner
+                    .predictions
+                    .refresh(&chat_id, harness_id, instance, || {
+                        doc_ref.read_entries().unwrap_or_default()
+                    });
             }
             // A turn stopped in place: the runtime lives on, parked like a
             // completed turn. Steers it had accepted but not yet delivered
@@ -7865,8 +7913,77 @@ mod tests {
         assert!(on_instance.can_route(HarnessId::Grok, Some("grok_work"), &follow_up));
         assert!(!on_instance.can_route(HarnessId::Grok, Some("grok_home"), &follow_up));
         assert_eq!(
-            on_instance.route(HarnessId::Grok, None, &follow_up, ""),
+            on_instance.route(HarnessId::Grok, None, &follow_up, "", None),
             None
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_instances::ProviderInstancesStore::open(temp.path()).unwrap();
+        let mut grok_work = zeron_proto::ProviderInstance {
+            id: "grok_work".into(),
+            driver: HarnessId::Grok,
+            label: "Work".into(),
+            accent: None,
+            config: zeron_proto::InstanceConfig::Native {
+                executable: None,
+                home_dir: None,
+                launch_args: Vec::new(),
+                env: [("GROK_API_KEY".into(), "one".into())].into(),
+            },
+        };
+        store.upsert(grok_work.clone()).unwrap();
+        let mut launched = on_instance.clone();
+        launched.instance = store.launch_config("grok_work");
+        let route_now = |store: &crate::provider_instances::ProviderInstancesStore| {
+            launched.route(
+                HarnessId::Grok,
+                Some("grok_work"),
+                &follow_up,
+                "",
+                store.launch_config("grok_work").as_ref(),
+            )
+        };
+        assert_eq!(route_now(&store), Some(false));
+        grok_work.label = "Work account".into();
+        grok_work.accent = Some("#ff8800".into());
+        store.upsert(grok_work.clone()).unwrap();
+        assert_eq!(
+            route_now(&store),
+            Some(false),
+            "a label or accent edit keeps the live run"
+        );
+        let edits: [fn(&mut zeron_proto::InstanceConfig); 3] = [
+            |config| {
+                if let zeron_proto::InstanceConfig::Native { env, .. } = config {
+                    env.insert("GROK_API_KEY".into(), "two".into());
+                }
+            },
+            |config| {
+                if let zeron_proto::InstanceConfig::Native { launch_args, .. } = config {
+                    launch_args.push("--verbose".into());
+                }
+            },
+            |config| {
+                if let zeron_proto::InstanceConfig::Native { executable, .. } = config {
+                    *executable = Some("/opt/grok/bin/grok".into());
+                }
+            },
+        ];
+        for edit in edits {
+            let mut edited = grok_work.clone();
+            edit(&mut edited.config);
+            store.upsert(edited).unwrap();
+            assert_eq!(
+                route_now(&store),
+                None,
+                "an edited launch replaces the runtime"
+            );
+            store.upsert(grok_work.clone()).unwrap();
+        }
+        assert_eq!(
+            launched.route(HarnessId::Grok, Some("grok_work"), &follow_up, "", None),
+            None,
+            "a deleted instance never keeps routing into its process"
         );
 
         // Images ride the mailbox: they never force a replacement runtime.
@@ -7891,10 +8008,10 @@ mod tests {
 
         let mut launch = follow_up.clone();
         launch.permission_mode = PermissionMode::Ask;
-        assert_eq!(config.route(HarnessId::Grok, None, &launch, ""), None);
+        assert_eq!(config.route(HarnessId::Grok, None, &launch, "", None), None);
         launch.permission_mode = follow_up.permission_mode;
         launch.computer_control = !follow_up.computer_control;
-        assert_eq!(config.route(HarnessId::Grok, None, &launch, ""), None);
+        assert_eq!(config.route(HarnessId::Grok, None, &launch, "", None), None);
 
         follow_up.model = Some("grok-4.5".into());
         assert!(!config.can_route(HarnessId::Grok, None, &follow_up));
@@ -7910,7 +8027,7 @@ mod tests {
             Arc::new(zeron_harness::PiHarness::new()),
         );
         assert_eq!(
-            pi.route(HarnessId::Pi, None, &initial, "never read"),
+            pi.route(HarnessId::Pi, None, &initial, "never read", None),
             Some(false),
             "a driver that never reads the instructions keeps its run"
         );
@@ -7937,17 +8054,20 @@ mod tests {
         let mut effort = follow_up.clone();
         effort.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert_eq!(
-            config.route(HarnessId::ClaudeCode, None, &effort, ""),
+            config.route(HarnessId::ClaudeCode, None, &effort, "", None),
             Some(true),
             "a harness that changes effort in place keeps its run"
         );
         assert_eq!(
-            config.route(HarnessId::ClaudeCode, None, &effort, "Lead the room."),
+            config.route(HarnessId::ClaudeCode, None, &effort, "Lead the room.", None),
             None,
             "a profile's instructions ride --append-system-prompt, read only at launch"
         );
         effort.permission_mode = PermissionMode::Ask;
-        assert_eq!(config.route(HarnessId::ClaudeCode, None, &effort, ""), None);
+        assert_eq!(
+            config.route(HarnessId::ClaudeCode, None, &effort, "", None),
+            None
+        );
 
         follow_up
             .model_options
