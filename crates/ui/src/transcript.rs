@@ -2829,9 +2829,7 @@ impl HandoffSide {
 
 #[derive(Clone, PartialEq)]
 enum CompactionWait {
-    Queued {
-        background: bool,
-    },
+    Queued,
     Classifying {
         harness: zeron_proto::HarnessId,
         model: Option<String>,
@@ -9161,11 +9159,8 @@ impl Transcript {
             });
         }
         // The agent's compaction runs after its turn settles, with the chat idle.
-        (agent && state.indicator_for(chat_id, now) == crate::state::Indicator::None).then(|| {
-            CompactionWait::Queued {
-                background: !session.background_tasks.is_empty() || session.running_subagents > 0,
-            }
-        })
+        (agent && state.indicator_for(chat_id, now) == crate::state::Indicator::None)
+            .then_some(CompactionWait::Queued)
     }
 
     /// Drawn where the classifier row or compaction note lands, so the result replaces it in place.
@@ -9206,12 +9201,8 @@ impl Transcript {
             }
         };
         let (lead, chip, tail, timed) = match &wait {
-            CompactionWait::Queued { background } => (
-                if *background {
-                    "Compaction queued · starts when background work ends".to_string()
-                } else {
-                    "Compaction queued · starts when the turn settles".to_string()
-                },
+            CompactionWait::Queued => (
+                "Compaction queued · starts when the turn settles".to_string(),
                 None,
                 None,
                 false,
@@ -10487,6 +10478,9 @@ impl Transcript {
             Some(said) => format!("{} (said {})", label(record.verdict), label(said)),
             None => label(record.verdict).to_string(),
         };
+        let overturned = record.decided_by == DecidedBy::Stage2
+            && record.stage2_reply.is_some()
+            && record.verdict != ClassifierVerdict::Continue;
         let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
         let decided = match record.decided_by {
             DecidedBy::Stage1 => "First look",
@@ -10526,11 +10520,23 @@ impl Transcript {
             .child("Classifier")
             .children(model.as_ref().map(|side| side.chip(theme)))
             .child(SharedString::from(format!("· {secs} ·")))
+            .when(overturned, |header| {
+                header
+                    .child(
+                        div()
+                            .line_through()
+                            .child(label(ClassifierVerdict::Continue)),
+                    )
+                    .child("→")
+            })
             .child(
                 div()
                     .text_color(verdict_color)
                     .child(SharedString::from(verdict.clone())),
             )
+            .when(overturned, |header| {
+                header.child(div().text_color(theme.accent).child("second look"))
+            })
             .child(
                 crate::icons::icon(if open {
                     crate::icons::LUCIDE_CHEVRON_DOWN
@@ -10567,7 +10573,7 @@ impl Transcript {
                 )),
                 _ => None,
             };
-            let mono_box = |id: &'static str, text: &str| {
+            let mono_box = |id: &'static str, text: &str, border: gpui::Hsla| {
                 div()
                     .id(SharedString::from(format!("{row_id}-{id}")))
                     .max_h(px(224.0))
@@ -10575,7 +10581,7 @@ impl Transcript {
                     .p(px(10.0))
                     .rounded(px(8.0))
                     .border_1()
-                    .border_color(theme.border)
+                    .border_color(border)
                     .font_family(theme.font_mono.clone())
                     .text_size(px(12.0))
                     .line_height(px(18.0))
@@ -10625,17 +10631,50 @@ impl Transcript {
                         .text_color(theme.text_muted)
                         .child("Sent to the classifier"),
                 )
-                .child(mono_box("input", &record.input))
-                .child(div().text_color(theme.text_muted).child("Reply"))
-                .child(mono_box("reply", &record.reply))
-                .children(record.stage2_reply.as_deref().map(|reply| {
-                    div()
+                .child(mono_box("input", &record.input, theme.border))
+                .child(match record.stage2_reply.as_deref() {
+                    None => div()
                         .flex()
                         .flex_col()
                         .gap(px(10.0))
-                        .child(div().text_color(theme.text_muted).child("Second look"))
-                        .child(mono_box("stage2", reply))
-                }))
+                        .child(div().text_color(theme.text_muted).child("Reply"))
+                        .child(mono_box("reply", &record.reply, theme.border)),
+                    Some(stage2) => {
+                        let stage = |title: &'static str, id: &'static str, text: &str, decided| {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(10.0))
+                                .child(div().text_color(theme.text_muted).child(if decided {
+                                    SharedString::from(format!("{title} · decides"))
+                                } else {
+                                    SharedString::from(title)
+                                }))
+                                .child(mono_box(
+                                    id,
+                                    text,
+                                    if decided { theme.accent } else { theme.border },
+                                ))
+                        };
+                        div()
+                            .flex()
+                            .gap(px(10.0))
+                            .child(stage(
+                                "First look",
+                                "reply",
+                                &record.reply,
+                                record.decided_by == DecidedBy::Stage1,
+                            ))
+                            .child(stage(
+                                "Second look",
+                                "stage2",
+                                stage2,
+                                record.decided_by == DecidedBy::Stage2,
+                            ))
+                    }
+                })
         });
         div()
             .w_full()

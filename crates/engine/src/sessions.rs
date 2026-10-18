@@ -69,6 +69,11 @@ pub struct CompactQueued {
     pub running_subagents: u32,
 }
 
+/// Background shells and sub-agents still running for a chat's live run.
+fn background_work(session: Option<&Session>) -> (usize, u32) {
+    session.map_or((0, 0), |s| (s.background_tasks.len(), s.running_subagents))
+}
+
 /// Result of a manual context compaction — also the RPC result shape.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2284,6 +2289,14 @@ impl SessionsEngine {
                 harness.display_name()
             )));
         }
+        let session = self.session_status(chat_id);
+        let (background_tasks, running_subagents) = background_work(session.as_ref());
+        if !harness.compacts_in_place() && background_tasks + running_subagents as usize > 0 {
+            return Err(EngineError::Other(format!(
+                "{} restarts its process to compact, which would end the background work still running. Call compact again after it finishes.",
+                harness.display_name()
+            )));
+        }
         let trimmed = |text: Option<String>| {
             text.map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
@@ -2306,11 +2319,10 @@ impl SessionsEngine {
         });
         self.inner
             .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
-        let session = self.session_status(chat_id);
         Ok(CompactQueued {
             replaced: replaced.is_some(),
-            background_tasks: session.as_ref().map_or(0, |s| s.background_tasks.len()),
-            running_subagents: session.map_or(0, |s| s.running_subagents),
+            background_tasks,
+            running_subagents,
         })
     }
 
@@ -2431,6 +2443,16 @@ impl SessionsEngine {
         if !self.agent_compact_due(chat_id, &request).await {
             return Ok(None);
         }
+        if !self.compacts_in_place(chat_id) {
+            let (tasks, subagents) = background_work(self.session_status(chat_id).as_ref());
+            if tasks + subagents as usize > 0 {
+                let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
+                return Ok(Some((
+                    self.decline_agent_compact(chat_id, &request, reason),
+                    request,
+                )));
+            }
+        }
         let verdict = match &request.continue_with {
             Some(note) => {
                 let verdict = self.judge_agent_note(chat_id, note).await;
@@ -2457,17 +2479,8 @@ impl SessionsEngine {
                     }),
             ),
             ClassifierVerdict::Continue | ClassifierVerdict::Failed => {
-                self.inner
-                    .edit_agent_compacts(|compacts| compacts.remove(chat_id));
-                self.inner.set_compact_plan(chat_id, None);
-                let reason = declined_reason(verdict);
-                if let Some(text) = &request.continue_with {
-                    lock(&self.inner.compact_owed).insert(
-                        chat_id.to_string(),
-                        format!("{reason} {}", unsent_note(text)),
-                    );
-                }
-                return Ok(Some((AgentCompactRun::Declined(reason), request)));
+                let run = self.decline_agent_compact(chat_id, &request, declined_reason(verdict));
+                return Ok(Some((run, request)));
             }
         };
         if let Some(text) = &request.continue_with {
@@ -2513,6 +2526,33 @@ impl SessionsEngine {
                 Err(err)
             }
         }
+    }
+
+    fn decline_agent_compact(
+        &self,
+        chat_id: &str,
+        request: &AgentCompact,
+        reason: String,
+    ) -> AgentCompactRun {
+        self.inner
+            .edit_agent_compacts(|compacts| compacts.remove(chat_id));
+        self.inner.set_compact_plan(chat_id, None);
+        if let Some(text) = &request.continue_with {
+            lock(&self.inner.compact_owed).insert(
+                chat_id.to_string(),
+                format!("{reason} {}", unsent_note(text)),
+            );
+        }
+        AgentCompactRun::Declined(reason)
+    }
+
+    /// Whether the chat's harness compacts inside its live run, leaving
+    /// background shells and sub-agents running.
+    pub(crate) fn compacts_in_place(&self, chat_id: &str) -> bool {
+        self.compaction_request(chat_id)
+            .ok()
+            .and_then(|(harness_id, _)| self.inner.resolve_for_chat(chat_id, harness_id).ok())
+            .is_some_and(|(harness, _)| harness.compacts_in_place())
     }
 
     pub(crate) fn set_compact_plan(&self, chat_id: &str, plan: Option<zeron_proto::CompactPlan>) {

@@ -19,7 +19,8 @@ use crate::{
 const CACHE_TTL_SECS: u32 = 3600;
 const FIRE_AT_FRACTION: f64 = 0.9;
 const LATE_MS: i64 = 60_000;
-/// A finished background shell makes the CLI open its own turn seconds after the chat settles.
+/// Harnesses that restart to compact: a finished background shell makes the
+/// CLI open its own turn seconds after the chat settles.
 const AGENT_SETTLE_MS: i64 = 10_000;
 /// Monotonic sleeps stop while the Mac sleeps; re-read the wall clock often.
 const MAX_NAP: Duration = Duration::from_secs(60);
@@ -48,6 +49,11 @@ fn settled(session: &Session) -> bool {
         && !session.held_by_subagents
         && session.running_subagents == 0
         && session.background_tasks.is_empty()
+}
+
+/// The agent's turn is over: idle, or parked while background sub-agents run.
+fn turn_over(session: &Session) -> bool {
+    !session.compacting && (session.status == SessionStatus::Idle || session.held_by_subagents)
 }
 
 fn clear_idle_plan(sessions: &SessionsEngine, chat_id: &str) {
@@ -84,7 +90,7 @@ fn run_agent_compaction(
                         None
                     }
                     AgentCompactRun::Declined(reason) => {
-                        tracing::info!(chat = %chat_id, "agent compaction declined by the classifier");
+                        tracing::info!(chat = %chat_id, "agent compaction declined");
                         Some(reason)
                     }
                 };
@@ -126,6 +132,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
         let mut armed: HashMap<String, Armed> = HashMap::new();
         let mut fired: HashMap<String, i64> = HashMap::new();
         let mut agent_due: HashMap<String, i64> = HashMap::new();
+        let mut agent_seen: HashMap<String, DateTime<Utc>> = HashMap::new();
         let running = Arc::new(Mutex::new(HashSet::new()));
         let mut last_settings = registry.compaction_settings();
         loop {
@@ -142,7 +149,28 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                 .cloned()
                 .collect();
             seen.retain(|chat, _| idle.iter().any(|s| &s.chat_id == chat));
-            agent_due.retain(|chat, _| seen.contains_key(chat));
+            let waiting: Vec<Session> = statuses
+                .borrow()
+                .iter()
+                .filter(|session| {
+                    turn_over(session) && sessions.agent_compact_waiting(&session.chat_id)
+                })
+                .cloned()
+                .collect();
+            agent_seen.retain(|chat, _| waiting.iter().any(|s| &s.chat_id == chat));
+            agent_due.retain(|chat, _| agent_seen.contains_key(chat));
+            for session in &waiting {
+                if agent_seen.get(&session.chat_id) == Some(&session.updated_at) {
+                    continue;
+                }
+                agent_seen.insert(session.chat_id.clone(), session.updated_at);
+                let settle = if sessions.compacts_in_place(&session.chat_id) {
+                    0
+                } else {
+                    AGENT_SETTLE_MS
+                };
+                agent_due.insert(session.chat_id.clone(), now_ms() + settle);
+            }
             let gone: Vec<String> = armed
                 .keys()
                 .filter(|chat| !seen.contains_key(*chat))
@@ -159,7 +187,6 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                 seen.insert(session.chat_id.clone(), session.updated_at);
                 if sessions.agent_compact_waiting(&session.chat_id) {
                     armed.remove(&session.chat_id);
-                    agent_due.insert(session.chat_id.clone(), now_ms() + AGENT_SETTLE_MS);
                     continue;
                 }
                 let next = sessions

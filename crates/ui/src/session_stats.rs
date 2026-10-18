@@ -541,7 +541,7 @@ pub fn compact_section(view: &CompactView, theme: &Theme) -> gpui::Div {
         _ if view.compacting => ("Compacting", None),
         Some(zeron_proto::CompactPlan::Agent) => (
             "Agent compaction",
-            Some("The agent asked to compact. It runs once the turn and any background work end."),
+            Some("The agent asked to compact. It runs as soon as the turn ends."),
         ),
         _ => (
             "Idle compaction",

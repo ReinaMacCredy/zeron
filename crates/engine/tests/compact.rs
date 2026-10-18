@@ -621,13 +621,25 @@ async fn a_message_during_the_agent_compaction_drops_its_continue_with() {
     );
 }
 
+fn sleeping_shell() -> Vec<zeron_proto::BackgroundTask> {
+    vec![zeron_proto::BackgroundTask {
+        id: "b7wb5vp5o".into(),
+        kind: zeron_proto::BackgroundTaskKind::Shell,
+        label: "sleep 300 && echo done".into(),
+        started_at: None,
+        output_path: None,
+    }]
+}
+
 /// A parked run can open its own turn (a finished background shell); interrupting it loses that turn.
+/// Its background work survives an in-place compaction, so the compaction does not wait for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_compaction_queues_into_the_parked_run() {
     let tmp = tempfile::tempdir().unwrap();
     let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let harness = Arc::new(TestHarness::new(requests.clone(), true));
     harness.in_place.store(true, Ordering::SeqCst);
+    *harness.background.lock().unwrap() = sleeping_shell();
     let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
     threshold_mode(&core, 150_000);
 
@@ -671,6 +683,29 @@ async fn an_agent_compaction_queues_into_the_parked_run() {
             .all(|entry| entry.status != Some(MessageStatus::Aborted)),
         "{entries:#?}"
     );
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .and_then(|s| s.compact_plan),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_compaction_that_would_restart_over_background_work_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    *harness.background.lock().unwrap() = sleeping_shell();
+    let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
+    let refused = zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "go on" }),
+        )
+        .await
+        .expect_err("refused");
+    assert!(refused.to_string().contains("background work"), "{refused}");
     assert_eq!(
         core.sessions
             .session_status(CHAT)
