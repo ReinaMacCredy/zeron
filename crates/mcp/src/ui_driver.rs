@@ -4,14 +4,11 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
-use zeron_proto::ui_driver::{UiDriverBuild, UiDriverDescriptor, run_dir, socket_path};
+use zeron_proto::ui_driver::{
+    DRIVE_ACTIONS, OBSERVE_ACTIONS, UiDriverBuild, UiDriverDescriptor, run_dir, socket_path,
+};
 
 pub const TOOL: &str = "ui_driver";
-
-const ACTIONS: [&str; 17] = [
-    "list", "state", "tree", "snapshot", "wait", "frames", "track", "audit", "click", "move",
-    "drag", "scroll", "key", "type", "press", "action", "set",
-];
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
@@ -20,7 +17,7 @@ pub fn tool() -> Value {
     let field = |kind: &str, description: &str| json!({ "type": kind, "description": description });
     let end = |which: &str| json!({ "type": ["array", "object"], "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": format!("Drag {which}: a window point [x, y], or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}.") });
     let properties: Map<String, Value> = [
-        ("action", json!({ "type": "string", "enum": ACTIONS })),
+        ("action", json!({ "type": "string", "enum": std::iter::once(&"list").chain(OBSERVE_ACTIONS).chain(DRIVE_ACTIONS).collect::<Vec<_>>() })),
         ("target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
         ("window", field("integer", "Window id from `state`. Defaults to the frontmost window.")),
         ("x", field("number", "Window point in logical pixels.")),

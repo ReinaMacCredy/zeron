@@ -2,6 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub const OBSERVE_ACTIONS: &[&str] = &[
+    "state", "tree", "snapshot", "wait", "audit", "frames", "track",
+];
+
+pub const DRIVE_ACTIONS: &[&str] = &[
+    "click", "move", "drag", "scroll", "key", "type", "press", "action", "set",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiDriverBuild {

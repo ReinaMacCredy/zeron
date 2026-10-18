@@ -18,13 +18,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-
-const OBSERVE: &[&str] = &[
-    "state", "tree", "snapshot", "wait", "audit", "frames", "track",
-];
-const DRIVE: &[&str] = &[
-    "click", "move", "drag", "scroll", "key", "type", "press", "action", "set",
-];
+use zeron_proto::ui_driver::{DRIVE_ACTIONS as DRIVE, OBSERVE_ACTIONS as OBSERVE};
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 static LAST_DRAW_MS: AtomicU64 = AtomicU64::new(0);
