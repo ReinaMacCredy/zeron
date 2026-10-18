@@ -12,10 +12,10 @@ for testing computer use itself.
 
 ## Two levels
 
-| Level | Actions | Builds |
-|---|---|---|
-| Observe | `state`, `tree`, `snapshot`, `wait`, `frames`, `track`, `audit` | every build, the stable app included |
-| Drive | `click`, `move`, `drag`, `scroll`, `key`, `type`, `press`, `action`, `set`, plus `during` on `frames`/`track` | debug builds only (Zeron Dev bundles) |
+| Level | Actions | Builds | MCP tool |
+|---|---|---|---|
+| Observe | `state`, `tree`, `snapshot`, `wait`, `frames`, `track`, `audit` | every build, the stable app included | `ui_driver` |
+| Drive | `click`, `move`, `drag`, `scroll`, `key`, `type`, `press`, `action`, `set`, plus `during` on `frames`/`track` | debug builds only (Zeron Dev bundles) | `ui_driver_drive` |
 
 Drive code is compiled out of release builds. A release build answers a drive request (or any
 `during`) with: `click` drives the UI and exists only in debug builds (Zeron Dev bundles);
@@ -31,6 +31,11 @@ What each level exposes:
 - Drive in a Dev bundle goes around the chat permission gates of that bundle: an agent can click
   Approve on a pending request there, or type into its terminal panel. Keep Dev bundles on test
   data.
+- `ui_driver_drive` refuses the app that serves the calling chat (any app whose `ipcPort` is the
+  chat's engine port), so a chat cannot approve its own requests through the tool. `zeron ui`
+  and the raw socket have no such check: an agent with a shell can still reach its own app.
+  Turn `ui_driver_drive` off in Settings > Tools to keep reading without driving; turning
+  `ui_driver` off turns both off.
 
 ## Reaching a target
 
@@ -45,7 +50,9 @@ Two clients share one implementation (`crates/mcp/src/ui_driver.rs`):
   checkout. Run `cargo build -p zeron` once, then call `$CARGO_TARGET_DIR/debug/zeron` (or
   `target/debug/zeron`). Any build of the CLI can talk to any app. Text replies (`tree`) print
   raw and everything else prints as pretty JSON. Errors go to stderr with exit code 1.
-- MCP tool `ui_driver` in `zeron mcp` (Settings > Tools, Workspace group). The arguments are
+- MCP tools in `zeron mcp` (Settings > Tools, Workspace group): `ui_driver` takes `list` and the
+  observe actions, `ui_driver_drive` the drive actions plus `frames` and `track` with `during`.
+  Each refuses the other's actions with an error that names the right tool. The arguments are
   the CLI JSON plus `"action"` and an optional `"target"`. `snapshot` also returns the PNG as an
   image block unless `"inline": false`.
 
@@ -66,8 +73,9 @@ or `Zeron` outside a bundle.
 | any other text | an exact case-insensitive label, else a case-insensitive substring that matches one app |
 
 Every miss or ambiguity error ends with `live targets (pid label build ipcPort):` and one line
-per app. An agent in the stable app that omits `target` therefore reaches the release app,
-which only observes. Pass the Dev bundle's label or pid to drive it.
+per app. An agent that omits `target` reaches the app serving its own chat: `ui_driver`
+observes it and `ui_driver_drive` refuses it. To drive, pass the label or pid of a Dev bundle
+that runs its own engine port.
 
 The wire format is newline-delimited JSON over the socket: request
 `{"id":1,"action":"state","window"?:<id>,...}`, reply `{"id":1,"ok":<value>}` or
@@ -128,7 +136,8 @@ The examples below use a shell helper bound to the bundle from the previous sect
 zui() { target/debug/zeron ui "$@" --target "Zeron Dev 7"; }
 ```
 
-Under each example, the second line is the same request as `ui_driver` tool arguments. Every
+Under each example, the second line is the same request as tool arguments, for `ui_driver`
+(observe) or `ui_driver_drive` (drive). Every
 action also takes `window` (a window id from `state`; the default is the frontmost Shell window).
 
 ### Observe
@@ -182,7 +191,7 @@ without `y`, or `nth` without `select` errors with `give one of ref, select, or 
 element-addressed drive reply may also carry `"unsettled": true`, and any drive reply
 `"stale": true` (see Actionability).
 
-The `ui_driver` tool schema gives every property one JSON type: `keys` is an array, `from`/`to`
+The tool schemas give every property one JSON type: `keys` is an array, `from`/`to`
 are objects, `size` is `{w,h}`. The CLI lines below use the short forms (`"cmd-k"`, `[x,y]`),
 which the app also accepts.
 
@@ -299,8 +308,8 @@ zui wait '{"for":"gone","select":"Button \"Stop\""}'
   alongside drive.
 - `wait` kinds: `frame` forces one redraw and returns `{frame}`; `idle` returns
   `{frame,quietMs}` once no frame has drawn for `quietMs` (300); `ms` sleeps `ms`; `select`
-  returns `{ref,node,waitedMs}` once the element exists; `gone` returns `{gone,waitedMs}` once
-  nothing matches; `text` returns `{ref,node,waitedMs}` once a label, value or description
+  returns `{ref,node,waitedMs}` once the element exists; `gone` takes an element (`ref` or `select`) or `text` and
+  returns `{gone,waitedMs}` once nothing matches it; `text` returns `{ref,node,waitedMs}` once a label, value or description
   contains `text`. `timeoutMs` defaults to 5000. `timeoutMs`, `quietMs` and `ms` are at most
   60000; a larger value errors at once. A timeout reports what it last saw, for example
   `not idle after 5000 ms: 120 frames drawn (24.0 fps), last 3 ms ago`.
@@ -460,7 +469,7 @@ of these keys:
 | `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. |
 | `{"ui": "<driver action>", ...args, "save"?: "n"}` | Sends one driver request, as `zeron ui <action>` would. |
 | `{"assert": {"select": "Role \"label\"", "nth"?: n, "exists"?: bool}}` | `true` waits for a match (`wait for:select`); `false` waits for none (`wait for:gone`, which ignores `nth`). |
-| `{"assert": {"text": "substring", "exists"?: bool}}` | `true` waits for a label, value or description that contains it; `false` reads the tree once, without waiting. |
+| `{"assert": {"text": "substring", "exists"?: bool}}` | `true` waits for a label, value or description that contains it; `false` waits until none does (`wait for:gone` with `text`). |
 | `{"assert": {"saved": "n.path", "equals": json}}` | Compares a saved value. `"contains": "s"` searches its text instead (a JSON value is searched as compact JSON). |
 | `{"snapshot": "label"}` | Writes `shots/NN-label.png`. |
 | `{"sleep": ms}` | Waits. |
@@ -502,7 +511,8 @@ A lead agent can hand a QA pass to a child agent that acts only as a user would.
 
 1. this guide (`docs/ui-driver.md`) and nothing about the implementation;
 2. the target label (`Zeron Dev 7`) and the rule that it acts only through `zeron ui` or the
-   `ui_driver` tool with that `target`, never by editing code, never through computer use, and
+   `ui_driver` and `ui_driver_drive` tools with that `target`, never by editing code, never
+   through computer use, and
    never against `/Applications/Zeron.app`;
 3. the goal as a user story ("open Settings, turn on Compact mode, confirm the sidebar
    switches to compact rows, turn it back off");
@@ -556,7 +566,10 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `zeron ui list` prints `[]` | No live app serves the driver. The bundle is still building (check its launch log), it crashed (stale descriptors are pruned by pid), or the app's build predates the driver. |
 | `no running Zeron app serves the UI driver: ... has no live ui-<pid>.json` | Same as above, reported at target selection. |
 | `N Zeron apps match ...` | Several apps are live; pass `--target` with the pid or exact label from the listed targets. |
-| `` `click` drives the UI and exists only in debug builds `` | You reached a release build, usually by omitting `target` from a chat in the stable app. Target the Dev bundle. |
+| `` `click` drives the UI and exists only in debug builds `` | You reached a release build. Target a Dev bundle. |
+| `` `click` drives the UI, which ui_driver never does `` | Drive actions and `during` go through `ui_driver_drive`, with a Dev bundle as `target`. |
+| `` ui_driver_drive takes a drive action ... `` | The action only observes; call `ui_driver`. |
+| `` ui_driver_drive does not drive <label> (pid n): it serves this chat's engine `` | You omitted `target` or named the app that serves your chat. Target a Dev bundle that runs its own engine. |
 | `` `<sel>` matches N elements `` | Narrow with a role, use the exact label, or pass `nth`. |
 | `no element matches ...; near:` | Read the near list or `tree` with `query`; the element may lack a node. |
 | `... is outside the WxH window; scroll it into view first` | Scroll its container (`scroll` with `select` on the scroll area), then retry. |

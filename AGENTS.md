@@ -30,7 +30,8 @@ newcomers take worktrees.
 - Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
   (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
   hosts the running sessions. Inspect and drive it with `zeron ui` or the
-  `ui_driver` tool (`docs/ui-driver.md`), not computer use.
+  `ui_driver` and `ui_driver_drive` tools (`docs/ui-driver.md`), not
+  computer use.
 
 ## Finishing a worktree: merge gate, then clean up
 
