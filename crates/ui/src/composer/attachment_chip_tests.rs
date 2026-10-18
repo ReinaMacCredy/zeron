@@ -790,3 +790,117 @@ fn clicking_an_image_chip_opens_the_picture_full_size(cx: &mut gpui::TestAppCont
         })
         .unwrap();
 }
+
+fn paste_clipboard(
+    handle: &gpui::WindowHandle<Composer>,
+    cx: &mut gpui::TestAppContext,
+    item: ClipboardItem,
+) {
+    handle
+        .update(cx, |composer, window, cx| {
+            composer.input.update(cx, |input, cx| {
+                cx.write_to_clipboard(item);
+                input.paste(&Paste, window, cx);
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+}
+
+fn long_text(chars: usize) -> String {
+    "é".repeat(chars)
+}
+
+fn pasted_text_chip() -> String {
+    format!("{} ", attachment_mention_link(1, Some("Pasted text 1.txt")))
+}
+
+#[gpui::test]
+fn a_long_paste_is_staged_as_a_text_file_chip(cx: &mut gpui::TestAppContext) {
+    let (_dir, handle) = composer_focus_window(cx);
+    let long = long_text(crate::attachments::PASTED_TEXT_MIN_CHARS);
+    paste_clipboard(&handle, cx, ClipboardItem::new_string(long.clone()));
+    assert_eq!(staged_names(&handle, cx), ["Pasted text 1.txt"]);
+    assert_eq!(text(&handle, cx), pasted_text_chip());
+    handle
+        .read_with(cx, |composer, cx| {
+            assert_eq!(composer.staged()[0].bytes(), long.as_bytes());
+            assert_eq!(composer.input.read(cx).projection.mentions.len(), 1);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn a_paste_under_the_threshold_stays_inline(cx: &mut gpui::TestAppContext) {
+    let (_dir, handle) = composer_focus_window(cx);
+    let short = long_text(crate::attachments::PASTED_TEXT_MIN_CHARS - 1);
+    paste_clipboard(&handle, cx, ClipboardItem::new_string(short.clone()));
+    assert!(staged_names(&handle, cx).is_empty());
+    assert_eq!(text(&handle, cx), short);
+}
+
+#[gpui::test]
+fn a_long_paste_copied_from_a_composer_stays_inline(cx: &mut gpui::TestAppContext) {
+    let (_dir, handle) = composer_focus_window(cx);
+    let long = long_text(crate::attachments::PASTED_TEXT_MIN_CHARS);
+    let scope = handle
+        .read_with(cx, |composer, cx| {
+            composer.input.read(cx).attachment_scope.clone()
+        })
+        .unwrap();
+    paste_clipboard(
+        &handle,
+        cx,
+        ClipboardItem::new_string_with_json_metadata(
+            long.clone(),
+            serde_json::json!({
+                "zeronComposerV1": long,
+                "text": long,
+                "zeronAttachmentScope": scope,
+            }),
+        ),
+    );
+    assert!(staged_names(&handle, cx).is_empty());
+    assert_eq!(text(&handle, cx), long);
+}
+
+#[gpui::test]
+fn clicking_a_pasted_text_chip_puts_the_text_back_and_undo_restores_the_chip(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_dir, handle) = composer_focus_window(cx);
+    let long = long_text(crate::attachments::PASTED_TEXT_MIN_CHARS);
+    paste_clipboard(&handle, cx, ClipboardItem::new_string(long.clone()));
+    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+    handle
+        .update(cx, |composer, _, cx| {
+            composer.input.update(cx, |input, cx| {
+                let target = input.mention_hits[0].target.clone();
+                assert_eq!(
+                    input.mention_tooltip_text(&target).as_ref(),
+                    "Click to show in text field"
+                );
+            });
+        })
+        .unwrap();
+
+    click_first_chip(&handle, cx, point(px(40.0), px(0.0)));
+    assert_eq!(text(&handle, cx), pasted_text_chip());
+
+    click_first_chip(&handle, cx, point(px(0.0), px(0.0)));
+    assert_eq!(text(&handle, cx), format!("{long} "));
+    assert!(staged_names(&handle, cx).is_empty());
+
+    handle
+        .update(cx, |composer, window, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.undo(&Undo, window, cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(text(&handle, cx), pasted_text_chip());
+    assert_eq!(staged_names(&handle, cx), ["Pasted text 1.txt"]);
+    assert_eq!(attachment_mention_indices(&text(&handle, cx)), vec![1]);
+}

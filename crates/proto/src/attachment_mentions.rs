@@ -74,6 +74,24 @@ pub fn image_index_from_name(name: &str) -> Option<u32> {
     digits.parse().ok().filter(|index| *index > 0)
 }
 
+pub fn pasted_text_label(index: u32) -> String {
+    format!("Pasted text {index}.txt")
+}
+
+pub fn pasted_text_index_from_name(name: &str) -> Option<u32> {
+    let name = attachment_display_name(name.rsplit(['/', '\\']).next()?);
+    let digits = name
+        .strip_suffix(".txt")?
+        .strip_prefix("Pasted")?
+        .strip_prefix([' ', '_'])?
+        .strip_prefix("text")?
+        .strip_prefix([' ', '_'])?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|index| *index > 0)
+}
+
 /// Whether an attachment ref names an image, as opposed to any other file.
 /// The same extensions the desktop decodes (`format_by_extension`), so every
 /// client shows a given attachment the same way.
@@ -299,6 +317,24 @@ mod tests {
             ("cat.png", None),
         ] {
             assert_eq!(image_index_from_name(name), index, "{name}");
+        }
+    }
+
+    #[test]
+    fn pasted_text_names_recover_their_number() {
+        assert_eq!(pasted_text_label(2), "Pasted text 2.txt");
+        for (name, index) in [
+            ("Pasted text 2.txt", Some(2)),
+            ("ab12cd34-Pasted_text_2.txt", Some(2)),
+            ("/uploads/ab12cd34-Pasted_text_14.txt", Some(14)),
+            ("Pasted text 0.txt", None),
+            ("Pasted text.txt", None),
+            ("Pasted text 2.md", None),
+            ("my-Pasted_text_2.txt", None),
+            ("Image 2.png", None),
+            ("notes.txt", None),
+        ] {
+            assert_eq!(pasted_text_index_from_name(name), index, "{name}");
         }
     }
 

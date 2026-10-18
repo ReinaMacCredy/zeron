@@ -2066,7 +2066,8 @@ pub enum ComposerInputEvent {
         range: Range<usize>,
         revision: u64,
     },
-    /// An image chip was clicked: open its picture full size.
+    PastedLongText(String),
+    /// An image or pasted-text chip was clicked.
     OpenAttachment(u32),
 }
 
@@ -2663,39 +2664,72 @@ impl ComposerInput {
         true
     }
 
-    /// Tell the editor which staged attachments its chips may reference (`None`
-    /// for one that is not an image). Chips for any other number show as plain
-    /// text.
+    /// Tell the editor which staged attachments its chips may reference.
+    /// Chips for any other number show as plain text.
     pub(crate) fn set_attachment_chips(
         &mut self,
         scope: &str,
-        attachments: HashMap<u32, Option<std::sync::Arc<gpui::Image>>>,
+        attachments: HashMap<u32, ChipAttachment>,
         cx: &mut Context<Self>,
     ) {
-        let unchanged = self.attachment_scope == scope
-            && self.attachment_chips.as_ref().is_some_and(|current| {
-                current.len() == attachments.len()
-                    && attachments.iter().all(|(index, image)| {
-                        current.get(index).is_some_and(|known| {
-                            known.image.as_ref().map(std::sync::Arc::as_ptr)
-                                == image.as_ref().map(std::sync::Arc::as_ptr)
-                        })
-                    })
-            });
+        let unchanged =
+            self.attachment_scope == scope && self.attachment_chips.as_ref() == Some(&attachments);
         if unchanged {
             return;
         }
         self.attachment_scope = scope.to_string();
-        self.attachment_chips = Some(
-            attachments
-                .into_iter()
-                .map(|(index, image)| (index, ChipAttachment { image }))
-                .collect(),
-        );
+        self.attachment_chips = Some(attachments);
         self.invalidate_mention_tooltip();
         self.refresh_projection();
         self.needs_measure = true;
         cx.notify();
+    }
+
+    pub(crate) fn replace_attachment_chip(
+        &mut self,
+        index: u32,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.read_only || self.marked_range.is_some() {
+            return false;
+        }
+        let ranges: Vec<Range<usize>> =
+            zeron_proto::attachment_mentions::attachment_mentions(&self.content)
+                .into_iter()
+                .filter(|mention| mention.index == index)
+                .map(|mention| mention.range)
+                .collect();
+        let Some(first) = ranges.first().cloned() else {
+            return false;
+        };
+        self.invalidate_mention_tooltip();
+        self.record_edit(&first, text);
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        let mut content = String::with_capacity(self.content.len() + text.len());
+        let mut at = 0;
+        for (n, range) in ranges.iter().enumerate() {
+            content.push_str(&self.content[at..range.start]);
+            if n == 0 {
+                content.push_str(text);
+            }
+            at = range.end;
+        }
+        content.push_str(&self.content[at..]);
+        self.content = content;
+        let cursor = first.start + text.len();
+        self.selected_range = cursor..cursor;
+        self.last_edit = None;
+        self.selection_reversed = false;
+        self.caret_affinity = CaretAffinity::Downstream;
+        self.preferred_column = None;
+        self.refresh_projection();
+        self.follow_cursor = true;
+        self.reset_blink();
+        self.needs_measure = true;
+        cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
+        true
     }
 
     /// Insert a canonical reference link at the selection, as one undo step.
@@ -2901,10 +2935,10 @@ impl ComposerInput {
                     if let MentionTooltipPhase::Visible { target, generation } =
                         &input.mention_tooltip
                     {
-                        input.mention_tooltip_view = Some(cx.new(|_| MentionPathTooltip {
-                            path: target.path.clone(),
-                            activation: *generation,
-                        }));
+                        let path = input.mention_tooltip_text(target);
+                        let activation = *generation;
+                        input.mention_tooltip_view =
+                            Some(cx.new(|_| MentionPathTooltip { path, activation }));
                     }
                     cx.notify();
                 }
@@ -2913,20 +2947,30 @@ impl ComposerInput {
         }));
     }
 
-    fn is_image_chip(&self, target: &MentionTooltipTarget) -> bool {
+    fn chip_attachment(&self, target: &MentionTooltipTarget) -> Option<&ChipAttachment> {
         target
             .attachment
             .and_then(|index| self.attachment_chips.as_ref()?.get(&index))
-            .is_some_and(|chip| chip.image.is_some())
     }
 
-    /// The number of the image chip under `position`, if any.
-    fn image_chip_at(&self, position: Point<Pixels>) -> Option<u32> {
+    fn is_clickable_chip(&self, target: &MentionTooltipTarget) -> bool {
+        self.chip_attachment(target)
+            .is_some_and(ChipAttachment::opens_on_click)
+    }
+
+    fn clickable_chip_at(&self, position: Point<Pixels>) -> Option<u32> {
         self.mention_hits
             .iter()
             .find(|hit| hit.bounds.contains(&position))
-            .filter(|hit| self.is_image_chip(&hit.target))
+            .filter(|hit| self.is_clickable_chip(&hit.target))
             .and_then(|hit| hit.target.attachment)
+    }
+
+    fn mention_tooltip_text(&self, target: &MentionTooltipTarget) -> SharedString {
+        match self.chip_attachment(target) {
+            Some(ChipAttachment::PastedText) => "Click to show in text field".into(),
+            _ => target.path.clone(),
+        }
     }
 
     fn on_mention_pointer_move(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -2938,7 +2982,12 @@ impl ComposerInput {
             .mention_hits
             .iter()
             .find(|hit| hit.bounds.contains(&position))
-            .filter(|hit| !self.is_image_chip(&hit.target))
+            .filter(|hit| {
+                !matches!(
+                    self.chip_attachment(&hit.target),
+                    Some(ChipAttachment::Image(_))
+                )
+            })
             .map(|hit| hit.target.clone());
         let in_popup = self
             .mention_tooltip_popup
@@ -3808,11 +3857,13 @@ impl ComposerInput {
             return;
         }
         if let Some(mut text) = item.text() {
+            let mut from_composer = false;
             if self.mentions_enabled {
                 if let Some(value) = item
                     .metadata()
                     .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
                 {
+                    from_composer = value.get("zeronComposerV1").is_some();
                     if value.get("text").and_then(|v| v.as_str()) == Some(text.as_str()) {
                         if let Some(raw) = value.get("zeronComposerV1").and_then(|v| v.as_str()) {
                             // Chip numbers belong to one draft: chips copied from
@@ -3831,6 +3882,15 @@ impl ComposerInput {
                         }
                     }
                 }
+            }
+            if self.mentions_enabled
+                && !self.single_line
+                && !from_composer
+                && text.chars().count() >= crate::attachments::PASTED_TEXT_MIN_CHARS
+                && zeron_proto::attachment_mentions::attachment_mentions(&text).is_empty()
+            {
+                cx.emit(ComposerInputEvent::PastedLongText(text));
+                return;
             }
             // Clipboard operations remain separate undo steps, even a one-character paste.
             self.last_edit = None;
@@ -4246,7 +4306,7 @@ impl ComposerInput {
         window.focus(&self.focus_handle, cx);
         let intent = press_intent(event.click_count, event.modifiers.shift);
         self.chip_press = (intent == PressIntent::PlaceCaret)
-            .then(|| self.image_chip_at(event.position))
+            .then(|| self.clickable_chip_at(event.position))
             .flatten()
             .map(|index| (index, event.position));
         self.is_selecting = true;
@@ -4329,10 +4389,10 @@ impl ComposerInput {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // A click that starts and ends on an image chip opens the picture, as
-        // the thumbnails did; a drag across it only selects.
+        // A click that starts and ends on an image or pasted-text chip opens
+        // it, as the thumbnails did; a drag across it only selects.
         if let Some((index, down)) = self.chip_press.take()
-            && self.image_chip_at(event.position) == Some(index)
+            && self.clickable_chip_at(event.position) == Some(index)
             && (event.position - down).magnitude() <= 4.0
         {
             cx.emit(ComposerInputEvent::OpenAttachment(index));
@@ -5232,8 +5292,8 @@ struct ComposerTextPrepaint {
     /// Thread chip marks: the slot rect plus the icon to paint in it.
     mention_icons: Vec<(Bounds<Pixels>, (&'static str, Option<Hsla>))>,
     mention_hits: Vec<MentionHit>,
-    /// Image chips take the pointing hand: a click opens them.
-    image_chip_hitboxes: Vec<gpui::Hitbox>,
+    /// Image and pasted-text chips take the pointing hand: a click opens them.
+    clickable_chip_hitboxes: Vec<gpui::Hitbox>,
     selection_quads: Vec<PaintQuad>,
     /// Completion preview: window-space origin of the end-of-text caret plus
     /// the suffix to paint there (shaped at paint time — it never joins the
@@ -5496,9 +5556,9 @@ impl gpui::Element for ComposerTextElement {
                     .point_for_index(input.content.len())
                     .map(|p| (point(origin.x + p.x, origin.y + p.y), g))
             });
-        let image_chip_hitboxes = mention_hits
+        let clickable_chip_hitboxes = mention_hits
             .iter()
-            .filter(|hit| input.is_image_chip(&hit.target))
+            .filter(|hit| input.is_clickable_chip(&hit.target))
             .map(|hit| window.insert_hitbox(hit.bounds, gpui::HitboxBehavior::Normal))
             .collect();
         ComposerTextPrepaint {
@@ -5506,7 +5566,7 @@ impl gpui::Element for ComposerTextElement {
             mention_chips,
             mention_icons,
             mention_hits,
-            image_chip_hitboxes,
+            clickable_chip_hitboxes,
             selection_quads,
             ghost,
         }
@@ -5537,7 +5597,7 @@ impl gpui::Element for ComposerTextElement {
                 input.update(cx, |input, cx| input.on_mouse_move(event, cx));
             }
         });
-        for hitbox in &prepaint.image_chip_hitboxes {
+        for hitbox in &prepaint.clickable_chip_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
 
@@ -7390,6 +7450,7 @@ impl Composer {
                 );
             }
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
+            ComposerInputEvent::PastedLongText(text) => this.stage_pasted_text(text.clone(), cx),
             ComposerInputEvent::PastedText { range, revision } => {
                 this.resolve_pasted_references(range.clone(), *revision, cx);
             }
@@ -7808,16 +7869,22 @@ impl Composer {
         }
     }
 
-    /// Open a staged image full size, from its chip (the tiles' click).
+    /// Open a staged image full size, from its chip (the tiles' click). A
+    /// pasted-text chip turns back into its text instead.
     fn open_attachment(&mut self, index: u32, cx: &mut Context<Self>) {
-        let Some((name, image)) = self
-            .staged()
-            .iter()
-            .filter(|att| att.mention == Some(index))
-            .find_map(|att| Some((att.name.clone(), att.image()?.clone())))
-        else {
+        let Some(att) = self.staged().iter().find(|att| {
+            att.mention == Some(index) && (att.image().is_some() || att.is_pasted_text())
+        }) else {
             return;
         };
+        let Some(image) = att.image().cloned() else {
+            let text = String::from_utf8_lossy(att.bytes()).into_owned();
+            self.input.update(cx, |input, cx| {
+                input.replace_attachment_chip(index, &text, cx)
+            });
+            return;
+        };
+        let name = att.name.clone();
         let preview = attachments::PreviewImage::new(name, image);
         preview.viewer.reset();
         self.preview = Some(preview);
@@ -8099,6 +8166,17 @@ impl Composer {
         .detach();
     }
 
+    fn stage_pasted_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.queue_edit_finishing {
+            return;
+        }
+        let key = self.current_key.clone();
+        self.adopt_staged_attachments(key, vec![attachments::stage_pasted_text(text)], cx);
+        self.focus_pending = true;
+        self.sync_draft(cx);
+        cx.notify();
+    }
+
     /// Stage files (picker / drop / pasted paths): images with thumbnails, any
     /// other file as opaque bytes. Folders, read failures and oversize files
     /// surface in the failure notice.
@@ -8260,7 +8338,12 @@ impl Composer {
                     );
                     None
                 }
-                None => Some(att.name.as_str()),
+                None => {
+                    if att.is_pasted_text() {
+                        att.name = zeron_proto::attachment_mentions::pasted_text_label(index);
+                    }
+                    Some(att.name.as_str())
+                }
             };
             links.push(zeron_proto::attachment_mentions::attachment_mention_link(
                 index, file_name,
@@ -8285,10 +8368,10 @@ impl Composer {
 
     /// Hand the editor the attachments its chips may reference.
     fn sync_attachment_chips(&mut self, cx: &mut Context<Self>) {
-        let attachments: HashMap<u32, Option<std::sync::Arc<gpui::Image>>> = self
+        let attachments: HashMap<u32, ChipAttachment> = self
             .staged()
             .iter()
-            .filter_map(|att| att.mention.map(|index| (index, att.image().cloned())))
+            .filter_map(|att| att.mention.map(|index| (index, ChipAttachment::of(att))))
             .collect();
         let scope = self.current_key.clone();
         self.input.update(cx, |input, cx| {

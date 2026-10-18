@@ -2,9 +2,35 @@
 use super::*;
 
 /// A staged attachment an attachment chip can refer to; an image chip opens
-/// its picture on click.
-pub(super) struct ChipAttachment {
-    pub(super) image: Option<std::sync::Arc<gpui::Image>>,
+/// its picture on click, a pasted-text chip puts its text back in the draft.
+pub(crate) enum ChipAttachment {
+    Image(std::sync::Arc<gpui::Image>),
+    PastedText,
+    File,
+}
+
+impl ChipAttachment {
+    pub(super) fn of(att: &crate::attachments::StagedAttachment) -> Self {
+        match att.image() {
+            Some(image) => Self::Image(image.clone()),
+            None if att.is_pasted_text() => Self::PastedText,
+            None => Self::File,
+        }
+    }
+
+    pub(super) fn opens_on_click(&self) -> bool {
+        !matches!(self, Self::File)
+    }
+}
+
+impl PartialEq for ChipAttachment {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Image(a), Self::Image(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::PastedText, Self::PastedText) | (Self::File, Self::File) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Spaces reserve room at the start of every chip for its icon well, which is

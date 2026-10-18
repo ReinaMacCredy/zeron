@@ -286,6 +286,11 @@ impl StagedAttachment {
         }
     }
 
+    pub fn is_pasted_text(&self) -> bool {
+        matches!(self.content, AttachmentContent::File(_))
+            && zeron_proto::attachment_mentions::pasted_text_index_from_name(&self.name).is_some()
+    }
+
     fn new(name: String, content: AttachmentContent) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -416,6 +421,16 @@ pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
         image
     };
     StagedAttachment::from_image(ensure_extension("image", image.format), image)
+}
+
+pub const PASTED_TEXT_MIN_CHARS: usize = 5_000;
+
+pub fn stage_pasted_text(text: String) -> StagedAttachment {
+    // A placeholder number: adopting it into a draft renames it to its chip's.
+    StagedAttachment::from_file(
+        &zeron_proto::attachment_mentions::pasted_text_label(1),
+        text.into_bytes(),
+    )
 }
 
 /// Windows screenshots are BMP, but no agent harness inlines BMP and the
