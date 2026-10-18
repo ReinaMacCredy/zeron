@@ -887,6 +887,7 @@ mod tests {
             { "snapshot": "after key" },
             { "ui": "click", "x": 1, "y": 2 },
             { "assert": { "select": "Button \"Go\"", "exists": false } },
+            { "assert": { "text": "Picked", "exists": false } },
         ]));
         let mut fake = Fake {
             requests: Vec::new(),
@@ -900,6 +901,7 @@ mod tests {
             [
                 Status::Pass,
                 Status::Fail,
+                Status::Pass,
                 Status::Pass,
                 Status::Pass,
                 Status::Pass,
@@ -923,7 +925,11 @@ mod tests {
             fake.requests[4],
             json!({ "action": "wait", "for": "gone", "select": "Button \"Go\"", "timeoutMs": ASSERT_TIMEOUT_MS })
         );
-        assert_eq!(summary(&reports), "FAIL 5/6: step 2 keys: key broke");
+        assert_eq!(
+            fake.requests[5],
+            json!({ "action": "wait", "for": "gone", "text": "Picked", "timeoutMs": ASSERT_TIMEOUT_MS })
+        );
+        assert_eq!(summary(&reports), "FAIL 6/7: step 2 keys: key broke");
 
         let mut fake = Fake {
             requests: Vec::new(),
@@ -946,13 +952,14 @@ mod tests {
                 Status::Pass,
                 Status::Fail,
                 Status::Skipped,
+                Status::Skipped,
                 Status::Skipped
             ]
         );
         assert_eq!(fake.requests.len(), 3);
         assert_eq!(
             summary(&reports),
-            "FAIL 3/6: step 4 snapshot after key: snapshot broke"
+            "FAIL 3/7: step 4 snapshot after key: snapshot broke"
         );
     }
 
