@@ -208,6 +208,17 @@ fn parse(raw: Value) -> Result<Request, String> {
 
 impl Until {
     fn check(&self) -> Result<(), String> {
+        if let Until::Seen(
+            selector::Seen::Text { text, .. }
+            | selector::Seen::Gone {
+                absent: selector::Absent::Text { text },
+                ..
+            },
+        ) = self
+            && text.is_empty()
+        {
+            return Err("`text` must not be empty: every node contains the empty string".into());
+        }
         let limits = match self {
             Until::Frame { timeout_ms } => vec![("timeoutMs", *timeout_ms)],
             Until::Idle {
@@ -620,6 +631,10 @@ mod tests {
             })))
         );
         assert!(parse(json!({ "action": "wait", "for": "gone" })).is_err());
+        for until in ["gone", "text"] {
+            let error = parse(json!({ "action": "wait", "for": until, "text": "" })).unwrap_err();
+            assert!(error.starts_with("`text` must not be empty"), "{error}");
+        }
     }
 
     #[cfg(debug_assertions)]
