@@ -3050,14 +3050,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.delegation_settings())
             }
             methods::GET_COMPACTION_SETTINGS => {
-                RpcReply::value(&self.registry.compaction_settings())
+                RpcReply::value(&crate::jev::settings_state(&self.registry).await)
             }
             methods::SET_COMPACTION_SETTINGS => {
-                let p: crate::registry::CompactionSettings = parse_params(params)?;
-                self.registry
-                    .set_compaction_settings(p)
+                let p: crate::jev::CompactionSettingsUpdate = parse_params(params)?;
+                let state = crate::jev::update_settings(&self.registry, p)
+                    .await
                     .map_err(RpcError::Failed)?;
-                RpcReply::value(&self.registry.compaction_settings())
+                RpcReply::value(&state)
             }
             methods::GET_TOOL_SETTINGS => {
                 let p: GetToolSettingsParams = if params.is_null() {

@@ -1,0 +1,19 @@
+{
+  "verdict": {
+    "type": "choice",
+    "instructions": "The state is the end of a chat between a person and a coding agent, followed by a new message that is about to be answered. Compacting replaces the conversation so far with a short summary of its conclusions (requests, decisions, files touched, pending work); the specific details (numbers, steps, commands, file contents, exact wording) are lost. Messages are often informal Vietnamese with typos. Sometimes the new message is the agent's own note, written when it asked to compact; treat the note as a claim to check against the conversation, not as the person's words. Should the chat be compacted before the new message is answered, and how?",
+    "criteria": {
+      "NEW": "Compact to the summary only. The new message starts a different task or topic whose work needs only the conclusions: the person names a fresh start, a different task, topic or project, or asks for a different deliverable right after the agent reported the previous work finished (merged, committed, tests green, cleaned up, or a complete answer). Not NEW when the message builds on specifics from the recent turns, approves or chooses what the agent just proposed, or asks to test, run, merge or ship the work just done.",
+      "CARRY": "Compact, but keep the text of the last 2 user/agent pairs word for word (their tool calls and outputs are lost). The new message is a follow-up, clarification, correction, a question about something just said, an approval or choice of what the agent proposed (\"ok làm đi\", \"yes 1\", \"làm luôn\"), a request to test, run, open, merge or ship the work just done, or the next step of the same task, and what it needs is in the last 2 pairs or would survive in a summary.",
+      "CONTINUE": "Do not compact. Something is still running or pending at the cut (the agent's last reply says a build, test, background job, sub-agent or delegate is running, or that it will report when it finishes); or the new message asks for or builds on a specific from before the last 2 pairs (\"quay lại\", \"lúc nãy\", \"như trước\"); or it refers to something the last 2 pairs only point at without writing it out (\"option B\", \"lỗi kia\", \"cái kia\"); or the person said not to compact."
+    }
+  },
+  "new_task": {
+    "type": "noul",
+    "instructions": "The state is the end of a chat between a person and a coding agent, followed by a new message that is about to be answered. Compacting replaces the conversation so far with a short summary of its conclusions (requests, decisions, files touched, pending work); the specific details (numbers, steps, commands, file contents, exact wording) are lost. Messages are often informal Vietnamese with typos. Sometimes the new message is the agent's own note, written when it asked to compact; treat the note as a claim to check against the conversation, not as the person's words. Does the new message start a different task, topic or deliverable, after the previous work was reported finished, so that its work can start from a summary of conclusions alone?",
+    "criteria": {
+      "true": "A fresh start, a different task, topic or project, or a different deliverable after the work was reported done.",
+      "false": "A follow-up, approval, correction, question about the recent turns, a request to test, run or ship the work just done, or the next step of the same task."
+    }
+  }
+}

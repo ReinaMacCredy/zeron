@@ -2068,6 +2068,8 @@ impl SessionsEngine {
                 input,
                 ..Default::default()
             }
+        } else if let Some(source) = settings.jev {
+            crate::jev::classify(&self.inner.registry, source, input).await
         } else {
             let Some(record) = self
                 .run_classifier(chat_id, harness_id, settings.classifier, input, false)
@@ -2413,6 +2415,14 @@ impl SessionsEngine {
             zeron_doc::ClassifierRecord {
                 verdict: ClassifierVerdict::Carry,
                 decided_by: zeron_doc::DecidedBy::Ceiling,
+                input,
+                ..Default::default()
+            }
+        } else if settings.jev.is_some() {
+            zeron_doc::ClassifierRecord {
+                verdict: ClassifierVerdict::Carry,
+                decided_by: zeron_doc::DecidedBy::AgentNote,
+                model: Some(crate::jev::MODEL_LABEL.into()),
                 input,
                 ..Default::default()
             }
