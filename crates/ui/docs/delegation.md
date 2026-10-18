@@ -27,6 +27,8 @@ While child agents run, a pill above the composer shows how many are working. Cl
 | **Delegation depth**: how many levels of delegated tasks an agent may nest | 2 | 1 to 5 |
 | **Delegated tasks per chat**: how many delegated tasks one chat may run at once | 8 | 1 to 32 |
 
+**Delegated tasks per chat** also caps how many steps of an [orchestrated task](zeron://docs/tasks) its lead runs at once. Those steps run on ordinary chats, not as delegated tasks, so they show in the sidebar.
+
 An agent that hits a limit is told so and cannot start the task.
 
 > To stop agents from delegating at all, turn off **delegate_task** in the **Delegation** group of [Settings > Tools](zeron://settings/tools).
