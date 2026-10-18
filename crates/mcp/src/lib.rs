@@ -3466,11 +3466,17 @@ mod tests {
         assert!(names.contains(&"interrupt_thread") && names.contains(&"respond_to_input"));
         for tool in list.as_array().unwrap() {
             assert_eq!(
-                tool["inputSchema"]["additionalProperties"],
-                tool["name"] == ui_driver::TOOL,
+                tool["inputSchema"]["additionalProperties"], false,
                 "{}",
                 tool["name"]
             );
+            for (name, property) in tool["inputSchema"]["properties"].as_object().unwrap() {
+                assert!(
+                    !property["type"].is_array(),
+                    "{}.{name} has a union type",
+                    tool["name"]
+                );
+            }
         }
     }
 

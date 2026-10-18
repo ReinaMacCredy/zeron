@@ -9,8 +9,6 @@ use crate::ui_driver;
 
 const ASSERT_TIMEOUT_MS: u64 = 3000;
 const ENGINE_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const REPLY_SLACK: Duration = Duration::from_secs(10);
 const RESULT_CHARS: usize = 160;
 
 #[derive(Debug, PartialEq)]
@@ -24,6 +22,7 @@ struct Scenario {
 struct Step {
     name: Option<String>,
     continue_on_fail: bool,
+    save: Option<String>,
     kind: Kind,
 }
 
@@ -33,12 +32,10 @@ enum Kind {
         method: String,
         params: Value,
         first: bool,
-        save: Option<String>,
     },
     Ui {
         action: String,
         args: Map<String, Value>,
-        save: Option<String>,
     },
     Assert(Assert),
     Snapshot(String),
@@ -91,6 +88,8 @@ struct StepReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     shot: Option<String>,
 }
 
@@ -106,13 +105,7 @@ struct Live {
 
 impl Io for Live {
     async fn ui(&mut self, request: Map<String, Value>) -> Result<Value, String> {
-        let timeout = ["timeoutMs", "ms"]
-            .into_iter()
-            .find_map(|key| request.get(key)?.as_u64())
-            .map_or(DEFAULT_TIMEOUT, |ms| {
-                Duration::from_millis(ms).saturating_add(REPLY_SLACK)
-            });
-        ui_driver::request(&self.app, request, timeout).await
+        ui_driver::request(&self.app, request).await
     }
 
     async fn engine(&mut self, method: &str, params: Value, first: bool) -> Result<Value, String> {
@@ -310,7 +303,6 @@ fn parse_step(value: &Value) -> Result<Step, String> {
                 method,
                 params,
                 first,
-                save,
             }
         }
         "ui" => Kind::Ui {
@@ -319,7 +311,6 @@ fn parse_step(value: &Value) -> Result<Step, String> {
                 .ok_or("\"ui\" names a driver action")?
                 .to_owned(),
             args: fields,
-            save,
         },
         other => {
             if let Some(extra) = fields.keys().next() {
@@ -340,6 +331,7 @@ fn parse_step(value: &Value) -> Result<Step, String> {
     Ok(Step {
         name,
         continue_on_fail,
+        save,
         kind,
     })
 }
@@ -412,6 +404,7 @@ async fn play(
             ms: 0,
             result: None,
             error: None,
+            warning: None,
             shot: None,
         };
         if !stopped {
@@ -421,6 +414,12 @@ async fn play(
             match outcome {
                 Ok((result, shot)) => {
                     report.status = Status::Pass;
+                    if let (Some(save), Some(result)) = (&step.save, &result) {
+                        saved.insert(save.clone(), result.clone());
+                    }
+                    if let (Kind::Ui { .. }, Some(result)) = (&step.kind, &result) {
+                        report.warning = reply_warning(result);
+                    }
                     report.result = result.map(|value| short(&value));
                     report.shot = shot;
                 }
@@ -449,25 +448,18 @@ async fn perform(
             method,
             params,
             first,
-            save,
         } => {
             let params = substitute(params, saved)?;
             let result = io.engine(method, params, *first).await?;
-            if let Some(save) = save {
-                saved.insert(save.clone(), result.clone());
-            }
             Ok((Some(result), None))
         }
-        Kind::Ui { action, args, save } => {
+        Kind::Ui { action, args } => {
             let Value::Object(mut request) = substitute(&Value::Object(args.clone()), saved)?
             else {
                 unreachable!("an object substitutes to an object")
             };
             request.insert("action".into(), json!(action));
             let result = io.ui(request).await?;
-            if let Some(save) = save {
-                saved.insert(save.clone(), result.clone());
-            }
             Ok((Some(result), None))
         }
         Kind::Assert(assert) => check(assert, io, saved).await.map(|found| (found, None)),
@@ -550,6 +542,31 @@ async fn check(
             saved_matches(saved, path, &expect).map(Some)
         }
     }
+}
+
+fn reply_warning(reply: &Value) -> Option<String> {
+    let mut warnings = Vec::new();
+    if reply["unsettled"] == true {
+        warnings.push(String::from(
+            "unsettled: the element never held still across two frames",
+        ));
+    }
+    if let Some(handled) = reply["handled"].as_array() {
+        let missed: Vec<String> = handled
+            .iter()
+            .enumerate()
+            .filter(|(_, handled)| **handled == false)
+            .map(|(i, _)| (i + 1).to_string())
+            .collect();
+        if !missed.is_empty() {
+            warnings.push(format!(
+                "keystroke {} of {} not handled",
+                missed.join(", "),
+                handled.len()
+            ));
+        }
+    }
+    (!warnings.is_empty()).then(|| warnings.join("; "))
 }
 
 fn text_absent(tree: &Value, text: &str) -> Result<(), String> {
@@ -770,6 +787,10 @@ fn markdown(name: &str, target: &Value, reports: &[StepReport]) -> String {
             (None, None, Some(result)) => cell(result),
             (None, None, None) => String::new(),
         };
+        let detail = match &report.warning {
+            Some(warning) => format!("warning: {}; {detail}", cell(warning)),
+            None => detail,
+        };
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} | {detail} |\n",
             report.index,
@@ -860,7 +881,7 @@ mod tests {
     #[test]
     fn steps_parse_by_their_one_kind_key() {
         let step = parse_step(&json!({ "ui": "click", "select": "Button \"Go\"", "nth": 1, "save": "c", "name": "go" })).unwrap();
-        let Kind::Ui { action, args, save } = &step.kind else {
+        let Kind::Ui { action, args } = &step.kind else {
             panic!("{step:?}")
         };
         assert_eq!(action, "click");
@@ -868,7 +889,7 @@ mod tests {
             Value::Object(args.clone()),
             json!({ "select": "Button \"Go\"", "nth": 1 })
         );
-        assert_eq!(save.as_deref(), Some("c"));
+        assert_eq!(step.save.as_deref(), Some("c"));
         assert_eq!(step.name.as_deref(), Some("go"));
         assert_eq!(
             parse_step(&json!({ "assert": { "text": "hi", "exists": false } }))
@@ -889,9 +910,9 @@ mod tests {
                 method: "LocalDevice".into(),
                 params: json!({}),
                 first: false,
-                save: None
             }
         );
+        assert_eq!(engine.save, None);
         for (bad, why) in [
             (json!({ "ui": "click", "sleep": 3 }), "exactly one"),
             (json!({ "name": "x" }), "got none"),
@@ -958,6 +979,9 @@ mod tests {
             self.requests.push(request.clone());
             if request["action"] == self.fail_on {
                 return Err(format!("{} broke", self.fail_on));
+            }
+            if let Some(reply) = request.get("reply") {
+                return Ok(reply.clone());
             }
             Ok(json!({ "echo": request }))
         }
@@ -1058,6 +1082,73 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_unsettled_or_unhandled_ui_reply_passes_with_a_warning() {
+        let steps = steps(json!([
+            { "ui": "click", "x": 1, "y": 2, "reply": { "frame": 9, "unsettled": true } },
+            { "ui": "key", "keys": "a b c", "reply": { "frame": 9, "handled": [true, false, false] } },
+            { "ui": "key", "keys": "a", "reply": { "frame": 9, "handled": [true] } },
+            { "ui": "state", "reply": { "unsettled": false } },
+        ]));
+        let mut fake = Fake {
+            requests: Vec::new(),
+            fail_on: "",
+        };
+        let reports = play(
+            &steps,
+            &mut fake,
+            Path::new("/out"),
+            &mut Map::new(),
+            |_| {},
+        )
+        .await;
+        assert!(reports.iter().all(|r| r.status == Status::Pass));
+        let warnings: Vec<Option<&str>> = reports.iter().map(|r| r.warning.as_deref()).collect();
+        assert_eq!(
+            warnings,
+            [
+                Some("unsettled: the element never held still across two frames"),
+                Some("keystroke 2, 3 of 3 not handled"),
+                None,
+                None
+            ]
+        );
+        assert_eq!(summary(&reports), "PASS 4/4");
+        assert_eq!(
+            serde_json::to_value(&reports[1]).unwrap()["warning"],
+            "keystroke 2, 3 of 3 not handled"
+        );
+        assert!(
+            serde_json::to_value(&reports[2])
+                .unwrap()
+                .get("warning")
+                .is_none()
+        );
+        let md = markdown("w", &json!({}), &reports);
+        assert!(
+            md.contains(" | warning: keystroke 2, 3 of 3 not handled; {"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn the_committed_example_scenarios_parse() {
+        for (file, raw) in [
+            (
+                "mock-question.json",
+                include_str!("../../../scripts/scenarios/mock-question.json"),
+            ),
+            (
+                "journal-replay.json",
+                include_str!("../../../scripts/scenarios/journal-replay.json"),
+            ),
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let scenario = parse_scenario(&value).unwrap_or_else(|e| panic!("{file}: {e}"));
+            assert!(!scenario.steps.is_empty(), "{file}");
+        }
+    }
+
     #[test]
     fn the_report_tables_every_step_and_links_each_snapshot() {
         let report = |index, status, shot: Option<&str>, error: Option<&str>| StepReport {
@@ -1068,6 +1159,7 @@ mod tests {
             ms: 5,
             result: Some("ok".into()),
             error: error.map(str::to_owned),
+            warning: None,
             shot: shot.map(str::to_owned),
         };
         let reports = [

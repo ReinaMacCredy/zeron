@@ -145,11 +145,7 @@ impl MockHarness {
         // spaces the scripted events out so live-run UI states (working
         // indicator, streaming fade, trailing tool-group auto-open) are
         // observable. Unset (the default, and in tests) streams instantly.
-        let delay_ms = std::env::var("ZERON_MOCK_DELAY_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
-        let delay = std::time::Duration::from_millis(delay_ms);
+        let delay = mock_delay();
 
         // Dev/testing knob: `ZERON_MOCK_QUESTION=1` swaps in a run that asks
         // the user questions mid-stream via `controls.request_input` (the
@@ -163,7 +159,7 @@ impl MockHarness {
             let request_input = controls.request_input;
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
             tokio::spawn(async move {
-                let pause = if delay_ms == 0 {
+                let pause = if delay.is_zero() {
                     std::time::Duration::from_millis(50)
                 } else {
                     delay
@@ -866,7 +862,7 @@ impl MockHarness {
         let sub_delay_ms = std::env::var("ZERON_MOCK_SUBAGENT_DELAY_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok());
-        if delay_ms == 0 && sub_delay_ms.is_none() {
+        if delay.is_zero() && sub_delay_ms.is_none() {
             return Ok(futures::stream::iter(events).boxed());
         }
         Ok(futures::stream::iter(events)
@@ -882,6 +878,15 @@ impl MockHarness {
             })
             .boxed())
     }
+}
+
+fn mock_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("ZERON_MOCK_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0),
+    )
 }
 
 fn mock_chunk_chars() -> Option<usize> {
@@ -1107,12 +1112,7 @@ fn play_turn(
     steps: Vec<Step>,
     controls: RunControls,
 ) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
-    let delay = std::time::Duration::from_millis(
-        std::env::var("ZERON_MOCK_DELAY_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0),
-    );
+    let delay = mock_delay();
     let chunk_chars = mock_chunk_chars();
     let RunControls {
         request_input,
@@ -1286,6 +1286,18 @@ mod tests {
         assert!(parse_script("s.json", "[{\"type\": \"nope\"}]").is_err());
         assert!(parse_script("s.json", "[]").is_err());
         assert!(parse_script("s.json", "not json").is_err());
+    }
+
+    #[test]
+    fn the_committed_scenario_mock_scripts_parse() {
+        let script = include_str!("../../../scripts/scenarios/mock-question.mock.json");
+        let turns = parse_script("mock-question.mock.json", script).unwrap();
+        assert!(turns.iter().all(|turn| !turn.steps.is_empty()));
+        let journal = include_str!("../../../scripts/scenarios/journal-replay.jsonl");
+        let (turns, skipped) = journal_turns(journal);
+        assert_eq!(skipped, 0);
+        assert!(!turns.is_empty());
+        assert!(parse_script("journal-replay.jsonl", journal).is_ok());
     }
 
     #[test]

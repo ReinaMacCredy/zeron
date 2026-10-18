@@ -5,17 +5,33 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{
-    DRIVE_ACTIONS, OBSERVE_ACTIONS, UiDriverBuild, UiDriverDescriptor, run_dir, socket_path,
+    DRIVE_ACTIONS, MAX_WAIT_MS, OBSERVE_ACTIONS, UiDriverBuild, UiDriverDescriptor, run_dir,
+    socket_path,
 };
 
 pub const TOOL: &str = "ui_driver";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
+const STEP_MS: u64 = 100;
+const DRAG_STEPS: u64 = 12;
 
 pub fn tool() -> Value {
     let field = |kind: &str, description: &str| json!({ "type": kind, "description": description });
-    let end = |which: &str| json!({ "type": ["array", "object"], "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": format!("Drag {which}: a window point [x, y], or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}.") });
+    let end = |which: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" },
+                "ref": { "type": "string" },
+                "select": { "type": "string" },
+                "nth": { "type": "integer" }
+            },
+            "additionalProperties": false,
+            "description": format!("Drag {which}: a window point {{\"x\": 10, \"y\": 20}}, or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}. The server also takes [x, y].")
+        })
+    };
     let properties: Map<String, Value> = [
         ("action", json!({ "type": "string", "enum": std::iter::once(&"list").chain(OBSERVE_ACTIONS).chain(DRIVE_ACTIONS).collect::<Vec<_>>() })),
         ("target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
@@ -26,13 +42,15 @@ pub fn tool() -> Value {
         ("select", field("string", "Selector: `#e12`, `Role`, `Role \"label\"` or `\"label\"`. An exact label match beats a substring match, which beats value, then placeholder or description.")),
         ("nth", field("integer", "Which match of `select` when several match.")),
         ("text", field("string", "Text to type, or to wait for.")),
-        ("keys", json!({ "type": ["string", "array"], "items": { "type": "string" }, "description": "Keystrokes separated by spaces, such as `cmd-k` or `down enter`, or a list of them." })),
+        ("keys", json!({ "type": "array", "items": { "type": "string" }, "description": "Keystrokes, such as [\"cmd-k\"] or [\"down\", \"enter\"]. The server also takes one string of keystrokes separated by spaces." })),
         ("name", field("string", "gpui action name, for `action`.")),
         ("args", field("object", "Arguments of the gpui action, for `action`.")),
         ("rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
         ("path", field("string", "Absolute path for the snapshot PNG. Defaults to a file under ~/.zeron/run/shots.")),
         ("from", end("start")),
         ("to", end("end")),
+        ("steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
+        ("holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
         ("do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView.")),
         ("value", field("string", "For `press` with `do: setValue`: the new value.")),
         ("full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
@@ -54,7 +72,7 @@ pub fn tool() -> Value {
         ("json", field("boolean", "`tree` as JSON instead of text lines.")),
         ("inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
         ("theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
-        ("size", json!({ "type": ["object", "array"], "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "For `set`: window content size {w, h} or [w, h] in points." })),
+        ("size", json!({ "type": "object", "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["w", "h"], "additionalProperties": false, "description": "For `set`: window content size {w, h} in points. The server also takes [w, h]." })),
         ("motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal, 5 is five times slower. Applies to animations started afterwards; loaders, pulses and disclosure rows ignore it.")),
     ]
     .into_iter()
@@ -67,7 +85,7 @@ pub fn tool() -> Value {
             "type": "object",
             "properties": properties,
             "required": ["action"],
-            "additionalProperties": true
+            "additionalProperties": false
         },
         "annotations": { "title": "Drive the Zeron UI", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
     })
@@ -130,8 +148,7 @@ pub async fn run(args: &Value, own_port: Option<u16>) -> Result<Value, String> {
         return serde_json::to_value(live).map_err(|error| error.to_string());
     }
     let app = select(&live, target.as_deref(), own_port)?;
-    let timeout = timeout_for(&args);
-    request(app, args, timeout).await
+    request(app, args).await
 }
 
 pub fn list() -> Vec<UiDriverDescriptor> {
@@ -267,21 +284,41 @@ fn targets(live: &[UiDriverDescriptor]) -> String {
     lines
 }
 
-fn timeout_for(args: &Map<String, Value>) -> Duration {
-    ["timeoutMs", "ms"]
+fn reply_timeout(request: &Map<String, Value>) -> Duration {
+    DEFAULT_TIMEOUT.max(Duration::from_millis(work_ms(request)).saturating_add(REPLY_SLACK))
+}
+
+fn work_ms(request: &Map<String, Value>) -> u64 {
+    let number = |key: &str| request.get(key).and_then(Value::as_u64);
+    let wait = ["timeoutMs", "ms", "quietMs"]
         .into_iter()
-        .find_map(|key| args.get(key)?.as_u64())
-        .map_or(DEFAULT_TIMEOUT, |ms| {
-            Duration::from_millis(ms).saturating_add(REPLY_SLACK)
-        })
+        .filter_map(number)
+        .max()
+        .unwrap_or(0)
+        .min(MAX_WAIT_MS);
+    let steps = match request.get("action").and_then(Value::as_str) {
+        Some("drag") => number("steps").unwrap_or(DRAG_STEPS).max(1),
+        Some("type") => request
+            .get("text")
+            .and_then(Value::as_str)
+            .map_or(0, |text| text.chars().count() as u64),
+        _ => 0,
+    };
+    let during = match request.get("during") {
+        Some(Value::Object(during)) => work_ms(during),
+        _ => 0,
+    };
+    wait.saturating_add(number("holdMs").unwrap_or(0))
+        .saturating_add(steps.saturating_mul(STEP_MS))
+        .saturating_add(during)
 }
 
 pub async fn request(
     app: &UiDriverDescriptor,
     mut request: Map<String, Value>,
-    timeout: Duration,
 ) -> Result<Value, String> {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let timeout = reply_timeout(&request);
     request.insert("id".into(), json!(NEXT_ID.fetch_add(1, Ordering::Relaxed)));
     let mut reply = tokio::time::timeout(timeout, exchange(&app.socket, Value::Object(request)))
         .await
@@ -418,6 +455,50 @@ mod tests {
             select(&[], Some("dev"), None)
                 .unwrap_err()
                 .starts_with("no running Zeron app")
+        );
+    }
+
+    #[test]
+    fn the_reply_timeout_covers_waits_drags_typing_and_a_nested_during() {
+        let timeout = |request: Value| {
+            let Value::Object(request) = request else {
+                unreachable!()
+            };
+            reply_timeout(&request).as_millis() as u64
+        };
+        assert_eq!(timeout(json!({ "action": "tree" })), 30_000);
+        assert_eq!(
+            timeout(json!({ "action": "wait", "for": "ms", "ms": 45_000 })),
+            55_000
+        );
+        assert_eq!(
+            timeout(
+                json!({ "action": "wait", "for": "idle", "quietMs": 50_000, "timeoutMs": 2000 })
+            ),
+            60_000
+        );
+        assert_eq!(
+            timeout(json!({ "action": "wait", "for": "text", "timeoutMs": 900_000 })),
+            MAX_WAIT_MS + 10_000
+        );
+        assert_eq!(
+            timeout(json!({ "action": "drag", "holdMs": 25_000 })),
+            25_000 + 12 * 100 + 10_000
+        );
+        assert_eq!(
+            timeout(json!({ "action": "drag", "steps": 300 })),
+            30_000 + 10_000
+        );
+        let text = "x".repeat(400);
+        assert_eq!(
+            timeout(json!({ "action": "type", "text": text })),
+            40_000 + 10_000
+        );
+        assert_eq!(
+            timeout(
+                json!({ "action": "track", "ms": 5000, "during": { "action": "drag", "holdMs": 20_000, "steps": 10 } })
+            ),
+            5000 + 20_000 + 1000 + 10_000
         );
     }
 
