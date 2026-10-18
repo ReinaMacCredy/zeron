@@ -82,13 +82,19 @@ pub(crate) const BOTTOM: [RailEntry; 1] = [RailEntry {
     icon: icons::LUCIDE_SETTINGS,
 }];
 
-pub(crate) fn button(entry: &RailEntry, active: bool, wash: Hsla, theme: &Theme) -> Stateful<Div> {
-    let id = entry.id;
+pub(crate) fn button(
+    id: &'static str,
+    label: &'static str,
+    glyph: &'static str,
+    active: bool,
+    wash: Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
     div()
         .id(id)
         .debug_selector(move || id.into())
         .role(gpui::Role::Button)
-        .aria_label(entry.label)
+        .aria_label(label)
         .tab_index(0)
         .focus_visible(|style| style.border_2().border_color(theme.accent))
         .size(px(BUTTON))
@@ -104,7 +110,7 @@ pub(crate) fn button(entry: &RailEntry, active: bool, wash: Hsla, theme: &Theme)
             motion::hover_blend(id, wash.opacity(0.0), wash)
         })
         .on_hover(motion::hover_listener(id))
-        .child(icon(entry.icon).size(px(GLYPH)).text_color(if active {
+        .child(icon(glyph).size(px(GLYPH)).text_color(if active {
             theme.text
         } else {
             motion::hover_blend(id, theme.text_muted, theme.text)

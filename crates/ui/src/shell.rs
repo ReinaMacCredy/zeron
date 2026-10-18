@@ -2762,6 +2762,7 @@ pub struct Shell {
     /// whether its engine calls have returned.
     update_all_restart: Option<(Vec<zeron_proto::HarnessId>, bool)>,
     user_menu: popover::Popup<()>,
+    help_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Repaints the update strip and dialog as the app-level update
@@ -3407,6 +3408,7 @@ impl Shell {
             update_all_dialog: None,
             update_all_restart: None,
             user_menu: popover::Popup::default(),
+            help_menu: popover::Popup::default(),
             sidebar_notice: None,
             _app_update_observation: crate::app_update::AppUpdate::global(cx).map(|update| {
                 cx.observe(&update, |shell, _, cx| {
@@ -13934,12 +13936,19 @@ impl Shell {
         let needs_you = (item == RailItem::Tasks)
             .then(|| crate::tasks::needs_you_count(self.state.read(cx)))
             .filter(|count| *count > 0);
-        let button = app_rail::button(entry, active, self.rail_wash(theme), theme)
-            .relative()
-            .when_some(awaiting.or(needs_you), |el, count| {
-                el.child(app_rail::badge(count, theme))
-            })
-            .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
+        let button = app_rail::button(
+            entry.id,
+            entry.label,
+            entry.icon,
+            active,
+            self.rail_wash(theme),
+            theme,
+        )
+        .relative()
+        .when_some(awaiting.or(needs_you), |el, count| {
+            el.child(app_rail::badge(count, theme))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {
             return button
                 .tooltip(crate::settings::widgets::text_tooltip(entry.label))
@@ -13983,6 +13992,7 @@ impl Shell {
         let rings = self.render_rail_rings(&theme, cx);
         let voice = self.render_voice_trigger(&theme, cx);
         let account = self.render_user_menu(&theme, cx);
+        let help = self.render_help_menu(&theme, cx);
         let update = self.render_update_rail_button(&theme, cx);
         let bottom: Vec<AnyElement> = app_rail::BOTTOM
             .iter()
@@ -14007,6 +14017,7 @@ impl Shell {
             .children(rings)
             .children(voice)
             .child(account)
+            .child(help)
             .children(update)
             .children(bottom)
             .into_any_element()
@@ -14458,20 +14469,6 @@ impl Shell {
                     };
                     menu.child(row)
                 })
-                .child(
-                    popover::menu_row(theme, false, "user-menu-whats-new")
-                        .id("user-menu-whats-new")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.close_user_menu(cx);
-                            this.open_whats_new_changelog(cx);
-                        }))
-                        .child(
-                            icon(icons::SPARK)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("What\u{2019}s new")),
-                )
                 // macOS keeps "Check for Updates…" in the app menu under
                 // About; elsewhere there is no app menu, so it lives here.
                 .when(!cfg!(target_os = "macos"), |menu| {
@@ -14995,6 +14992,10 @@ impl Shell {
         // path close here; the others remain explicit blockers.
         if self.whats_new_dialog.is_some() && !self.sync_flow.has_visible_overlay() {
             self.close_whats_new(cx);
+            return true;
+        }
+        if self.help_menu.is_open() {
+            self.close_help_menu(cx);
             return true;
         }
         if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
@@ -19261,6 +19262,10 @@ impl Render for Shell {
                     Some("whats-new-changelog") => {
                         self.debug_dialog = None;
                         self.open_whats_new_changelog(cx);
+                    }
+                    Some("help-menu") => {
+                        self.debug_dialog = None;
+                        self.help_menu.open(());
                     }
                     _ => {}
                 }

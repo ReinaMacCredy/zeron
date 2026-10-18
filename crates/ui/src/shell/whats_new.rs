@@ -17,6 +17,10 @@ const FEATURE_IN: MotionSpec = MotionSpec::new(360, motion::EASE_OUT_QUINT);
 const FEATURE_STAGGER_MS: u64 = 80;
 const DIALOG_WIDTH: f32 = 480.0;
 const DIALOG_BODY_MAX: f32 = 520.0;
+const HELP_RELEASES: usize = 3;
+const HELP_MENU_WIDTH: f32 = 264.0;
+const FEEDBACK_URL: &str = "https://github.com/ReinaMacCredy/zeron/issues/new";
+const DOCS_URL: &str = "https://github.com/ReinaMacCredy/zeron#readme";
 
 pub(super) struct WhatsNewCard {
     entry: &'static Entry,
@@ -131,6 +135,18 @@ fn feature_section(theme: &Theme, feature: &'static Feature) -> Div {
         })
 }
 
+fn help_row(
+    theme: &Theme,
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+) -> gpui::Stateful<Div> {
+    popover::menu_row(theme, false, id)
+        .id(id)
+        .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
+        .child(SharedString::from(label))
+}
+
 fn staggered(id: SharedString, index: usize, el: Div) -> AnyElement {
     let spec = FEATURE_IN.with_delay(index as u64 * FEATURE_STAGGER_MS);
     el.with_animation(id, spec.animation(), |el, t| {
@@ -192,6 +208,145 @@ impl Shell {
             dialog.view = view;
             cx.notify();
         }
+    }
+
+    pub(super) fn close_help_menu(&mut self, cx: &mut Context<Self>) {
+        if self.help_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.help_menu);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_help_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.help_menu.is_open();
+        let trigger = app_rail::button(
+            "rail-help",
+            "Help",
+            icons::LUCIDE_CIRCLE_HELP,
+            open,
+            self.rail_wash(theme),
+            theme,
+        )
+        .relative()
+        .aria_expanded(open)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.help_menu.note_trigger_press()),
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if this.help_menu.take_press_was_open() {
+                this.close_help_menu(cx);
+            } else {
+                this.help_menu.open(());
+            }
+            cx.notify();
+        }))
+        .when(!open, |el| {
+            el.tooltip(crate::settings::widgets::text_tooltip("Help"))
+        });
+        if self.help_menu.get().is_none() {
+            return trigger.into_any_element();
+        }
+        let theme = &theme.for_popup();
+        let releases: Vec<AnyElement> = whats_new::entries()
+            .iter()
+            .take(HELP_RELEASES)
+            .map(|entry| {
+                let id = SharedString::from(format!("help-release-{}", entry.version));
+                let title = entry.features.first().map_or_else(
+                    || format!("Version {}", entry.version),
+                    |feature| feature.title.clone(),
+                );
+                popover::menu_row(theme, false, id.clone())
+                    .id(id)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_help_menu(cx);
+                        this.open_whats_new(entry, WhatsNewView::Changelog, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(entry.date.as_str())),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let menu = popover::popover_card(theme)
+            .w(px(HELP_MENU_WIDTH))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_help_menu(cx)))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(4.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("What\u{2019}s new")),
+            )
+            .children(releases)
+            .child(
+                help_row(
+                    theme,
+                    "help-changelog",
+                    icons::LUCIDE_GIFT,
+                    "Full changelog",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_help_menu(cx);
+                    this.open_whats_new_changelog(cx);
+                })),
+            )
+            .child(popover::menu_separator())
+            .child(
+                help_row(
+                    theme,
+                    "help-keybindings",
+                    icons::LUCIDE_KEYBOARD,
+                    "Keybindings",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_help_menu(cx);
+                    this.open_settings(SettingsSection::Shortcuts, cx);
+                })),
+            )
+            .child(
+                help_row(
+                    theme,
+                    "help-feedback",
+                    icons::LUCIDE_MESSAGE_SQUARE_TEXT,
+                    "Send feedback",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_help_menu(cx);
+                    cx.open_url(FEEDBACK_URL);
+                })),
+            )
+            .child(
+                help_row(theme, "help-docs", icons::LUCIDE_BOOK_OPEN, "Docs").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.close_help_menu(cx);
+                        cx.open_url(DOCS_URL);
+                    }),
+                ),
+            )
+            .into_any_element();
+        trigger
+            .child(popover::anchored_menu_right(
+                "help-menu-popover",
+                menu,
+                self.help_menu.closing_since(),
+            ))
+            .into_any_element()
     }
 
     fn toggle_whats_new_release(&mut self, version: &'static str, cx: &mut Context<Self>) {
