@@ -1145,6 +1145,8 @@ pub enum RowKind {
         /// once per entry change in [`rows_for_entry`] (rows are cached by
         /// fingerprint), never per frame. Empty for ordinary prompts.
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        /// Chips need the single text layout, so only chipless prompts get blocks.
+        markdown: Option<Arc<BlockTree>>,
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
@@ -1556,6 +1558,11 @@ pub fn rows_for_entry(
                     .any(|chip| crate::attachments::chip_names_attachment(chip, &att.path))
         });
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
+        let markdown = if mentions.is_empty() {
+            user_markdown(&text)
+        } else {
+            None
+        };
         let mut rows = vec![Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
@@ -1563,6 +1570,7 @@ pub fn rows_for_entry(
             kind: RowKind::User {
                 text: text.into(),
                 mentions: Arc::new(mentions),
+                markdown,
                 attachments: Arc::new(attachments),
                 badges: Arc::new(badges),
                 pending,
@@ -6765,7 +6773,11 @@ impl Transcript {
                     return;
                 }
                 this.user_hold_task = None;
-                crate::markdown::selection::clear_if_owner(&selection_key);
+                if let Some(anchor) = crate::markdown::selection::anchor_key()
+                    .filter(|anchor| anchor.starts_with(&*selection_key))
+                {
+                    crate::markdown::selection::clear_if_owner(&anchor);
+                }
                 this.toggle_user_fold(
                     row_id,
                     row_ix,
@@ -7691,6 +7703,7 @@ impl Transcript {
         row_ix: usize,
         text: SharedString,
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        markdown: Option<Arc<BlockTree>>,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -7779,19 +7792,24 @@ impl Transcript {
                     this.cancel_user_hold();
                 }))
             })
-            .child(user_bubble_text(
-                row_id,
-                text,
-                mentions,
-                thread_icons,
-                theme,
-                measured_h.clone(),
-                cx.entity_id(),
-                chip_overlays,
-                Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                    this.open_chip_image(path, window, cx);
-                })),
-            ));
+            .child(match markdown {
+                Some(tree) => {
+                    self.render_user_markdown(row_id, &tree, measured_h.clone(), theme, window, cx)
+                }
+                None => user_bubble_text(
+                    row_id,
+                    text,
+                    mentions,
+                    thread_icons,
+                    theme,
+                    measured_h.clone(),
+                    cx.entity_id(),
+                    chip_overlays,
+                    Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
+                        this.open_chip_image(path, window, cx);
+                    })),
+                ),
+            });
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
         // full text remains laid out behind the clip; only the viewport over it
@@ -7841,6 +7859,67 @@ impl Transcript {
                     cx,
                 ))
             })
+            .into_any_element()
+    }
+
+    fn render_user_markdown(
+        &mut self,
+        row_id: &SharedString,
+        tree: &Arc<BlockTree>,
+        measured_h: Rc<Cell<f32>>,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key: SharedString = format!("{row_id}:u").into();
+        let code: HashMap<usize, render::CodeUi> = tree
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, top)| self.code_uis_for(&key, &top.block, ix, cx))
+            .flatten()
+            .collect();
+        let opts = RenderOptions {
+            copy: Some(self.copy_ui_for(&key, cx)),
+            link: self.link_ui(cx),
+            code: (!code.is_empty()).then_some(code),
+            tables: Some(self.table_scrolls.clone()),
+            ..RenderOptions::settled(key.clone())
+        };
+        let highlight = self.code_highlight_for(&key, tree, None, cx);
+        let entity_id = cx.entity_id();
+        let measure = canvas(
+            |_, _, _| {},
+            move |bounds, _, _, cx| {
+                let next_h = f32::from(bounds.size.height);
+                if (measured_h.get() - next_h).abs() > 0.5 {
+                    measured_h.set(next_h);
+                    cx.notify(entity_id);
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(render::MD_BLOCK_GAP))
+            .child(measure)
+            .children(tree.blocks.iter().enumerate().map(|(ix, top)| {
+                render::render_block(
+                    &top.block,
+                    ix,
+                    ix,
+                    &opts,
+                    theme,
+                    window,
+                    highlight
+                        .get(&ix)
+                        .and_then(|o| o.as_deref())
+                        .map(|document| document.lines.as_slice()),
+                )
+            }))
             .into_any_element()
     }
 
@@ -9477,6 +9556,7 @@ impl Transcript {
             RowKind::User {
                 text,
                 mentions,
+                markdown,
                 attachments,
                 badges,
                 pending,
@@ -9486,6 +9566,7 @@ impl Transcript {
                 let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
+                let markdown = markdown.clone();
                 let pending = *pending;
                 let wake = from_chat_id.as_ref().and_then(|from| {
                     let state = self.state.read(cx);
@@ -9690,7 +9771,7 @@ impl Transcript {
                                     .text_color(theme.text)
                                     .when(pending, |el| el.opacity(0.65))
                                     .child(self.render_user_body(
-                                        &row.id, ix, text, mentions, &theme, window, cx,
+                                        &row.id, ix, text, mentions, markdown, &theme, window, cx,
                                     )),
                             ),
                     );
@@ -11612,6 +11693,47 @@ fn agent_message_display(text: &str) -> String {
     let suffix = format!(" ({id})");
     let name = label.strip_suffix(&suffix).unwrap_or(label);
     format!("Message from {name}\n\n{body}")
+}
+
+/// Plain paragraphs return `None` so prose keeps the text path's exact spacing.
+fn user_markdown(text: &str) -> Option<Arc<BlockTree>> {
+    let attribution = text
+        .strip_prefix("Message from ")
+        .and_then(|rest| rest.split_once("\n\n"));
+    let body = attribution.map_or(text, |(_, body)| body);
+    let mut tree = crate::markdown::parser::parse_full_line_breaks(body);
+    let plain = tree.blocks.iter().all(|top| match &top.block {
+        Block::Paragraph { runs } => runs.iter().all(|run| run.style == InlineStyle::default()),
+        _ => false,
+    });
+    if plain {
+        return None;
+    }
+    if let Some((name, _)) = attribution {
+        let header = Block::Paragraph {
+            runs: vec![
+                InlineRun {
+                    text: "Message from ".into(),
+                    style: InlineStyle::default(),
+                },
+                InlineRun {
+                    text: name.into(),
+                    style: InlineStyle {
+                        bold: true,
+                        ..InlineStyle::default()
+                    },
+                },
+            ],
+        };
+        tree.blocks.insert(
+            0,
+            Arc::new(crate::markdown::parser::TopBlock {
+                range: 0..0,
+                block: header,
+            }),
+        );
+    }
+    Some(Arc::new(tree))
 }
 
 /// The bubble text's runs: body text in the sans font, chips as labels in it
@@ -20473,6 +20595,48 @@ mod tests {
         };
         assert_eq!(text.as_ref(), "no mentions here");
         assert!(mentions.is_empty());
+
+        let markdown_of = |raw: &str| {
+            let mut entry = entry.clone();
+            entry.parts = vec![text_part("t0", raw)];
+            let rows = rows_for_entry(&entry, false, false, &mut parse);
+            let RowKind::User {
+                mentions, markdown, ..
+            } = &rows[0].kind
+            else {
+                panic!("expected a user row");
+            };
+            (mentions.len(), markdown.clone())
+        };
+        assert_eq!(markdown_of("plain prose\nsecond line\n\nnext"), (0, None));
+        assert_eq!(
+            markdown_of("## Look\n- at [composer.rs](zeron-file:crates/ui/src/composer.rs)"),
+            (1, None),
+            "a chipped prompt keeps the text path"
+        );
+        let (_, Some(tree)) = markdown_of("# Plan\nfirst line\nsecond line\n\n1. one\n2. two")
+        else {
+            panic!("a Markdown prompt must carry its blocks");
+        };
+        assert!(matches!(
+            tree.blocks[0].block,
+            Block::Heading { level: 1, .. }
+        ));
+        let Block::Paragraph { runs } = &tree.blocks[1].block else {
+            panic!("expected the paragraph under the heading");
+        };
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "first line\nsecond line",
+            "a typed newline stays a line break"
+        );
+        assert!(matches!(
+            tree.blocks[2].block,
+            Block::List {
+                ordered_start: Some(1),
+                ..
+            }
+        ));
     }
 
     #[test]
