@@ -1,4 +1,5 @@
-use super::tree::{self, Bounds, Element};
+use super::selector::Element;
+use super::tree::{self, Bounds};
 use super::{Drive, epoch, frame_count, target_window};
 use gpui::{AnyWindowHandle, AsyncApp};
 use serde::Deserialize;

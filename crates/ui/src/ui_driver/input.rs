@@ -1,4 +1,4 @@
-use super::{frame_count, frames, next_frame, target_window, tree};
+use super::{frame_count, frames, next_frame, selector, target_window, tree};
 use gpui::accesskit::{Action as AxAction, ActionData, NodeId};
 use gpui::{
     AnyWindowHandle, AppContext as _, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
@@ -70,7 +70,7 @@ pub(super) enum Drive {
     },
     Press {
         #[serde(flatten)]
-        element: tree::Element,
+        element: selector::Element,
         #[serde(rename = "do")]
         perform: Option<String>,
         value: Option<String>,
@@ -130,7 +130,7 @@ pub(super) async fn run(
 
 async fn settled(
     handle: AnyWindowHandle,
-    element: &tree::Element,
+    element: &selector::Element,
     cx: &mut AsyncApp,
 ) -> Result<(tree::Node, (f32, f32), bool), String> {
     let started = Instant::now();
@@ -163,7 +163,7 @@ async fn settled(
 pub(super) enum Target {
     Point { x: f32, y: f32 },
     Pair([f32; 2]),
-    Element(tree::Element),
+    Element(selector::Element),
 }
 
 #[derive(Deserialize)]
@@ -211,14 +211,17 @@ impl TargetFields {
                 nth: None,
                 x: None,
                 y: None,
-            } => Ok(Some(Target::Element(tree::Element::Ref { id }))),
+            } => Ok(Some(Target::Element(selector::Element::Ref { id }))),
             TargetFields {
                 id: None,
                 select: Some(select),
                 nth,
                 x: None,
                 y: None,
-            } => Ok(Some(Target::Element(tree::Element::Select { select, nth }))),
+            } => Ok(Some(Target::Element(selector::Element::Select {
+                select,
+                nth,
+            }))),
             _ => Err(ONE_TARGET.into()),
         }
     }
@@ -344,7 +347,7 @@ impl Driver {
 
     async fn find(
         &mut self,
-        element: &tree::Element,
+        element: &selector::Element,
         cx: &mut AsyncApp,
     ) -> Result<(tree::Node, (f32, f32)), String> {
         let (node, viewport, unsettled) = settled(self.window, element, cx).await?;
@@ -676,7 +679,7 @@ fn performable(
 
 async fn press(
     window: Option<u64>,
-    element: tree::Element,
+    element: selector::Element,
     perform: Option<String>,
     value: Option<String>,
     cx: &mut AsyncApp,

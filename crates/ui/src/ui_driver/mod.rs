@@ -4,6 +4,7 @@ mod frames;
 #[cfg(debug_assertions)]
 mod input;
 #[cfg(unix)]
+mod selector;
 mod server;
 mod tree;
 
@@ -141,7 +142,7 @@ enum Until {
         ms: u64,
     },
     #[serde(untagged)]
-    Seen(tree::Seen),
+    Seen(selector::Seen),
 }
 
 fn quiet() -> u64 {
@@ -411,7 +412,7 @@ async fn wait(window: Option<u64>, until: Until, cx: &mut AsyncApp) -> Result<Va
         }
         Until::Seen(seen) => {
             let handle = cx.update(|cx| target_window(window, cx))?;
-            tree::wait(handle, seen, cx).await
+            selector::wait(handle, seen, cx).await
         }
         Until::Ms { ms } => {
             cx.background_executor()
@@ -584,8 +585,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             select.action,
-            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Select {
-                element: tree::Element::Select {
+            Action::Observe(Observe::Wait(Until::Seen(selector::Seen::Select {
+                element: selector::Element::Select {
                     select: "Button \"Send\"".into(),
                     nth: Some(1)
                 },
@@ -595,16 +596,16 @@ mod tests {
         let gone = parse(json!({ "action": "wait", "for": "gone", "ref": "e4", "timeoutMs": 9 }));
         assert_eq!(
             gone.unwrap().action,
-            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Gone {
-                absent: tree::Absent::Element(tree::Element::Ref { id: "e4".into() }),
+            Action::Observe(Observe::Wait(Until::Seen(selector::Seen::Gone {
+                absent: selector::Absent::Element(selector::Element::Ref { id: "e4".into() }),
                 timeout_ms: 9,
             })))
         );
         let gone = parse(json!({ "action": "wait", "for": "gone", "text": "Working" }));
         assert_eq!(
             gone.unwrap().action,
-            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Gone {
-                absent: tree::Absent::Text {
+            Action::Observe(Observe::Wait(Until::Seen(selector::Seen::Gone {
+                absent: selector::Absent::Text {
                     text: "Working".into()
                 },
                 timeout_ms: 5000,
@@ -613,7 +614,7 @@ mod tests {
         let text = parse(json!({ "action": "wait", "for": "text", "text": "Done" })).unwrap();
         assert_eq!(
             text.action,
-            Action::Observe(Observe::Wait(Until::Seen(tree::Seen::Text {
+            Action::Observe(Observe::Wait(Until::Seen(selector::Seen::Text {
                 text: "Done".into(),
                 timeout_ms: 5000,
             })))
@@ -642,7 +643,7 @@ mod tests {
         assert_eq!(
             driven(json!({ "action": "click", "select": "Tab \"Git\"", "nth": 0 })),
             Drive::Click {
-                at: input::Target::Element(tree::Element::Select {
+                at: input::Target::Element(selector::Element::Select {
                     select: "Tab \"Git\"".into(),
                     nth: Some(0)
                 }),
@@ -657,7 +658,7 @@ mod tests {
         };
         assert_eq!(
             from,
-            input::Target::Element(tree::Element::Ref { id: "e3".into() })
+            input::Target::Element(selector::Element::Ref { id: "e3".into() })
         );
         assert_eq!(to, input::Target::Pair([5.0, 6.0]));
         assert_eq!(
@@ -671,7 +672,7 @@ mod tests {
             driven(json!({ "action": "type", "text": "hi", "ref": "e7" })),
             Drive::Type {
                 text: "hi".into(),
-                into: input::TypeAt::Target(input::Target::Element(tree::Element::Ref {
+                into: input::TypeAt::Target(input::Target::Element(selector::Element::Ref {
                     id: "e7".into()
                 }))
             }
@@ -682,7 +683,7 @@ mod tests {
         assert_eq!(
             press,
             Drive::Press {
-                element: tree::Element::Ref { id: "e7".into() },
+                element: selector::Element::Ref { id: "e7".into() },
                 perform: Some("setValue".into()),
                 value: Some("hello".into()),
             }
