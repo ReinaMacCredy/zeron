@@ -90,7 +90,8 @@ pub fn tool_list() -> Value {
         for (after, tool) in [
             ("html_render", visual::tool()),
             ("context_settings", compact_tool()),
-            ("project_actions", ui_driver::tool()),
+            ("project_actions", ui_driver::tool(ui_driver::Tool::Observe)),
+            (ui_driver::TOOL, ui_driver::tool(ui_driver::Tool::Drive)),
         ] {
             if let Some(at) = list.iter().position(|tool| tool["name"] == after) {
                 list.insert(at + 1, tool);
@@ -3045,8 +3046,11 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             if name == html_render::PREVIEW_TOOL {
                 return Some(ok(id, tools.html_preview(&args).await));
             }
-            if name == ui_driver::TOOL {
-                return Some(ok(id, ui_driver::mcp_result(&args, tools.ipc_port).await));
+            if let Some(tool) = ui_driver::Tool::named(name) {
+                return Some(ok(
+                    id,
+                    ui_driver::mcp_result(tool, &args, tools.ipc_port).await,
+                ));
             }
             let (text, is_error) = match tools.call(name, &args).await {
                 Ok(value) => (
@@ -3112,7 +3116,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 35] = [
+    const THREAD_TOOLS: [&str; 36] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -3128,6 +3132,7 @@ mod tests {
         "terminal",
         "project_actions",
         "ui_driver",
+        "ui_driver_drive",
         "tasks",
         "agent_profiles",
         "context_settings",

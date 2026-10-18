@@ -10,11 +10,45 @@ use zeron_proto::ui_driver::{
 };
 
 pub const TOOL: &str = "ui_driver";
+pub const DRIVE_TOOL: &str = "ui_driver_drive";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
+const RECORDERS: &[&str] = &["frames", "track"];
 
-pub fn tool() -> Value {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    Observe,
+    Drive,
+}
+
+impl Tool {
+    pub fn named(name: &str) -> Option<Tool> {
+        match name {
+            TOOL => Some(Tool::Observe),
+            DRIVE_TOOL => Some(Tool::Drive),
+            _ => None,
+        }
+    }
+
+    fn admits(self, action: &str, args: &Map<String, Value>) -> Result<(), String> {
+        let during = args.get("during").is_some_and(|during| !during.is_null());
+        let drives = DRIVE_ACTIONS.contains(&action);
+        match self {
+            Tool::Observe if drives || during => Err(format!(
+                "`{}` drives the UI, which {TOOL} never does: call {DRIVE_TOOL} with a Zeron Dev bundle as `target`",
+                if during { "during" } else { action }
+            )),
+            Tool::Drive if !drives && !(during && RECORDERS.contains(&action)) => Err(format!(
+                "{DRIVE_TOOL} takes a drive action ({}), or `frames` or `track` with `during`; call {TOOL} for `{action}`",
+                DRIVE_ACTIONS.join(", ")
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+pub fn tool(tool: Tool) -> Value {
     let field = |kind: &str, description: &str| json!({ "type": kind, "description": description });
     let end = |which: &str| {
         json!({
@@ -30,68 +64,102 @@ pub fn tool() -> Value {
             "description": format!("Drag {which}: a window point {{\"x\": 10, \"y\": 20}}, or an element {{\"ref\": \"e12\"}} or {{\"select\": \"Button \\\"Send\\\"\", \"nth\": 0}}. The server also takes [x, y].")
         })
     };
+    let (observe, drive, both) = (
+        &[Tool::Observe][..],
+        &[Tool::Drive][..],
+        &[Tool::Observe, Tool::Drive][..],
+    );
+    let actions: Vec<&str> = match tool {
+        Tool::Observe => std::iter::once(&"list")
+            .chain(OBSERVE_ACTIONS)
+            .copied()
+            .collect(),
+        Tool::Drive => DRIVE_ACTIONS.iter().chain(RECORDERS).copied().collect(),
+    };
     let properties: Map<String, Value> = [
-        ("action", json!({ "type": "string", "enum": std::iter::once(&"list").chain(OBSERVE_ACTIONS).chain(DRIVE_ACTIONS).collect::<Vec<_>>() })),
-        ("target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
-        ("window", field("integer", "Window id from `state`. Defaults to the frontmost window.")),
-        ("x", field("number", "Window point in logical pixels.")),
-        ("y", field("number", "Window point in logical pixels.")),
-        ("ref", field("string", "Element ref from `tree`, such as `e12`.")),
-        ("select", field("string", "Selector: `#e12`, `Role`, `Role \"label\"` or `\"label\"`. An exact label match beats a substring match, which beats value, then placeholder or description.")),
-        ("nth", field("integer", "Which match of `select` when several match.")),
-        ("text", field("string", "Text to type, or to wait for.")),
-        ("keys", json!({ "type": "array", "items": { "type": "string" }, "description": "Keystrokes, such as [\"cmd-k\"] or [\"down\", \"enter\"]. The server also takes one string of keystrokes separated by spaces." })),
-        ("name", field("string", "gpui action name, for `action`.")),
-        ("args", field("object", "Arguments of the gpui action, for `action`.")),
-        ("rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
-        ("path", field("string", "Absolute path for the snapshot PNG. Defaults to a file under ~/.zeron/run/shots.")),
-        ("from", end("start")),
-        ("to", end("end")),
-        ("steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
-        ("holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
-        ("do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView.")),
-        ("value", field("string", "For `press` with `do: setValue`: the new value.")),
-        ("full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
-        ("during", field("object", "For `frames` and `track` (Dev builds only): a drive request such as {\"action\": \"click\", \"select\": \"Button \\\"Settings\\\"\"} that runs once recording has started.")),
-        ("jumpPx", field("number", "For `track`: a per-frame move larger than this counts as a jump. Defaults to 40.")),
-        ("dx", field("number", "Horizontal scroll in pixels.")),
-        ("dy", field("number", "Vertical scroll in pixels.")),
-        ("trackpad", field("boolean", "Scroll as a trackpad instead of a mouse wheel.")),
-        ("button", json!({ "type": "string", "enum": ["left", "right", "middle"] })),
-        ("count", field("integer", "Clicks; 2 double-clicks.")),
-        ("modifiers", json!({ "type": "array", "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] } })),
-        ("for", json!({ "type": "string", "enum": ["idle", "frame", "ms", "text", "select", "gone"], "description": "What `wait` waits for." })),
-        ("quietMs", field("integer", "For `wait` idle: how long no frame may draw.")),
-        ("timeoutMs", field("integer", "Longest wait.")),
-        ("ms", field("integer", "Duration of `wait` ms; the window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
-        ("query", field("string", "Keep only `tree` lines that match this text.")),
-        ("root", field("string", "Ref the `tree` starts from.")),
-        ("depth", field("integer", "Levels of `tree` to print.")),
-        ("json", field("boolean", "`tree` as JSON instead of text lines.")),
-        ("inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
-        ("theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
-        ("size", json!({ "type": "object", "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["w", "h"], "additionalProperties": false, "description": "For `set`: window content size {w, h} in points. The server also takes [w, h]." })),
-        ("motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal, 5 is five times slower. Applies to animations started afterwards; loaders, pulses and disclosure rows ignore it.")),
+        (both, "action", json!({ "type": "string", "enum": actions })),
+        (observe, "target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
+        (drive, "target", field("string", "The Zeron Dev bundle to drive: a pid or label from `ui_driver` `list` (exact, or a unique substring such as `dev`), or a socket path. Never the app serving this chat.")),
+        (both, "window", field("integer", "Window id from `state`. Defaults to the frontmost window.")),
+        (drive, "x", field("number", "Window point in logical pixels.")),
+        (drive, "y", field("number", "Window point in logical pixels.")),
+        (both, "ref", field("string", "Element ref from `tree`, such as `e12`.")),
+        (both, "select", field("string", "Selector: `#e12`, `Role`, `Role \"label\"` or `\"label\"`. An exact label match beats a substring match, which beats value, then placeholder or description.")),
+        (both, "nth", field("integer", "Which match of `select` when several match.")),
+        (observe, "text", field("string", "Text to wait for.")),
+        (drive, "text", field("string", "Text to type.")),
+        (drive, "keys", json!({ "type": "array", "items": { "type": "string" }, "description": "Keystrokes, such as [\"cmd-k\"] or [\"down\", \"enter\"]. The server also takes one string of keystrokes separated by spaces." })),
+        (drive, "name", field("string", "gpui action name, for `action`.")),
+        (drive, "args", field("object", "Arguments of the gpui action, for `action`.")),
+        (observe, "rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
+        (observe, "path", field("string", "Absolute path for the snapshot PNG. Defaults to a file under ~/.zeron/run/shots.")),
+        (drive, "from", end("start")),
+        (drive, "to", end("end")),
+        (drive, "steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
+        (drive, "holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
+        (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView.")),
+        (drive, "value", field("string", "For `press` with `do: setValue`: the new value.")),
+        (observe, "full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
+        (drive, "during", field("object", "For `frames` and `track`, required: a drive request such as {\"action\": \"click\", \"select\": \"Button \\\"Settings\\\"\"} that runs once recording has started.")),
+        (both, "jumpPx", field("number", "For `track`: a per-frame move larger than this counts as a jump. Defaults to 40.")),
+        (drive, "dx", field("number", "Horizontal scroll in pixels.")),
+        (drive, "dy", field("number", "Vertical scroll in pixels.")),
+        (drive, "trackpad", field("boolean", "Scroll as a trackpad instead of a mouse wheel.")),
+        (drive, "button", json!({ "type": "string", "enum": ["left", "right", "middle"] })),
+        (drive, "count", field("integer", "Clicks; 2 double-clicks.")),
+        (drive, "modifiers", json!({ "type": "array", "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] } })),
+        (observe, "for", json!({ "type": "string", "enum": ["idle", "frame", "ms", "text", "select", "gone"], "description": "What `wait` waits for." })),
+        (observe, "quietMs", field("integer", "For `wait` idle: how long no frame may draw.")),
+        (observe, "timeoutMs", field("integer", "Longest wait.")),
+        (observe, "ms", field("integer", "Duration of `wait` ms; the window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
+        (drive, "ms", field("integer", "The window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
+        (observe, "query", field("string", "Keep only `tree` lines that match this text.")),
+        (observe, "root", field("string", "Ref the `tree` starts from.")),
+        (observe, "depth", field("integer", "Levels of `tree` to print.")),
+        (observe, "json", field("boolean", "`tree` as JSON instead of text lines.")),
+        (observe, "inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
+        (drive, "theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
+        (drive, "size", json!({ "type": "object", "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["w", "h"], "additionalProperties": false, "description": "For `set`: window content size {w, h} in points. The server also takes [w, h]." })),
+        (drive, "motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal, 5 is five times slower. Applies to animations started afterwards; loaders, pulses and disclosure rows ignore it.")),
     ]
     .into_iter()
-    .map(|(name, schema)| (name.to_owned(), schema))
+    .filter(|(uses, ..)| uses.contains(&tool))
+    .map(|(_, name, schema)| (name.to_owned(), schema))
     .collect();
+    let (name, title, description) = match tool {
+        Tool::Observe => (
+            TOOL,
+            "Inspect the Zeron UI",
+            "Inspect a running Zeron app from inside it: read its UI as text, wait for it, measure its frames, and snapshot it. This tool never clicks or types; `ui_driver_drive` does, in Zeron Dev bundles. `list` shows the running apps (pid, label, build, ipcPort, input). Omit `target` for the app serving this chat. Prefer `tree` with `query` over snapshots: it is cheap text, and each line carries a `ref`. Name an element by `ref` from `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`). `frames` measures drawn frames for `ms` (fps, interval percentiles, long frames, draw time); `track` samples one element's bounds every drawn frame and reports jumps and when it settled. Use `wait` (`for`: idle, frame, ms, text, select, gone) instead of sleeping. Take a `snapshot` only for a visual check: it returns the PNG, or only its path with `inline: false`.",
+        ),
+        Tool::Drive => (
+            DRIVE_TOOL,
+            "Drive the Zeron UI",
+            "Drive a Zeron Dev bundle's UI as a person would: click, move, drag, scroll, press keys, type, perform an accessibility action, dispatch a gpui action, or `set` theme, window size and motion scale. Only debug builds (Zeron Dev bundles) take input, and this tool refuses the app serving this chat, so pass a Dev bundle's label or pid from `ui_driver` `list` as `target`. Act on an element by `ref` from `ui_driver` `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Each action replies after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` or `track` with a `during` drive request measures the transition it starts. Check the result with `ui_driver` (`tree`, `wait`, `snapshot`).",
+        ),
+    };
     json!({
-        "name": TOOL,
-        "description": "Inspect and drive a running Zeron app from inside it: read its UI as text, act on elements, wait for it, and snapshot it. `list` shows the running apps (pid, label, build, ipcPort, input). Omit `target` for the app serving this chat; a release build is observe-only and refuses drive actions. To drive, pass a Zeron Dev bundle's label or pid from `list` as `target`. Prefer `tree` with `query` over snapshots: it is cheap text, and each line carries a `ref`. Act on an element by `ref` from `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Drive actions (click, move, drag, scroll, key, type, press, action, set) reply after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` measures drawn frames for `ms` (fps, interval percentiles, long frames, draw time); `track` samples one element's bounds every drawn frame and reports jumps and when it settled. Give either one a `during` drive request to measure the transition it starts. `set` changes theme, window size or motion scale at runtime. Use `wait` (`for`: idle, frame, ms, text, select, gone) instead of sleeping. Take a `snapshot` only for a visual check: it returns the PNG, or only its path with `inline: false`.",
+        "name": name,
+        "description": description,
         "inputSchema": {
             "type": "object",
             "properties": properties,
             "required": ["action"],
             "additionalProperties": false
         },
-        "annotations": { "title": "Drive the Zeron UI", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
+        "annotations": {
+            "title": title,
+            "readOnlyHint": tool == Tool::Observe,
+            "destructiveHint": tool == Tool::Drive,
+            "idempotentHint": false,
+            "openWorldHint": false
+        }
     })
 }
 
-pub async fn mcp_result(args: &Value, own_port: Option<u16>) -> Value {
+pub async fn mcp_result(tool: Tool, args: &Value, own_port: Option<u16>) -> Value {
     let image = args["action"] == "snapshot" && args["inline"] != false;
-    let result = run(args, own_port).await.and_then(|value| {
+    let result = run(args, own_port, Some(tool)).await.and_then(|value| {
         let mut content = vec![json!({ "type": "text", "text": text(&value) })];
         if image {
             content.push(
@@ -123,7 +191,7 @@ pub fn text(value: &Value) -> String {
     }
 }
 
-pub async fn run(args: &Value, own_port: Option<u16>) -> Result<Value, String> {
+pub async fn run(args: &Value, own_port: Option<u16>, tool: Option<Tool>) -> Result<Value, String> {
     let mut args = match args {
         Value::Object(args) => args.clone(),
         Value::Null => Map::new(),
@@ -141,11 +209,23 @@ pub async fn run(args: &Value, own_port: Option<u16>) -> Result<Value, String> {
         Some(other) => return Err(format!("`target` must be a pid or a label, not {other}")),
     };
     args.remove("inline");
+    if let Some(tool) = tool {
+        tool.admits(&action, &args)?;
+    }
     let live = list();
     if action == "list" {
         return serde_json::to_value(live).map_err(|error| error.to_string());
     }
     let app = select(&live, target.as_deref(), own_port)?;
+    if tool == Some(Tool::Drive) && own_port == Some(app.ipc_port) {
+        return Err(format!(
+            "{DRIVE_TOOL} does not drive {} (pid {}): it serves this chat's engine on port {}, so its input could approve this chat's own requests. Pass a Zeron Dev bundle with its own engine as `target`.\n{}",
+            app.label,
+            app.pid,
+            app.ipc_port,
+            targets(&live)
+        ));
+    }
     request(app, args).await
 }
 
@@ -498,6 +578,45 @@ mod tests {
             ),
             5000 + 20_000 + 1000 + 10_000
         );
+    }
+
+    #[test]
+    fn the_observe_tool_refuses_input_and_the_drive_tool_takes_only_input() {
+        let Value::Object(during) = json!({ "during": { "action": "click", "x": 1, "y": 2 } })
+        else {
+            unreachable!()
+        };
+        for tool in [Tool::Observe, Tool::Drive] {
+            for action in super::tool(tool)["inputSchema"]["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+            {
+                let action = action.as_str().unwrap();
+                let args = match tool == Tool::Drive && RECORDERS.contains(&action) {
+                    true => during.clone(),
+                    false => Map::new(),
+                };
+                assert_eq!(tool.admits(action, &args), Ok(()), "{tool:?} {action}");
+            }
+        }
+        for action in DRIVE_ACTIONS {
+            let error = Tool::Observe.admits(action, &Map::new()).unwrap_err();
+            assert!(error.starts_with(&format!("`{action}` drives")), "{error}");
+            assert!(error.contains(DRIVE_TOOL), "{error}");
+        }
+        for action in std::iter::once(&"list").chain(OBSERVE_ACTIONS) {
+            let error = Tool::Drive.admits(action, &Map::new()).unwrap_err();
+            assert!(
+                error.ends_with(&format!("call {TOOL} for `{action}`")),
+                "{error}"
+            );
+        }
+        let error = Tool::Observe.admits("frames", &during).unwrap_err();
+        assert!(error.starts_with("`during` drives"), "{error}");
+        let Value::Object(null) = json!({ "during": null }) else {
+            unreachable!()
+        };
+        assert_eq!(Tool::Observe.admits("track", &null), Ok(()));
     }
 
     #[test]

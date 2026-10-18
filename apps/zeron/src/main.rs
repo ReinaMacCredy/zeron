@@ -482,7 +482,7 @@ async fn ui_cli(
     if let Some(target) = target {
         request.insert("target".into(), target.into());
     }
-    match zeron_mcp::ui_driver::run(&serde_json::Value::Object(request), None).await {
+    match zeron_mcp::ui_driver::run(&serde_json::Value::Object(request), None, None).await {
         Ok(reply) => {
             println!("{}", zeron_mcp::ui_driver::text(&reply));
             Ok(())

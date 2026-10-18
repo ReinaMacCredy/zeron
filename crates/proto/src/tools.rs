@@ -109,9 +109,11 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "project_actions",
                 "Manage the saved commands in the project's Actions menu.",
             ),
-            tool(
+            tool("ui_driver", "Inspect a running Zeron app's UI."),
+            needs(
+                "ui_driver_drive",
+                "Click, type and change a Zeron Dev build's UI, never the app serving the chat.",
                 "ui_driver",
-                "Inspect a running Zeron app's UI, and drive a Dev build's.",
             ),
             tool(
                 "tasks",
