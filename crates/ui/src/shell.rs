@@ -87,6 +87,7 @@ mod home_grid_tests;
 mod type_to_focus_tests;
 mod command_palette;
 mod device_tabs;
+mod docs;
 mod file_mutations;
 mod files_panel;
 mod handoff;
@@ -714,7 +715,7 @@ impl SettingsSection {
     }
 
     /// Inverse of [`Self::slug`], plus the pages' former names.
-    fn from_slug(slug: &str) -> Option<Self> {
+    pub(crate) fn from_slug(slug: &str) -> Option<Self> {
         Some(match slug {
             "devices" => SettingsSection::Devices,
             "providers" | "harnesses" => SettingsSection::Harnesses,
@@ -965,6 +966,7 @@ pub enum Route {
     Settings(SettingsSection),
     Terminal,
     Tasks,
+    Docs,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -1135,6 +1137,7 @@ pub enum NavEntry {
     Usage,
     Inbox,
     Tasks,
+    Docs(Option<&'static str>),
 }
 
 /// Browser-style navigation history for the titlebar back/forward buttons
@@ -2602,6 +2605,9 @@ pub struct Shell {
     swipe: swipe_nav::SwipeNav,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     usage_page: Option<Entity<crate::usage::UsagePage>>,
+    docs_article: Option<&'static str>,
+    docs_search: Entity<ComposerInput>,
+    _docs_search_sub: Subscription,
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
     _tasks_events: Option<gpui::Subscription>,
@@ -2966,6 +2972,13 @@ impl Shell {
                 cx.notify();
             }
         });
+        let docs_search =
+            cx.new(|cx| ComposerInput::with_context("Search docs…", "PaletteSearch", cx));
+        let docs_search_sub = cx.subscribe(&docs_search, |_: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
         let voice = cx.new(|_| crate::voice::VoiceController::default());
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
@@ -3155,6 +3168,7 @@ impl Shell {
             Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
+            Route::Docs => NavEntry::Docs(None),
         });
         // Parent notifications carry presentation changes (session status,
         // elapsed labels, menus); sibling animation/caret ticks do not.
@@ -3299,6 +3313,9 @@ impl Shell {
             swipe: swipe_nav::SwipeNav::default(),
             pull_requests_page: None,
             usage_page: None,
+            docs_article: None,
+            docs_search,
+            _docs_search_sub: docs_search_sub,
             inbox_page: None,
             tasks_page: None,
             _tasks_events: None,
@@ -8486,6 +8503,7 @@ impl Shell {
             NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
+            NavEntry::Docs(article) => self.enter_docs_route(article, cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -16022,6 +16040,10 @@ impl Shell {
             return self.render_tasks_page(window, cx);
         }
 
+        if matches!(self.route, Route::Docs) {
+            return self.render_docs_page(main_content_width, window, cx);
+        }
+
         if matches!(self.route, Route::PullRequests) {
             if let Some((url, device)) = self.pending_pull_request.take() {
                 self.show_pull_request_detail(url, device, window, cx);
@@ -19018,7 +19040,8 @@ impl Render for Shell {
                     | Route::Terminal
                     | Route::Usage
                     | Route::Inbox
-                    | Route::Tasks => {}
+                    | Route::Tasks
+                    | Route::Docs => {}
                 }),
             )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
@@ -19315,6 +19338,15 @@ impl Render for Shell {
                         self.debug_dialog = None;
                         self.help_menu.open(());
                     }
+                    Some("docs") => {
+                        self.debug_dialog = None;
+                        self.open_docs(None, cx);
+                    }
+                    Some(knob) if knob.starts_with("docs:") => {
+                        let article = crate::docs::article(&knob["docs:".len()..]);
+                        self.debug_dialog = None;
+                        self.open_docs(article.map(|article| article.id.as_str()), cx);
+                    }
                     _ => {}
                 }
                 // `=model-switch` picks a different model on the selected chat
@@ -19559,7 +19591,7 @@ impl Render for Shell {
                 let page_route = pr_route
                     || matches!(
                         self.route,
-                        Route::Terminal | Route::Usage | Route::Inbox | Route::Tasks
+                        Route::Terminal | Route::Usage | Route::Inbox | Route::Tasks | Route::Docs
                     );
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);

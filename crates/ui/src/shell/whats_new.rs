@@ -317,6 +317,14 @@ impl Shell {
                     this.open_settings(SettingsSection::Shortcuts, cx);
                 })),
             )
+            .child(
+                help_row(theme, "help-docs", icons::LUCIDE_BOOK_OPEN, "Docs").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.close_help_menu(cx);
+                        this.open_docs(None, cx);
+                    }),
+                ),
+            )
             .into_any_element();
         trigger
             .child(popover::anchored_menu_right(

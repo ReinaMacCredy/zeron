@@ -1,0 +1,305 @@
+# In-app Docs. Sections show in this order; articles keep their order within a
+# section. Each article's body is <id>.md, listed in src/docs.rs BODIES.
+# actions: tasks, inbox, usage, pull-requests, changelog, settings/<slug>, docs/<id>.
+
+[[section]]
+id = "basics"
+title = "Basics"
+
+[[section]]
+id = "agents"
+title = "Agents"
+
+[[section]]
+id = "work"
+title = "Work"
+
+[[section]]
+id = "tools"
+title = "Tools"
+
+[[article]]
+id = "getting-around"
+section = "basics"
+title = "Getting around"
+icon = "lucide-columns-2"
+blurb = "The app rail, the sidebar, and moving back and forward through pages."
+actions = ["inbox", "tasks", "settings/appearance"]
+
+[[article]]
+id = "new-chat"
+section = "basics"
+title = "Start a new chat"
+icon = "lucide-square-pen"
+blurb = "Pick Chat or Work, a project and checkout, then send your first message."
+actions = ["settings/general"]
+
+[[article]]
+id = "composer"
+section = "basics"
+title = "The composer"
+icon = "chat-round-line"
+blurb = "Send, attach files, queue or steer follow-ups, stop, and use predictions."
+actions = ["settings/general"]
+
+[[article]]
+id = "commands-and-mentions"
+section = "basics"
+title = "Commands and mentions"
+icon = "command"
+blurb = "Use / commands, $ skills, and @ mentions of files and threads."
+actions = ["settings/providers"]
+
+[[article]]
+id = "models-and-effort"
+section = "basics"
+title = "Models and effort"
+icon = "lucide-sliders-horizontal"
+blurb = "Choose the agent and model, set reasoning effort and fast mode."
+actions = ["settings/general", "settings/providers"]
+
+[[article]]
+id = "sessions-sidebar"
+section = "basics"
+title = "Sessions in the sidebar"
+icon = "lucide-rows-3"
+blurb = "Status, pinning, renaming, archiving, grouping, and Inbox shelves."
+actions = ["settings/archived"]
+
+[[article]]
+id = "command-palette"
+section = "basics"
+title = "Command palette and switcher"
+icon = "palette-search"
+blurb = "Cmd+K finds threads, files, and commands; Ctrl+Tab flips sessions."
+actions = ["settings/general"]
+
+[[article]]
+id = "keyboard-shortcuts"
+section = "basics"
+title = "Keyboard shortcuts"
+icon = "keyboard"
+blurb = "The most useful defaults and how to rebind them."
+actions = ["settings/shortcuts"]
+
+[[article]]
+id = "appearance"
+section = "basics"
+title = "Appearance"
+icon = "tuning"
+blurb = "Light and dark, themes, accent, glass, fonts, and background art."
+actions = ["settings/appearance"]
+
+[[article]]
+id = "home-widgets"
+section = "basics"
+title = "Home widgets"
+icon = "home"
+blurb = "Cards under the new chat composer: running agents, PRs, Git, ports."
+actions = ["settings/home"]
+
+[[article]]
+id = "updates"
+section = "basics"
+title = "Updates and what's new"
+icon = "lucide-gift"
+blurb = "App and agent updates, auto-resume after limits, the changelog."
+actions = ["changelog", "settings/providers"]
+
+[[article]]
+id = "providers"
+section = "agents"
+title = "Providers and accounts"
+icon = "widget"
+blurb = "Choose which agents Zeron runs, sign in, and add extra provider instances."
+actions = ["settings/providers", "usage"]
+
+[[article]]
+id = "agent-profiles"
+section = "agents"
+title = "Agent profiles"
+icon = "bot"
+blurb = "Save an agent, model, mode and instructions, and apply them in one click."
+actions = ["settings/agent-profiles"]
+
+[[article]]
+id = "delegation"
+section = "agents"
+title = "Delegation and subagents"
+icon = "lucide-bot"
+blurb = "Follow, open, and stop the child agents a chat starts."
+actions = ["settings/general", "settings/tools"]
+
+[[article]]
+id = "side-chat"
+section = "agents"
+title = "Side questions with /btw"
+icon = "astra-chat-bubble"
+blurb = "Ask about a chat on the side while its agent keeps working."
+actions = ["settings/shortcuts"]
+
+[[article]]
+id = "handoff"
+section = "agents"
+title = "Hand off a thread"
+icon = "lucide-arrow-left-right"
+blurb = "Continue a conversation with another agent, here or in a new thread."
+
+[[article]]
+id = "review"
+section = "agents"
+title = "Code review"
+icon = "checklist"
+blurb = "Run a fresh reviewer over your changes and fix or dismiss its findings."
+actions = ["settings/code-review"]
+
+[[article]]
+id = "compaction"
+section = "agents"
+title = "Compaction and context"
+icon = "lucide-minimize-2"
+blurb = "Watch context use, compact by hand, and let idle or busy chats compact."
+actions = ["settings/general"]
+
+[[article]]
+id = "agent-questions"
+section = "agents"
+title = "When an agent asks"
+icon = "lucide-message-circle-question"
+blurb = "Answer agent questions and approvals, and choose how often agents ask."
+actions = ["inbox", "tasks"]
+
+[[article]]
+id = "agent-tools"
+section = "agents"
+title = "Zeron tools for agents"
+icon = "lucide-hammer"
+blurb = "What agents can do through Zeron's tools, and how to switch tools off."
+actions = ["settings/tools"]
+
+[[article]]
+id = "projects"
+section = "work"
+title = "Projects and worktrees"
+icon = "lucide-folder-plus"
+blurb = "Add project folders, keep agents in worktrees, and save run commands as Actions."
+actions = ["settings/general"]
+
+[[article]]
+id = "right-pane"
+section = "work"
+title = "Right pane and files"
+icon = "lucide-panel-right"
+blurb = "Open a browser, terminal, file, or diff next to the chat, and browse the file tree."
+actions = ["settings/files"]
+
+[[article]]
+id = "terminal"
+section = "work"
+title = "Terminal"
+icon = "terminal"
+blurb = "A terminal drawer under every chat, plus full-window terminal tabs."
+actions = ["settings/shortcuts", "settings/appearance"]
+
+[[article]]
+id = "git"
+section = "work"
+title = "Git"
+icon = "git-branch"
+blurb = "Browse history, stage, commit with an AI message, pull, and push."
+actions = ["pull-requests", "settings/source-control"]
+
+[[article]]
+id = "pull-requests"
+section = "work"
+title = "Pull requests"
+icon = "lucide-git-pull-request"
+blurb = "Review, merge, and chat about GitHub pull requests in a native view."
+actions = ["pull-requests", "settings/source-control"]
+
+[[article]]
+id = "tasks"
+section = "work"
+title = "Tasks"
+icon = "hugeicons-apple-reminder"
+blurb = "Plan work as a list or a Kanban board and start a task with one click."
+actions = ["tasks"]
+
+[[article]]
+id = "inbox"
+section = "work"
+title = "Inbox"
+icon = "bell"
+blurb = "What needs you, today's tasks, your day so far, and plan left."
+actions = ["inbox"]
+
+[[article]]
+id = "usage"
+section = "work"
+title = "Usage and cost"
+icon = "lucide-chart-no-axes-column"
+blurb = "Plan limits, token spend at API prices, and per-session cost and speed."
+actions = ["usage"]
+
+[[article]]
+id = "split-view"
+section = "work"
+title = "Split view"
+icon = "split-columns"
+blurb = "Drag a session onto the chat to work in two side by side."
+
+[[article]]
+id = "computer-use"
+section = "tools"
+title = "Computer use"
+icon = "cursor"
+blurb = "Let an agent see and drive your Mac's apps, and take control back anytime."
+actions = ["settings/computer"]
+
+[[article]]
+id = "browser"
+section = "tools"
+title = "Browser"
+icon = "globe"
+blurb = "Browse beside the chat, let agents drive a tab, annotate pages, open HTML."
+actions = ["settings/computer"]
+
+[[article]]
+id = "appshots"
+section = "tools"
+title = "Appshots"
+icon = "screen-capture"
+blurb = "Snap another app's window into a chat with one hotkey."
+actions = ["settings/appshots"]
+
+[[article]]
+id = "device-hub"
+section = "tools"
+title = "Device hub"
+icon = "smartphone"
+blurb = "Run iOS simulators and Android emulators next to the chat."
+actions = ["settings/device-hub"]
+
+[[article]]
+id = "voice"
+section = "tools"
+title = "Voice and dictation"
+icon = "microphone"
+blurb = "Dictate into the composer, or talk with a Codex agent in voice mode."
+actions = ["settings/voice"]
+
+[[article]]
+id = "notifications"
+section = "tools"
+title = "Notifications"
+icon = "bell"
+blurb = "Choose the sounds and desktop banners that tell you a chat needs you."
+actions = ["settings/notifications"]
+
+[[article]]
+id = "devices"
+section = "tools"
+title = "Devices"
+icon = "monitor"
+blurb = "Connect your machines and run chats and projects on another device."
+actions = ["settings/devices"]
