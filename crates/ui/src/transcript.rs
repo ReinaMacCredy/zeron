@@ -7276,7 +7276,8 @@ impl Transcript {
     /// What a sent bubble's attachment chips show beyond their label: the
     /// progress of an upload still crossing to the host in place of the icon
     /// (the strip's thumbnails used to carry it), a warning for an image that
-    /// can't be read back, and a click target opening a loaded image.
+    /// can't be read back, and a click target opening a loaded image or a
+    /// pasted text.
     fn chip_overlays(
         &mut self,
         row_id: &SharedString,
@@ -7327,6 +7328,10 @@ impl Transcript {
                     }
                     _ => {}
                 }
+            } else if !sending
+                && zeron_proto::attachment_mentions::pasted_text_index_from_name(upload).is_some()
+            {
+                open = Some(upload.clone());
             }
             if open.is_some() || status.is_some() {
                 overlays.push(ChipOverlay {
@@ -7804,7 +7809,15 @@ impl Transcript {
                     cx.entity_id(),
                     chip_overlays,
                     Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                        this.open_chip_image(path, window, cx);
+                        match zeron_proto::attachment_mentions::pasted_text_index_from_name(path) {
+                            Some(index) => this.open_pasted_text(
+                                path.clone(),
+                                crate::pasted_text::pill_label(index, None).into(),
+                                window,
+                                cx,
+                            ),
+                            None => this.open_chip_image(path, window, cx),
+                        }
                     })),
                 ),
             });
@@ -11985,7 +11998,7 @@ fn user_bubble_text(
 const CHIP_STATUS_SIZE: f32 = 14.0;
 
 /// One sent chip's extras, laid over its pill: a status in place of its icon
-/// and, for a loaded image, a click target opening it full size.
+/// and, for a loaded image or a pasted text, a click target opening it.
 struct ChipOverlay {
     range: Range<usize>,
     open: Option<SharedString>,
@@ -20467,10 +20480,11 @@ mod tests {
         });
         let transcript = cx.new(|cx| Transcript::new(state, cx));
         let body = format!(
-            "compare {} with {} and {}",
+            "compare {} with {} and {} and {}",
             attachment_mention_link(1, None),
             attachment_mention_link(2, Some("notes.md")),
             attachment_mention_link(3, Some("done.md")),
+            attachment_mention_link(4, Some("Pasted text 4.txt")),
         );
         let raw = crate::attachments::with_attachments(
             &body,
@@ -20478,6 +20492,7 @@ mod tests {
                 "pending://att-1/Image 1.png".to_string(),
                 "pending://att-2/notes.md".to_string(),
                 "/uploads/ef56ab78-done.md".to_string(),
+                "/uploads/ab12cd34-Pasted_text_4.txt".to_string(),
             ],
         );
         let mut entry = assistant("u5", MessageStatus::Complete, vec![]);
@@ -20498,15 +20513,21 @@ mod tests {
         transcript.update(cx, |transcript, cx| {
             let overlays = transcript.chip_overlays(&"u5".into(), &mentions, &Theme::dark(), cx);
             // The image (43% across) and the file still crossing show a
-            // status; the landed file shows its icon.
+            // status; the landed file shows its icon; the landed pasted text
+            // opens its preview.
             assert_eq!(
                 overlays
                     .iter()
-                    .map(|overlay| (overlay.range.clone(), overlay.status.is_some()))
+                    .map(|overlay| (
+                        overlay.range.clone(),
+                        overlay.status.is_some(),
+                        overlay.open.is_some()
+                    ))
                     .collect::<Vec<_>>(),
                 [
-                    (mentions[0].range.clone(), true),
-                    (mentions[1].range.clone(), true)
+                    (mentions[0].range.clone(), true, false),
+                    (mentions[1].range.clone(), true, false),
+                    (mentions[3].range.clone(), false, true)
                 ]
             );
             assert_eq!(
