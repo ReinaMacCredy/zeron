@@ -20,7 +20,7 @@ const THUMB_WIDTH: u32 = 440;
 
 /// One window frame as the window server holds it: tightly packed BGRA at
 /// nominal (1px per point) resolution — the byte order `RenderImage` consumes.
-pub(super) struct CapturedFrame {
+pub(crate) struct CapturedFrame {
     pub width: u32,
     pub height: u32,
     pub bgra: Vec<u8>,
@@ -40,18 +40,22 @@ pub(super) struct Switcher {
 /// unexpected pixel layout.
 #[cfg(target_os = "macos")]
 pub(super) fn capture_window() -> Option<CapturedFrame> {
-    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-    use core_graphics::window::{
-        create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowImageNominalResolution,
-        kCGWindowImageShouldBeOpaque, kCGWindowListOptionIncludingWindow,
-    };
     let mtm = objc2::MainThreadMarker::new()?;
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     let window = app
         .keyWindow()
         .or_else(|| app.mainWindow())
         .or_else(|| app.windows().firstObject())?;
-    let id = u32::try_from(window.windowNumber()).ok()?;
+    capture_window_number(u32::try_from(window.windowNumber()).ok()?)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_window_number(id: u32) -> Option<CapturedFrame> {
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    use core_graphics::window::{
+        create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowImageNominalResolution,
+        kCGWindowImageShouldBeOpaque, kCGWindowListOptionIncludingWindow,
+    };
     // CGRectNull: the image takes the window's own bounds.
     let null_rect = CGRect::new(
         &CGPoint::new(f64::INFINITY, f64::INFINITY),

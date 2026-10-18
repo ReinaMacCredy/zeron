@@ -110,7 +110,7 @@ pub(crate) mod spaces;
 mod split;
 mod summary;
 mod swipe_nav;
-mod switcher;
+pub(crate) mod switcher;
 mod whats_new;
 mod task_actions;
 mod thread_search;
@@ -8444,6 +8444,10 @@ impl Shell {
         } else {
             self.nav.push(entry);
         }
+    }
+
+    pub(crate) fn driver_route(&self, cx: &App) -> (Route, Option<String>) {
+        (self.route, self.state.read(cx).selected_chat.clone())
     }
 
     fn navigate_back(&mut self, cx: &mut Context<Self>) {
@@ -20010,6 +20014,7 @@ impl Render for Shell {
         if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
             window.request_animation_frame();
         }
+        crate::ui_driver::frame_drawn();
 
         // Boot splash overlay: visible → crossfades out on Ready → removed.
         let root = match self.splash {

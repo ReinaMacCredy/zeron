@@ -22,6 +22,7 @@ pub mod provider_instance;
 pub mod sidebar_pins;
 pub mod source_control;
 pub mod tools;
+pub mod ui_driver;
 pub mod usage;
 pub mod view;
 pub mod voice;
