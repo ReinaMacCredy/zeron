@@ -149,6 +149,7 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
 /// on click is enough.
 fn tab_trailing(
     id: &str,
+    title: &SharedString,
     status: ChatIndicator,
     show_close: bool,
     theme: &Theme,
@@ -158,6 +159,8 @@ fn tab_trailing(
         let close_id = id.to_string();
         return div()
             .id(SharedString::from(format!("session-tab-close-{id}")))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Close {title}")))
             .size(px(24.0))
             .flex_none()
             .flex()
@@ -286,7 +289,7 @@ fn split_tab_chip(
         let is_primary = selected == Some(id.as_str());
         let half_hovered = hovered == Some(id.as_str());
         let brand = harness.last().cloned();
-        let trailing = tab_trailing(&id, status, is_primary || half_hovered, theme, cx);
+        let trailing = tab_trailing(&id, &title, status, is_primary || half_hovered, theme, cx);
         let select_id = id.clone();
         let middle_id = id.clone();
         let menu_id = id.clone();
@@ -295,6 +298,9 @@ fn split_tab_chip(
             div()
                 .id(SharedString::from(format!("session-tab-{id}")))
                 .debug_selector(|| format!("session-tab-{id}"))
+                .role(gpui::Role::Tab)
+                .aria_label(title.clone())
+                .aria_selected(is_primary)
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -1329,10 +1335,14 @@ impl Shell {
                     let middle_id = id.clone();
                     let menu_id = id.clone();
                     let hover_id = id.clone();
-                    let trailing = tab_trailing(&id, status, is_selected || is_hovered, &theme, cx);
+                    let trailing =
+                        tab_trailing(&id, &title, status, is_selected || is_hovered, &theme, cx);
                     let tab_el = div()
                         .id(SharedString::from(format!("session-tab-{id}")))
                         .debug_selector(|| format!("session-tab-{id}"))
+                        .role(gpui::Role::Tab)
+                        .aria_label(title.clone())
+                        .aria_selected(is_selected)
                         .w(px(TAB_MAX_WIDTH))
                         .min_w(px(TAB_MIN_WIDTH))
                         .h(px(TAB_HEIGHT))
@@ -1482,6 +1492,8 @@ impl Shell {
             .child(
                 div()
                     .id("session-tabs-scroll")
+                    .role(gpui::Role::TabList)
+                    .aria_label("Sessions")
                     .flex()
                     .flex_row()
                     .items_center()

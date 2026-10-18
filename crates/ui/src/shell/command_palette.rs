@@ -506,6 +506,7 @@ impl Shell {
         self.close_add_space(cx);
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search threads, commands and files…", "PaletteSearch", cx)
+                .with_accessibility_role(gpui::Role::SearchInput)
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -1163,8 +1164,9 @@ impl Shell {
                 popover::menu_row(theme, active, format!("command-file-{ix}"))
                     .id(("command-file", ix))
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
+                    .role(gpui::Role::ListBoxOption)
                     .aria_label(SharedString::from(path.clone()))
+                    .aria_selected(active)
                     .min_h(px(30.0))
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1206,11 +1208,12 @@ impl Shell {
                 popover::menu_row(theme, active, format!("command-content-{ix}"))
                     .id(("command-content", ix))
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
+                    .role(gpui::Role::ListBoxOption)
                     .aria_label(SharedString::from(format!(
                         "{}:{} {}",
                         found.path, found.line, found.preview
                     )))
+                    .aria_selected(active)
                     .min_h(px(30.0))
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1379,6 +1382,8 @@ impl Shell {
         }
         let body = div()
             .id("command-results")
+            .role(gpui::Role::ListBox)
+            .aria_label("Results")
             .min_h_0()
             .max_h(px(palette_results_height(viewport)))
             .overflow_y_scroll()
@@ -1396,6 +1401,9 @@ impl Shell {
             });
         let body = palette_results_fade(body, &scroll);
         let tabs = div()
+            .id("command-tabs")
+            .role(gpui::Role::TabList)
+            .aria_label("Result type")
             .flex_none()
             .px(px(12.0))
             .py(px(6.0))
@@ -1418,6 +1426,8 @@ impl Shell {
                     .child(popover::kbd_hint(&theme, &combo))
             }));
         let card = palette_card("command-palette", &focus, viewport, &theme)
+            .role(gpui::Role::Dialog)
+            .aria_label("Command palette")
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, action: &SelectPaletteTab, _, cx| {
                 if let Some(tab) = Tab::ALL.get(action.0) {
@@ -1496,8 +1506,9 @@ fn command_row(
     popover::menu_row(theme, active, format!("command-action-{ix}"))
         .id(("command-action", ix))
         .rounded(px(popover::PALETTE_ITEM_RADIUS))
-        .role(gpui::Role::Button)
+        .role(gpui::Role::ListBoxOption)
         .aria_label(label.clone())
+        .aria_selected(active)
         .min_h(px(30.0))
         .py(px(4.0))
         .child(

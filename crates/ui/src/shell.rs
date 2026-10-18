@@ -11639,6 +11639,7 @@ impl Shell {
                     }
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
+                .when(corner_hovered, |el| el.role(gpui::Role::Button))
                 .flex_none()
                 // Pin the corner to line 1's text height so the archive pill
                 // (taller, padded) overflows vertically instead of growing the
@@ -11757,6 +11758,8 @@ impl Shell {
             &row_id,
             &id,
             &title,
+            selected,
+            status_label.clone(),
             &harnesses,
             drag,
             preview,
@@ -11944,7 +11947,8 @@ impl Shell {
                                     "Session time"
                                 })
                                 .when(show_archive, |el| {
-                                    el.cursor_pointer()
+                                    el.role(gpui::Role::Button)
+                                        .cursor_pointer()
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
                                         })
@@ -12331,20 +12335,23 @@ impl Shell {
                 cx,
             )
         });
-        let frame = self.chat_row_frame(
-            &row_id,
-            &id,
-            &title,
-            &harnesses,
-            drag,
-            preview,
-            true,
-            rename_input.is_some(),
-            hovered,
-            &fade_key,
-            cx,
-        )
-        .when_some(hover_card, |el, card| el.child(card));
+        let frame = self
+            .chat_row_frame(
+                &row_id,
+                &id,
+                &title,
+                selected,
+                status_label.clone(),
+                &harnesses,
+                drag,
+                preview,
+                true,
+                rename_input.is_some(),
+                hovered,
+                &fade_key,
+                cx,
+            )
+            .when_some(hover_card, |el, card| el.child(card));
 
         if slim {
             let lifted = hovered || selected;
@@ -12880,6 +12887,8 @@ impl Shell {
         row_id: &str,
         id: &str,
         title: &SharedString,
+        selected: bool,
+        status: Option<SharedString>,
         harnesses: &[crate::provider_instances::InstanceIcon],
         drag: Option<SidebarSessionDrag>,
         preview: bool,
@@ -12893,6 +12902,14 @@ impl Shell {
         let menu_id = id.to_string();
         div()
             .id(SharedString::from(row_id.to_string()))
+            .role(if search_query_none {
+                gpui::Role::Button
+            } else {
+                gpui::Role::ListBoxOption
+            })
+            .aria_label(title.clone())
+            .aria_selected(selected)
+            .when_some(status, |el, status| el.aria_description(status))
             .group("sidebar-session-row")
             .debug_selector({
                 let row_id = row_id.to_string();
@@ -13605,6 +13622,8 @@ impl Shell {
         Some(
             div()
                 .id("github-star-banner")
+                .role(gpui::Role::Link)
+                .aria_label("Star on GitHub")
                 .mx(px(Theme::SPACE_SM))
                 .mb(px(Theme::SPACE_SM))
                 .pl(px(Theme::SPACE_SM))
@@ -13639,6 +13658,8 @@ impl Shell {
                 .child(
                     div()
                         .id("github-star-banner-dismiss")
+                        .role(gpui::Role::Button)
+                        .aria_label("Dismiss Star on GitHub")
                         .flex_none()
                         .size(px(18.0))
                         .rounded(px(4.0))
@@ -15647,6 +15668,9 @@ impl Shell {
                     .child(SharedString::from(label.to_string()))
             };
             let card = popover::dialog_card(&theme)
+                .id("appshot-welcome-card")
+                .role(gpui::Role::Dialog)
+                .aria_label("Zeron Appshots are live!")
                 .w(px(420.0))
                 .rounded(px(20.0))
                 .child(
@@ -15696,6 +15720,8 @@ impl Shell {
                         .child(
                             action("Not now")
                                 .id("appshot-welcome-dismiss")
+                                .role(gpui::Role::Button)
+                                .aria_label("Not now")
                                 .text_color(theme.text_muted)
                                 .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -15705,6 +15731,8 @@ impl Shell {
                         .child(
                             action("Set up Appshots")
                                 .id("appshot-welcome-confirm")
+                                .role(gpui::Role::Button)
+                                .aria_label("Set up Appshots")
                                 .bg(theme.text)
                                 .text_color(theme.on_solid)
                                 .hover(|s| s.opacity(0.9))
@@ -18487,6 +18515,8 @@ fn window_control_button_with(
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
+        .role(gpui::Role::Button)
+        .aria_label(label)
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -18642,7 +18672,10 @@ fn nav_history_button(
 ) -> AnyElement {
     if !enabled {
         return div()
+            .id(id)
             .debug_selector(move || id.to_owned())
+            .role(gpui::Role::Button)
+            .aria_label(label)
             .size(px(24.0))
             .flex_none()
             .flex()
