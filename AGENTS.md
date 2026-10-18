@@ -3,17 +3,30 @@
 Local `main` is the integration branch; upstream is `origin` (zeronsh/zeron).
 Never push, tag, or bump the version without Reina's explicit approval.
 
-## Worktrees
+## Where to work
 
-- One branch per unit of work, in `.maestro/worktree/<slug>` with its own
-  `CARGO_TARGET_DIR=$PWD/target`. Never build a worktree into the main
-  checkout's `target/`.
-- Right after `git worktree add`, run `scripts/seed-worktree-target.sh` from
-  the new worktree, before its first build: it APFS-clones the main checkout's
-  `target/debug` (about 2-3 min, no extra disk) so only workspace crates
-  rebuild. Worktrees Zeron creates get this from the project's setup Action.
-- Peers edit the main checkout live. Never revert, format, or stash files
-  there that you did not change.
+Every worktree carries its own 100G+ `target/`, so work in the main checkout
+on `main` by default, whatever the size of the change. Take a worktree only
+when another thread is already working in the main checkout: `git status
+--short` shows changes you did not make, or Reina says other threads are
+running. A thread that started on main stays there when others arrive; the
+newcomers take worktrees.
+
+- In the main checkout:
+  - Commit only your own paths: `git commit -m "..." -- <paths>`. Never
+    `git commit -a`, `git add .`, or `git add -A`.
+  - Iterate with `cargo check -p <crate>`; run `cargo build` or `cargo test`
+    only to verify.
+  - Never switch branches here, and never revert, format, or stash files you
+    did not change.
+- In a worktree, `.maestro/worktree/<slug>` on its own branch:
+  - Build with its own `CARGO_TARGET_DIR=$PWD/target`, never into the main
+    checkout's `target/`.
+  - Right after `git worktree add`, run `scripts/seed-worktree-target.sh`
+    from the new worktree, before its first build: it APFS-clones the main
+    checkout's `target/debug` (about 2-3 min, no extra disk) so only
+    workspace crates rebuild. Worktrees Zeron creates get this from the
+    project's setup Action.
 - Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
   (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
   hosts the running sessions.
@@ -41,6 +54,14 @@ in the same hand-off, without waiting to be asked:
 
 Branches the gate refused stay in their worktree; say so in the hand-off so
 the next session does not mistake them for abandoned.
+
+## Tests
+
+- Verification is required; new tests are not. Spacing, color, size, copy,
+  and layout tweaks are proven with a `Zeron Dev <N>` screenshot, never a new
+  gpui fixture test that pins pixel bounds.
+- Add a test only for behavior no existing test covers and that could
+  plausibly regress; extend a nearby test before building a new fixture.
 
 ## Build hygiene
 
