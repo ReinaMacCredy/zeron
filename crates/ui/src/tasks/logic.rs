@@ -131,6 +131,9 @@ mod tests {
             chat_id: None,
             updated_at: Utc.timestamp_millis_opt(1_000).unwrap(),
             deleted: false,
+            mode: Default::default(),
+            plan_pending: false,
+            send_error: None,
         }
     }
 

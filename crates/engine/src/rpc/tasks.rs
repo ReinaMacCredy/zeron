@@ -54,6 +54,9 @@ impl EngineRpc {
                 created_at: now,
                 updated_at: now,
                 deleted: false,
+                mode: Default::default(),
+                plan_pending: false,
+                send_error: None,
             })
             .map_err(failed)
             .map(drop)

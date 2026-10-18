@@ -831,7 +831,7 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
         }
     });
     Row {
-        status: task_status(task, linked.as_ref().map(|l| l.indicator)),
+        status: task_status(task, linked.as_ref().map(|l| l.indicator), &[]),
         project: task
             .space_id
             .as_deref()
@@ -871,7 +871,7 @@ pub(crate) fn needs_you_count(state: &AppState) -> usize {
         .filter(|task| {
             let linked =
                 linked_chat(&state.chats, task).map(|chat| state.display_status_for(chat, now));
-            task_status(task, linked) == TaskStatus::NeedsYou
+            task_status(task, linked, &[]) == TaskStatus::NeedsYou
         })
         .count()
 }

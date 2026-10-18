@@ -40,12 +40,14 @@ pub const KIND_CHATS: &str = "chats";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
 pub const KIND_TASKS: &str = "tasks";
+pub const KIND_TASK_STEPS: &str = "taskSteps";
 
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 mod sidebar_pins;
 mod sidebar_sections;
+mod task_steps;
 mod tasks;
 
 pub use tasks::{TASK_NOTES_MAX_CHARS, TASK_TITLE_MAX_CHARS, check_task_syncs};

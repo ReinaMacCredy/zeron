@@ -1,5 +1,5 @@
 use super::*;
-use zeron_proto::{Task, TaskPatch, pin_order_key_between, valid_pin_order_key};
+use zeron_proto::{Task, TaskMode, TaskPatch, pin_order_key_between, valid_pin_order_key};
 
 pub const TASK_TITLE_MAX_CHARS: usize = 500;
 pub const TASK_NOTES_MAX_CHARS: usize = 10_000;
@@ -30,9 +30,15 @@ struct RawTask {
     updated_at: i64,
     #[serde(default)]
     deleted: bool,
+    #[serde(default)]
+    mode: TaskMode,
+    #[serde(default)]
+    plan_pending: bool,
+    #[serde(default)]
+    send_error: Option<String>,
 }
 
-fn at(ms: i64) -> DateTime<Utc> {
+pub(super) fn at(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
 }
 
@@ -50,15 +56,18 @@ impl From<RawTask> for Task {
             created_at: at(raw.created_at),
             updated_at: at(raw.updated_at),
             deleted: raw.deleted,
+            mode: raw.mode,
+            plan_pending: raw.plan_pending,
+            send_error: raw.send_error,
         }
     }
 }
 
-fn invalid(message: &str) -> DocError {
+pub(super) fn invalid(message: &str) -> DocError {
     DocError::Schema(message.into())
 }
 
-fn checked_title(title: &str) -> Result<String, DocError> {
+pub(super) fn checked_title(title: &str) -> Result<String, DocError> {
     let title = title.trim();
     if title.is_empty() || title.chars().count() > TASK_TITLE_MAX_CHARS {
         return Err(invalid("A task needs a title of up to 500 characters"));
@@ -66,7 +75,7 @@ fn checked_title(title: &str) -> Result<String, DocError> {
     Ok(title.to_string())
 }
 
-fn check_notes(notes: &str) -> Result<(), DocError> {
+pub(super) fn check_notes(notes: &str) -> Result<(), DocError> {
     if notes.chars().count() > TASK_NOTES_MAX_CHARS {
         return Err(invalid("Task notes are limited to 10,000 characters"));
     }
@@ -84,7 +93,7 @@ fn check_due_on(due_on: Option<&str>) -> Result<(), DocError> {
     }
 }
 
-fn check_order_key(key: &str) -> Result<(), DocError> {
+pub(super) fn check_order_key(key: &str) -> Result<(), DocError> {
     if !valid_pin_order_key(key) {
         return Err(invalid("Invalid task order key"));
     }
@@ -104,11 +113,14 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("createdAt", json!(task.created_at.timestamp_millis())),
         ("updatedAt", json!(task.updated_at.timestamp_millis())),
         ("deleted", json!(false)),
+        ("mode", json!(task.mode)),
+        ("planPending", json!(task.plan_pending)),
+        ("sendError", opt_str(task.send_error.as_deref())),
     ])
 }
 
 /// A re-seed sends the whole row and its clocks as one op; the room rejects an oversized op's batch.
-fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
+pub(super) fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
     if !fits_op_budget(&row_to_seed_op(row)) {
         return Err(invalid("This task is too large to sync; shorten its notes"));
     }
@@ -251,6 +263,15 @@ impl RegistryDoc {
             check_order_key(order_key)?;
             set.insert("orderKey".into(), json!(order_key));
         }
+        if let Some(mode) = patch.mode {
+            set.insert("mode".into(), json!(mode));
+        }
+        if let Some(plan_pending) = patch.plan_pending {
+            set.insert("planPending".into(), json!(plan_pending));
+        }
+        if let Some(send_error) = &patch.send_error {
+            set.insert("sendError".into(), opt_str(send_error.as_deref()));
+        }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();
         self.enqueue_task_op(task_id, OpKind::Update, set, hlc)?;
@@ -262,15 +283,25 @@ impl RegistryDoc {
         if self.task(task_id).is_none() {
             return Ok(false);
         }
-        self.write(
-            KIND_TASKS,
-            task_id,
-            OpKind::Update,
-            fields([
+        let hlc = self.next_hlc();
+        let flag = |kind: &str, id: &str| RowOp {
+            kind: kind.into(),
+            id: id.into(),
+            op: OpKind::Update,
+            set: Some(fields([
                 ("deleted", json!(true)),
                 ("updatedAt", json!(now.timestamp_millis())),
-            ]),
+            ])),
+            hlc: hlc.clone(),
+            clocks: None,
+        };
+        let mut ops = vec![flag(KIND_TASKS, task_id)];
+        ops.extend(
+            self.task_steps_of(task_id)
+                .iter()
+                .map(|step| flag(KIND_TASK_STEPS, &step.id)),
         );
+        self.enqueue_ops(ops);
         Ok(true)
     }
 }
