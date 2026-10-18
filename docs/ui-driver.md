@@ -17,11 +17,14 @@ for testing computer use itself.
 | Observe | `state`, `tree`, `snapshot`, `wait`, `frames`, `track`, `audit` | every build, the stable app included | `ui_driver` |
 | Drive | `click`, `move`, `drag`, `scroll`, `key`, `type`, `press`, `action`, `set`, plus `during` on `frames`/`track` | debug builds only (Zeron Dev bundles) | `ui_driver_drive` |
 
-Drive code is compiled out of release builds. A release build answers a drive request (or any
-`during`) with: `click` drives the UI and exists only in debug builds (Zeron Dev bundles);
-this build is observe-only. To drive, launch a Dev bundle (next sections). The stable app in
-`/Applications/Zeron.app` hosts the person's running sessions, so observe it only. It serves the
-driver only once it runs a build that includes it.
+Drive code is compiled out of release builds. A release build answers a drive request with:
+`click` drives the UI and exists only in debug builds (Zeron Dev bundles); this build is
+observe-only. A `frames` or `track` with a drive `during` gets the same refusal for `during`,
+after ``invalid `frames` request:``. In every build, a `during` whose action is not a drive
+action gets `` `during` must be a drive request (click, ...) ``. To drive, launch a Dev
+bundle (next sections). The stable app in `/Applications/Zeron.app` hosts the person's
+running sessions, so observe it only. It serves the driver only once it runs a build that
+includes it.
 
 What each level exposes:
 
