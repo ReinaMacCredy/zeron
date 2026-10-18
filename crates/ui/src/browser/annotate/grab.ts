@@ -1,4 +1,5 @@
 // Page world: React fiber expandos live on the page's DOM wrappers, invisible to the overlay's world.
+import { isSourceFile } from "bippy/source";
 import { getElementContext } from "react-grab/primitives";
 
 const ELEMENT_ATTRIBUTE = "data-zeron-annotate";
@@ -11,6 +12,9 @@ interface Frame {
   lineNumber?: number;
   columnNumber?: number;
 }
+
+const isReadableName = (name: string | null): name is string =>
+  name !== null && /^[A-Z][\w$]{2,}$/.test(name);
 
 const toStackFrame = (frame: Frame) => ({
   functionName: frame.functionName ?? null,
@@ -42,8 +46,14 @@ async function grab(id: string) {
     const stack = (context.stack ?? []).map(toStackFrame);
     return {
       id,
-      componentName: context.componentName,
-      source: stack.find((frame) => frame.fileName) ?? null,
+      componentName: isReadableName(context.componentName) ? context.componentName : null,
+      source:
+        stack.find(
+          (frame) =>
+            isReadableName(frame.functionName) &&
+            frame.fileName !== null &&
+            isSourceFile(frame.fileName),
+        ) ?? null,
       selector: context.selector,
       htmlPreview: (context.htmlPreview ?? "").slice(0, CONTEXT_TEXT_LIMIT),
       styles: (context.styles ?? "").slice(0, CONTEXT_TEXT_LIMIT),

@@ -8019,9 +8019,6 @@ impl Composer {
                 crate::draft_store::set(&key, entry, cx);
             }
         }
-        if capture.send && key == self.current_key {
-            self.submit(false, cx);
-        }
     }
 
     pub fn show_appshot_error(&mut self, message: String, cx: &mut Context<Self>) {

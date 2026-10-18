@@ -19400,18 +19400,16 @@ impl Render for Shell {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                if matches!(
-                    self.debug_dialog.as_deref(),
-                    Some("annotate" | "annotate-send")
-                ) && self.state.read(cx).focused_id().is_some()
+                if self.debug_dialog.as_deref() == Some("annotate")
+                    && self.state.read(cx).focused_id().is_some()
                 {
-                    let send = self.debug_dialog.take().as_deref() == Some("annotate-send");
+                    self.debug_dialog = None;
                     if let Ok(url) = std::env::var("ZERON_ANNOTATE_DEMO") {
                         self.set_surfaces_open(true, cx);
                         if let Some(browser) = self.new_browser_surface(window, cx) {
                             browser.update(cx, |browser, cx| {
                                 browser.navigate(&url, window, cx);
-                                browser.run_annotate_demo(send, cx);
+                                browser.run_annotate_demo(cx);
                             });
                         }
                         if !self.right_pane_open(cx) {

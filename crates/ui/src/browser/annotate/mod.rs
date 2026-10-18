@@ -53,7 +53,6 @@ impl AnnotationState {
 pub struct AnnotationCapture {
     pub appshot: Option<CapturedAppshot>,
     pub draft: String,
-    pub send: bool,
 }
 
 impl std::fmt::Debug for AnnotationCapture {
@@ -61,7 +60,6 @@ impl std::fmt::Debug for AnnotationCapture {
         f.debug_struct("AnnotationCapture")
             .field("appshot", &self.appshot.as_ref().map(|shot| &shot.id))
             .field("draft", &self.draft)
-            .field("send", &self.send)
             .finish()
     }
 }
@@ -156,6 +154,7 @@ fn merge_page_context(elements: &mut [ElementTarget], value: serde_json::Value) 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StyleChange {
+    target_id: String,
     property: String,
     previous_value: String,
     value: String,
@@ -179,15 +178,7 @@ impl Annotation {
             }
             text.push_str("Requested visual changes:");
             for change in &self.style_changes {
-                let previous = match change.previous_value.trim() {
-                    "" => "(unset)",
-                    previous => previous,
-                };
-                let _ = write!(
-                    text,
-                    "\n- {}: {previous} -> {}",
-                    change.property, change.value
-                );
+                let _ = write!(text, "\n- {}: {}", change.property, change.value);
             }
         }
         text
@@ -255,6 +246,25 @@ impl Annotation {
                     if let Some(column) = column {
                         let _ = write!(text, ":{column}");
                     }
+                }
+            }
+            let mut previous = self
+                .style_changes
+                .iter()
+                .filter(|change| change.target_id == target.id)
+                .peekable();
+            if previous.peek().is_some() {
+                text.push_str("\n  before requested changes:");
+                for change in previous {
+                    let value = clip(
+                        change
+                            .previous_value
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    );
+                    let value = if value.is_empty() { "(unset)" } else { &value };
+                    let _ = write!(text, "\n    {}: {value}", change.property);
                 }
             }
             for (name, body) in [("html", &element.html_preview), ("styles", &element.styles)] {
@@ -330,7 +340,6 @@ mod host {
     struct Picked {
         annotation: super::Annotation,
         crop_rect: Rect,
-        submission: Submission,
     }
 
     #[derive(Debug, Clone, Copy, Deserialize)]
@@ -339,13 +348,6 @@ mod host {
         y: f64,
         width: f64,
         height: f64,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Submission {
-        Attach,
-        Send,
     }
 
     impl BrowserSurface {
@@ -483,12 +485,11 @@ mod host {
             AnnotationCapture {
                 appshot,
                 draft: annotation.user_text(),
-                send: picked.submission == Submission::Send,
             }
         }
 
         // Synthetic input never reaches a Dev bundle, and the overlay ignores untrusted events.
-        pub(crate) fn run_annotate_demo(&mut self, send: bool, cx: &mut Context<Self>) {
+        pub(crate) fn run_annotate_demo(&mut self, cx: &mut Context<Self>) {
             cx.spawn(async move |this, cx| {
                 let executor = cx.background_executor().clone();
                 let wait = |ms| executor.timer(std::time::Duration::from_millis(ms));
@@ -506,8 +507,7 @@ mod host {
                 tracing::info!("annotate-demo: idle");
                 wait(6000).await;
                 let _ = this.update(cx, |this, cx| this.start_annotation(cx));
-                let last = if send { DEMO_SEND } else { DEMO_ATTACH };
-                for (label, script) in DEMO_STEPS.into_iter().chain([last]) {
+                for (label, script) in DEMO_STEPS {
                     wait(1500).await;
                     let _ = this.update(cx, |this, _| {
                         if let Some(native) = &this.native {
@@ -522,7 +522,7 @@ mod host {
         }
     }
 
-    const DEMO_STEPS: [(&str, &str); 2] = [
+    const DEMO_STEPS: [(&str, &str); 3] = [
         (
             "overlay",
             r##"(() => {
@@ -536,15 +536,11 @@ mod host {
             "styled",
             r##"(() => { globalThis.__zeronAnnotate.demo().fontSize(20); return JSON.stringify(null); })()"##,
         ),
+        (
+            "attached",
+            r##"(() => { globalThis.__zeronAnnotate.demo().submit(); return JSON.stringify(null); })()"##,
+        ),
     ];
-    const DEMO_ATTACH: (&str, &str) = (
-        "attached",
-        r##"(() => { globalThis.__zeronAnnotate.demo().submit("attach"); return JSON.stringify(null); })()"##,
-    );
-    const DEMO_SEND: (&str, &str) = (
-        "sent",
-        r##"(() => { globalThis.__zeronAnnotate.demo().submit("send"); return JSON.stringify(null); })()"##,
-    );
 }
 
 #[cfg(test)]
@@ -664,11 +660,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             annotation.user_text(),
-            "Make this the primary call to action\n\nRequested visual changes:\n- font-size: 14px -> 20px\n- gap: (unset) -> 4px"
+            "Make this the primary call to action\n\nRequested visual changes:\n- font-size: 20px\n- gap: 4px"
         );
         let context = annotation.page_context();
         assert!(!context.contains("primary call to action"));
         assert!(!context.contains("20px"));
+        assert!(
+            context.contains("  before requested changes:\n    font-size: 14px\n    gap: (unset)")
+        );
         assert!(context.starts_with("Page: Pricing\nURL: http://localhost:3000/pricing\nTargets: 1 selected element, 1 marked region."));
         assert!(context.contains("- <BuyButton> (Buy.tsx:12):"));
         assert!(context.contains("  selector: button#buy"));
