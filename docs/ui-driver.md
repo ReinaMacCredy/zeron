@@ -448,6 +448,9 @@ the script.
   `{"echoAnswers": "prefix"}` (text with the labels picked in the last `ask`), and
   `{"awaitInterrupt": true}` (wait for Stop, end the turn interrupted). A turn with no `done`
   gets `Done{completed}` appended.
+- A message sent while a turn runs is taken at the next step boundary as a `steered` event, with
+  no scripted reply of its own. An `ask` holds it until the question is answered;
+  `awaitInterrupt` takes it and keeps waiting for Stop.
 - A `.jsonl` engine journal (`{"seq":n,"event":{...}}` lines) replays a recorded session,
   split into turns at each top-level `done`, with engine-written records dropped,
   `inputRequested` turned into an `ask` and `done.sessionId` cleared. Journals carry real

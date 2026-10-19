@@ -2389,6 +2389,7 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
 struct AskingHarness {
     prompts: Arc<Mutex<Vec<String>>>,
     approval: bool,
+    steerable: bool,
 }
 
 #[async_trait]
@@ -2400,10 +2401,14 @@ impl Harness for AskingHarness {
         "Asking"
     }
     fn supports_steering(&self) -> bool {
-        false
+        self.steerable
     }
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        if self.steerable {
+            SteeringMode::StepBoundary
+        } else {
+            SteeringMode::TurnBoundary
+        }
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
@@ -2420,6 +2425,12 @@ impl Harness for AskingHarness {
         let asks = request.prompt.starts_with("please ask");
         let holds = request.prompt.contains("please hold");
         let approval = self.approval;
+        let prompts = self.prompts.clone();
+        let RunControls {
+            request_input,
+            mut steering,
+            ..
+        } = controls;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
         tokio::spawn(async move {
             let _ = tx
@@ -2437,7 +2448,7 @@ impl Harness for AskingHarness {
                 tokio::time::sleep(Duration::from_millis(800)).await;
             }
             if asks {
-                let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                let answers = (request_input)(vec![zeron_proto::UserInputQuestion {
                     id: "q-curl".into(),
                     header: "Agent question".into(),
                     question: "Execute `curl -o main.jpg https://example.com/a.jpg`".into(),
@@ -2454,6 +2465,15 @@ impl Harness for AskingHarness {
                     .first()
                     .and_then(|a| a.labels.first().cloned())
                     .unwrap_or_else(|| "no answer".into());
+            }
+            while let Ok(message) = steering.try_recv() {
+                prompts.lock().unwrap().push(message.prompt);
+                let _ = tx
+                    .send(Ok(AgentEvent::Steered {
+                        assistant_message_id: None,
+                        next_assistant_message_id: None,
+                    }))
+                    .await;
             }
             let _ = tx.send(Ok(AgentEvent::TextDelta { text })).await;
             let _ = tx
@@ -2477,6 +2497,7 @@ fn asking_rig(approval: bool) -> Rig {
     let rig = rig_on(Arc::new(AskingHarness {
         prompts: prompts.clone(),
         approval,
+        steerable: false,
     }));
     Rig { prompts, ..rig }
 }
@@ -2704,6 +2725,87 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
         prompts_with(&rig, "is waiting for input").is_empty(),
         "the answered question never reached the owner"
     );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_input_wake_into_an_owner_parked_on_its_own_question_leaves_that_question_open() {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let rig = rig_on(Arc::new(AskingHarness {
+        prompts: prompts.clone(),
+        approval: false,
+        steerable: true,
+    }));
+    let rig = Rig { prompts, ..rig };
+    queue_run(
+        &rig.core,
+        "lead",
+        "cmd-l",
+        "msg-l",
+        "please ask about the scope",
+    );
+    wait_for(
+        || pending_request(&rig.core, "lead").is_some(),
+        "the owner's own question",
+    )
+    .await;
+    let own = pending_request(&rig.core, "lead").unwrap();
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate("please ask before downloading"),
+            Default::default(),
+        )
+        .await
+        .expect("delegate")
+        .task_id;
+    wait_for(
+        || {
+            entries(&rig.core, "lead")
+                .iter()
+                .any(|e| e.from_chat_id.as_deref() == Some(child.as_str()))
+                && queue_len(&rig.core, "lead") == 0
+        },
+        "the child's input wake to reach the owner",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(pending_request(&rig.core, "lead"), Some(own.clone()));
+    assert!(rig.core.sessions.awaits_input("lead", &own));
+    assert!(prompts_with(&rig, "is waiting for input").is_empty());
+    assert_eq!(prompts_with(&rig, "please ask about the scope").len(), 1);
+
+    assert!(
+        rig.core
+            .sessions
+            .respond_input(
+                "lead",
+                &own,
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-curl".into(),
+                    labels: vec!["Yes, proceed".into()],
+                }],
+            )
+            .unwrap()
+    );
+    wait_for(
+        || !prompts_with(&rig, "is waiting for input").is_empty(),
+        "the wake to reach the owner after the answer",
+    )
+    .await;
+    wait_for(
+        || {
+            entries(&rig.core, "lead").iter().any(|entry| {
+                entry.role == MessageRole::Assistant
+                    && entry.parts.iter().any(|part| {
+                        matches!(part, zeron_doc::MessagePart::Text { text, .. } if text == "Yes, proceed")
+                    })
+            })
+        },
+        "the owner's turn to carry the person's answer",
+    )
+    .await;
     rig.core.shutdown().await;
 }
 

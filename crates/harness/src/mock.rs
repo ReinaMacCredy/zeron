@@ -159,6 +159,7 @@ impl MockHarness {
             .is_some_and(|v| !v.is_empty() && v != "0");
         if question_mode {
             let request_input = controls.request_input;
+            let mut steering = controls.steering;
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
             tokio::spawn(async move {
                 let pause = if delay.is_zero() {
@@ -174,6 +175,9 @@ impl MockHarness {
                 });
                 tokio::time::sleep(pause).await;
                 let answers = request_input(question_script()).await.unwrap_or_default();
+                if !script::confirm_steers(&mut steering, &tx) {
+                    return;
+                }
                 let picked: Vec<String> = answers
                     .iter()
                     .flat_map(|a| a.labels.iter().cloned())

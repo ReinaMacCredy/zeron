@@ -45,6 +45,25 @@ fn done(status: DoneStatus) -> AgentEvent {
     }
 }
 
+fn steered() -> AgentEvent {
+    AgentEvent::Steered {
+        assistant_message_id: None,
+        next_assistant_message_id: None,
+    }
+}
+
+pub(super) fn confirm_steers(
+    steering: &mut tokio::sync::mpsc::Receiver<crate::SteerMessage>,
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+) -> bool {
+    while steering.try_recv().is_ok() {
+        if tx.send(steered()).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) fn run(
     path: &str,
     request: &RunRequest,
@@ -203,10 +222,12 @@ fn play_turn(
 ) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
     let delay = mock_delay();
     let chunk_chars = mock_chunk_chars();
+    // A closed mailbox makes the engine replace the turn, which answers an open `ask` empty.
     let RunControls {
         request_input,
         interrupt,
         execution_lease,
+        mut steering,
         ..
     } = controls;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -214,6 +235,9 @@ fn play_turn(
         let _lease = execution_lease;
         let mut labels: Vec<String> = Vec::new();
         for step in steps {
+            if !confirm_steers(&mut steering, &tx) {
+                return;
+            }
             let events = match step {
                 Step::Sleep { sleep } => {
                     tokio::time::sleep(std::time::Duration::from_millis(sleep)).await;
@@ -231,15 +255,20 @@ fn play_turn(
                 Step::AwaitInterrupt {
                     await_interrupt: false,
                 } => continue,
-                Step::AwaitInterrupt { .. } => {
+                Step::AwaitInterrupt { .. } => loop {
                     tokio::select! {
                         _ = interrupt.cancelled() => {
                             let _ = tx.send(done(DoneStatus::Interrupted));
+                            return;
                         }
-                        _ = tx.closed() => {}
+                        Some(_) = steering.recv() => {
+                            if tx.send(steered()).is_err() {
+                                return;
+                            }
+                        }
+                        _ = tx.closed() => return,
                     }
-                    return;
-                }
+                },
                 Step::EchoAnswers { echo_answers } => vec![AgentEvent::TextDelta {
                     text: format!("{echo_answers}{}", labels.join(", ")),
                 }],
@@ -427,6 +456,109 @@ mod tests {
             ],
         };
         assert_eq!(turn_steps(&waiting), waiting.steps);
+    }
+
+    fn steer(prompt: &str) -> crate::SteerMessage {
+        crate::SteerMessage {
+            prompt: prompt.into(),
+            message_id: None,
+            attachments: Vec::new(),
+            config: None,
+        }
+    }
+
+    fn controls_with(
+        steering: tokio::sync::mpsc::Receiver<crate::SteerMessage>,
+        answer: tokio::sync::oneshot::Receiver<Vec<zeron_proto::UserInputAnswer>>,
+        asked: std::sync::Arc<tokio::sync::Notify>,
+        interrupt: tokio_util::sync::CancellationToken,
+    ) -> RunControls {
+        let answer = std::sync::Mutex::new(Some(answer));
+        RunControls {
+            realtime: None,
+            execution_lease: None,
+            request_input: Box::new(move |_| {
+                asked.notify_one();
+                answer.lock().unwrap().take().unwrap()
+            }),
+            steering,
+            interrupt,
+            tool_server: None,
+            stop_tasks: None,
+            turn: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_sent_while_a_question_waits_lands_after_the_answer() {
+        let (steer_tx, steering) = tokio::sync::mpsc::channel(4);
+        let (answer_tx, answer) = tokio::sync::oneshot::channel();
+        let turn = parse_script(
+            "s.json",
+            r#"[{"ask": [{"id": "q", "header": "Scope", "question": "Q", "options": ["Yes", "No"]}]},
+                {"echoAnswers": "Scope: "}]"#,
+        )
+        .unwrap();
+        let asked = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut events = play_turn(
+            turn_steps(&turn[0]),
+            controls_with(steering, answer, asked.clone(), Default::default()),
+        );
+        asked.notified().await;
+        steer_tx
+            .send(steer("wake"))
+            .await
+            .expect("the mailbox stays open while the question waits");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
+                .await
+                .is_err(),
+            "the steer does not end the wait"
+        );
+        answer_tx
+            .send(vec![zeron_proto::UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec!["Yes".into()],
+            }])
+            .unwrap();
+        let rest: Vec<AgentEvent> = events.map(Result::unwrap).collect().await;
+        assert!(
+            matches!(
+                &rest[..],
+                [
+                    AgentEvent::Steered { .. },
+                    AgentEvent::TextDelta { text },
+                    AgentEvent::Done { status: DoneStatus::Completed, .. },
+                ] if text == "Scope: Yes"
+            ),
+            "{rest:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_turn_takes_a_steer_and_keeps_holding_until_stopped() {
+        let (steer_tx, steering) = tokio::sync::mpsc::channel(4);
+        let interrupt = tokio_util::sync::CancellationToken::new();
+        let turn = parse_script("s.json", r#"[{"awaitInterrupt": true}]"#).unwrap();
+        let mut events = play_turn(
+            turn_steps(&turn[0]),
+            controls_with(
+                steering,
+                tokio::sync::oneshot::channel().1,
+                Default::default(),
+                interrupt.clone(),
+            ),
+        );
+        steer_tx.send(steer("wake")).await.expect("open mailbox");
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(AgentEvent::Steered { .. }))
+        ));
+        interrupt.cancel();
+        assert_eq!(
+            events.next().await.map(Result::unwrap),
+            Some(done(DoneStatus::Interrupted))
+        );
     }
 
     #[tokio::test]
