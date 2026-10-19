@@ -2221,13 +2221,19 @@ impl SessionsEngine {
         input: String,
         agent_note: bool,
     ) -> Option<zeron_doc::ClassifierRecord> {
-        let target = crate::compact_boundary::classifier_target(
-            &self.inner.registry,
-            classifier,
-            harness_id,
-            self.inner.instance_harness(chat_id, harness_id).ok()?,
+        // The person's message waits on this, and a pending CLI update would hold the lease until it installs.
+        const TARGET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+        let target = tokio::time::timeout(
+            TARGET_TIMEOUT,
+            crate::compact_boundary::classifier_target(
+                &self.inner.registry,
+                classifier,
+                harness_id,
+                self.inner.instance_harness(chat_id, harness_id).ok()?,
+            ),
         )
-        .await?;
+        .await
+        .ok()??;
         self.inner.set_classifying(
             chat_id,
             Some(zeron_proto::Classifying {
