@@ -8154,6 +8154,19 @@ impl Composer {
         cx.notify();
     }
 
+    pub(crate) fn set_idle_placeholder(
+        &mut self,
+        placeholder: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.idle_placeholder = placeholder.into();
+        if self.wizard.is_none() {
+            self.input
+                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
+        cx.notify();
+    }
+
     pub(crate) fn set_pr_chat(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
         self.side_chat = true;
         self.pr_chat = true;

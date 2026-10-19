@@ -4391,6 +4391,76 @@ impl Transcript {
             .into_any_element()
     }
 
+    fn supervisor_wake_events(&self, row_id: &str, cx: &gpui::App) -> Option<usize> {
+        self.chat_id
+            .as_deref()
+            .filter(|id| zeron_proto::supervisor::is_supervisor_chat(id))?;
+        self.state
+            .read(cx)
+            .supervisor
+            .as_ref()?
+            .wakes
+            .iter()
+            .find(|wake| wake.id == row_id)
+            .map(|wake| wake.events.len())
+    }
+
+    fn render_supervisor_wake_row(
+        &self,
+        events: usize,
+        timestamp: Option<i64>,
+        theme: &Theme,
+    ) -> AnyElement {
+        let clock = timestamp
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|utc| {
+                utc.with_timezone(&chrono::Local)
+                    .format("%-I:%M %p")
+                    .to_string()
+            });
+        div()
+            .debug_selector(|| "supervisor-wake-row".into())
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .pb(px(8.0))
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(
+                crate::icons::icon(crate::icons::LUCIDE_SHIELD)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(format!(
+                        "Wake · {events} {}",
+                        if events == 1 { "event" } else { "events" }
+                    )),
+            )
+            .when_some(clock, |el, clock| {
+                el.child(
+                    div()
+                        .font_family(theme.font_mono.clone())
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .text_color(theme.text_faint)
+                        .child(clock),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(1.0))
+                    .ml(px(4.0))
+                    .bg(theme.border.opacity(0.6)),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
     }
@@ -9664,6 +9734,11 @@ impl Transcript {
                 let mentions = mentions.clone();
                 let markdown = markdown.clone();
                 let pending = *pending;
+                if from_chat_id.is_none()
+                    && let Some(events) = self.supervisor_wake_events(&row.id, cx)
+                {
+                    break 'user self.render_supervisor_wake_row(events, row.timestamp, &theme);
+                }
                 let wake = from_chat_id.as_ref().and_then(|from| {
                     let state = self.state.read(cx);
                     let owner = self.chat_id.as_deref()?;

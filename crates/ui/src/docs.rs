@@ -53,6 +53,7 @@ const BODIES: &[(&str, &str)] = &[
     ("git", include_str!("../docs/git.md")),
     ("pull-requests", include_str!("../docs/pull-requests.md")),
     ("tasks", include_str!("../docs/tasks.md")),
+    ("supervisor", include_str!("../docs/supervisor.md")),
     ("inbox", include_str!("../docs/inbox.md")),
     ("usage", include_str!("../docs/usage.md")),
     ("split-view", include_str!("../docs/split-view.md")),
@@ -105,6 +106,7 @@ pub struct Docs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Tasks,
+    Supervisor,
     Inbox,
     Usage,
     PullRequests,
@@ -199,6 +201,7 @@ impl Action {
     pub fn parse(target: &str) -> Option<Self> {
         Some(match target {
             "tasks" => Self::Tasks,
+            "supervisor" => Self::Supervisor,
             "inbox" => Self::Inbox,
             "usage" => Self::Usage,
             "pull-requests" => Self::PullRequests,
@@ -217,6 +220,7 @@ impl Action {
     pub fn label(self) -> SharedString {
         match self {
             Self::Tasks => "Open Tasks".into(),
+            Self::Supervisor => "Open Supervisor".into(),
             Self::Inbox => "Open Inbox".into(),
             Self::Usage => "Open Usage".into(),
             Self::PullRequests => "Open Pull requests".into(),
@@ -232,6 +236,7 @@ impl Action {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Tasks => crate::icons::TASKS,
+            Self::Supervisor => crate::icons::LUCIDE_SHIELD,
             Self::Inbox => crate::icons::BELL,
             Self::Usage => crate::icons::LUCIDE_CHART_NO_AXES_COLUMN,
             Self::PullRequests => crate::icons::LUCIDE_GIT_PULL_REQUEST,

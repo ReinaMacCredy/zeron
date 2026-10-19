@@ -60,6 +60,10 @@ pub mod methods {
     /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.
     pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
     pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
+    pub const ENSURE_SUPERVISOR: &str = "EnsureSupervisor";
+    pub const WATCH_SUPERVISOR: &str = "WatchSupervisor";
+    pub const GET_SUPERVISOR_SETTINGS: &str = "GetSupervisorSettings";
+    pub const SET_SUPERVISOR_SETTINGS: &str = "SetSupervisorSettings";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
     /// `CompactionSettingsUpdate` (settings plus a write-only `jevApiKey`) →
     /// `CompactionSettingsState`.

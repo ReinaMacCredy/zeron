@@ -370,6 +370,7 @@ fn route_json((route, selected_chat): (Route, Option<String>)) -> Value {
         Route::Terminal => ("terminal", None),
         Route::Tasks => ("tasks", None),
         Route::TaskCenter => ("taskCenter", None),
+        Route::Supervisor => ("supervisor", None),
         Route::Docs => ("docs", None),
     };
     json!({ "kind": kind, "section": section, "selectedChat": selected_chat })
