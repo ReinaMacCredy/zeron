@@ -1604,8 +1604,22 @@ impl ThreadTools {
             return Err("only the Supervisor has the supervisor tool".into());
         }
         let action = args["action"].as_str().unwrap_or_default();
-        if !matches!(action, "ask" | "rebrief" | "start") {
-            return Err("action must be ask, rebrief or start".into());
+        let takes: &[&str] = match action {
+            "ask" => &["taskId", "title", "why", "detail", "options"],
+            "rebrief" => &["stepId", "title", "notes", "reason"],
+            "start" => &["title", "notes", "projectId", "planDoc"],
+            _ => return Err("action must be ask, rebrief or start".into()),
+        };
+        if let Some(extra) = args
+            .as_object()
+            .into_iter()
+            .flat_map(|args| args.keys())
+            .find(|key| *key != "action" && !takes.contains(&key.as_str()))
+        {
+            return Err(format!(
+                "{action} takes only {}, not {extra}",
+                takes.join(", ")
+            ));
         }
         if action != "ask" {
             self.spend_send()?;
