@@ -51,6 +51,28 @@ impl TaskCenterPane {
     }
 }
 
+enum TaskOrigin {
+    Card {
+        card: Entity<crate::tasks::TaskCard>,
+        patch: Option<TaskPatch>,
+    },
+    Mission {
+        start: crate::composer::MissionStart,
+        create: serde_json::Value,
+    },
+}
+
+impl TaskOrigin {
+    fn first_step(&self, task_id: &str) -> Option<serde_json::Value> {
+        match self {
+            Self::Card { patch, .. } => patch.as_ref().map(
+                |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+            ),
+            Self::Mission { create, .. } => Some(create.clone()),
+        }
+    }
+}
+
 impl Shell {
     fn task_engine(&mut self, cx: &mut Context<Self>) -> Option<crate::state::EngineHandle> {
         let engine = self.state.read(cx).engine().cloned();
@@ -68,6 +90,19 @@ impl Shell {
         }
     }
 
+    fn create_task_params(
+        task_id: &str,
+        title: &str,
+        notes: &str,
+        space_id: Option<String>,
+        due_on: Option<String>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "op": "createTask", "taskId": task_id, "title": title, "notes": notes,
+            "spaceId": space_id, "dueOn": due_on,
+        })
+    }
+
     pub fn create_task(
         &mut self,
         task_id: &str,
@@ -77,12 +112,69 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.mutate_task_row(
-            serde_json::json!({
-                "op": "createTask", "taskId": task_id, "title": title,
-                "spaceId": space_id, "dueOn": due_on,
-            }),
+            Self::create_task_params(task_id, title, "", space_id, due_on),
             cx,
         );
+    }
+
+    pub(super) fn start_mission(
+        &mut self,
+        start: crate::composer::MissionStart,
+        cx: &mut Context<Self>,
+    ) {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let (title, mut notes) = start.title_notes();
+        let lead = start
+            .chat_id
+            .clone()
+            .filter(|_| settings::current(cx).chat_mission == settings::ChatMission::Lead);
+        if let Some(chat_id) = start.chat_id.as_deref().filter(|_| lead.is_none()) {
+            let read = format!(
+                "Before you plan, read the chat this mission came from with read_thread, threadId \"{chat_id}\"."
+            );
+            notes = match notes.as_str() {
+                "" => read,
+                notes => format!("{notes}\n\n{read}"),
+            };
+        }
+        let create =
+            Self::create_task_params(&task_id, &title, &notes, start.space_id.clone(), None);
+        let orchestrate = start.orchestrate;
+        let (space_id, config) = (start.space_id.clone(), start.config.clone());
+        let origin = TaskOrigin::Mission { start, create };
+        match lead {
+            Some(chat_id) => {
+                self.assign_task(origin, &task_id, &chat_id, true, Some(orchestrate), cx)
+            }
+            None => self.start_task(origin, &task_id, space_id, config, Some(orchestrate), cx),
+        }
+    }
+
+    fn task_origin_failed(
+        &mut self,
+        origin: &TaskOrigin,
+        task_id: &str,
+        save_failed: bool,
+        start_failed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match origin {
+            TaskOrigin::Card { card, patch } => card.update(cx, |card, cx| {
+                if let Some(patch) = patch.as_ref().filter(|_| save_failed) {
+                    card.save_failed(task_id, patch, cx);
+                }
+                if start_failed {
+                    card.start_failed(task_id, cx);
+                }
+            }),
+            TaskOrigin::Mission { start, .. } => {
+                if !save_failed {
+                    self.delete_task(task_id, cx);
+                }
+                self.composer
+                    .update(cx, |composer, cx| composer.mission_failed(start, cx));
+            }
+        }
     }
 
     pub fn update_task(&mut self, task_id: &str, patch: TaskPatch, cx: &mut Context<Self>) {
@@ -125,31 +217,22 @@ impl Shell {
         );
     }
 
-    /// Saves the card's unsaved edits first, so the agent's first turn carries them.
-    #[allow(clippy::too_many_arguments)]
+    /// Saves the card's edits, or creates the composer's task, first, so the agent's first turn carries them.
     fn start_task(
         &mut self,
-        card: &Entity<crate::tasks::TaskCard>,
+        origin: TaskOrigin,
         task_id: &str,
-        patch: Option<TaskPatch>,
         space_id: Option<String>,
         config: Option<ChatConfig>,
         orchestrate: Option<crate::tasks::Orchestrate>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.task_engine(cx) else {
-            card.update(cx, |card, cx| {
-                if let Some(patch) = &patch {
-                    card.save_failed(task_id, patch, cx);
-                }
-                card.start_failed(task_id, cx);
-            });
+            self.task_origin_failed(&origin, task_id, true, true, cx);
             return;
         };
         let chat_id = uuid::Uuid::new_v4().to_string();
-        let update = patch.clone().map(
-            |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
-        );
+        let update = origin.first_step(task_id);
         let start = serde_json::json!({
             "op": "startTask", "taskId": task_id, "chatId": chat_id,
             "spaceId": space_id, "config": config,
@@ -158,19 +241,14 @@ impl Shell {
             "sameAgents": orchestrate.is_some_and(|o| o.same_agents),
             "planDoc": orchestrate.is_some_and(|o| o.plan_doc),
         });
-        let (card, task_id) = (card.clone(), task_id.to_string());
+        let task_id = task_id.to_string();
         cx.spawn(async move |this, cx| {
             let saving = update.is_some();
             for (step, params) in update.into_iter().chain([start]).enumerate() {
                 if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                     this.update(cx, |shell, cx| {
                         shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
-                        card.update(cx, |card, cx| {
-                            if let Some(patch) = patch.as_ref().filter(|_| saving && step == 0) {
-                                card.save_failed(&task_id, patch, cx);
-                            }
-                            card.start_failed(&task_id, cx);
-                        });
+                        shell.task_origin_failed(&origin, &task_id, saving && step == 0, true, cx);
                         cx.notify();
                     })
                     .ok();
@@ -178,11 +256,22 @@ impl Shell {
                 }
             }
             if orchestrate.is_some() {
-                this.update(cx, |shell, cx| {
-                    if card.read(cx).task_id() == Some(task_id.as_str()) {
-                        card.update(cx, |card, cx| card.close(None, cx));
+                this.update(cx, |shell, cx| match &origin {
+                    TaskOrigin::Card { card, .. } => {
+                        if card.read(cx).task_id() == Some(task_id.as_str()) {
+                            card.update(cx, |card, cx| card.close(None, cx));
+                        }
+                        shell.open_task_center(task_id.clone(), cx);
                     }
-                    shell.open_task_center(task_id.clone(), cx);
+                    TaskOrigin::Mission { start, .. } => match start.chat_id.clone() {
+                        Some(chat_id) => {
+                            let title = start.title_notes().0;
+                            shell.composer.update(cx, |composer, cx| {
+                                composer.mission_started(chat_id, task_id.clone(), title, cx)
+                            });
+                        }
+                        None => shell.open_task_center(task_id.clone(), cx),
+                    },
                 })
                 .ok();
                 return;
@@ -210,35 +299,33 @@ impl Shell {
 
     fn assign_task(
         &mut self,
-        card: &Entity<crate::tasks::TaskCard>,
+        origin: TaskOrigin,
         task_id: &str,
-        patch: Option<TaskPatch>,
         chat_id: &str,
         send: bool,
+        lead: Option<crate::tasks::Orchestrate>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.task_engine(cx) else {
-            if let Some(patch) = &patch {
-                card.update(cx, |card, cx| card.save_failed(task_id, patch, cx));
-            }
+            self.task_origin_failed(&origin, task_id, true, false, cx);
             return;
         };
-        let update = patch.clone().map(
-            |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
-        );
+        let update = origin.first_step(task_id);
         let assign = serde_json::json!({
             "op": "assignTask", "taskId": task_id, "chatId": chat_id, "send": send,
+            "orchestrate": lead.is_some(),
+            "approvePlan": lead.is_none_or(|lead| lead.approve_plan),
+            "sameAgents": lead.is_some_and(|lead| lead.same_agents),
+            "planDoc": lead.is_some_and(|lead| lead.plan_doc),
         });
-        let (card, task_id) = (card.clone(), task_id.to_string());
+        let task_id = task_id.to_string();
         cx.spawn(async move |this, cx| {
             let saving = update.is_some();
             for (step, params) in update.into_iter().chain([assign]).enumerate() {
                 if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                     this.update(cx, |shell, cx| {
                         shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
-                        if let Some(patch) = patch.as_ref().filter(|_| saving && step == 0) {
-                            card.update(cx, |card, cx| card.save_failed(&task_id, patch, cx));
-                        }
+                        shell.task_origin_failed(&origin, &task_id, saving && step == 0, false, cx);
                         cx.notify();
                     })
                     .ok();
@@ -313,9 +400,11 @@ impl Shell {
                 config,
                 orchestrate,
             } => self.start_task(
-                card,
+                TaskOrigin::Card {
+                    card: card.clone(),
+                    patch: patch.clone(),
+                },
                 task_id,
-                patch.clone(),
                 space_id.clone(),
                 config.clone(),
                 *orchestrate,
@@ -337,7 +426,17 @@ impl Shell {
                 patch,
                 chat_id,
                 send,
-            } => self.assign_task(card, task_id, patch.clone(), chat_id, *send, cx),
+            } => self.assign_task(
+                TaskOrigin::Card {
+                    card: card.clone(),
+                    patch: patch.clone(),
+                },
+                task_id,
+                chat_id,
+                *send,
+                None,
+                cx,
+            ),
             TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);

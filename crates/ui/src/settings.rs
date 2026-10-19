@@ -1181,6 +1181,14 @@ pub enum TasksView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub enum ChatMission {
+    #[default]
+    Lead,
+    NewMission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub enum SidebarSort {
     #[default]
     LastUpdated,
@@ -1533,6 +1541,7 @@ pub struct UiSettings {
     /// it, or with a name this build does not know, open on General.
     pub settings_section: crate::shell::SettingsSection,
     pub tasks_view: TasksView,
+    pub chat_mission: ChatMission,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
     /// Optional columns shown in every Git History pane.
@@ -1698,6 +1707,7 @@ impl Default for UiSettings {
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             tasks_view: TasksView::List,
+            chat_mission: ChatMission::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             follow_up_behavior: FollowUpBehavior::default(),
             reasoning_shortcut_modifier: ReasoningShortcutModifier::default(),
@@ -2401,6 +2411,7 @@ impl UiSettings {
             escape_stops_active_agent,
             settings_section,
             tasks_view,
+            chat_mission,
             appearance,
             git_history_columns,
             git_history_column_widths,
@@ -3875,6 +3886,7 @@ mod tests {
             escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             tasks_view: TasksView::Kanban,
+            chat_mission: ChatMission::NewMission,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             follow_up_behavior: FollowUpBehavior::Steer,
             reasoning_shortcut_modifier: ReasoningShortcutModifier::Control,

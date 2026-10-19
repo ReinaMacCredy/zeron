@@ -1333,6 +1333,10 @@ impl WorkspaceHost {
         self.read(|doc| doc.task(task_id))
     }
 
+    pub fn read_tasks(&self) -> Result<Vec<Task>, EngineError> {
+        Ok(self.read(|doc| doc.read_tasks())?)
+    }
+
     pub fn create_task(&self, task: &Task) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.create_task(task))?)
     }

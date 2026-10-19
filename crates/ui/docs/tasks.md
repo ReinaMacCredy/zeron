@@ -56,6 +56,15 @@ For work that needs more than one agent, switch **Hand it to an agent** from **O
 
 Click **Start mission** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's Mission Control page.
 
+## Start a mission from a composer
+
+You do not need a task card to start a mission. On the New chat canvas, the **Mission Control** tab starts one from what you type: see [Start a new chat](zeron://docs/new-chat).
+
+In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
+
+- **This chat leads**, the default: the chat becomes the mission's lead. It keeps its name and its agent, and the task with the lead's instructions arrives in it as a message, so the agent plans from the conversation you already had. If the agent is working, the message steers its turn instead of stopping it. The step threads show in the sidebar under this chat. A chat leads one unfinished mission at a time: while it still leads one, Zeron refuses a second and gives your text back.
+- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and the task's notes ask the lead to read this chat before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
+
 ## The Mission Control page
 
 A Mission Control task opens its own page instead of the card, from the list, the board, the Inbox, or the strip at the top of its chats. The back button in the titlebar takes you back: to the chat you came from, named after it, or else to **Tasks**.

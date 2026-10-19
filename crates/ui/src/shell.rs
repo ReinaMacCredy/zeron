@@ -3081,6 +3081,10 @@ impl Shell {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
                 ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
+                ComposerEvent::StartMission(start) => this.start_mission(start.clone(), cx),
+                ComposerEvent::OpenTaskCenter(task_id) => {
+                    this.open_task_center(task_id.clone(), cx)
+                }
                 ComposerEvent::OpenChanges => this
                     .defer_in_active_window(cx, |shell, window, cx| {
                         shell.focus_changes(window, cx)
@@ -6948,7 +6952,9 @@ impl Shell {
             | ComposerEvent::WorkspaceCommand(_)
             | ComposerEvent::WorktreeSetup { .. }
             | ComposerEvent::OpenChat(_)
-            | ComposerEvent::OpenChanges => {}
+            | ComposerEvent::OpenChanges
+            | ComposerEvent::StartMission(_)
+            | ComposerEvent::OpenTaskCenter(_) => {}
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,

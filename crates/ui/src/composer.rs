@@ -5961,6 +5961,26 @@ pub enum ComposerEvent {
     },
     OpenChat(String),
     OpenChanges,
+    StartMission(MissionStart),
+    OpenTaskCenter(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct MissionStart {
+    pub key: String,
+    pub text: String,
+    pub chat_id: Option<String>,
+    pub space_id: Option<String>,
+    pub config: Option<zeron_proto::ChatConfig>,
+    pub orchestrate: crate::tasks::Orchestrate,
+}
+
+impl MissionStart {
+    pub fn title_notes(&self) -> (String, String) {
+        let text = self.text.trim();
+        let (title, notes) = text.split_once('\n').unwrap_or((text, ""));
+        (title.trim().to_string(), notes.trim().to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7090,6 +7110,10 @@ pub struct Composer {
     running_tab: bool,
     running_tab_since: Option<Instant>,
     running_ticker: Option<Task<()>>,
+    mission: bool,
+    mission_plan_doc: bool,
+    mission_review: bool,
+    started_missions: HashMap<String, (String, SharedString)>,
     dock_reflow: crate::composer_dock::DockReflow,
     /// The shared clock owns this frame's height, including its final step.
     dock_height_changed: bool,
@@ -7187,6 +7211,22 @@ impl Composer {
         cx.notify();
     }
 
+    fn mission_available(&self) -> bool {
+        self.chat_override.is_none() && !self.side_chat && !self.btw && !self.pr_chat
+    }
+
+    fn set_mission(&mut self, on: bool, cx: &mut Context<Self>) {
+        let on = on && self.mission_available();
+        if self.mission == on {
+            return;
+        }
+        self.mission = on;
+        if on {
+            self.set_running_tab(false, cx);
+        }
+        cx.notify();
+    }
+
     fn running_reveal(&self, window: &mut Window, cx: &App) -> f32 {
         let target = if self.running_tab { 1.0 } else { 0.0 };
         let Some(since) = self.running_tab_since else {
@@ -7215,7 +7255,12 @@ impl Composer {
         reveal: f32,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let tab = |id: &'static str, label: &'static str, count: Option<usize>, amount: f32| {
+        let tab = |id: &'static str,
+                   label: &'static str,
+                   glyph: Option<&'static str>,
+                   count: Option<usize>,
+                   amount: f32| {
+            let color = theme.text_muted.blend(theme.text.opacity(amount));
             div()
                 .id(id)
                 .debug_selector(move || id.to_string())
@@ -7230,33 +7275,62 @@ impl Composer {
                 .role(Role::Tab)
                 .aria_label(label)
                 .bg(theme.wash(0.08 * amount))
-                .text_color(theme.text_muted.blend(theme.text.opacity(amount)))
+                .text_color(color)
                 .hover(|style| style.text_color(theme.text))
+                .when_some(glyph, |el, glyph| {
+                    el.child(crate::icons::icon(glyph).size(px(12.0)).text_color(color))
+                })
                 .child(label)
                 .when_some(count, |el, count| {
                     el.child(div().text_color(theme.text_faint).child(count.to_string()))
                 })
         };
+        let mission = if self.mission { 1.0 - reveal } else { 0.0 };
         div()
             .flex()
             .items_center()
             .gap(px(2.0))
             .child(
-                tab("composer-tab-new-task", "New task", None, 1.0 - reveal).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.set_running_tab(false, cx);
-                        window.focus(&this.input.focus_handle(cx), cx);
-                    },
-                )),
+                tab(
+                    "composer-tab-new-task",
+                    "New task",
+                    None,
+                    None,
+                    1.0 - reveal - mission,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_running_tab(false, cx);
+                    this.set_mission(false, cx);
+                    window.focus(&this.input.focus_handle(cx), cx);
+                })),
+            )
+            .child(
+                tab(
+                    "composer-tab-mission",
+                    "Mission Control",
+                    Some(crate::icons::LUCIDE_CIRCLE_DOT),
+                    None,
+                    mission,
+                )
+                .bg(theme.accent.opacity(0.18 * mission))
+                .when(!self.mission, |el| el.child(kbd_hint("⇧Tab", theme)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_mission(true, cx);
+                    window.focus(&this.input.focus_handle(cx), cx);
+                })),
             )
             .child(
                 tab(
                     "composer-tab-running",
                     "Running agents",
+                    None,
                     Some(running),
                     reveal,
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.set_running_tab(true, cx))),
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_mission(false, cx);
+                    this.set_running_tab(true, cx)
+                })),
             )
     }
 
@@ -7588,6 +7662,10 @@ impl Composer {
             running_tab: false,
             running_tab_since: None,
             running_ticker: None,
+            mission: false,
+            mission_plan_doc: true,
+            mission_review: true,
+            started_missions: HashMap::new(),
             dock_reflow: Default::default(),
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
@@ -7761,6 +7839,7 @@ impl Composer {
 
     fn active_prediction(&self, cx: &App) -> Option<SharedString> {
         if self.side_chat
+            || self.mission
             || (self.chat_override.is_some() && !self.full_chat)
             || self.wizard.is_some()
             || self.editing_queued.is_some()
@@ -7782,7 +7861,15 @@ impl Composer {
             return;
         }
         let prediction = self.active_prediction(cx);
-        let idle = if !self.side_chat
+        let idle = if self.mission {
+            match self.bound_chat_id(cx) {
+                Some(_) => "Turn this chat into a mission: what should the team build?".into(),
+                None => {
+                    "Describe the mission. A lead plans it and runs each step on its own thread."
+                        .into()
+                }
+            }
+        } else if !self.side_chat
             && self.bound_chat_id(cx).is_none()
             && self.state.read(cx).no_project
         {
@@ -11016,6 +11103,7 @@ impl Composer {
                 }
             };
             self.current_key = key;
+            self.mission = false;
             self.prompt_history = None;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -11300,6 +11388,12 @@ impl Composer {
             self.execute_workspace_command(action, 0..self.input.read(cx).text().len(), cx);
             return;
         }
+        if self.mission {
+            if !text.trim().is_empty() && !self.send_blocked(cx) {
+                self.start_mission(text, cx);
+            }
+            return;
+        }
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
@@ -11325,6 +11419,58 @@ impl Composer {
                 self.send(text, true, false, steer, cx)
             }
         }
+    }
+
+    fn start_mission(&mut self, text: String, cx: &mut Context<Self>) {
+        let chat_id = self.bound_chat_id(cx);
+        let space_id = match &chat_id {
+            Some(_) => self
+                .bound_chat_row(cx)
+                .and_then(|chat| chat.space_id.clone()),
+            None => self
+                .state
+                .read(cx)
+                .selected_space_row()
+                .map(|space| space.id.clone()),
+        };
+        let start = MissionStart {
+            key: self.current_key.clone(),
+            text,
+            chat_id,
+            space_id,
+            config: self.pickers.read(cx).resolved(cx).chat_config(),
+            orchestrate: crate::tasks::Orchestrate {
+                approve_plan: self.mission_review,
+                same_agents: false,
+                plan_doc: self.mission_plan_doc,
+            },
+        };
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+        self.sync_draft(cx);
+        self.mission = false;
+        cx.emit(ComposerEvent::StartMission(start));
+        cx.notify();
+    }
+
+    pub(crate) fn mission_failed(&mut self, start: &MissionStart, cx: &mut Context<Self>) {
+        if self.current_key != start.key || !self.input.read(cx).text().is_empty() {
+            return;
+        }
+        self.input
+            .update(cx, |input, cx| input.set_text(start.text.clone(), cx));
+        self.set_mission(true, cx);
+    }
+
+    pub(crate) fn mission_started(
+        &mut self,
+        chat_id: String,
+        task_id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.started_missions
+            .insert(chat_id, (task_id, title.into()));
+        cx.notify();
     }
 
     /// Send `prompt` as this composer's turn without it ever being typed —
@@ -11356,6 +11502,9 @@ impl Composer {
         }
         if self.commit_queue_edit(cx) {
             return;
+        }
+        if self.mission {
+            return self.submit(false, cx);
         }
         let text = self.input.read(cx).text().to_string();
         let has_content = composer_has_content(
@@ -13442,6 +13591,157 @@ impl Composer {
             .into_any_element()
     }
 
+    fn render_mission_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let composer = cx.entity().downgrade();
+        let plan = crate::settings::widgets::segmented(
+            theme,
+            "composer-mission-plan",
+            &[(true, "plan.md"), (false, "Steps only")],
+            self.mission_plan_doc,
+            move |plan_doc, _, cx| {
+                composer
+                    .update(cx, |composer, cx| {
+                        composer.mission_plan_doc = plan_doc;
+                        cx.notify();
+                    })
+                    .ok();
+            },
+        )
+        .debug_selector(|| "composer-mission-plan".into());
+        let review = self.mission_review;
+        let switch = div()
+            .id("composer-mission-review")
+            .debug_selector(|| "composer-mission-review".into())
+            .role(Role::Switch)
+            .aria_label("Review plan first")
+            .aria_toggled(if review {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .flex_none()
+            .h(px(28.0))
+            .pl(px(5.0))
+            .pr(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.text))
+            .child(crate::settings::widgets::toggle_switch(
+                theme,
+                review,
+                "composer-mission-review-switch",
+            ))
+            .child("Review plan first")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.mission_review = !review;
+                cx.notify();
+            }));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(plan)
+            .child(switch)
+            .into_any_element()
+    }
+
+    fn render_mission_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let on = self.mission;
+        let tone = if on { theme.text } else { theme.text_muted };
+        div()
+            .flex_none()
+            .pl(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .id("composer-mission-chip")
+                    .debug_selector(|| "composer-mission-chip".into())
+                    .role(Role::Switch)
+                    .aria_label("Mission Control")
+                    .aria_toggled(if on {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .h(px(22.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if on {
+                        theme.accent.opacity(0.5)
+                    } else {
+                        theme.border
+                    })
+                    .bg(theme.accent.opacity(if on { 0.16 } else { 0.0 }))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(tone)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.text))
+                    .child(
+                        crate::icons::icon(crate::icons::LUCIDE_CIRCLE_DOT)
+                            .size(px(12.0))
+                            .text_color(tone),
+                    )
+                    .child("Mission Control")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_mission(!on, cx);
+                        window.focus(&this.input.focus_handle(cx), cx);
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(10.5))
+                    .text_color(theme.text_faint)
+                    .child(if on { "⇧Tab: back to chat" } else { "⇧Tab" }),
+            )
+    }
+
+    fn render_start_mission(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::of(cx);
+        let blocked = self.send_blocked(cx);
+        div()
+            .id("composer-start-mission")
+            .debug_selector(|| "composer-start-mission".into())
+            .role(Role::Button)
+            .aria_label("Start mission")
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded_full()
+            .bg(theme.text)
+            .text_color(theme.bg)
+            .text_size(crate::typography::ui_rems(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .when(blocked, |el| el.opacity(0.35))
+            .when(!blocked, |el| {
+                el.cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+            })
+            .child(
+                crate::icons::icon(crate::icons::ARROW_UP)
+                    .size(px(14.0))
+                    .text_color(theme.bg),
+            )
+            .child("Start mission")
+            .into_any_element()
+    }
+
     fn render_send_button(
         &mut self,
         mode: SendButtonMode,
@@ -13511,6 +13811,37 @@ impl Composer {
             }
         }
     }
+}
+
+fn mission_glow(accent: gpui::Hsla) -> Vec<gpui::BoxShadow> {
+    vec![
+        gpui::BoxShadow {
+            color: accent.opacity(0.14),
+            offset: gpui::point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(3.0),
+            inset: false,
+        },
+        gpui::BoxShadow {
+            color: accent.opacity(0.3),
+            offset: gpui::point(px(0.0), px(10.0)),
+            blur_radius: px(40.0),
+            spread_radius: px(-18.0),
+            inset: false,
+        },
+    ]
+}
+
+fn kbd_hint(text: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(5.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::typography::ui_rems(10.5))
+        .text_color(theme.text_faint)
+        .child(text)
 }
 
 /// The composer's send control: a size-7 filled circle with an up arrow,
@@ -13778,7 +14109,7 @@ impl Render for Composer {
                 route_snap,
             )
         };
-        let expanded = self.expanded_mode;
+        let expanded = self.expanded_mode || self.mission;
 
         let failure = self.visible_failure();
         // Composer honesty: when the target's delivery path is degraded, say
@@ -13814,6 +14145,13 @@ impl Render for Composer {
         };
         let effort_hint = self.computer_effort_hint(cx);
         let resume_compaction = self.resume_compaction(cx);
+        let started_mission = self
+            .bound_chat_id(cx)
+            .filter(|_| self.mission_available())
+            .and_then(|chat_id| {
+                let started = self.started_missions.get(&chat_id).cloned()?;
+                Some((chat_id, started))
+            });
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -13870,6 +14208,50 @@ impl Render for Composer {
                             cx,
                         ))
                         .child("Compacting context…"),
+                )
+            })
+            .when_some(started_mission, |el, (chat_id, (task_id, title))| {
+                let open = cx.entity().downgrade();
+                let dismiss = open.clone();
+                el.child(
+                    div()
+                        .mx(px(4.0))
+                        .debug_selector(|| "composer-started-mission".into())
+                        .child(crate::computer::cards::computer_card(
+                            crate::computer::cards::CardTone::Info,
+                            crate::icons::LUCIDE_CIRCLE_DOT,
+                            format!("Started mission {title}").into(),
+                            vec!["Its lead reads this chat".into()],
+                            vec![
+                                crate::computer::cards::CardAction {
+                                    id: "composer-started-mission-open".into(),
+                                    label: "Open".into(),
+                                    primary: true,
+                                    on_click: Box::new(move |_, _, cx| {
+                                        let task_id = task_id.clone();
+                                        open.update(cx, |_, cx| {
+                                            cx.emit(ComposerEvent::OpenTaskCenter(task_id))
+                                        })
+                                        .ok();
+                                    }),
+                                },
+                                crate::computer::cards::CardAction {
+                                    id: "composer-started-mission-dismiss".into(),
+                                    label: "Dismiss".into(),
+                                    primary: false,
+                                    on_click: Box::new(move |_, _, cx| {
+                                        dismiss
+                                            .update(cx, |composer, cx| {
+                                                composer.started_missions.remove(&chat_id);
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                                },
+                            ],
+                            None,
+                            &theme,
+                        )),
                 )
             })
             .when_some(resume_compaction, |el, offer| {
@@ -14085,6 +14467,15 @@ impl Render for Composer {
                 cx.propagate();
             }
         }));
+        let container = container.on_action(cx.listener(|this, _: &OutdentList, _, cx| {
+            if !this.mission_available()
+                || this.mention.token.is_some()
+                || this.slash.token.is_some()
+            {
+                return cx.propagate();
+            }
+            this.set_mission(!this.mission, cx);
+        }));
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
         // to the mention/slash popups, which outrank this while they're open.
@@ -14270,7 +14661,11 @@ impl Render for Composer {
             }
         });
 
-        let send_button = self.render_send_button(mode, cx);
+        let send_button = if self.mission {
+            self.render_start_mission(cx)
+        } else {
+            self.render_send_button(mode, cx)
+        };
         let (voice_t, voice_frame) = self.update_voice(window, cx);
         let dictating = self.input.read(cx).dictation.phase.active();
         let microphone = self.render_dictation_button(voice_t, voice_frame.as_ref(), cx);
@@ -14385,6 +14780,11 @@ impl Render for Composer {
                         ),
                 )
             });
+        let leading = if self.mission {
+            self.render_mission_controls(&theme, cx)
+        } else {
+            attach.into_any_element()
+        };
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -14420,9 +14820,14 @@ impl Render for Composer {
                 el.border_color(gpui::transparent_black())
             })
             .when(!self.pr_chat, |el| {
-                el.border_color(if self.btw { theme.accent } else { pill_border })
-                    .bg(theme.composer_surface_bg())
-                    .when(!theme.is_frost(), |el| el.shadow_lg())
+                el.border_color(if self.btw || self.mission {
+                    theme.accent
+                } else {
+                    pill_border
+                })
+                .bg(theme.composer_surface_bg())
+                .when(!theme.is_frost() && !self.mission, |el| el.shadow_lg())
+                .when(self.mission, |el| el.shadow(mission_glow(theme.accent)))
             });
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
@@ -14548,7 +14953,7 @@ impl Render for Composer {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach),
+                                .child(leading),
                         )
                         .child(model_picker)
                         .child(
@@ -14606,7 +15011,7 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach),
+                                .child(leading),
                         )
                         .child(
                             div()
@@ -14794,6 +15199,10 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
             });
             let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
+            let mission_chip = (session_chrome_opacity > 0.0
+                && self.mission_available()
+                && self.bound_chat_id(cx).is_some())
+            .then(|| self.render_mission_chip(&theme, cx));
             if session_chrome_opacity > 0.0 {
                 let chat = self.bound_chat_id(cx);
                 self.context_ring.update(cx, |ring, _| ring.track(chat));
@@ -14816,7 +15225,18 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .opacity(new_thread_chrome_opacity)
-                                .children(new_thread_git_selectors),
+                                .map(|row| {
+                                    if self.mission {
+                                        row.child(
+                                            div()
+                                                .text_size(crate::typography::ui_rems(11.5))
+                                                .text_color(theme.text_faint)
+                                                .child("⇧Tab: back to New task"),
+                                        )
+                                    } else {
+                                        row.children(new_thread_git_selectors)
+                                    }
+                                }),
                         )
                     })
                     .when(session_chrome_opacity > 0.0, |slot| {
@@ -14829,6 +15249,7 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .opacity(session_chrome_opacity)
+                                .children(mission_chip)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
                                     // The footer row's own 4px gap: the PR badge
@@ -14974,7 +15395,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_takes_the_prediction_into_the_draft_and_sending_retires_it(
+    fn tab_takes_the_prediction_and_shift_tab_toggles_mission_control(
         cx: &mut gpui::TestAppContext,
     ) {
         let (_dir, handle) = composer_focus_window(cx);
@@ -15038,6 +15459,62 @@ mod tests {
                 assert_eq!(composer.placeholder(cx), "Do anything…");
             })
             .unwrap();
+
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.input.update(cx, |input, cx| {
+                    input.set_text("- shop\n  - cart", cx);
+                    input.move_to(input.text().len(), cx);
+                });
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input_text(cx), "- shop\n- cart");
+                assert!(!composer.mission, "a list line still outdents");
+                composer.input.update(cx, |input, cx| {
+                    input.set_text("Shop frontend\nNext.js and Tailwind", cx)
+                });
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .read_with(cx, |composer, _| assert!(composer.mission))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .read_with(cx, |composer, _| assert!(!composer.mission))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        let started = Rc::new(std::cell::RefCell::new(Vec::new()));
+        handle
+            .update(cx, |composer, _, cx| {
+                assert!(composer.mission);
+                let sink = started.clone();
+                let composer_entity = cx.entity();
+                cx.subscribe(&composer_entity, move |_, _, event: &ComposerEvent, _| {
+                    if let ComposerEvent::StartMission(start) = event {
+                        sink.borrow_mut().push(start.clone());
+                    }
+                })
+                .detach();
+                composer.on_submit(cx);
+                assert!(!composer.mission, "Send returns the chat to chat mode");
+                assert_eq!(composer.input_text(cx), "");
+            })
+            .unwrap();
+        let started = started.borrow();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].chat_id.as_deref(), Some("chat-a"));
+        assert_eq!(
+            started[0].title_notes(),
+            (
+                "Shop frontend".to_string(),
+                "Next.js and Tailwind".to_string()
+            )
+        );
+        assert!(started[0].orchestrate.plan_doc && started[0].orchestrate.approve_plan);
     }
 
     #[gpui::test]
