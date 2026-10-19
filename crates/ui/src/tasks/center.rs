@@ -1346,7 +1346,7 @@ impl TaskCenter {
         )
     }
 
-    fn lead_line(task: &zeron_proto::Task, plan: &Rollup) -> String {
+    pub(super) fn lead_line(task: &zeron_proto::Task, plan: &Rollup) -> String {
         let running = plan.count(StepStatus::Working);
         if task.completed_at.is_some() {
             "Done".into()
@@ -1431,7 +1431,7 @@ impl TaskCenter {
                         div()
                             .text_size(ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .child(Self::shimmer_text(
+                            .child(super::tree::shimmer_text(
                                 Self::lead_line(task, plan),
                                 lead_shimmer,
                                 ui_rems(12.0),
@@ -1587,32 +1587,8 @@ impl TaskCenter {
     fn shimmer(&self, working: bool, cx: &mut Context<Self>) -> Option<f32> {
         (working && !motion::reduced_motion(cx)).then(|| {
             motion::pulse_lease(cx.entity_id(), cx);
-            crate::transcript::tool_title_shimmer_phase(self.shimmer_since, Instant::now())
+            super::tree::title_phase(self.shimmer_since, Instant::now())
         })
-    }
-
-    fn shimmer_text(
-        text: impl Into<SharedString>,
-        shimmer: Option<f32>,
-        size: gpui::Rems,
-        base: gpui::Hsla,
-        theme: &Theme,
-    ) -> AnyElement {
-        let text = text.into();
-        match shimmer {
-            Some(phase) => crate::transcript::shimmer_label(
-                text,
-                phase,
-                theme.font_sans.clone(),
-                size.into(),
-                None,
-                base,
-                theme,
-            )
-            .flex_none()
-            .into_any_element(),
-            None => text.into_any_element(),
-        }
     }
 
     fn step_subline(
@@ -1650,7 +1626,7 @@ impl TaskCenter {
                 .items_center()
                 .gap(px(4.0))
                 .text_color(working)
-                .child(Self::shimmer_text(
+                .child(super::tree::shimmer_text(
                     "Working",
                     shimmer,
                     ui_rems(11.5),

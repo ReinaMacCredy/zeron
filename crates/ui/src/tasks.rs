@@ -30,6 +30,7 @@ use crate::attachments::StagedAttachment;
 use images::ImageGallery;
 mod logic;
 mod morph;
+mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};

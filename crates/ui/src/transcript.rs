@@ -2724,7 +2724,7 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
         px(TOOL_LABEL_SIZE).into(),
         Some(px(TOOL_LABEL_LINE_HEIGHT)),
         theme.text_muted,
-        theme,
+        theme.text,
     )
     .h_full()
     .flex_1()
@@ -2738,7 +2738,7 @@ pub(crate) fn shimmer_label(
     font_size: gpui::AbsoluteLength,
     line_height: Option<Pixels>,
     base: gpui::Hsla,
-    theme: &Theme,
+    peak: gpui::Hsla,
 ) -> gpui::Div {
     // Keep the title as ONE normal text run. Splitting it per character copies
     // the gradient stops, but also splits shaping/kerning and makes the sweep
@@ -2747,7 +2747,6 @@ pub(crate) fn shimmer_label(
     // CSS `background-clip: text` without duplicating accessible text.
     let overlay_text = text.clone();
     let overlay_font = gpui::font(font_family);
-    let peak = theme.text;
     let overlay = canvas(
         move |bounds, window, _| {
             let font_size = font_size.to_pixels(window.rem_size());
@@ -9603,7 +9602,7 @@ impl Transcript {
                     size.into(),
                     None,
                     theme.text_muted,
-                    &theme,
+                    theme.text,
                 )
                 .flex_none()
                 .into_any_element(),
