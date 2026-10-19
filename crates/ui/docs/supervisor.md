@@ -6,6 +6,21 @@ Click **Supervisor**, the shield in the rail under **Tasks**. The first time you
 
 The Supervisor's chat never shows in the sidebar or under **Archived**, and it never plays the run-finished sound. You reach it only from this page.
 
+## What wakes it and what it can do
+
+Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, or the lead escalates. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour.
+
+It acts through the missions' leads, within the switches under **Authority**:
+
+- It messages a lead or a step's thread, and answers their questions and tool approvals.
+- It re-briefs a step: it rewrites that step's title and spec, and the lead gets one message saying what changed and why. It never changes the plan's overview and never adds or removes a step.
+- It starts a new mission. The new lead writes a plan that you review before any step runs.
+- It asks you. A change to a mission's goal or spend, or a decision it should not make alone, becomes a card under **Needs you**.
+
+A mission's lead can bring a decision to you too. When a decision changes the goal, costs money you have not approved, or cannot be settled from the plan, the lead escalates it as a card under **Needs you** and keeps working on what does not depend on it. A lead escalates even when its mission is not watched; only the Supervisor's wake is skipped.
+
+Every action the Supervisor takes is listed under **Interventions**.
+
 ## The header
 
 Under the title, one line says what the Supervisor is for. The line below it reads **Watching** and the number of missions it watches, then the Supervisor's model, then its state:
@@ -77,15 +92,15 @@ Click the × to close the drawer.
 
 **Authority** sets what the Supervisor may do on its own:
 
-- **Message a Lead or Peer directly**
+- **Message a Lead or Peer directly**: send messages to leads and step threads, and answer their questions. Answering a tool approval also needs the Supervisor's chat at **Full** access, its default.
 - **Re-brief a step, through its Lead**
-- **Start a new mission**
+- **Start a new mission**: off by default. While it is off, the Supervisor cannot start new threads either.
 
 **Change a mission's goal or spend** has no switch: the Supervisor always asks you. **Check in on its own** wakes it every 30 or 60 minutes while a watched mission runs; it is **Off** by default. Your choices are saved on this Mac and stay after a restart.
 
 ## Wake log
 
-**Wake log** at the end of the page, closed by default, lists the recent wakes, newest first. Each shows its time, how many events it carried, and how it reached the Supervisor: **Started a turn**, **Steered its turn**, **Held for turn end**, **Held while stopped**, or **Failed** with the reason. Under it are the events themselves. Events that went stale before they were sent are listed as **Dropped**.
+**Wake log** at the end of the page, closed by default, lists the recent wakes, newest first. Each shows its time, how many events it carried, and how it reached the Supervisor: **Started a turn**, **Steered its turn**, **Held for turn end**, **Held by your Stop**, or **Failed** with the reason. Under it are the events themselves. Events that went stale before they were sent are listed as **Dropped**.
 
 ## Talk to the Supervisor
 
