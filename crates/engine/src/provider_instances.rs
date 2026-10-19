@@ -38,6 +38,11 @@ impl ProviderInstancesStore {
     pub fn open(data_dir: &Path) -> Result<Self, EngineError> {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join(STORE_FILE);
+        #[cfg(unix)]
+        if path.is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         let state = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<ProviderInstancesFile>(&bytes) {
                 Ok(file) if file.version == STORE_VERSION => file,
@@ -422,7 +427,26 @@ mod tests {
         assert_eq!(snapshot.instances[1].label, "Work");
         assert_eq!(snapshot.instances[1].accent, None);
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = temp.path().join(STORE_FILE);
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "instance env holds API keys");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         let reopened = ProviderInstancesStore::open(temp.path()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = temp.path().join(STORE_FILE);
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a file from an older build is tightened"
+            );
+        }
         assert_eq!(reopened.snapshot(), snapshot);
         let mut watcher = reopened.watch();
         assert_eq!(*watcher.borrow_and_update(), snapshot);
