@@ -7149,18 +7149,8 @@ impl Transcript {
     /// device (uploads targeted it) plus this device (zeron's
     /// `uniqueIds([attachmentDeviceId, m.device_id])`).
     fn attachment_device_ids(&self, cx: &Context<Self>) -> Vec<String> {
-        // `selected_chat_row` belongs to the PRIMARY transcript's chat — an
-        // override instance has no chat row, so it claims no devices (its
-        // thumbnails degrade to placeholders instead of guessing).
-        if self.doc_override.is_some() {
-            return Vec::new();
-        }
-        let state = self.state.read(cx);
-        let mut ids = Vec::new();
-        if let Some(chat) = state.selected_chat_row() {
-            ids.push(chat.device_id.clone());
-        }
-        if let Some(local) = state.local_device_id.clone()
+        let mut ids: Vec<String> = self.image_host(cx).0.into_iter().collect();
+        if let Some(local) = self.state.read(cx).local_device_id.clone()
             && !ids.contains(&local)
         {
             ids.push(local);
@@ -16743,6 +16733,45 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn an_embedded_transcript_loads_images_from_its_threads_device(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "step",
+                    "deviceId": "mac",
+                    "archived": false,
+                    "createdAt": "2026-10-20T00:00:00Z"
+                }))
+                .unwrap(),
+            ];
+            state.local_device_id = Some("other-mac".into());
+            state
+        });
+        let path = "/uploads/embedded-step.png";
+        crate::attachments::store_loaded_for(
+            &crate::attachments::AttachmentKey::new("mac", path, None),
+            "embedded-step.png".into(),
+            Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
+        );
+        let transcript = cx.new(|cx| Transcript::for_doc(state, "step".into(), true, cx));
+        transcript.update(cx, |transcript, cx| {
+            let devices = transcript.attachment_device_ids(cx);
+            assert_eq!(devices, ["mac", "other-mac"]);
+            assert!(matches!(
+                transcript.attachment_state(&devices, path, None, cx),
+                crate::attachments::AttachmentSnapshot::Loaded(_)
+            ));
+        });
     }
 
     #[gpui::test]
