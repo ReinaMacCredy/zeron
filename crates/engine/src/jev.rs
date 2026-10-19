@@ -220,8 +220,11 @@ async fn ask(
     let key = api_key(registry, source)
         .await
         .ok_or_else(|| "No Jev API key in the Keychain".to_string())?;
-    let endpoint =
-        std::env::var("ZERON_JEV_ENDPOINT").unwrap_or_else(|_| source.endpoint().to_string());
+    // A bench hook: a release build never sends the key anywhere but the source.
+    let endpoint = std::env::var("ZERON_JEV_ENDPOINT")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .unwrap_or_else(|| source.endpoint().to_string());
     let response = HTTP
         .post(&endpoint)
         .bearer_auth(&key)
