@@ -226,12 +226,20 @@ blurb = "Plan work as a list or a Kanban board, start a task with one click, or 
 actions = ["tasks"]
 
 [[article]]
+id = "mission-control"
+section = "work"
+title = "Mission Control"
+icon = "hugeicons-target-02"
+blurb = "A lead agent plans a big task into steps, runs each on its own thread, and checks the results."
+actions = ["tasks", "supervisor", "settings/general"]
+
+[[article]]
 id = "supervisor"
 section = "work"
 title = "Supervisor"
 icon = "lucide-shield"
 blurb = "One agent above your missions' leads: it wakes on their events, and you set what it may do."
-actions = ["supervisor", "tasks"]
+actions = ["supervisor", "tasks", "docs/mission-control"]
 
 [[article]]
 id = "inbox"
