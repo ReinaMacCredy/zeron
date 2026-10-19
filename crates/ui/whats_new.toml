@@ -44,6 +44,11 @@ title = "Docs and release notes inside the app"
 description = "The ? on the rail opens recent releases, the full changelog, keybindings, and Docs articles for every feature."
 
 [[entry.features]]
+id = "fold-mission-threads"
+title = "Fold a mission's threads in the sidebar"
+description = "Collapse a lead's step threads under its row; it still shows what is running and what needs you."
+
+[[entry.features]]
 id = "smaller-things-0-2-114"
 title = "Smaller things"
 description = "Pastes over 5,000 characters become a Pasted text chip you can preview, skill chips open their SKILL.md, and you can annotate a browser page for your agent."
