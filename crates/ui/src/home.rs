@@ -2453,19 +2453,28 @@ mod tests {
             task("gone", "e", serde_json::json!({ "deleted": true })),
             task("single", "f", serde_json::json!({ "mode": "single" })),
         ];
-        state.chats = ["working-lead", "review-lead", "stuck-lead", "child"]
-            .into_iter()
-            .map(chat)
-            .collect();
+        state.chats = [
+            "working-lead",
+            "review-lead",
+            "stuck-lead",
+            "child",
+            "stuck-child",
+            "skipped-child",
+            "gone-lead",
+            "single-lead",
+        ]
+        .into_iter()
+        .map(chat)
+        .collect();
         state.task_steps = vec![
             step("working", "1", None, Some("done")),
-            step("working", "2", None, Some("skipped")),
+            step("working", "2", Some("skipped-child"), Some("skipped")),
             step("working", "3", None, Some("done")),
             step("working", "4", Some("child"), None),
             step("working", "5", None, None),
             step("review", "1", None, None),
             step("stuck", "1", None, Some("done")),
-            step("stuck", "2", Some("child"), None),
+            step("stuck", "2", Some("stuck-child"), None),
         ];
         state.task_steps[7].turn = Some(zeron_proto::StepTurn {
             ended: zeron_proto::StepTurnEnd::Failed,
@@ -2485,6 +2494,17 @@ mod tests {
             ]
         );
         assert_eq!((rows[2].progress.done, rows[2].progress.total), (2, 4));
+        let strip = |chat: &str| {
+            crate::tasks::mission_thread(&state, chat, Utc::now())
+                .map(|thread| (thread.task_id, thread.role.label()))
+        };
+        let on = |task: &str, label: &str| Some((task.to_owned(), label.to_owned()));
+        assert_eq!(strip("working-lead"), on("working", "Lead"));
+        assert_eq!(strip("child"), on("working", "Step 4 of 5"));
+        assert_eq!(strip("skipped-child"), on("working", "Step 2 of 5"));
+        assert_eq!(strip("stuck-child"), on("stuck", "Step 2 of 2"));
+        assert_eq!(strip("gone-lead"), None);
+        assert_eq!(strip("single-lead"), None);
     }
 
     #[test]

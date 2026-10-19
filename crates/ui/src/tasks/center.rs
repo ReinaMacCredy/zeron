@@ -3,15 +3,16 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, Hsla, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Edges, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, Render, SharedString, Subscription,
+    Window, div, prelude::*, px, relative,
 };
 use zeron_proto::{
     ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, StepTurnEnd, TaskPatch,
     TaskStatus, TaskStepPatch,
 };
 
+use super::morph::{self, Key, Painted, ZOOM_DROP, ZOOM_SLIDE, ZoomFrame};
 use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
@@ -187,6 +188,8 @@ pub struct TaskCenter {
     live: Option<LiveThread>,
     fill: Option<Tween>,
     arrivals: Option<HashMap<String, Tween>>,
+    zoom: Option<ZoomFrame>,
+    painted: Painted,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -224,6 +227,8 @@ impl TaskCenter {
             live: None,
             fill: None,
             arrivals: None,
+            zoom: None,
+            painted: Painted::default(),
             focus: cx.focus_handle(),
             _subscriptions: vec![add_events, state_changes],
         }
@@ -266,6 +271,15 @@ impl TaskCenter {
     pub fn set_live(&mut self, live: Option<LiveThread>, cx: &mut Context<Self>) {
         self.live = live;
         cx.notify();
+    }
+
+    pub fn set_zoom(&mut self, zoom: Option<ZoomFrame>) {
+        self.zoom = zoom;
+    }
+
+    pub fn zoom_ready(&self) -> bool {
+        let painted = self.painted.borrow();
+        painted.contains_key(&Key::Center) && painted.contains_key(&Key::Live)
     }
 
     fn add_step(&mut self, cx: &mut Context<Self>) {
@@ -1657,6 +1671,7 @@ impl TaskCenter {
         &self,
         task: &zeron_proto::Task,
         plan: &Rollup,
+        fade: Option<f32>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1664,11 +1679,10 @@ impl TaskCenter {
             Selection::Step(id) => plan
                 .steps
                 .iter()
-                .position(|row| &row.step.id == id)
-                .map(|ix| (ix, &plan.steps[ix])),
+                .find(|row| &row.step.id == id)
+                .zip(plan.step_label(id)),
             Selection::Lead => None,
         };
-        let total = plan.steps.len();
         let live_chat = self.live.as_ref().and_then(|live| {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == live.chat_id)?;
@@ -1678,25 +1692,22 @@ impl TaskCenter {
                 chat_brand(chat),
             ))
         });
-        let step_has_thread = step.is_some_and(|(_, row)| {
+        let step_has_thread = step.as_ref().is_some_and(|(row, _)| {
             live_chat
                 .as_ref()
                 .is_some_and(|(id, _, _)| row.step.chat_id.as_deref() == Some(id.as_str()))
         });
         let (title, sub) = match step {
-            Some((ix, row)) if !step_has_thread => (
+            Some((row, label)) if !step_has_thread => (
                 row.step.title.clone(),
-                format!(
-                    "Step {} of {total} has not started · messages go to the lead",
-                    ix + 1
-                ),
+                format!("{label} has not started · messages go to the lead"),
             ),
-            Some((ix, _)) => (
+            Some((_, label)) => (
                 live_chat
                     .as_ref()
                     .map(|(_, title, _)| title.clone())
                     .unwrap_or_default(),
-                format!("Step {} of {total}", ix + 1),
+                label,
             ),
             None => (
                 live_chat
@@ -1760,7 +1771,8 @@ impl TaskCenter {
                             .child(sub),
                     ),
             )
-            .children(open);
+            .children(open)
+            .when_some(fade, |el, fade| el.opacity(fade));
         let body = match &self.live {
             Some(live) => div()
                 .flex_1()
@@ -1794,6 +1806,16 @@ impl TaskCenter {
     }
 }
 
+fn zoomed(el: AnyElement, t: f32, dx: f32, dy: f32) -> AnyElement {
+    div()
+        .relative()
+        .left(px(dx * (1.0 - t)))
+        .top(px(dy * (1.0 - t)))
+        .opacity(t)
+        .child(el)
+        .into_any_element()
+}
+
 fn retryable(status: DelegationStatus) -> bool {
     matches!(
         status,
@@ -1806,6 +1828,36 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 }
 
 impl TaskCenter {
+    fn zoom_ghost(&self, frame: ZoomFrame, live: AnyElement) -> AnyElement {
+        let from = Edges {
+            top: Theme::TITLEBAR_HEIGHT,
+            ..Edges::default()
+        };
+        let painted = self.painted.borrow();
+        let to = match (painted.get(&Key::Center), painted.get(&Key::Live)) {
+            (Some(page), Some(slot)) => Edges {
+                top: f32::from(slot.top() - page.top()),
+                right: f32::from(page.right() - slot.right()),
+                bottom: f32::from(page.bottom() - slot.bottom()),
+                left: f32::from(slot.left() - page.left()),
+            },
+            _ => from,
+        };
+        let t = frame.rect();
+        let inset = |from: f32, to: f32| px(motion::lerp(from, to, t));
+        div()
+            .absolute()
+            .top(inset(from.top, to.top))
+            .right(inset(from.right, to.right))
+            .bottom(inset(from.bottom, to.bottom))
+            .left(inset(from.left, to.left))
+            .flex()
+            .overflow_hidden()
+            .when_some(frame.backdrop, |el, backdrop| el.bg(backdrop))
+            .child(live)
+            .into_any_element()
+    }
+
     fn fill_at(&mut self, progress: PlanProgress, reduced: bool, now: Instant) -> (f32, bool) {
         let PlanProgress { done, total } = progress;
         let fraction = if total == 0 {
@@ -1912,12 +1964,21 @@ impl Render for TaskCenter {
         }
         let reduced = motion::reduced_motion(cx);
         let now = Instant::now();
+        let zoom = self.zoom;
+        let slide = |el: AnyElement, ix: usize| match zoom {
+            Some(frame) => zoomed(el, frame.row(ix), -ZOOM_SLIDE, 0.0),
+            None => el,
+        };
         let (fill, filling) = self.fill_at(plan.progress, reduced, now);
         let ids: Vec<&str> = shown.iter().map(|(row, _)| row.step.id.as_str()).collect();
         let arrivals = self.arrivals_at(&ids, reduced, now);
         if filling || arrivals.iter().any(|tween| !tween.settled_at(now)) {
             window.request_animation_frame();
         }
+        let lead = self.render_lead(&task, &plan, &theme, cx);
+        let banner = self.render_banner(&task, &plan, &theme, cx);
+        let overview = self.render_overview(&task, editable, &theme, window, cx);
+        let first_step = 1 + usize::from(banner.is_some()) + usize::from(overview.is_some());
         let last = shown.len().saturating_sub(1);
         let steps: Vec<AnyElement> = shown
             .iter()
@@ -1937,14 +1998,17 @@ impl Render for TaskCenter {
                     cx,
                 );
                 let shown = arrival.value_at(now);
+                let slid = zoom.map_or(1.0, |frame| frame.row(first_step + ix));
                 div()
                     .relative()
                     .top(px(STEP_RISE * (1.0 - shown)))
-                    .opacity(shown)
+                    .left(px(-ZOOM_SLIDE * (1.0 - slid)))
+                    .opacity(shown * slid)
                     .child(step)
                     .into_any_element()
             })
             .collect();
+        let after_steps = first_step + shown.len();
         let list = div()
             .id("task-center-plan")
             .debug_selector(|| "task-center-plan".into())
@@ -1956,15 +2020,17 @@ impl Render for TaskCenter {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .child(self.render_lead(&task, &plan, &theme, cx))
-            .children(self.render_banner(&task, &plan, &theme, cx))
-            .children(self.render_overview(&task, editable, &theme, window, cx))
+            .child(slide(lead, 0))
+            .children(banner.map(|banner| slide(banner, 1)))
+            .children(overview.map(|overview| slide(overview, first_step - 1)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .children(steps)
-                    .when(editable, |el| el.child(self.render_add_step(&theme))),
+                    .when(editable, |el| {
+                        el.child(slide(self.render_add_step(&theme), after_steps))
+                    }),
             );
         let left = div()
             .flex_1()
@@ -1973,17 +2039,46 @@ impl Render for TaskCenter {
             .flex()
             .flex_col()
             .child(list)
-            .children(editable.then(|| self.render_edit_bar(&theme, cx)).flatten());
+            .children(
+                editable
+                    .then(|| self.render_edit_bar(&theme, cx))
+                    .flatten()
+                    .map(|bar| slide(bar, after_steps)),
+            );
+        let head = |el: AnyElement| match zoom {
+            Some(frame) => zoomed(el, frame.header(), 0.0, -ZOOM_DROP),
+            None => el,
+        };
+        let live = self.render_live(
+            &task,
+            &plan,
+            zoom.map(|frame| frame.live_header()),
+            &theme,
+            cx,
+        );
+        let slot = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .child(morph::measure(&self.painted, Key::Live, Edges::default()));
+        let (slot, ghost) = match zoom {
+            Some(frame) => (slot, Some(self.zoom_ghost(frame, live))),
+            None => (slot.child(live), None),
+        };
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .flex()
             .flex_col()
-            .child(self.render_header(&task, &plan, fill, &theme, cx))
-            .children(self.render_send_error(&task, &theme, cx))
+            .child(morph::measure(&self.painted, Key::Center, Edges::default()))
+            .child(head(self.render_header(&task, &plan, fill, &theme, cx)))
+            .children(self.render_send_error(&task, &theme, cx).map(head))
             .child(
                 div()
                     .flex_1()
@@ -1991,8 +2086,9 @@ impl Render for TaskCenter {
                     .flex()
                     .flex_row()
                     .child(left)
-                    .child(self.render_live(&task, &plan, &theme, cx)),
+                    .child(slot),
             )
+            .children(ghost)
             .into_any_element()
     }
 }
