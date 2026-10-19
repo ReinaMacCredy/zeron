@@ -8223,14 +8223,9 @@ impl Composer {
     ) {
         match capture.appshot {
             Some(appshot) => {
-                if !self.stage_appshot_for(key.clone(), appshot, cx) {
-                    return;
-                }
+                self.stage_appshot_for(key.clone(), appshot, cx);
             }
-            None => self.show_error(
-                "Couldn't capture the annotated area.",
-                cx,
-            ),
+            None => self.show_error("Couldn't capture the annotated area.", cx),
         }
         let draft = capture.draft.trim();
         if !draft.is_empty() {
