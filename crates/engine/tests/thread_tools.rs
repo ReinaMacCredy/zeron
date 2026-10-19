@@ -82,7 +82,11 @@ impl Harness for RecordingHarness {
             }
         });
         let delay = self.step_delay;
-        let reply = self.reply;
+        let reply = if request.prompt.contains("FOLLOW-UP") {
+            "Because the handle outlives the request."
+        } else {
+            self.reply
+        };
         tokio::spawn(async move {
             let script = vec![
                 AgentEvent::SessionStarted {
@@ -1473,6 +1477,17 @@ async fn resolving_findings_checks_the_owner_the_review_the_ids_and_the_notes() 
     );
     assert_eq!(outcomes["F1"].commit.as_deref(), Some("abc1234"));
 
+    rig.core
+        .doc_host
+        .queue_thread_message(&review, Some("lead"), "FOLLOW-UP: why F2?")
+        .await
+        .unwrap();
+    wait_for(
+        || prompts_with(&rig, "FOLLOW-UP").len() == 1,
+        "the reviewer's follow-up turn",
+    )
+    .await;
+    wait_for(|| idle(&rig.core, &review), "the follow-up to end").await;
     let view = serde_json::to_value(
         rig.core
             .doc_host

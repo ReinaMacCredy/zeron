@@ -695,23 +695,18 @@ impl DocHost {
             "working"
         };
         let summary = (!delegation.is_running()).then(|| self.result_of(child, &delegation));
-        let findings = summary
-            .as_deref()
-            .filter(|_| crate::review::is_review(&delegation))
-            .filter(|_| delegation.status == DelegationStatus::Completed)
-            .and_then(crate::review::parse_findings)
-            .map(|findings| {
-                findings
-                    .into_iter()
-                    .map(|finding| FindingView {
-                        outcome: delegation.finding_outcomes.get(&finding.id).cloned(),
-                        location: finding.location(),
-                        id: finding.id,
-                        severity: finding.severity,
-                        title: finding.title,
-                    })
-                    .collect::<Vec<_>>()
-            });
+        let findings = self.review_findings(child, &delegation).map(|findings| {
+            findings
+                .into_iter()
+                .map(|finding| FindingView {
+                    outcome: delegation.finding_outcomes.get(&finding.id).cloned(),
+                    location: finding.location(),
+                    id: finding.id,
+                    severity: finding.severity,
+                    title: finding.title,
+                })
+                .collect::<Vec<_>>()
+        });
         let next = findings
             .as_ref()
             .filter(|findings| findings.iter().any(|finding| finding.outcome.is_none()))
@@ -774,9 +769,24 @@ impl DocHost {
         child: &Chat,
         delegation: &Delegation,
     ) -> Option<Vec<crate::review::ReviewFinding>> {
-        (crate::review::is_review(delegation) && delegation.status == DelegationStatus::Completed)
-            .then(|| crate::review::parse_findings(&self.result_of(child, delegation)))
-            .flatten()
+        if !crate::review::is_review(delegation) || delegation.status != DelegationStatus::Completed
+        {
+            return None;
+        }
+        // Ids number the reply the review completed with; a later follow-up must not renumber them.
+        let settled = delegation.completed_at.map(|at| at.timestamp_millis());
+        let text = self
+            .open(&child.id)
+            .ok()
+            .and_then(|handle| handle.doc.read_entries().ok())
+            .map(|mut entries| {
+                entries.retain(|entry| settled.is_none_or(|settled| entry.created_at <= settled));
+                result_parts(&entries, &delegation.anchor)
+                    .0
+                    .unwrap_or_default()
+            })
+            .or_else(|| delegation.summary.clone())?;
+        crate::review::parse_findings(&text)
     }
 
     fn finished_review(
