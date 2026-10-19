@@ -98,7 +98,6 @@ pub(crate) async fn update_settings(
     if api_key.is_some() && source.is_none() {
         return Err("Pick a Jev source before saving its key".into());
     }
-    registry.set_compaction_settings(update.settings)?;
     if let (Some(key), Some(source)) = (api_key, source) {
         let account =
             key_account(registry).ok_or_else(|| "The engine has no data directory".to_string())?;
@@ -110,6 +109,7 @@ pub(crate) async fn update_settings(
                 .map_err(|error| error.to_string())?;
         }
     }
+    registry.set_compaction_settings(update.settings)?;
     Ok(settings_state(registry).await)
 }
 

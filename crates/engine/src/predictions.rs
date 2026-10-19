@@ -220,7 +220,6 @@ impl Predictions {
         {
             return Err("That does not look like an API key".into());
         }
-        self.registry.set_prediction_settings(update.settings)?;
         if let Some(key) = api_key {
             let account = key_account(&self.registry)
                 .ok_or_else(|| "The engine has no data directory".to_string())?;
@@ -232,6 +231,7 @@ impl Predictions {
                     .map_err(|error| error.to_string())?;
             }
         }
+        self.registry.set_prediction_settings(update.settings)?;
         if !self.registry.prediction_settings().enabled {
             self.clear_all();
         }
