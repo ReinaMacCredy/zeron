@@ -647,9 +647,31 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
     selected: T,
     pick: impl Fn(T, &mut Window, &mut gpui::App) + Clone + 'static,
 ) -> gpui::Stateful<gpui::Div> {
+    segmented_with(theme, id, options, selected, pick, false)
+}
+
+pub fn segmented_fill<T: Copy + PartialEq + 'static>(
+    theme: &Theme,
+    id: &'static str,
+    options: &[(T, &'static str)],
+    selected: T,
+    pick: impl Fn(T, &mut Window, &mut gpui::App) + Clone + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    segmented_with(theme, id, options, selected, pick, true)
+}
+
+fn segmented_with<T: Copy + PartialEq + 'static>(
+    theme: &Theme,
+    id: &'static str,
+    options: &[(T, &'static str)],
+    selected: T,
+    pick: impl Fn(T, &mut Window, &mut gpui::App) + Clone + 'static,
+    fill: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_none()
+        .when(fill, |el| el.w_full())
         .flex()
         .flex_row()
         .rounded(px(9.0))
@@ -660,8 +682,10 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
             let pick = pick.clone();
             div()
                 .id((id, ix))
+                .debug_selector(move || format!("{id}-{ix}"))
+                .when(fill, |el| el.flex_1())
                 .min_w(px(72.0))
-                .px(px(12.0))
+                .px(px(if fill { 4.0 } else { 12.0 }))
                 .py(px(6.0))
                 .rounded(px(7.0))
                 .flex()
