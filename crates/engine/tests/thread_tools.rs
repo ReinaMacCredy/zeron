@@ -2664,6 +2664,8 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
 
 #[tokio::test]
 async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
+    const FOLD_MS: i64 = 8_000;
+    unsafe { std::env::set_var("ZERON_SUPERVISOR_FOLD_MS", FOLD_MS.to_string()) };
     let rig = rig(Duration::from_millis(400));
     let rpc = rig.core.rpc_service();
     let call = |method: &'static str, params: serde_json::Value| {
@@ -2823,6 +2825,26 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     assert_eq!(titles(&rig).len(), 2);
     assert_eq!(titles(&rig)[1].1, "README");
 
+    let ensure = || {
+        call(
+            zeron_rpc::methods::ENSURE_SUPERVISOR,
+            serde_json::json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+        )
+    };
+    let supervisor = started(ensure().await);
+    assert_eq!(
+        started(ensure().await),
+        supervisor,
+        "one Supervisor per device"
+    );
+    let supervise = |on: bool| {
+        mutate(
+            serde_json::json!({ "op": "setMissionSupervised", "taskId": "t1", "supervised": on }),
+        )
+    };
+    let wakes = |rig: &Rig| prompts_with(rig, "Supervisor wake ");
+    supervise(false).await.unwrap();
+
     mutate(edit(Vec::new())).await.unwrap();
     let edited = "The person edited the plan in Mission Control (task id t1)";
     wait_for(
@@ -2830,6 +2852,11 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         "the lead's edit message",
     )
     .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wakes(&rig).is_empty(),
+        "a mission with the Supervisor off wakes nobody"
+    );
     assert_eq!(
         rig.core.workspace.task("t1").unwrap().plan,
         "Ship the API, then its docs"
@@ -2856,6 +2883,8 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         assert!(message.contains(&change), "{change} in {message}");
     }
 
+    supervise(true).await.unwrap();
+    let removed_at = chrono::Utc::now();
     mutate(serde_json::json!({
         "op": "editTaskPlan", "taskId": "t1", "removeStepIds": [added.id],
     }))
@@ -2874,5 +2903,69 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         2,
         "each edit reaches the lead as one message"
     );
+
+    wait_for(|| wakes(&rig).len() == 1, "the Supervisor's first wake").await;
+    let first = wakes(&rig).remove(0);
+    for line in [
+        "Plan edited by the person · Shop backend (task t1)".to_string(),
+        format!(
+            "- Step \"Tag the release\" (taskStepId {}) is removed.",
+            added.id
+        ),
+        "Last reply from the lead: \"noted\"".to_string(),
+    ] {
+        assert!(first.contains(&line), "{line} in {first}");
+    }
+    let held_from = chrono::Utc::now();
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1", "overview": "Ship the API and document it",
+    }))
+    .await
+    .unwrap();
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1",
+        "steps": [{ "stepId": steps[1].id, "title": "Write the docs", "notes": "README, a guide and a FAQ" }],
+    }))
+    .await
+    .unwrap();
+    wait_for(|| wakes(&rig).len() == 2, "the folded wake").await;
+    let folded = wakes(&rig).remove(1);
+    for line in [
+        "2 events since".to_string(),
+        "- The overview changed.".to_string(),
+        format!("(taskStepId {}) has a new spec.", steps[1].id),
+    ] {
+        assert!(folded.contains(&line), "{line} in {folded}");
+    }
+    let zeron_rpc::RpcReply::Stream(mut watch) =
+        call(zeron_rpc::methods::WATCH_SUPERVISOR, serde_json::json!({}))
+            .await
+            .unwrap()
+    else {
+        panic!("a snapshot stream");
+    };
+    let snapshot: zeron_proto::supervisor::SupervisorSnapshot =
+        serde_json::from_value(watch.next().await.unwrap()).unwrap();
+    assert_eq!(snapshot.chat_id.as_deref(), Some(supervisor.as_str()));
+    let [second_wake, first_wake] = &snapshot.wakes[..] else {
+        panic!("two wakes: {:?}", snapshot.wakes);
+    };
+    let fold = chrono::Duration::milliseconds(FOLD_MS);
+    assert!(
+        first_wake.at - removed_at < chrono::Duration::seconds(1),
+        "the first edit wakes it at once"
+    );
+    assert!(
+        held_from < first_wake.at + fold && second_wake.at - first_wake.at >= fold,
+        "later edits wait out the window and share one wake"
+    );
+    let asked: Vec<String> = entries(&rig.core, &supervisor)
+        .into_iter()
+        .filter(|entry| entry.role == MessageRole::User)
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(asked, [first_wake.id.clone(), second_wake.id.clone()]);
+    let row = rig.core.workspace.chat(&supervisor).unwrap().unwrap();
+    assert!(!row.is_top_level(), "the Supervisor has no sidebar row");
     rig.core.shutdown().await;
 }

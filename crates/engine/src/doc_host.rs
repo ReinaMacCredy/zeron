@@ -49,9 +49,12 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 mod delegation;
 #[path = "doc_host_steps.rs"]
 mod steps;
+#[path = "doc_host_supervisor.rs"]
+mod supervisor_host;
 pub use delegation::{
     DELEGATION_GUIDANCE, DelegateTaskParams, ProfileParams, ResolveFindingsParams, TaskView,
 };
+pub(crate) use supervisor_host::newest_supervisor;
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
@@ -266,6 +269,7 @@ struct DocHostInner {
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
     thread_watches: OnceLock<crate::thread_watches::ThreadWatches>,
+    supervisor: OnceLock<crate::supervisor::SupervisorStore>,
     /// Cancels every worker spawned through `spawn_worker` — the loops'
     /// own exit conditions (weak handle death, closed channels) don't cover
     /// runtime replacement, where Edge-capable tasks must stop doing
@@ -1174,6 +1178,7 @@ impl DocHost {
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 thread_watches: OnceLock::new(),
+                supervisor: OnceLock::new(),
                 shutdown: CancellationToken::new(),
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
