@@ -1425,6 +1425,19 @@ async fn resolving_findings_checks_the_owner_the_review_the_ids_and_the_notes() 
             .contains("note_required")
         );
     }
+    for commit in ["abc123é", "not-hex", "abc"] {
+        assert!(
+            refused(
+                resolve(
+                    "lead",
+                    &review,
+                    serde_json::json!([{ "id": "F1", "outcome": "fixed", "commit": commit }])
+                )
+                .await
+            )
+            .contains("invalid_commit")
+        );
+    }
     assert!(
         delegation(&rig.core, &review).finding_outcomes.is_empty(),
         "a refused call writes nothing"

@@ -833,12 +833,25 @@ impl DocHost {
                     format!("{} needs a note saying why", resolution.id),
                 ));
             }
+            let commit = trimmed(resolution.commit);
+            if let Some(commit) = commit
+                .as_deref()
+                .filter(|commit| !crate::working_tree::is_commit_id(commit))
+            {
+                return Err(failure(
+                    "invalid_commit",
+                    format!(
+                        "{}: commit {commit:?} is not a commit id (4 to 64 hex digits)",
+                        resolution.id
+                    ),
+                ));
+            }
             outcomes.push((
                 resolution.id,
                 FindingOutcome {
                     outcome: resolution.outcome,
                     note,
-                    commit: trimmed(resolution.commit),
+                    commit,
                 },
             ));
         }

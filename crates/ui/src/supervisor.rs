@@ -3329,7 +3329,7 @@ impl SupervisorPage {
                 Some(sha) => format!(
                     "started on {} at {}",
                     source.branch,
-                    &sha[..sha.len().min(7)]
+                    crate::review::short_sha(sha)
                 ),
                 None => format!("started on {}", source.branch),
             }),

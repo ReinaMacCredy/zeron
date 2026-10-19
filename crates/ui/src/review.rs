@@ -64,8 +64,14 @@ pub struct CommitPick {
 
 impl CommitPick {
     pub fn short(&self) -> &str {
-        &self.sha[..self.sha.len().min(7)]
+        short_sha(&self.sha)
     }
+}
+
+pub fn short_sha(sha: &str) -> &str {
+    sha.char_indices()
+        .nth(7)
+        .map_or(sha, |(end, _)| &sha[..end])
 }
 
 impl ChatReview {
@@ -540,6 +546,14 @@ mod tests {
             ReadOutcome::Read(Some(mut findings)) => findings.remove(0),
             other => panic!("unread: {other:?}"),
         }
+    }
+
+    #[test]
+    fn short_sha_cuts_on_a_char_boundary() {
+        assert_eq!(short_sha("abc123é"), "abc123é");
+        assert_eq!(short_sha("abc123éf9"), "abc123é");
+        assert_eq!(short_sha("a1b2c3d4e5"), "a1b2c3d");
+        assert_eq!(short_sha("abc"), "abc");
     }
 
     #[test]

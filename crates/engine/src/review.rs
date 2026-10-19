@@ -80,7 +80,7 @@ pub fn parse_request(request_id: &str) -> Option<(ReviewScope, Option<String>)> 
     let scope = ReviewScope::from_key(parts.next()?)?;
     let commit = parts
         .nth(1)
-        .filter(|sha| !sha.is_empty())
+        .filter(|sha| crate::working_tree::is_commit_id(sha))
         .map(str::to_string);
     Some((scope, commit))
 }
@@ -599,6 +599,8 @@ mod tests {
             Some((ReviewScope::Commit, Some("a1b2c3d".to_string())))
         );
         assert_eq!(parse_request("other:branch:x"), None);
+        let forged = request_id(ReviewScope::Commit, Some("abc123é"), "abc");
+        assert_eq!(parse_request(&forged), Some((ReviewScope::Commit, None)));
     }
 
     #[test]
