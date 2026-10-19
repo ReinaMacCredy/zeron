@@ -1736,6 +1736,19 @@ mod tests {
             page.card().read(cx).task_id().map(str::to_owned)
         });
         assert_eq!(open.as_deref(), Some("plain"));
+
+        let at = cx.debug_bounds("task-row-orch").unwrap().center();
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let edit = cx.debug_bounds("task-row-menu-edit").unwrap().center();
+        cx.simulate_click(edit, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*opened.borrow(), ["orch"]);
+        let open = page.read_with(cx, |page, cx| {
+            page.card().read(cx).task_id().map(str::to_owned)
+        });
+        assert_eq!(open.as_deref(), Some("orch"));
     }
 
     #[gpui::test]
