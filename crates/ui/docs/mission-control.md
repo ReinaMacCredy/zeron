@@ -41,30 +41,32 @@ In an open chat, press Shift+Tab in the composer, or click **Mission Control** u
 
 A Mission Control task opens its own page instead of the card, from the Tasks list, the board, the Inbox, the **Missions** widget on Home, the Supervisor's **Missions** list, or the strip at the top of its chats. The back button in the titlebar takes you back: to the chat you came from, named after it, or else to **Tasks**.
 
-The header reads **MISSION CONTROL** above the task's title, and shows the task's status (**Planning**, **Plan ready**, or its Kanban column), **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
+The header reads **MISSION CONTROL** above the task's title, and shows the task's status (**Planning**, **Plan ready**, or its Kanban column), **Mark as done** or **Reopen**, and how many steps are done. Under it the plan is drawn as a tree:
 
-- The lead, with its model and what it is doing: **Not started**, **Planning**, **Watching** its running steps, **Working**, **Waiting on you**, or **Done**.
-- **Reads**, when the mission has chats to read: one chip per chat with its status, read-only.
-- With **plan.md**, the **Overview** the lead wrote.
-- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Needs you**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**. Click **spec** under a step to read what the lead wrote for it.
+- **Steps** at the top sums it up: how many steps, how many are working, a **needs you** and a **failed** button when any step needs you or failed, and the tokens the whole mission has used so far. Click **needs you** or **failed** for a small window that lists those steps, with **Open thread** and **Answer**, **Approve and run** for a plan that waits for you, or **Skip** and **Retry**.
+- The lead's card on top: its agent and model, its state (**Not started**, **Planning**, **Working**, **Needs you**, **Done**), what it is doing (**The lead is planning**, **Watching** its running steps, **Working**, **Waiting on you**), and, with **plan.md**, the **Overview** the lead wrote. The overview shows one line; click **Overview** to read all of it. **Reads**, when the mission has chats to read, shows one chip per chat with its status, read-only. The bottom line has the tokens the lead and its steps have used, and a button with the number of steps that folds them away and brings them back.
+- The steps, from the top down, alternating left and right of a line that runs down the middle, each joined to it. Each card shows the step's number, its agent and model (or **Not started**), its state (**Planned**, **Working**, **Needs you**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**), its title, and the tokens it has used and its time: the time so far while it works, then the time its agent spent working. A failed step shows what went wrong. Click **spec** on a card to read what the lead wrote for it.
+- **Add a step**, a dashed card at the end.
 
-Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
+As the plan arrives, the lines draw themselves from the lead and the cards rise in one after another; when cards move, they glide to their new place. Running steps shimmer. With reduced motion, everything appears and moves at once.
+
+Click a card to watch its thread live in a panel that slides in from the right, with a composer to write to it. The tree makes room for it. **Open thread** opens the full chat; × or Escape closes the panel. The lead, and any step that has not started, show the lead's chat.
 
 The page keeps its place while you are away: go back to it from a chat, and the specs you opened, the edit you were writing, your unsent changes and the scroll position are as you left them.
 
 ## Approve the plan
 
-While the lead writes the plan, the page reads **The lead is planning**. Then **Plan ready** shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first.
+While the lead writes the plan, its card reads **The lead is planning**. Then **Plan ready** on the lead's card shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first.
 
 ## Change the plan
 
 You can change the plan once the lead has started, before you approve it and while the steps run, in both **plan.md** and **Steps only**. A task marked done cannot be edited.
 
-- Open a step's **spec** and click **Edit**, or right-click the step and pick **Edit spec**, to change its title and its spec. The step opens as a card. Press Cmd+Enter or click **Save** to keep the change, or press Escape or click **Cancel** to drop it. Enter in the title saves too.
-- With **plan.md**, **Edit** on the **Overview** changes the overview in the same kind of card.
+- Open a step's **spec** and click **Edit**, or right-click the step and pick **Edit spec**, to change its title and its spec. The step's card opens for editing in its place and grows taller. Press Cmd+Enter or click **Save** to keep the change, or press Escape or click **Cancel** to drop it. Enter in the title saves too.
+- With **plan.md**, **Edit** on the lead card's **Overview** changes the overview in the same kind of card.
 - Type a new step in **Add a step** and press Enter.
 - **Remove** takes out a step that has not started. **Restore** brings it back.
-- Drag a step that has not started by the grip at its left edge, which shows when you hover the step, to change the order, or right-click it and pick **Move up** or **Move down**. A step can only land below the last step that has started; steps that are done or running keep their place, and their grip says so. Steps you added and have not sent stay at the end, in the order you put them.
+- Drag a step that has not started by the grip that takes the place of its agent's mark when you hover the card, to change the order; a bar shows where it will land. Or right-click it and pick **Move up** or **Move down**. A step can only land below the last step that has started; steps that are done or running have no grip, and keep their place. Because the cards alternate sides, the steps after a moved one glide to the other side. Steps you added and have not sent stay at the end, in the order you put them.
 
 Right-click a step for **Edit spec**, **Open thread** (when the step has a thread), **Add image**, **Move up**, **Move down**, **Skip** or **Reopen**, and **Remove**. An item that does not apply to that step is greyed out. Escape or a click outside closes the menu.
 
