@@ -2066,12 +2066,14 @@ impl SessionsEngine {
         message_id: Option<&str>,
     ) -> bool {
         let settings = self.inner.registry.compaction_settings();
+        // After a provider switch the handoff packet is the compaction.
         let blocked = || {
             settings.mode != CompactionMode::Classifier
                 || !self.inner.auto_compacts(chat_id)
                 || self.turn_in_flight(chat_id)
                 || lock(&self.inner.compacting).contains(chat_id)
                 || lock(&self.inner.agent_compacted).contains(chat_id)
+                || self.inner.session_tombstoned(chat_id)
         };
         if zeron_proto::invocation::leading_command(prompt).is_some() || blocked() {
             return false;
@@ -2715,6 +2717,14 @@ impl SessionsEngine {
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
         request.resume = self.inner.resume_for(chat_id, &request.cwd);
+        if request.resume.is_none() {
+            return Ok(CompactOutcome {
+                compacted: false,
+                pre_tokens: None,
+                post_tokens: None,
+                message: Some("Nothing to compact".into()),
+            });
+        }
         self.inner.inject_branch(chat_id, &mut request);
 
         // Retire a parked warm child so the compaction owns the run slot; a

@@ -1485,6 +1485,34 @@ async fn the_classifier_starts_fresh_on_a_harness_that_cannot_compact() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_provider_switch_hands_over_instead_of_compacting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    classifier_mode(&core);
+    core.sessions.switch_harness(CHAT).await.expect("switch");
+    let outcome = core.sessions.compact(CHAT, None).await.expect("compaction");
+    assert!(!outcome.compacted);
+    assert_eq!(requests.lock().unwrap().len(), 1, "no compaction run");
+
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "the message runs").await;
+    assert!(
+        harness.one_shots.lock().unwrap().is_empty(),
+        "no classifier call"
+    );
+    let next = requests.lock().unwrap()[1].clone();
+    assert_eq!(next.resume, None, "the new harness's own session");
+    assert!(
+        next.prompt.starts_with("<provider_switch>"),
+        "{}",
+        next.prompt
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_fresh_session_carries_the_last_turns_ahead_of_its_packet() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
