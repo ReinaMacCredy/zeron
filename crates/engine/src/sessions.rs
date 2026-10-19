@@ -2816,6 +2816,7 @@ impl SessionsEngine {
                 pre_tokens,
                 post_tokens,
             )?;
+            lock(&self.inner.streaks).remove(handle.chat_id());
         }
         self.compaction_outcome(handle.chat_id(), drain)
     }
@@ -6517,6 +6518,7 @@ async fn drive_run(
             {
                 tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
             }
+            lock(&inner.streaks).remove(&chat_id);
             continue;
         }
         // The engine's input bridge is the sole authority on input requests:
