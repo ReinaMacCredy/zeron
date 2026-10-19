@@ -497,12 +497,24 @@ fn extract_zip_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessE
             std::fs::create_dir_all(parent)?;
         }
         let mut output_file = std::fs::File::create(&output)?;
-        let copied = std::io::copy(&mut entry, &mut output_file)?;
-        if copied != entry.size() {
+        let declared = entry.size();
+        let mut capped = Capped {
+            inner: &mut entry,
+            remaining: declared,
+            exceeded: false,
+        };
+        let copied = std::io::copy(&mut capped, &mut output_file);
+        if capped.exceeded {
             return Err(HarnessError::Install(format!(
-                "archive entry {} extracted {copied} bytes but declared {}",
-                output.display(),
-                entry.size()
+                "archive entry {} holds more than the {declared} bytes it declares",
+                output.display()
+            )));
+        }
+        let copied = copied?;
+        if copied != declared {
+            return Err(HarnessError::Install(format!(
+                "archive entry {} extracted {copied} bytes but declared {declared}",
+                output.display()
             )));
         }
         output_file.flush()?;
@@ -674,6 +686,35 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o111, 0o111, "{name} is executable");
         }
+    }
+
+    #[tokio::test]
+    async fn a_zip_entry_cannot_write_more_than_it_declares() {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "server",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(&vec![0; 1 << 20]).unwrap();
+        let mut bytes = zip.finish().unwrap().into_inner();
+        for (signature, offset) in [
+            ([0x50, 0x4b, 0x03, 0x04], 22),
+            ([0x50, 0x4b, 0x01, 0x02], 24),
+        ] {
+            let at = bytes.windows(4).position(|w| w == signature).unwrap() + offset;
+            bytes[at..at + 4].copy_from_slice(&10_u32.to_le_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bomb.zip");
+        std::fs::write(&archive, bytes).unwrap();
+        let error = extract_zip(&archive, dir.path()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("more than the 10 bytes"),
+            "{error}"
+        );
+        assert!(std::fs::metadata(dir.path().join("server")).unwrap().len() <= 10);
     }
 
     #[tokio::test]
