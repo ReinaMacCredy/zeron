@@ -20,6 +20,7 @@ use crate::icons::{self, icon};
 use crate::popover;
 use crate::settings::HomeWidgets as Toggles;
 use crate::state::AppState;
+use crate::tasks::PlanPhase;
 use crate::theme::Theme;
 
 const GRID_MAX_WIDTH: f32 = 880.0;
@@ -717,11 +718,12 @@ pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionR
         .into_iter()
         .map(|task| {
             let plan = crate::tasks::rollup(state, task, now);
+            let phase = plan.phase(task);
             let (word, status) = plan.label(task);
-            let label = match (word, status) {
-                ("Plan ready", _) => "Needs you · plan review".to_owned(),
-                ("Planning", _) => "Planning".to_owned(),
-                (_, TaskStatus::NeedsYou) => plan
+            let label = match phase {
+                PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
+                PlanPhase::Planning => "Planning".to_owned(),
+                PlanPhase::Status(TaskStatus::NeedsYou) => plan
                     .steps
                     .iter()
                     .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
