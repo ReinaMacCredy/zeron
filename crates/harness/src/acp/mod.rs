@@ -1554,6 +1554,7 @@ impl AcpHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         cmd.args(&self.launch.args);
+        child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
         self.launch.apply(&mut cmd, None);
