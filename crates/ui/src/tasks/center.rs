@@ -84,7 +84,6 @@ struct StepText {
     notes: String,
 }
 
-/// Edits the person has not sent: never written to the registry until Send.
 #[derive(Default)]
 struct Draft {
     overview: Option<String>,
