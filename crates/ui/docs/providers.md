@@ -1,4 +1,4 @@
-Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, and Antigravity. Open [Settings > Providers](zeron://settings/providers) to choose which ones the composer offers, sign in, and add extra accounts or setups.
+Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, and Antigravity, plus any agent you add from the ACP Registry. Open [Settings > Providers](zeron://settings/providers) to choose which ones the composer offers, sign in, and add extra accounts or setups.
 
 ## Turn agents on and off
 
@@ -18,15 +18,24 @@ Click **Add account** and finish signing in on the page that opens in your brows
 
 ## Add provider
 
-**Add provider** sets up a second instance of an agent, for example a work login next to a personal one.
+**Add provider** sets up another instance of an agent, for example a work login next to a personal one. Each instance has its own label and settings, and its own tab in the model picker.
 
-1. Pick a provider tile. **Sign in with Claude** or **Continue with ChatGPT** creates a numbered instance with its own login in one step. **Configure manually** walks through the rest.
-2. Give it a **Label**, an **Instance ID**, and an optional **Accent color** for the picker.
-3. Set a **Binary path**, a separate home folder, **Launch arguments**, or **Environment** variables.
+1. **Provider**: pick a tile. For Claude, Codex, and Pi, **Sign in with Claude** or **Continue with ChatGPT** creates a numbered instance with a home folder of its own and starts its sign-in in one step. **Configure manually**, or **Next** for the other agents, walks through the rest.
+2. **Identity**: a **Label** shown in the provider list and the model picker, an **Instance ID** (letters, digits, `-`, or `_`), and an optional **Accent color** for the picker.
+3. **Config**: a **Binary path**, **Launch arguments**, and **Environment** variables set for this instance only. Claude, Codex, and Pi also take a separate home folder, so the instance keeps its own login and settings. Cursor instances take only environment variables.
 
-Below the tiles, **Or choose from ACP Registry** lets you search for agents that speak the Agent Client Protocol and **Add** them. **Local ACP command** runs an ACP agent from a command on your Mac.
+## ACP agents
 
-Instances appear under their provider, with a pen to edit and a trash button that asks **Delete?** first.
+Below the tiles, **Or choose from ACP Registry** searches the registry of agents that speak the Agent Client Protocol. Each result shows its version and how it installs, and **Installed** when it is already set up. Click **Add** to download or prepare it, give it a label, then choose **Continue to sign-in**. The **Sign in** step lists the sign-in methods the agent offers, or links to its docs with **Open docs** when it has none in the app. **Skip for now** finishes without signing in.
+
+- **Enter manually** takes an agent ID from the official ACP Registry, for example `devin`.
+- **Local ACP command** runs an ACP agent that is already installed: set its **Executable** (an absolute path or a command on PATH), **Arguments**, and **Environment**, then **Add instance**.
+
+## Instances on the Providers page
+
+Instances of a built-in agent show under that agent's row; ACP agents get rows of their own. A row shows the instance's account, **Uses the default Claude login** (or Codex, or Pi) when it shares yours, or **Sign in** for an ACP agent you have not signed in to yet. The pen (**Edit**) reopens the setup, and the trash asks **Delete?** first. Deleting an instance whose home folder Zeron made also removes that folder and its saved login.
+
+Moving a chat that has history to another instance works like switching to another agent: Zeron asks **Switch provider?**, closes the old session, and hands the conversation over as text. See [Models and effort](zeron://docs/models-and-effort).
 
 ## Plan usage in the rail
 

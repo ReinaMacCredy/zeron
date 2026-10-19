@@ -17,7 +17,7 @@ The compact picker is the default. It shows the current effort level in large ty
 
 ## Full picker
 
-The full picker has a row of tabs along the top: a star for your favorites, a tab for agent profiles, then one tab per agent. Search with **Search models…**. Click a row's star to add it to favorites. Cmd+1 to Cmd+9 pick the first nine rows.
+The full picker has a row of tabs along the top: a star for your favorites, a tab for agent profiles, then one tab per agent. Each agent's tab is followed by a tab for every extra instance you set up under **Add provider**, and ACP agents you added get tabs at the end. An instance's tab lists that instance's models, and picking one runs the chat on that instance. Search with **Search models…**. Click a row's star to add it to favorites. Cmd+1 to Cmd+9 pick the first nine rows.
 
 Below the list, the **Reasoning** card shows the current level. A bolt button on the card turns fast mode on or off for models that have it, and a reset button restores the default level and speed.
 
@@ -34,6 +34,6 @@ Levels depend on the model. They range from **Minimal** or **Low** up to **High*
 Your pick applies to the chat you are in. Clicking another agent's tab only browses; nothing changes until you pick a model.
 
 - **Same agent, new model**: if the chat has history, Zeron asks **Switch model?** The next response is slower and uses more tokens, because the full history is re-read. Choose **Yes, switch to …** or **No, go back** (press 1 or 2). A divider in the transcript marks the change.
-- **Different agent**: Zeron asks **Switch provider?** The old session is closed, and on your next message the conversation so far is handed to the new agent as plain text. Tool results, open files, and the old agent's cache are not carried over.
+- **Different agent or instance**: Zeron asks **Switch provider?** The old session is closed, and on your next message the conversation so far is handed to the new agent as plain text. Tool results, open files, and the old agent's cache are not carried over.
 
 New chats start with the model you picked last for each agent.
