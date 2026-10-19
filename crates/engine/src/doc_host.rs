@@ -3747,6 +3747,20 @@ impl DocHost {
         from_chat_id: Option<&str>,
         text: &str,
     ) -> Result<String, EngineError> {
+        let (handle, id) = self.push_thread_row(chat_id, from_chat_id, text)?;
+        match self.steer_queued_now(chat_id, &id).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => self.drain_queue(&handle).await,
+        }
+        Ok(id)
+    }
+
+    fn push_thread_row(
+        &self,
+        chat_id: &str,
+        from_chat_id: Option<&str>,
+        text: &str,
+    ) -> Result<(Arc<ChatDocHandle>, String), EngineError> {
         if from_chat_id == Some(chat_id) {
             return Err(EngineError::Other("a thread cannot message itself".into()));
         }
@@ -3785,11 +3799,7 @@ impl DocHost {
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
-        match self.steer_queued_now(chat_id, &id).await {
-            Ok(true) => {}
-            Ok(false) | Err(_) => self.drain_queue(&handle).await,
-        }
-        Ok(id)
+        Ok((handle, id))
     }
 
     pub fn last_user_entry(&self, chat_id: &str) -> Result<Option<String>, EngineError> {

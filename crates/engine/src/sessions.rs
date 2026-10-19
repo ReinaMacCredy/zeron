@@ -6755,6 +6755,9 @@ async fn drive_run(
                     SessionStatus::Working
                 };
                 inner.set_status(&chat_id, status, false);
+                if let Some(host) = inner.doc_host() {
+                    host.supervisor_stale();
+                }
             }
             _ => {}
         }
