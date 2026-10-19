@@ -583,11 +583,7 @@ impl Composer {
             chat_reasoning.or_else(|| self.pickers.read(cx).resolved(cx).reasoning);
         let (agents, shells) = {
             let state = self.state.read(cx);
-            let transcript = if self.chat_override.is_some() {
-                state.sub_transcript(&chat_id)
-            } else {
-                &state.transcript
-            };
+            let transcript = self.bound_transcript(state);
             let turn_start = latest_prompt(transcript);
             let mut agents = agent_runs(transcript, turn_start.unwrap_or(0));
             let pending_review = state

@@ -19136,12 +19136,12 @@ impl Render for Shell {
                         this.toggle_pr_chat(cx)
                     }
                     Route::PullRequests => {}
+                    Route::TaskCenter => this.open_task_center_terminal(cx),
                     Route::Settings(_)
                     | Route::Terminal
                     | Route::Usage
                     | Route::Inbox
                     | Route::Tasks
-                    | Route::TaskCenter
                     | Route::Docs => {}
                 }),
             )
