@@ -1,6 +1,18 @@
 use serde_json::{Map, Value, json};
+use zeron_proto::ui_driver::MAX_WAIT_MS;
 
 pub(super) const ASSERT_TIMEOUT_MS: u64 = 3000;
+const RESERVED_NAMES: [&str; 3] = ["env", "target", "run"];
+const ASSERT_FIELDS: [&str; 8] = [
+    "select",
+    "nth",
+    "text",
+    "saved",
+    "equals",
+    "contains",
+    "exists",
+    "timeoutMs",
+];
 
 #[derive(Debug, PartialEq)]
 pub(super) struct Scenario {
@@ -115,6 +127,14 @@ fn parse_step(value: &Value) -> Result<Step, String> {
     };
     let save = match fields.remove("save") {
         None => None,
+        Some(Value::String(save))
+            if save.is_empty() || save.contains('.') || RESERVED_NAMES.contains(&save.as_str()) =>
+        {
+            return Err(format!(
+                "\"save\" must be a name without dots other than {}, not {save:?}",
+                RESERVED_NAMES.join(", ")
+            ));
+        }
         Some(Value::String(save)) if *kind == "engine" || *kind == "ui" => Some(save),
         Some(_) if *kind != "engine" && *kind != "ui" => {
             return Err(format!(
@@ -164,7 +184,11 @@ fn parse_step(value: &Value) -> Result<Step, String> {
                         .ok_or("\"snapshot\" takes a label")?
                         .to_owned(),
                 ),
-                _ => Kind::Sleep(head.as_u64().ok_or("\"sleep\" takes milliseconds")?),
+                _ => Kind::Sleep(
+                    head.as_u64()
+                        .filter(|&ms| ms <= MAX_WAIT_MS)
+                        .ok_or(format!("\"sleep\" takes up to {MAX_WAIT_MS} milliseconds"))?,
+                ),
             }
         }
     };
@@ -177,6 +201,21 @@ fn parse_step(value: &Value) -> Result<Step, String> {
 }
 
 fn parse_assert(value: &Value) -> Result<Assert, String> {
+    if let Some(fields) = value.as_object() {
+        if let Some(extra) = fields
+            .keys()
+            .find(|key| !ASSERT_FIELDS.contains(&key.as_str()))
+        {
+            return Err(format!("unknown assert field \"{extra}\""));
+        }
+        let kinds = ["select", "text", "saved"]
+            .into_iter()
+            .filter(|kind| fields.contains_key(*kind))
+            .count();
+        if kinds > 1 {
+            return Err("an assert takes one of \"select\", \"text\" or \"saved\"".into());
+        }
+    }
     let exists = match &value["exists"] {
         Value::Null => true,
         Value::Bool(exists) => *exists,
@@ -282,6 +321,17 @@ mod tests {
                 "\"first\" must be a bool",
             ),
             (json!({ "sleep": "1s" }), "milliseconds"),
+            (json!({ "sleep": 60_001 }), "up to 60000 milliseconds"),
+            (json!({ "ui": "state", "save": "a.b" }), "without dots"),
+            (json!({ "ui": "state", "save": "target" }), "without dots"),
+            (
+                json!({ "assert": { "select": "Button", "text": "Go" } }),
+                "one of \"select\"",
+            ),
+            (
+                json!({ "assert": { "text": "Go", "exist": false } }),
+                "unknown assert field \"exist\"",
+            ),
         ] {
             let error = parse_step(&bad).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");

@@ -481,15 +481,17 @@ of these keys:
 
 | Step | Effect |
 |---|---|
-| `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. |
+| `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. A scenario with an engine step refuses a release-build target. |
 | `{"ui": "<driver action>", ...args, "save"?: "n"}` | Sends one driver request, as `zeron ui <action>` would. |
 | `{"assert": {"select": "Role \"label\"", "nth"?: n, "exists"?: bool}}` | `true` waits for a match (`wait for:select`); `false` waits for none (`wait for:gone`, which ignores `nth`). |
 | `{"assert": {"text": "substring", "exists"?: bool}}` | `true` waits for a label, value or description that contains it; `false` waits until none does (`wait for:gone` with `text`). |
 | `{"assert": {"saved": "n.path", "equals": json}}` | Compares a saved value. `"contains": "s"` searches its text instead (a JSON value is searched as compact JSON). |
 | `{"snapshot": "label"}` | Writes `shots/NN-label.png`. |
-| `{"sleep": ms}` | Waits. |
+| `{"sleep": ms}` | Waits, up to 60000 ms. |
 
-- `select` and `text` asserts take `timeoutMs` (default 3000).
+- `select` and `text` asserts take `timeoutMs` (default 3000). An assert takes exactly one of
+  `select`, `text` or `saved`, and no other keys than the ones above.
+- A `save` name has no dots and is not `env`, `target` or `run`.
 - Any step may set `"name"` for the report, and `"continueOnFail": true`. Without it, the first
   failure skips the remaining steps.
 - Strings in `params`, args and asserts may hold `${n.path.0.field}`: a saved result, `target`
