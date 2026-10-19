@@ -2513,7 +2513,18 @@ impl Harness for AcpHarness {
         } else {
             vec![]
         };
-        crate::model_context::context(self.id(), &binary, &extra, &self.launch).map(Some)
+        // npx and local agents share an interpreter; the script and flags name the agent.
+        let launch = LaunchOverrides {
+            args: self
+                .spec
+                .args
+                .iter()
+                .chain(&self.launch.args)
+                .cloned()
+                .collect(),
+            ..self.launch.clone()
+        };
+        crate::model_context::context(self.id(), &binary, &extra, &launch).map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
         (self.spec.models)()
@@ -6223,6 +6234,32 @@ mod tests {
             ),
             Vec::new()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generic_agents_on_one_interpreter_keep_separate_model_catalogs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.0.0\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hash = |script: &str| {
+            AcpHarness::generic(AcpLaunch {
+                display_name: "Agent".into(),
+                program: node.clone(),
+                args: vec![script.into()],
+                env: Default::default(),
+            })
+            .unwrap()
+            .model_context()
+            .unwrap()
+            .unwrap()
+            .hash
+        };
+        let claude = hash("/adapters/claude-agent-acp/dist/index.js");
+        assert_ne!(claude, hash("/adapters/codex-acp/dist/index.js"));
+        assert_eq!(claude, hash("/adapters/claude-agent-acp/dist/index.js"));
     }
 
     #[test]
