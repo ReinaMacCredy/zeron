@@ -2121,17 +2121,6 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     }
 }
 
-/// Derive the model list a `session/new` response advertises. The `model`
-/// config option's choices come FIRST, the legacy first-class `models` state
-/// is only a fallback: the org adapters enumerate one `availableModels` entry
-/// per model × effort combination on that deprecated surface (Zed dropped it
-/// entirely), while their `configOptions` carry base model ids with effort as
-/// a separate `thought_level` option. `[1m]`-suffixed long-context variants
-/// collapse into the base model's Context Window trait, matching the static
-/// catalogs. Traits come off the wire too — every select/boolean config
-/// option outside mode/model/thought_level becomes a `ModelOption` — so
-/// unmatched models keep fast mode etc.; the catalog only enriches matched
-/// ids with label/description/per-model ladders.
 fn lead_with_current_model(models: &mut [Model], session_response: &Value) {
     let current = session_response
         .get("configOptions")
@@ -2149,6 +2138,17 @@ fn lead_with_current_model(models: &mut [Model], session_response: &Value) {
     }
 }
 
+/// Derive the model list a `session/new` response advertises. The `model`
+/// config option's choices come FIRST, the legacy first-class `models` state
+/// is only a fallback: the org adapters enumerate one `availableModels` entry
+/// per model × effort combination on that deprecated surface (Zed dropped it
+/// entirely), while their `configOptions` carry base model ids with effort as
+/// a separate `thought_level` option. `[1m]`-suffixed long-context variants
+/// collapse into the base model's Context Window trait, matching the static
+/// catalogs. Traits come off the wire too — every select/boolean config
+/// option outside mode/model/thought_level becomes a `ModelOption` — so
+/// unmatched models keep fast mode etc.; the catalog only enriches matched
+/// ids with label/description/per-model ladders.
 fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
     let config_options = session_response
         .get("configOptions")
