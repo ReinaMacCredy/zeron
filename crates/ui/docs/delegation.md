@@ -2,7 +2,7 @@ An agent can hand part of its work to a child agent on any installed provider an
 
 ## Delegated task chips
 
-When an agent delegates, a chip appears in the transcript with the child's agent, title, model, and status: **Running**, **Completed**, **Failed**, or **Stopped**. When the child is done, the chip shows how long it took, and the parent chat gets a row saying the delegated task finished, with **Open subagent**.
+When an agent delegates, a chip appears in the transcript with the child's agent, title, model, and status: **Running**, **Completed**, **Failed**, or **Stopped**. When the child is done, the chip shows how long it took, and the parent chat gets a row saying the delegated task finished, with **Open subagent**. The parent's agent gets the child's final reply in that message.
 
 Click the chip to open the child chat as a tab in the right pane. It has its own composer, so you can talk to the child directly. A line above that composer reads **Subagent of** the parent chat, with **Open parent** to jump back. Delegated chats do not appear in the sidebar.
 

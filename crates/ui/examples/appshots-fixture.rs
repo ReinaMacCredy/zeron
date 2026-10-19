@@ -148,6 +148,7 @@ fn main() -> anyhow::Result<()> {
             delivery_gate: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         },
         zeron_doc::QueuedMessage {
@@ -162,6 +163,7 @@ fn main() -> anyhow::Result<()> {
             delivery_gate: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         },
     ];

@@ -9693,7 +9693,8 @@ impl Transcript {
                 let auto_continue = from_chat_id
                     .as_deref()
                     .is_some_and(|from| Some(from) == self.chat_id.as_deref());
-                let peer: Option<(
+                let peers: Vec<(
+                    SharedString,
                     SharedString,
                     Option<crate::provider_instances::InstanceIcon>,
                 )> = from_chat_id
@@ -9701,19 +9702,32 @@ impl Transcript {
                     .filter(|_| !auto_continue)
                     .map(|from| {
                         let state = self.state.read(cx);
-                        let chat = state
-                            .chats
-                            .iter()
-                            .find(|chat| chat.id.as_str() == from.as_ref());
-                        let title = chat
-                            .and_then(|chat| chat.title.clone())
-                            .map(|title| SharedString::from(single_line(&title)))
-                            .unwrap_or_else(|| from.clone());
-                        let mark = chat.and_then(|chat| crate::pickers::chat_mark(chat, cx));
-                        (title, mark)
-                    });
+                        let senders = step_handback_threads(&text);
+                        let senders = if senders.len() > 1 {
+                            senders.into_iter().map(SharedString::from).collect()
+                        } else {
+                            vec![from.clone()]
+                        };
+                        senders
+                            .into_iter()
+                            .map(|from| {
+                                let chat = state
+                                    .chats
+                                    .iter()
+                                    .find(|chat| chat.id.as_str() == from.as_ref());
+                                let title = chat
+                                    .and_then(|chat| chat.title.clone())
+                                    .map(|title| SharedString::from(single_line(&title)))
+                                    .unwrap_or_else(|| from.clone());
+                                let mark =
+                                    chat.and_then(|chat| crate::pickers::chat_mark(chat, cx));
+                                (from, title, mark)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut column = div().w_full().flex().flex_col();
-                if let Some((title, mark)) = &peer {
+                if !peers.is_empty() {
                     let clock: Option<SharedString> = row
                         .timestamp
                         .and_then(chrono::DateTime::from_timestamp_millis)
@@ -9740,12 +9754,20 @@ impl Transcript {
                                     .text_color(theme.text_faint),
                             )
                             .child(SharedString::from("From"))
-                            .child({
+                            .children(peers.iter().enumerate().map(|(n, (from, title, mark))| {
                                 // The name is the way over: clicking it opens
                                 // the sending thread.
-                                let open_id = from_chat_id.clone().map(|id| id.to_string());
+                                let open_id = from.to_string();
+                                let title = if n + 1 < peers.len() {
+                                    SharedString::from(format!("{title},"))
+                                } else {
+                                    title.clone()
+                                };
                                 div()
-                                    .id(SharedString::from(format!("{}-from-thread", row.id)))
+                                    .id(SharedString::from(format!(
+                                        "{}-from-thread-{from}",
+                                        row.id
+                                    )))
                                     .flex()
                                     .flex_row()
                                     .items_center()
@@ -9759,16 +9781,14 @@ impl Transcript {
                                             mark.svg(theme.text_muted).size(px(12.0)).flex_none(),
                                         )
                                     })
-                                    .child(title.clone())
-                                    .when_some(open_id, |el, open_id| {
-                                        el.on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.stop_propagation();
-                                            cx.emit(TranscriptEvent::OpenChat {
-                                                chat_id: open_id.clone(),
-                                            });
-                                        }))
-                                    })
-                            })
+                                    .child(title)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(TranscriptEvent::OpenChat {
+                                            chat_id: open_id.clone(),
+                                        });
+                                    }))
+                            }))
                             .when_some(clock, |el, clock| {
                                 el.child(
                                     div()
@@ -9845,7 +9865,7 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
-                    let peer_voice = peer.is_some();
+                    let peer_voice = !peers.is_empty();
                     column = column.child(
                         div()
                             .w_full()
@@ -14147,7 +14167,41 @@ fn delegate_chip(
     agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
 }
 
+fn handback_status_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    text.lines().filter(move |line| match *line {
+        "<agent-response>" => {
+            quoted = true;
+            false
+        }
+        "</agent-response>" => {
+            quoted = false;
+            false
+        }
+        _ => !quoted,
+    })
+}
+
 pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
+    let ids: Vec<String> = handback_status_lines(text)
+        .filter_map(|line| {
+            let (id, rest) = line.strip_prefix("Delegated task ")?.split_once(" (\"")?;
+            [
+                "completed.",
+                "failed.",
+                "was cancelled.",
+                "was interrupted.",
+                "ended.",
+            ]
+            .iter()
+            .any(|outcome| rest.ends_with(&format!("\") {outcome}")))
+            .then(|| id.to_string())
+        })
+        .collect();
+    if !ids.is_empty() {
+        return Some(ids);
+    }
+    // Saved transcripts keep wakes written before the handback carried the reply.
     if let Some(rest) = text.strip_prefix("Delegated task ") {
         let (id, _) = rest.split_once(" reached a terminal state.")?;
         return Some(vec![id.to_string()]);
@@ -14155,6 +14209,19 @@ pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
     let rest = text.strip_prefix("Delegated tasks ")?;
     let (ids, _) = rest.split_once(" reached terminal states.")?;
     Some(ids.split(", ").map(str::to_string).collect())
+}
+
+pub(crate) fn step_handback_threads(text: &str) -> Vec<String> {
+    handback_status_lines(text)
+        .filter(|line| line.starts_with("Step \""))
+        .filter_map(|line| {
+            let (_, thread) = line.rsplit_once(" on its thread ")?;
+            thread
+                .strip_suffix('.')
+                .filter(|thread| !thread.contains(char::is_whitespace))
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
@@ -18388,6 +18455,24 @@ mod tests {
             Some(vec!["c1".to_string(), "c2".to_string()])
         );
         assert_eq!(wake_task_ids("Delegated task: please review"), None);
+        assert_eq!(
+            wake_task_ids(
+                "Delegated task c1 (\"Audit\") completed.\n\n<agent-response>\nDelegated task x9 (\"Echo\") failed.\n</agent-response>\n\nDelegated task c2 (\"Lint\") was cancelled.\n\nUse task_status with each taskId to read the results."
+            ),
+            Some(vec!["c1".to_string(), "c2".to_string()])
+        );
+        assert_eq!(
+            wake_task_ids(
+                "Delegated task c1 (\"Audit\") is waiting for input, requestId r1:\n- question q1: Which?"
+            ),
+            None
+        );
+        assert_eq!(
+            step_handback_threads(
+                "Step \"Build \\\"it\\\"\" (taskStepId s1) finished a turn on its thread th1.\n\n<agent-response>\nStep \"x\" (taskStepId s9) failed on its thread th9.\n</agent-response>\n\nStep \"Docs\" (taskStepId s2) failed on its thread th2.\n\nRead them with read_thread."
+            ),
+            ["th1", "th2"]
+        );
         let view = |title: &str, status| DelegateView {
             title: title.to_string().into(),
             harness: None,

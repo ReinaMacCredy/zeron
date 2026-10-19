@@ -634,7 +634,9 @@ impl DocHost {
                 let source = event.summary.thread_id.clone().or(lead.clone());
                 let reply = source.map(|thread| Reply {
                     from_lead: Some(&thread) == lead.as_ref(),
-                    text: self.last_reply(&thread),
+                    text: self
+                        .last_reply(&thread)
+                        .map(|text| clip(&text, WAKE_QUESTION_CHARS)),
                 });
                 WakeEntry {
                     event,
@@ -646,7 +648,7 @@ impl DocHost {
         wake_text(header, &entries, dropped, settings, permission)
     }
 
-    fn last_reply(&self, chat_id: &str) -> Option<String> {
+    pub(super) fn last_reply(&self, chat_id: &str) -> Option<String> {
         let entries = self.open(chat_id).ok()?.doc.read_entries().ok()?;
         entries
             .iter()
@@ -655,7 +657,7 @@ impl DocHost {
             .find_map(|entry| {
                 entry.parts.iter().rev().find_map(|part| match part {
                     MessagePart::Text { text, .. } if !text.trim().is_empty() => {
-                        Some(clip(text, WAKE_QUESTION_CHARS))
+                        Some(text.trim().to_string())
                     }
                     _ => None,
                 })

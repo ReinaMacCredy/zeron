@@ -3724,6 +3724,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         })?;
         handle.publish_queue();
@@ -3746,6 +3747,17 @@ impl DocHost {
         chat_id: &str,
         from_chat_id: Option<&str>,
         text: &str,
+    ) -> Result<String, EngineError> {
+        self.queue_thread_row(chat_id, from_chat_id, text, Vec::new())
+            .await
+    }
+
+    async fn queue_thread_row(
+        &self,
+        chat_id: &str,
+        from_chat_id: Option<&str>,
+        text: &str,
+        task_steps: Vec<String>,
     ) -> Result<String, EngineError> {
         if from_chat_id == Some(chat_id) {
             return Err(EngineError::Other("a thread cannot message itself".into()));
@@ -3780,6 +3792,7 @@ impl DocHost {
             from_chat_id: from_chat_id.map(str::to_owned),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            task_steps,
             input_request: None,
         })?;
         handle.publish_queue();
@@ -3886,6 +3899,7 @@ impl DocHost {
             from_chat_id: Some(chat_id.to_string()),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         })?;
         drop(drain);
@@ -4969,7 +4983,8 @@ impl DocHost {
                 item.issued_at.min(now_ms()),
                 Some(from),
             )?;
-            if item.input_request.is_none() && from != chat_id {
+            // A step handback names every step thread it reports on; one sender line would hide the rest.
+            if item.input_request.is_none() && item.task_steps.is_empty() && from != chat_id {
                 let title = self
                     .workspace()
                     .and_then(|ws| ws.chat(from).ok().flatten())
@@ -6413,6 +6428,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
@@ -6584,6 +6600,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         })?;
         handle.publish_queue();
