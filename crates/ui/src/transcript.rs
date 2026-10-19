@@ -2723,6 +2723,7 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
         theme.font_sans_fixed.clone(),
         px(TOOL_LABEL_SIZE).into(),
         Some(px(TOOL_LABEL_LINE_HEIGHT)),
+        theme.text_muted,
         theme,
     )
     .h_full()
@@ -2730,12 +2731,13 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
     .into_any_element()
 }
 
-fn shimmer_label(
+pub(crate) fn shimmer_label(
     text: SharedString,
     shimmer_phase: f32,
     font_family: SharedString,
     font_size: gpui::AbsoluteLength,
     line_height: Option<Pixels>,
+    base: gpui::Hsla,
     theme: &Theme,
 ) -> gpui::Div {
     // Keep the title as ONE normal text run. Splitting it per character copies
@@ -2745,7 +2747,6 @@ fn shimmer_label(
     // CSS `background-clip: text` without duplicating accessible text.
     let overlay_text = text.clone();
     let overlay_font = gpui::font(font_family);
-    let base = theme.text_muted;
     let peak = theme.text;
     let overlay = canvas(
         move |bounds, window, _| {
@@ -3685,7 +3686,7 @@ fn tool_title_shimmer_amount(x: f32, phase: f32) -> f32 {
         .fold(0.0, f32::max)
 }
 
-fn tool_title_shimmer_phase(start: Instant, now: Instant) -> f32 {
+pub(crate) fn tool_title_shimmer_phase(start: Instant, now: Instant) -> f32 {
     let elapsed = now.checked_duration_since(start).unwrap_or_default();
     (elapsed.as_secs_f32() / TOOL_GROUP_SHIMMER_DURATION.as_secs_f32()).fract()
 }
@@ -9601,6 +9602,7 @@ impl Transcript {
                     theme.font_sans.clone(),
                     size.into(),
                     None,
+                    theme.text_muted,
                     &theme,
                 )
                 .flex_none()
