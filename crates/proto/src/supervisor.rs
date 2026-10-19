@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::{UserInputAnswer, UserInputQuestion};
+
 pub const CHAT_PREFIX: &str = "supervisor-";
 pub const CHAT_TITLE: &str = "Supervisor";
 
@@ -43,6 +45,7 @@ pub enum WakeDelivery {
     Started,
     Steered,
     HeldForTurnEnd,
+    HeldByStop,
     Failed { error: String },
     Dropped,
 }
@@ -76,18 +79,190 @@ pub enum SupervisorState {
     Off,
     Asleep,
     Awake,
+    Stopped,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ItemWhy {
+    Goal,
+    Spend,
+    Decision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Raiser {
+    Lead,
+    Supervisor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemAnswer {
+    pub at: DateTime<Utc>,
+    pub choice: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorItem {
+    pub id: String,
+    pub at: DateTime<Utc>,
+    pub raised_by: Raiser,
+    pub raiser_chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub title: String,
+    pub why: ItemWhy,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<ItemAnswer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputAsker {
+    Lead,
+    Step,
+    Supervisor,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeedsYouInput {
+    pub chat_id: String,
+    pub request_id: String,
+    pub asker: InputAsker,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    pub at: DateTime<Utc>,
+    pub questions: Vec<UserInputQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NeedsYouRow {
+    Item(SupervisorItem),
+    Input(NeedsYouInput),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SettledBy {
+    Lead,
+    Supervisor,
+    Outside,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum QuestionState {
+    Open,
+    Settled {
+        by: SettledBy,
+        answers: Vec<UserInputAnswer>,
+    },
+    Dropped,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeadQuestion {
+    pub task_id: String,
+    pub step_id: String,
+    pub chat_id: String,
+    pub request_id: String,
+    pub at: DateTime<Utc>,
+    pub questions: Vec<UserInputQuestion>,
+    pub state: QuestionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InterventionKind {
+    Send,
+    Respond,
+    Rebrief,
+    Start,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InterventionTrigger {
+    #[serde(rename_all = "camelCase")]
+    Wake {
+        wake_id: String,
+    },
+    Person,
+}
+
+/// Step numbers are 1-based, in the plan's order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InterventionChip {
+    Sent,
+    LeadRanTurn,
+    PlanEdited { steps: Vec<usize> },
+    StepCompletedTurn { steps: Vec<usize> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorIntervention {
+    pub id: String,
+    pub at: DateTime<Utc>,
+    pub kind: InterventionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<InterventionTrigger>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chips: Vec<InterventionChip>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupervisorSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
     pub state: SupervisorState,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub waiting: usize,
     #[serde(default)]
     pub wakes: Vec<SupervisorWake>,
     #[serde(default)]
     pub unwatched: Vec<String>,
+    #[serde(default)]
+    pub needs_you: Vec<NeedsYouRow>,
+    #[serde(default)]
+    pub questions: Vec<LeadQuestion>,
+    #[serde(default)]
+    pub interventions: Vec<SupervisorIntervention>,
+}
+
+impl SupervisorSnapshot {
+    pub fn needs_you_count(&self) -> usize {
+        self.needs_you.len()
+    }
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

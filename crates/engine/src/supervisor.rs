@@ -114,6 +114,7 @@ impl State {
                 .cloned()
                 .collect(),
             unwatched: self.file.unwatched.iter().cloned().collect(),
+            ..SupervisorSnapshot::default()
         }
     }
 
