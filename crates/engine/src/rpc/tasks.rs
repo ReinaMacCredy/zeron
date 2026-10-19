@@ -260,6 +260,21 @@ impl EngineRpc {
         if chat.device_id != self.doc_host.device_id() {
             return Err(refused("Assign the task to a thread on this device"));
         }
+        if lead.is_some()
+            && self
+                .workspace
+                .read_tasks()
+                .map_err(failed)?
+                .iter()
+                .any(|other| {
+                    other.id != task_id
+                        && other.completed_at.is_none()
+                        && other.mode == TaskMode::Orchestrated
+                        && other.chat_id.as_deref() == Some(chat_id)
+                })
+        {
+            return Err(refused("This chat already leads a mission"));
+        }
         let send = send || lead.is_some();
         if send && from_chat_id == Some(chat_id) {
             return Err(refused("A thread cannot send a task to itself"));

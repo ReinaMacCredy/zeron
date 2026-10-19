@@ -332,6 +332,19 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         Some("Shop design chat"),
         "the lead chat keeps its title"
     );
+    mutate(json!({ "op": "createTask", "taskId": "t6", "title": "Shop backend" }))
+        .await
+        .unwrap();
+    assert!(
+        mutate(json!({
+            "op": "assignTask", "taskId": "t6", "chatId": "talk", "orchestrate": true,
+        }))
+        .await
+        .is_err(),
+        "a chat that leads an unfinished mission cannot lead a second one"
+    );
+    assert_eq!(core.workspace.task("t6").unwrap().chat_id, None);
+    assert_eq!(prompts.lock().unwrap().len(), 4);
 
     let unapproved = core.workspace.task("t2").unwrap();
     assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);
