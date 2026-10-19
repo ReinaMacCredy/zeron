@@ -375,6 +375,17 @@ async fn download(
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(STALL_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if attempt.url().scheme() != "https"
+                && attempt.previous().iter().any(|url| url.scheme() == "https")
+            {
+                attempt.error("the download redirected away from https")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|e| failed(e.to_string()))?;
     let response = client
