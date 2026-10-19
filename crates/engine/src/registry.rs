@@ -873,7 +873,7 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if let Some((cached, harness)) = instances.get(&instance.id)
-            && cached == instance
+            && crate::provider_instances::same_launch(cached, instance)
         {
             return Ok(harness.clone());
         }

@@ -184,15 +184,26 @@ impl ProviderInstancesStore {
     }
 
     pub(crate) fn launch_config(&self, id: &str) -> Option<InstanceConfig> {
-        let mut config = self.instance(id)?.config;
-        match &mut config {
-            InstanceConfig::Acp { icon_path, .. } => *icon_path = None,
-            InstanceConfig::Native { executable, .. } => {
-                *executable = executable.take().filter(|path| !path.trim().is_empty());
-            }
-        }
-        Some(config)
+        Some(launch_projection(&self.instance(id)?))
     }
+}
+
+fn launch_projection(instance: &ProviderInstance) -> InstanceConfig {
+    let mut config = instance.config.clone();
+    match &mut config {
+        InstanceConfig::Acp { icon_path, .. } => *icon_path = None,
+        InstanceConfig::Native { executable, .. } => {
+            *executable = executable.take().filter(|path| !path.trim().is_empty());
+        }
+    }
+    config
+}
+
+/// A generic ACP agent shows its label as the harness's name; no other driver reads it.
+pub(crate) fn same_launch(a: &ProviderInstance, b: &ProviderInstance) -> bool {
+    a.driver == b.driver
+        && launch_projection(a) == launch_projection(b)
+        && (a.driver != HarnessId::Acp || a.label == b.label)
 }
 
 // Instances name paths, env and managed homes; never overwrite a file this build cannot read.
@@ -599,6 +610,12 @@ mod tests {
                 .home,
             Some(home)
         );
+
+        let mut relabeled = instance("codex_work", HarnessId::Codex);
+        relabeled.label = "Personal".into();
+        relabeled.accent = Some("#ff8800".into());
+        store.upsert(relabeled).unwrap();
+        assert!(Arc::ptr_eq(&work, &resolve("codex_work")));
 
         let mut edited = instance("codex_work", HarnessId::Codex);
         if let InstanceConfig::Native { launch_args, .. } = &mut edited.config {

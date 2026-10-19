@@ -883,7 +883,7 @@ impl AgentAccounts {
     pub fn for_instance(&self, instance: &ProviderInstance) -> Result<AgentAccounts, EngineError> {
         let mut instances = lock(&self.inner.instances);
         if let Some((cached, accounts)) = instances.get(&instance.id)
-            && cached == instance
+            && crate::provider_instances::same_launch(cached, instance)
         {
             return Ok(accounts.clone());
         }
@@ -5116,8 +5116,8 @@ mod probe_tests {
 #[cfg(test)]
 mod login_tests {
     use super::*;
-    use zeron_proto::HomeDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use zeron_proto::HomeDir;
 
     /// Temp homes for every provider; never the real logins or Keychain.
     fn config(root: &Path) -> AgentAccountsConfig {
