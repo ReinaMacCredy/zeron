@@ -137,6 +137,7 @@ mod tests {
             plan: String::new(),
             plan_doc: false,
             resources: Vec::new(),
+            images: Vec::new(),
         }
     }
 

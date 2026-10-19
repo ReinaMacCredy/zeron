@@ -9,6 +9,7 @@ use gpui::{
 };
 use zeron_proto::{ChatConfig, ChatIndicator, TaskPatch, TaskStatus};
 
+use super::images::{self, ImageGallery};
 use super::logic::{self, DuePick};
 use super::{Row, SAVE_DEBOUNCE, START_PENDING, linked_chat, patched, row_for};
 use crate::composer::{ComposerInput, ComposerInputEvent, Submit};
@@ -82,6 +83,8 @@ struct Open {
     notes: Entity<ComposerInput>,
     saved_title: String,
     saved_notes: String,
+    images: Vec<String>,
+    uploads: Vec<Task<()>>,
     refused: bool,
     seen: bool,
     save: Option<Task<()>>,
@@ -135,6 +138,8 @@ pub struct TaskCard {
     focus: FocusHandle,
     start_focus: FocusHandle,
     folder_prompt: Option<Task<()>>,
+    picking: Option<Task<()>>,
+    gallery: Entity<ImageGallery>,
     _state_changes: Subscription,
 }
 
@@ -147,8 +152,11 @@ impl TaskCard {
             cx.notify();
         });
         let agent = cx.new(|cx| Pickers::new_for_tasks(state.clone(), cx));
+        let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
         let now = Instant::now();
         Self {
+            gallery,
+            picking: None,
             agent,
             state,
             open: None,
@@ -249,6 +257,10 @@ impl TaskCard {
             .as_ref()
             .map(|task| task.notes.clone())
             .unwrap_or_default();
+        let saved_images = row
+            .as_ref()
+            .map(|task| task.images.clone())
+            .unwrap_or_default();
         let title_input = cx.new(|cx| {
             let mut input = ComposerInput::new("Task title", cx)
                 .with_single_line()
@@ -268,7 +280,11 @@ impl TaskCard {
                      cx: &mut Context<Self>| match event {
             ComposerInputEvent::Edited => card.schedule_save(cx),
             ComposerInputEvent::Submitted => card.flush(cx),
-            _ => {}
+            event => {
+                if let Some(staged) = images::pasted(event, cx) {
+                    card.add_images(staged, cx);
+                }
+            }
         };
         let assign_input = cx.new(|cx| {
             ComposerInput::new("@ a thread", cx)
@@ -323,6 +339,8 @@ impl TaskCard {
             notes: notes_input,
             saved_title,
             saved_notes,
+            images: saved_images,
+            uploads: Vec::new(),
             refused: false,
             seen: row.is_some(),
             save: None,
@@ -468,8 +486,81 @@ impl TaskCard {
             open.saved_title = row.as_ref().map(|t| t.title.clone()).unwrap_or_default();
         }
         if patch.notes.as_ref() == Some(&open.saved_notes) {
-            open.saved_notes = row.map(|t| t.notes).unwrap_or_default();
+            open.saved_notes = row.as_ref().map(|t| t.notes.clone()).unwrap_or_default();
         }
+        if patch.images.as_ref() == Some(&open.images) {
+            open.images = row.map(|t| t.images).unwrap_or_default();
+        }
+    }
+
+    fn add_images(
+        &mut self,
+        staged: Vec<crate::attachments::StagedAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        if staged.is_empty() {
+            return;
+        }
+        let task_id = open.task_id.clone();
+        let upload = images::upload(&self.state, staged, cx);
+        open.uploads.push(cx.spawn(async move |card, cx| {
+            let paths = upload.await;
+            card.update(cx, |card, cx| {
+                let Some(open) = card.open.as_mut().filter(|open| open.task_id == task_id) else {
+                    return;
+                };
+                if paths.is_empty() {
+                    return;
+                }
+                let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(open.images.len());
+                if paths.len() > room {
+                    crate::toast::error(cx, "A task holds up to 12 images.");
+                }
+                open.images.extend(paths.into_iter().take(room));
+                card.save_images(cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn pick_images(&mut self, cx: &mut Context<Self>) {
+        let picked = images::pick(cx);
+        self.picking = Some(cx.spawn(async move |card, cx| {
+            let paths = picked.await;
+            card.update(cx, |card, cx| {
+                let staged = images::staged_files(&paths, cx);
+                card.add_images(staged, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut()
+            && index < open.images.len()
+        {
+            open.images.remove(index);
+            self.save_images(cx);
+        }
+    }
+
+    fn save_images(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let (task_id, images) = (open.task_id.clone(), open.images.clone());
+        self.update(
+            &task_id,
+            TaskPatch {
+                images: Some(images),
+                ..Default::default()
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     pub fn start_failed(&mut self, task_id: &str, cx: &mut Context<Self>) {
@@ -819,6 +910,15 @@ impl TaskCard {
         .h(px(PILL_HEIGHT))
         .rounded_full();
 
+        let add_image = Self::pill(theme, "task-card-add-image")
+            .aria_label("Add image")
+            .tooltip(widgets::text_tooltip("Add image"))
+            .child(
+                icon(icons::GALLERY)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.pick_images(cx)));
         let more = Self::pill(theme, "task-card-more")
             .aria_label("More options")
             .child(
@@ -834,6 +934,7 @@ impl TaskCard {
             .gap(px(6.0))
             .child(due)
             .child(project)
+            .child(add_image)
             .child(more)
             .into_any_element()
     }
@@ -1332,6 +1433,32 @@ impl TaskCard {
                 }
             }))
             .child(crate::composer::growing_field(notes, 20.0, 220.0, cx));
+        let saved = self
+            .open
+            .as_ref()
+            .map(|open| open.images.clone())
+            .unwrap_or_default();
+        let thumbs = (!saved.is_empty()).then(|| {
+            let open_paths = saved.clone();
+            images::strip(
+                "task-card",
+                &saved,
+                images::SPEC_THUMB,
+                &self.state,
+                theme,
+                move |card: &mut Self, ix, _, cx| {
+                    card.gallery
+                        .update(cx, |gallery, cx| gallery.open(open_paths.clone(), ix, cx))
+                },
+                Some(
+                    |card: &mut Self, ix, _: &mut Window, cx: &mut Context<Self>| {
+                        card.remove_image(ix, cx)
+                    },
+                ),
+                cx,
+            )
+            .pt(px(6.0))
+        });
         let chips = self.render_chips(&task_id, row, theme, cx);
 
         let linked_chat_id = row
@@ -1555,7 +1682,8 @@ impl TaskCard {
                             .flex_col()
                             .gap(px(4.0))
                             .child(header)
-                            .child(note),
+                            .child(note)
+                            .children(thumbs),
                     )
                     .child(chips)
                     .children(body)
@@ -1564,6 +1692,16 @@ impl TaskCard {
             .when(content.inert, |el| {
                 el.child(div().absolute().inset_0().occlude())
             })
+            .drag_over::<gpui::ExternalPaths>({
+                let accent = theme.accent;
+                move |style, _, _, _| style.border_color(accent)
+            })
+            .on_drop(cx.listener(|card, paths: &gpui::ExternalPaths, _, cx| {
+                cx.stop_propagation();
+                let staged = images::staged_files(paths.paths(), cx);
+                card.add_images(staged, cx);
+            }))
+            .child(div().absolute().size_0().child(self.gallery.clone()))
             .into_any_element()
     }
 }
@@ -1941,6 +2079,118 @@ mod tests {
             [vec!["s1".to_string(), "s3".into(), "s2".into()]],
             "a started step keeps its place above the moved one"
         );
+    }
+
+    struct Uploads;
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for Uploads {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            let reply = match method {
+                zeron_rpc::methods::UPLOAD_COMMIT => serde_json::json!({
+                    "path": format!("/uploads/{}", params["fileName"].as_str().unwrap_or_default()),
+                }),
+                _ => serde_json::json!({}),
+            };
+            zeron_rpc::RpcReply::value(&reply)
+        }
+    }
+
+    #[gpui::test]
+    fn a_pasted_step_image_goes_with_the_plan_edit_only_once_saved(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let _dir = init(cx);
+        cx.executor().allow_parking();
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::memory_client(std::sync::Arc::new(Uploads)),
+            ));
+            state.tasks = vec![orchestrated(false)];
+            state.chats = vec![chat("lead")];
+            state.task_steps = vec![step("s1", "1", None, None)];
+        });
+        let (center, cx) =
+            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = sent.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(
+                &center,
+                move |_, event: &super::super::TaskCenterEvent, _| {
+                    if let super::super::TaskCenterEvent::EditPlan { edit, .. } = event {
+                        sink.borrow_mut().push(edit.steps.clone());
+                    }
+                },
+            )
+            .detach();
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let shot = gpui::Image::from_bytes(gpui::ImageFormat::Png, png.into_inner());
+        let settle = |cx: &mut gpui::VisualTestContext,
+                      done: &dyn Fn(&mut gpui::VisualTestContext) -> bool| {
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if done(cx) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("condition never settled");
+        };
+        let edit_and_paste = |cx: &mut gpui::VisualTestContext| {
+            let at = cx.debug_bounds("task-center-step-s1").unwrap().center();
+            cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+            cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+            cx.run_until_parked();
+            let at = cx.debug_bounds("task-center-menu-edit").unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            std::thread::sleep(crate::motion::MENU_OUT.total());
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_image(&shot));
+            cx.dispatch_action(crate::composer::Paste);
+            settle(cx, &|cx| {
+                cx.debug_bounds("task-center-edit-image-0").is_some()
+            });
+        };
+
+        edit_and_paste(cx);
+        let at = cx.debug_bounds("task-center-edit-cancel").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-center-editor").is_none());
+        assert!(
+            cx.debug_bounds("task-center-edit-bar").is_none(),
+            "Cancel drops the new image"
+        );
+
+        edit_and_paste(cx);
+        let at = cx.debug_bounds("task-center-edit-save").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("task-center-editor").is_none());
+        assert!(
+            cx.debug_bounds("task-center-spec-s1-image-0").is_some(),
+            "the saved image shows under the spec"
+        );
+        let at = cx.debug_bounds("task-center-send").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0][0].step_id.as_deref(), Some("s1"));
+        assert_eq!(sent[0][0].images, ["/uploads/image.png"]);
     }
 
     #[gpui::test]

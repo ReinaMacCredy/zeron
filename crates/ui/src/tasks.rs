@@ -24,6 +24,10 @@ use crate::typography::ui_rems;
 
 mod card;
 mod center;
+mod images;
+
+use crate::attachments::StagedAttachment;
+use images::ImageGallery;
 mod logic;
 mod morph;
 
@@ -51,6 +55,7 @@ pub enum TasksEvent {
         task_id: String,
         title: String,
         space_id: Option<String>,
+        images: Vec<String>,
     },
     Update {
         task_id: String,
@@ -185,6 +190,10 @@ impl Row {
 pub struct TasksPage {
     state: Entity<AppState>,
     add: Entity<ComposerInput>,
+    add_images: Vec<String>,
+    add_uploads: Vec<gpui::Task<()>>,
+    picking: Option<gpui::Task<()>>,
+    gallery: Entity<ImageGallery>,
     card: Entity<TaskCard>,
     done_open: bool,
     open_first_card: bool,
@@ -222,8 +231,11 @@ impl TasksPage {
         let add_events = cx.subscribe(&add, |page, _, event: &ComposerInputEvent, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 page.submit_add(false, None, cx);
+            } else if let Some(staged) = images::pasted(event, cx) {
+                page.add_images(staged, cx);
             }
         });
+        let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
         let state_changes = cx.observe(&state, |page, _, cx| {
             page.open_knob_card(cx);
             cx.notify();
@@ -242,6 +254,10 @@ impl TasksPage {
         let mut page = Self {
             state,
             add,
+            add_images: Vec::new(),
+            add_uploads: Vec::new(),
+            picking: None,
+            gallery,
             card,
             done_open: true,
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
@@ -290,6 +306,42 @@ impl TasksPage {
         Local::now().date_naive()
     }
 
+    fn add_images(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
+        if staged.is_empty() {
+            return;
+        }
+        let upload = images::upload(&self.state, staged, cx);
+        self.add_uploads.push(cx.spawn(async move |page, cx| {
+            let paths = upload.await;
+            page.update(cx, |page, cx| {
+                let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(page.add_images.len());
+                if paths.len() > room {
+                    crate::toast::error(cx, "A task holds up to 12 images.");
+                }
+                page.add_images.extend(paths.into_iter().take(room));
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn pick_add_images(&mut self, cx: &mut Context<Self>) {
+        let picked = images::pick(cx);
+        self.picking = Some(cx.spawn(async move |page, cx| {
+            let paths = picked.await;
+            page.update(cx, |page, cx| {
+                let staged = images::staged_files(&paths, cx);
+                page.add_images(staged, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn open_images(&mut self, paths: Vec<String>, index: usize, cx: &mut Context<Self>) {
+        self.gallery
+            .update(cx, |gallery, cx| gallery.open(paths, index, cx));
+    }
+
     fn submit_add(
         &mut self,
         open_card: bool,
@@ -310,6 +362,7 @@ impl TasksPage {
             task_id: task_id.clone(),
             title: title.clone(),
             space_id,
+            images: std::mem::take(&mut self.add_images),
         });
         if open_card {
             self.card.update(cx, |card, cx| {
@@ -767,7 +820,9 @@ impl TasksPage {
             status: row.status,
         };
         let check = self.checkbox(row, theme, cx);
+        let thumbs = self.row_images("task-row", row, theme, cx);
         Self::row_content(row, check, selected, today, theme)
+            .children(thumbs)
             .id(SharedString::from(format!("task-row-{task_id}")))
             .debug_selector(|| format!("task-row-{}", row.task.id))
             .role(gpui::Role::ListItem)
@@ -801,6 +856,63 @@ impl TasksPage {
                 }))
             })
             .into_any_element()
+    }
+
+    fn row_images(
+        &self,
+        key: &str,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let paths = row.task.images.clone();
+        (!paths.is_empty()).then(|| {
+            let open = paths.clone();
+            images::strip(
+                &format!("{key}-{}", row.task.id),
+                &paths,
+                images::ROW_THUMB,
+                &self.state,
+                theme,
+                move |page: &mut Self, ix, _, cx| page.open_images(open.clone(), ix, cx),
+                None::<fn(&mut Self, usize, &mut Window, &mut Context<Self>)>,
+                cx,
+            )
+            .flex_none()
+            .flex_nowrap()
+        })
+    }
+
+    fn add_tray(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.add_images.is_empty() {
+            return None;
+        }
+        let paths = self.add_images.clone();
+        let open = paths.clone();
+        Some(
+            div()
+                .debug_selector(|| "tasks-add-tray".into())
+                .pl(px(12.0 + CHECK_SIZE + 12.0))
+                .pb(px(6.0))
+                .child(images::strip(
+                    "tasks-add",
+                    &paths,
+                    images::SPEC_THUMB,
+                    &self.state,
+                    theme,
+                    move |page: &mut Self, ix, _, cx| page.open_images(open.clone(), ix, cx),
+                    Some(
+                        |page: &mut Self, ix: usize, _: &mut Window, cx: &mut Context<Self>| {
+                            if ix < page.add_images.len() {
+                                page.add_images.remove(ix);
+                                cx.notify();
+                            }
+                        },
+                    ),
+                    cx,
+                ))
+                .into_any_element(),
+        )
     }
 
     fn add_ghost(&self, theme: &Theme, cx: &gpui::App) -> gpui::Div {
@@ -849,15 +961,24 @@ impl TasksPage {
             .on_drop(cx.listener(|page, drag: &TaskDrag, _, cx| {
                 page.reorder(&drag.task_id, None, cx);
             }))
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+            .on_drop(cx.listener(|page, paths: &gpui::ExternalPaths, _, cx| {
+                cx.stop_propagation();
+                let staged = images::staged_files(paths.paths(), cx);
+                page.add_images(staged, cx);
+            }))
             .capture_action(cx.listener(|page, _: &MentionTab, window, cx| {
                 if page.submit_add(true, Some(window), cx) {
                     cx.stop_propagation();
                 }
             }))
             .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && !page.add.read(cx).text().is_empty() {
+                if event.keystroke.key == "escape"
+                    && (!page.add.read(cx).text().is_empty() || !page.add_images.is_empty())
+                {
                     cx.stop_propagation();
                     page.add.update(cx, |input, cx| input.set_text("", cx));
+                    page.add_images.clear();
                     window.focus(&page.focus, cx);
                 }
             }))
@@ -868,6 +989,28 @@ impl TasksPage {
                     .min_w_0()
                     .text_size(ui_rems(13.5))
                     .child(self.add.clone()),
+            )
+            .child(
+                div()
+                    .id("tasks-add-image")
+                    .debug_selector(|| "tasks-add-image".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Add image")
+                    .flex_none()
+                    .size(px(26.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.wash(0.08)))
+                    .tooltip(widgets::text_tooltip("Add image"))
+                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.pick_add_images(cx)))
+                    .child(
+                        icon(icons::GALLERY)
+                            .size(px(15.0))
+                            .text_color(theme.text_faint),
+                    ),
             )
             .into_any_element()
     }
@@ -980,7 +1123,8 @@ impl TasksPage {
                         morph.map(|elapsed| morph::extra_t(elapsed, true)),
                         theme,
                         cx,
-                    )),
+                    ))
+                    .children(self.add_tray(theme, cx)),
             )
             .children(self.done_group(done, today, morph, theme, cx));
         widgets::scroll_faded(
@@ -1012,7 +1156,9 @@ impl TasksPage {
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
         let orchestrated = row.orchestrated();
+        let thumbs = self.row_images("task-kanban", row, theme, cx);
         Self::card_visual(row, selected, theme)
+            .children(thumbs)
             .id(SharedString::from(format!("task-card-{task_id}")))
             .debug_selector(|| format!("task-kanban-{}", row.task.id))
             .cursor_pointer()
@@ -1820,5 +1966,6 @@ impl Render for TasksPage {
                     )
             }))
             .children(self.render_row_menu(&theme, cx))
+            .child(div().absolute().size_0().child(self.gallery.clone()))
     }
 }

@@ -13,8 +13,10 @@ use zeron_proto::{
     TaskStatus, TaskStepPatch,
 };
 
+use super::images::{self, ImageGallery};
 use super::morph::{self, Key, Painted};
 use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
+use crate::attachments;
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec, Tween};
@@ -59,6 +61,8 @@ pub enum TaskCenterEvent {
 pub struct PlanEdit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview_images: Option<Vec<String>>,
     pub steps: Vec<PlanStepEdit>,
     pub remove_step_ids: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +76,7 @@ pub struct PlanStepEdit {
     pub step_id: Option<String>,
     pub title: String,
     pub notes: String,
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,11 +95,12 @@ pub struct LiveThread {
 struct StepText {
     title: String,
     notes: String,
+    images: Vec<String>,
 }
 
 #[derive(Default)]
 struct Draft {
-    overview: Option<String>,
+    overview: Option<StepText>,
     edited: HashMap<String, StepText>,
     added: Vec<(String, StepText)>,
     removed: Vec<String>,
@@ -149,6 +155,7 @@ impl Draft {
                     step_id: Some(row.step.id.clone()),
                     title: text.title.clone(),
                     notes: text.notes.clone(),
+                    images: text.images.clone(),
                 })
             })
             .collect();
@@ -156,9 +163,11 @@ impl Draft {
             step_id: None,
             title: text.title.clone(),
             notes: text.notes.clone(),
+            images: text.images.clone(),
         }));
         PlanEdit {
-            overview: self.overview.clone(),
+            overview: self.overview.as_ref().map(|text| text.notes.clone()),
+            overview_images: self.overview.as_ref().map(|text| text.images.clone()),
             steps,
             remove_step_ids: plan
                 .steps
@@ -268,8 +277,11 @@ struct Editor {
     target: EditTarget,
     title: Option<Entity<ComposerInput>>,
     body: Entity<ComposerInput>,
+    images: Vec<String>,
+    started: bool,
     from: f32,
     grow: Tween,
+    uploads: Vec<gpui::Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -326,6 +338,7 @@ struct StepMenu {
 enum MenuAction {
     Edit,
     Open,
+    AddImage,
     Up,
     Down,
     Outcome,
@@ -367,6 +380,8 @@ pub struct TaskCenter {
     drag: Option<StepDrag>,
     press: f32,
     settle: Option<(String, f32, Tween)>,
+    gallery: Entity<ImageGallery>,
+    picking: Option<gpui::Task<()>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -392,7 +407,10 @@ impl TaskCenter {
             }
         });
         let state_changes = cx.observe(&state, |_, _, cx| cx.notify());
+        let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
         Self {
+            gallery,
+            picking: None,
             state,
             task_id,
             selected: Selection::Lead,
@@ -465,6 +483,7 @@ impl TaskCenter {
             StepText {
                 title,
                 notes: String::new(),
+                images: Vec::new(),
             },
         ));
         cx.notify();
@@ -487,16 +506,18 @@ impl TaskCenter {
             .unwrap_or_else(|| StepText {
                 title: step.title.clone(),
                 notes: step.notes.clone(),
+                images: step.images.clone(),
             })
     }
 
     fn shown_text(&self, target: &EditTarget, cx: &App) -> Option<StepText> {
         let (task, plan) = self.task_and_plan(cx)?;
         match target {
-            EditTarget::Overview => Some(StepText {
+            EditTarget::Overview => Some(self.draft.overview.clone().unwrap_or(StepText {
                 title: String::new(),
-                notes: self.draft.overview.clone().unwrap_or(task.plan),
-            }),
+                notes: task.plan,
+                images: task.images,
+            })),
             EditTarget::Step(id) => self
                 .draft
                 .added
@@ -536,16 +557,33 @@ impl TaskCenter {
             input.set_text(text.notes, cx);
             input
         });
-        let subscriptions: Vec<Subscription> = title
+        let mut subscriptions: Vec<Subscription> = title
             .iter()
             .map(|title| {
                 cx.subscribe(title, |center, _, event: &ComposerInputEvent, cx| {
                     if matches!(event, ComposerInputEvent::Submitted) {
                         center.commit_edit(cx);
+                    } else if let Some(staged) = images::pasted(event, cx) {
+                        center.add_images(staged, cx);
                     }
                 })
             })
             .collect();
+        subscriptions.push(
+            cx.subscribe(&body, |center, _, event: &ComposerInputEvent, cx| {
+                if let Some(staged) = images::pasted(event, cx) {
+                    center.add_images(staged, cx);
+                }
+            }),
+        );
+        let started = match &target {
+            EditTarget::Overview => false,
+            EditTarget::Step(id) => self.task_and_plan(cx).is_some_and(|(_, plan)| {
+                plan.steps
+                    .iter()
+                    .any(|row| &row.step.id == id && row.step.chat_id.is_some())
+            }),
+        };
         let focus = title.as_ref().unwrap_or(&body).focus_handle(cx);
         window.focus(&focus, cx);
         if let EditTarget::Step(id) = &target {
@@ -569,11 +607,115 @@ impl TaskCenter {
             target,
             title,
             body,
+            images: text.images,
+            started,
             from,
             grow,
+            uploads: Vec::new(),
             _subscriptions: subscriptions,
         });
         cx.notify();
+    }
+
+    fn add_images(&mut self, staged: Vec<attachments::StagedAttachment>, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        if staged.is_empty() {
+            return;
+        }
+        let target = editor.target.clone();
+        let upload = images::upload(&self.state, staged, cx);
+        editor.uploads.push(cx.spawn(async move |center, cx| {
+            let paths = upload.await;
+            center
+                .update(cx, |center, cx| {
+                    let Some(editor) = center
+                        .editor
+                        .as_mut()
+                        .filter(|editor| editor.target == target)
+                    else {
+                        return;
+                    };
+                    let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(editor.images.len());
+                    if paths.len() > room {
+                        crate::toast::error(cx, "A step or overview holds up to 12 images.");
+                    }
+                    editor.images.extend(paths.into_iter().take(room));
+                    cx.notify();
+                })
+                .ok();
+        }));
+    }
+
+    fn pick_images(&mut self, step_id: Option<String>, cx: &mut Context<Self>) {
+        let picked = images::pick(cx);
+        self.picking = Some(cx.spawn(async move |center, cx| {
+            let paths = picked.await;
+            center
+                .update(cx, |center, cx| {
+                    let staged = images::staged_files(&paths, cx);
+                    match step_id {
+                        None => center.add_images(staged, cx),
+                        Some(id) => center.add_to_spec(id, staged, cx),
+                    }
+                })
+                .ok();
+        }));
+    }
+
+    fn add_to_spec(
+        &mut self,
+        step_id: String,
+        staged: Vec<attachments::StagedAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        if staged.is_empty() {
+            return;
+        }
+        let upload = images::upload(&self.state, staged, cx);
+        self.picking = Some(cx.spawn(async move |center, cx| {
+            let paths = upload.await;
+            center
+                .update(cx, |center, cx| {
+                    if paths.is_empty() {
+                        return;
+                    }
+                    let target = EditTarget::Step(step_id.clone());
+                    let Some(mut text) = center.shown_text(&target, cx) else {
+                        return;
+                    };
+                    let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(text.images.len());
+                    if paths.len() > room {
+                        crate::toast::error(cx, "A step holds up to 12 images.");
+                    }
+                    text.images.extend(paths.into_iter().take(room));
+                    if let Some((_, added)) =
+                        center.draft.added.iter_mut().find(|(id, _)| *id == step_id)
+                    {
+                        *added = text;
+                    } else {
+                        center.draft.edited.insert(step_id.clone(), text);
+                    }
+                    center.expanded.insert(step_id);
+                    cx.notify();
+                })
+                .ok();
+        }));
+    }
+
+    fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(editor) = self.editor.as_mut()
+            && index < editor.images.len()
+        {
+            editor.images.remove(index);
+            cx.notify();
+        }
+    }
+
+    fn open_images(&mut self, paths: Vec<String>, index: usize, cx: &mut Context<Self>) {
+        self.gallery
+            .update(cx, |gallery, cx| gallery.open(paths, index, cx));
     }
 
     fn commit_edit(&mut self, cx: &mut Context<Self>) {
@@ -585,17 +727,24 @@ impl TaskCenter {
             .title
             .map(|input| input.read(cx).text().trim().to_string())
             .filter(|title| !title.is_empty());
+        let images = editor.images;
         let saved = self.task_and_plan(cx);
         match editor.target {
             EditTarget::Overview => {
-                let unchanged = saved.is_some_and(|(task, _)| task.plan == notes);
-                self.draft.overview = (!unchanged).then_some(notes);
+                let unchanged =
+                    saved.is_some_and(|(task, _)| task.plan == notes && task.images == images);
+                self.draft.overview = (!unchanged).then_some(StepText {
+                    title: String::new(),
+                    notes,
+                    images,
+                });
             }
             EditTarget::Step(id) => {
                 if let Some((_, text)) = self.draft.added.iter_mut().find(|(added, _)| *added == id)
                 {
                     text.title = title.unwrap_or(std::mem::take(&mut text.title));
                     text.notes = notes;
+                    text.images = images;
                 } else if let Some(step) = saved.and_then(|(_, plan)| {
                     plan.steps
                         .into_iter()
@@ -605,8 +754,12 @@ impl TaskCenter {
                     let text = StepText {
                         title: title.unwrap_or_else(|| self.shown_step(&step).title),
                         notes,
+                        images,
                     };
-                    if text.title == step.title && text.notes == step.notes {
+                    if text.title == step.title
+                        && text.notes == step.notes
+                        && text.images == step.images
+                    {
                         self.draft.edited.remove(&id);
                     } else {
                         self.draft.edited.insert(id, text);
@@ -727,6 +880,7 @@ impl TaskCenter {
                     let mut step = row.step.clone();
                     step.title = text.title;
                     step.notes = text.notes;
+                    step.images = text.images;
                     (
                         StepRow {
                             step,
@@ -752,6 +906,7 @@ impl TaskCenter {
                 updated_at: Default::default(),
                 deleted: false,
                 turn: None,
+                images: text.images.clone(),
             };
             shown.push((
                 StepRow {
@@ -933,6 +1088,7 @@ impl TaskCenter {
         let id = actions.step_id;
         match action {
             MenuAction::Edit => self.start_edit(EditTarget::Step(id), window, cx),
+            MenuAction::AddImage => self.pick_images(Some(id), cx),
             MenuAction::Open => {
                 if let Some(chat) = actions.thread {
                     cx.emit(TaskCenterEvent::OpenChat(chat));
@@ -1592,6 +1748,46 @@ impl TaskCenter {
                 260.0,
                 cx,
             ));
+        let paths = editor.images.clone();
+        let open_paths = paths.clone();
+        let tray = div()
+            .debug_selector(|| "task-center-edit-tray".into())
+            .pt(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                images::strip(
+                    "task-center-edit",
+                    &paths,
+                    images::SPEC_THUMB,
+                    &self.state,
+                    theme,
+                    move |center: &mut Self, ix, _, cx| {
+                        center.open_images(open_paths.clone(), ix, cx)
+                    },
+                    Some(
+                        |center: &mut Self, ix, _: &mut Window, cx: &mut Context<Self>| {
+                            center.remove_image(ix, cx)
+                        },
+                    ),
+                    cx,
+                )
+                .child(
+                    images::add_tile("task-center-edit-add-image", theme).on_click(
+                        cx.listener(|center, _: &ClickEvent, _, cx| center.pick_images(None, cx)),
+                    ),
+                ),
+            )
+            .when(editor.started, |el| {
+                el.child(
+                    div()
+                        .debug_selector(|| "task-center-edit-started".into())
+                        .text_size(ui_rems(11.5))
+                        .text_color(theme.text_faint)
+                        .child("This step's thread has started, so new images will not reach it."),
+                )
+            });
         let hint = if cfg!(target_os = "macos") {
             "⌘↵ save · Esc cancel"
         } else {
@@ -1648,6 +1844,7 @@ impl TaskCenter {
                     .flex()
                     .flex_col()
                     .child(notes)
+                    .child(tray)
                     .child(footer),
             );
         div()
@@ -1667,6 +1864,15 @@ impl TaskCenter {
                 inset: false,
             }])
             .when_some(height, |el, height| el.h(px(height)))
+            .drag_over::<gpui::ExternalPaths>({
+                let accent = theme.accent;
+                move |style, _, _, _| style.border_color(accent)
+            })
+            .on_drop(cx.listener(|center, paths: &gpui::ExternalPaths, _, cx| {
+                cx.stop_propagation();
+                let staged = images::staged_files(paths.paths(), cx);
+                center.add_images(staged, cx);
+            }))
             .on_key_down(cx.listener(|center, event: &KeyDownEvent, _, cx| {
                 let modifiers = &event.keystroke.modifiers;
                 match event.keystroke.key.as_str() {
@@ -1700,11 +1906,10 @@ impl TaskCenter {
             .editor
             .as_ref()
             .filter(|editor| editor.target == EditTarget::Overview);
-        let text = self
-            .draft
-            .overview
-            .clone()
-            .unwrap_or_else(|| task.plan.clone());
+        let (text, saved_images) = match &self.draft.overview {
+            Some(draft) => (draft.notes.clone(), draft.images.clone()),
+            None => (task.plan.clone(), task.images.clone()),
+        };
         let edit = (editable && editor.is_none()).then(|| {
             widgets::text_action(theme, widgets::ActionTone::Quiet, "Edit")
                 .id("task-center-edit-overview")
@@ -1772,6 +1977,20 @@ impl TaskCenter {
                 window,
             )
         };
+        let thumbs = (!saved_images.is_empty()).then(|| {
+            let paths = saved_images.clone();
+            images::strip(
+                "task-center-overview",
+                &saved_images,
+                images::SPEC_THUMB,
+                &self.state,
+                theme,
+                move |center: &mut Self, ix, _, cx| center.open_images(paths.clone(), ix, cx),
+                None::<fn(&mut Self, usize, &mut Window, &mut Context<Self>)>,
+                cx,
+            )
+            .mt(px(4.0))
+        });
         Some(
             div()
                 .id("task-center-overview")
@@ -1792,6 +2011,7 @@ impl TaskCenter {
                 ))
                 .child(head)
                 .child(body)
+                .children(thumbs)
                 .into_any_element(),
         )
     }
@@ -2086,6 +2306,19 @@ impl TaskCenter {
                     window,
                 )
             };
+            let thumbs = (!row.step.images.is_empty()).then(|| {
+                let paths = row.step.images.clone();
+                images::strip(
+                    &format!("task-center-spec-{step_id}"),
+                    &row.step.images,
+                    images::SPEC_THUMB,
+                    &self.state,
+                    theme,
+                    move |center: &mut Self, ix, _, cx| center.open_images(paths.clone(), ix, cx),
+                    None::<fn(&mut Self, usize, &mut Window, &mut Context<Self>)>,
+                    cx,
+                )
+            });
             let edit = (editable && tag != Some(Tag::Removed)).then(|| {
                 let id = step_id.clone();
                 side_button(
@@ -2122,14 +2355,20 @@ impl TaskCenter {
                 .border_l_2()
                 .border_color(theme.border)
                 .child(
-                    div().flex().flex_col().gap(px(6.0)).child(spec).child(
-                        div()
-                            .flex()
-                            .gap(px(4.0))
-                            .ml(px(-8.0))
-                            .children(edit)
-                            .children(remove),
-                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(spec)
+                        .children(thumbs)
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(4.0))
+                                .ml(px(-8.0))
+                                .children(edit)
+                                .children(remove),
+                        ),
                 )
         });
         let connector = (!last).then(|| {
@@ -2604,6 +2843,15 @@ impl TaskCenter {
             }))
             .child(self.menu_item(
                 &theme,
+                "task-center-menu-add-image",
+                "Add image",
+                actions.edit,
+                false,
+                MenuAction::AddImage,
+                cx,
+            ))
+            .child(self.menu_item(
+                &theme,
                 "task-center-menu-up",
                 "Move up",
                 actions.up,
@@ -2864,6 +3112,7 @@ impl Render for TaskCenter {
                     .child(live),
             )
             .children(self.render_menu(&theme, cx))
+            .child(div().absolute().size_0().child(self.gallery.clone()))
             .into_any_element()
     }
 }

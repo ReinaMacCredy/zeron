@@ -128,12 +128,14 @@ impl Shell {
         title: &str,
         space_id: Option<String>,
         due_on: Option<String>,
+        images: &[String],
         cx: &mut Context<Self>,
     ) {
-        self.mutate_task_row(
-            Self::create_task_params(task_id, title, "", space_id, due_on),
-            cx,
-        );
+        let mut params = Self::create_task_params(task_id, title, "", space_id, due_on);
+        if !images.is_empty() {
+            params["images"] = images.into();
+        }
+        self.mutate_task_row(params, cx);
     }
 
     pub(super) fn start_mission(
@@ -394,7 +396,8 @@ impl Shell {
                 task_id,
                 title,
                 space_id,
-            } => self.create_task(task_id, title, space_id.clone(), None, cx),
+                images,
+            } => self.create_task(task_id, title, space_id.clone(), None, images, cx),
             TasksEvent::Update { task_id, patch } => {
                 self.update_card_task(&card, task_id, patch, cx)
             }

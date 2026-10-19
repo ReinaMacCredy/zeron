@@ -79,7 +79,7 @@ The header reads **MISSION CONTROL** above the task's title, and shows the task'
 
 Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
 
-Right-click a step for **Edit spec**, **Open thread** (when the step has a thread), **Move up**, **Move down**, **Skip** or **Reopen**, and **Remove**. An item that does not apply to that step is greyed out. Escape or a click outside closes the menu.
+Right-click a step for **Edit spec**, **Open thread** (when the step has a thread), **Add image**, **Move up**, **Move down**, **Skip** or **Reopen**, and **Remove**. An item that does not apply to that step is greyed out. Escape or a click outside closes the menu.
 
 The page keeps its place while you are away: go back to it from a chat, and the specs you opened, the edit you were writing, your unsent changes and the scroll position are as you left them.
 
@@ -109,6 +109,18 @@ You can change the plan before you approve it and while the steps run, in both *
 - Drag a step that has not started by the grip at its left edge, which shows when you hover the step, to change the order, or right-click it and pick **Move up** or **Move down**. A step can only land below the last step that has started; steps that are done or running keep their place, and their grip says so. Steps you added and have not sent stay at the end, in the order you put them.
 
 Your changes are tagged **Edited**, **New**, **Removed**, or **New order**, and stay on this page until you send them: a bar at the bottom reads how many changes are unsent. **Undo** drops them all. **Send to lead** saves them all at once and sends the lead one message that lists what changed, including the new order of the steps, so the lead never works from a half-edited plan. When a step whose thread is already running changed, the lead tells that thread. Opening another task's Mission Control page, or the task being done or deleted, drops changes you have not sent.
+
+## Images
+
+A task, a mission's overview and a step's spec can carry images, up to 12 each:
+
+- On the Tasks list, paste an image (Cmd+V) into **Add a task, or press Tab to add notes and start it**, drop an image file on that row, or click the image button at its right. The images wait under the row with a × to take one out, and go with the task when you press Enter or Tab. Escape clears them with the text.
+- In a task's card, paste or drop an image on the card, or click the image button next to **Project**. The images show under the note and save on their own; the × on a thumbnail removes it.
+- In Mission Control, while you edit a step's spec or the overview, paste or drop an image on the card, or click **＋ Add image** under the text. **Save** keeps the images and **Cancel** drops the ones you added. **Add image** in a step's right-click menu adds the picked images to its spec at once. Like any edit, they reach the lead when you click **Send to lead**.
+
+Thumbnails show in the task's row and on its board card, under the overview, and in a step's open spec. Click one to see it large; the left and right arrows, or the ‹ › buttons, move between the images of that task, overview or step, and Escape or a click outside closes it.
+
+The images go to the agent that does the work, the same way an image you attach in a chat does: a task's images with its first message when you start or send it, the overview's images with the lead's first message (images added to the overview later go with the **Send to lead** message), and a step's images with the first message of the step's thread. An image added to a step whose thread has already started does not reach that thread; the edit card says so. Images are stored on this device with your chat attachments, and deleting a task leaves them there.
 
 ## While the steps run
 

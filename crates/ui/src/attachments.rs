@@ -1210,6 +1210,35 @@ pub(crate) fn lightbox_with_size(
     on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
     cx: &mut gpui::App,
 ) -> AnyElement {
+    lightbox_frame(window, preview, focus, natural_size, None, on_close, cx)
+}
+
+pub(crate) struct LightboxSet {
+    pub index: usize,
+    pub count: usize,
+    pub step: std::rc::Rc<dyn Fn(isize, &mut gpui::Window, &mut gpui::App)>,
+}
+
+pub(crate) fn lightbox_in_set(
+    window: &mut gpui::Window,
+    preview: &PreviewImage,
+    focus: &gpui::FocusHandle,
+    set: LightboxSet,
+    on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    lightbox_frame(window, preview, focus, None, Some(set), on_close, cx)
+}
+
+fn lightbox_frame(
+    window: &mut gpui::Window,
+    preview: &PreviewImage,
+    focus: &gpui::FocusHandle,
+    natural_size: Option<Size<gpui::Pixels>>,
+    set: Option<LightboxSet>,
+    on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
+) -> AnyElement {
     let viewport = window.viewport_size();
     let max_h = px(f32::from(viewport.height) * 0.85);
     let max_w = px(f32::from(viewport.width) * 0.9);
@@ -1244,6 +1273,65 @@ pub(crate) fn lightbox_with_size(
     let close_on_key = on_close.clone();
     let press_state = preview.viewer.clone();
     let click_state = preview.viewer.clone();
+    let caption = match &set {
+        Some(set) => SharedString::from(format!(
+            "{} · {} of {}",
+            preview.name,
+            set.index + 1,
+            set.count
+        )),
+        None => preview.name.clone(),
+    };
+    let step_on_key = set
+        .as_ref()
+        .filter(|set| set.count > 1)
+        .map(|set| set.step.clone());
+    let arrow = |set: &LightboxSet, delta: isize| {
+        let step = set.step.clone();
+        let (glyph, label, side) = if delta < 0 {
+            (crate::icons::LUCIDE_CHEVRON_LEFT, "Previous image", "prev")
+        } else {
+            (crate::icons::LUCIDE_CHEVRON_RIGHT, "Next image", "next")
+        };
+        let button = div()
+            .id(SharedString::from(format!("attachment-lightbox-{side}")))
+            .debug_selector(move || format!("attachment-lightbox-{side}"))
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .size(px(36.0))
+            .rounded_full()
+            .bg(crate::popover::scrim_alpha(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                step(delta, window, cx);
+            })
+            .child(
+                crate::icons::icon(glyph)
+                    .size(px(18.0))
+                    .text_color(ink(0.85)),
+            );
+        let rail = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .flex()
+            .items_center()
+            .child(button);
+        if delta < 0 {
+            rail.left(px(16.0))
+        } else {
+            rail.right(px(16.0))
+        }
+    };
+    let arrows: Vec<gpui::Div> = set
+        .as_ref()
+        .filter(|set| set.count > 1)
+        .map(|set| vec![arrow(set, -1), arrow(set, 1)])
+        .unwrap_or_default();
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -1261,9 +1349,19 @@ pub(crate) fn lightbox_with_size(
                     .justify_center()
                     .gap(px(12.0))
                     .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" {
+                        let delta = match event.keystroke.key.as_str() {
+                            "escape" => {
+                                cx.stop_propagation();
+                                close_on_key(window, cx);
+                                return;
+                            }
+                            "left" => -1,
+                            "right" => 1,
+                            _ => return,
+                        };
+                        if let Some(step) = &step_on_key {
                             cx.stop_propagation();
-                            close_on_key(window, cx);
+                            step(delta, window, cx);
                         }
                     })
                     .capture_any_mouse_down(move |event, _, _| {
@@ -1281,12 +1379,14 @@ pub(crate) fn lightbox_with_size(
                     .child(div().w(max_w).h(max_h).child(content))
                     .child(
                         div()
+                            .debug_selector(|| "attachment-lightbox-caption".into())
                             .max_w(max_w)
                             .overflow_hidden()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(ink(0.45))
-                            .child(preview.name.clone()),
-                    ),
+                            .child(caption),
+                    )
+                    .children(arrows),
             ),
     )
     .priority(3)
