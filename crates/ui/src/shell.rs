@@ -14233,6 +14233,10 @@ impl Shell {
             _ => None,
         }
         .filter(|count| *count > 0);
+        let pop = (item == RailItem::Supervisor)
+            .then(|| self.supervisor_badge_pop(needs_you.unwrap_or(0), cx))
+            .flatten();
+        let view = cx.entity_id();
         let button = app_rail::button(
             entry.id,
             entry.label,
@@ -14243,7 +14247,13 @@ impl Shell {
         )
         .relative()
         .when_some(awaiting.or(needs_you), |el, count| {
-            el.child(app_rail::badge(count, theme))
+            el.child(app_rail::badge(count, pop.unwrap_or(1.0), theme))
+        })
+        .when(pop.is_some(), |el| {
+            el.child(gpui::canvas(
+                |_, _, _| {},
+                move |_, _, window, _| window.on_next_frame(move |_, cx| cx.notify(view)),
+            ))
         })
         .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {

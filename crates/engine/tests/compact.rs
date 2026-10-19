@@ -20,7 +20,7 @@ use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
     AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    SteeringMode, Task, TaskPatch, TaskStep,
 };
 
 const CHAT: &str = "chat-compact";
@@ -762,35 +762,111 @@ async fn a_running_turn_is_reminded_once_per_step_of_growth() {
 async fn a_filling_context_nudges_the_agent_on_every_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
-    core.registry
-        .set_compaction_settings(zeron_engine::registry::CompactionSettings {
-            nudge_tokens: 20_000,
-            mode: CompactionMode::Threshold,
-            ..Default::default()
-        })
-        .unwrap();
+    let missions = |missions: bool| {
+        core.registry
+            .set_compaction_settings(CompactionSettings {
+                nudge_tokens: 20_000,
+                mode: CompactionMode::Threshold,
+                missions,
+                ..Default::default()
+            })
+            .unwrap();
+    };
+    missions(false);
     let cwd = tmp.path().to_string_lossy().to_string();
-    for (ix, id) in ["msg-2", "msg-3", "msg-4"].into_iter().enumerate() {
-        if id == "msg-4" {
-            harness.can_compact.store(false, Ordering::SeqCst);
-        }
+    let send = async |id: &str| {
+        let before = requests.lock().unwrap().len();
         core.doc_host
             .queue_command(CHAT, run_payload(id, &cwd))
             .expect("queue run");
-        wait_for(|| requests.lock().unwrap().len() == ix + 2, "run starts").await;
+        wait_for(
+            || requests.lock().unwrap().len() == before + 1,
+            "run starts",
+        )
+        .await;
         wait_for(|| !core.sessions.turn_in_flight(CHAT), "run settles").await;
-    }
-    let prompts: Vec<String> = requests.lock().unwrap().iter().map(|r| r.prompt.clone()).collect();
+        requests.lock().unwrap().last().unwrap().prompt.clone()
+    };
     let nudged = "hello\n\n<system-reminder>\nContext 22.8k. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn. Continuing, including any follow-up question: do not compact, unless this turn finishes a piece of work and what comes next needs only its conclusions; then call compact last. It runs after the turn ends; name what to keep.\n</system-reminder>";
-    assert_eq!(prompts[1], nudged);
-    assert_eq!(prompts[2], nudged, "the reminder repeats until the chat compacts");
-    assert_eq!(prompts[3], "hello", "no reminder when the harness cannot compact");
+    assert_eq!(
+        send("msg-2").await,
+        nudged,
+        "a plain chat ignores the missions switch"
+    );
+    assert_eq!(
+        send("msg-3").await,
+        nudged,
+        "the reminder repeats until the chat compacts"
+    );
+    harness.can_compact.store(false, Ordering::SeqCst);
+    assert_eq!(
+        send("msg-4").await,
+        "hello",
+        "no reminder when the harness cannot compact"
+    );
+    harness.can_compact.store(true, Ordering::SeqCst);
+
+    let lead: Task = serde_json::from_value(serde_json::json!({
+        "id": "task-1", "title": "Mission", "chatId": CHAT, "mode": "orchestrated",
+    }))
+    .unwrap();
+    core.workspace.create_task(&lead).unwrap();
+    let watched = |task: bool| {
+        let tasks = core.workspace.watch_tasks();
+        let steps = core.workspace.watch_task_steps();
+        move || {
+            let lead = tasks
+                .borrow()
+                .iter()
+                .any(|t| t.chat_id.as_deref() == Some(CHAT));
+            let step = steps
+                .borrow()
+                .iter()
+                .any(|s| s.chat_id.as_deref() == Some(CHAT));
+            (lead, step) == (task, !task)
+        }
+    };
+    wait_for(watched(true), "the chat leads a mission").await;
+    assert_eq!(
+        send("msg-5").await,
+        "hello",
+        "missions off: a lead is left alone"
+    );
+    missions(true);
+    assert_eq!(
+        send("msg-6").await,
+        nudged,
+        "missions on: a lead follows the same rule"
+    );
+
+    missions(false);
+    core.workspace
+        .update_task(
+            "task-1",
+            &TaskPatch {
+                chat_id: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let step: TaskStep = serde_json::from_value(serde_json::json!({
+        "id": "step-1", "taskId": "task-1", "title": "Step", "chatId": CHAT,
+    }))
+    .unwrap();
+    core.workspace.create_task_step(&step).unwrap();
+    wait_for(watched(false), "the chat runs a step").await;
+    assert_eq!(
+        send("msg-7").await,
+        "hello",
+        "missions off: a step thread is left alone"
+    );
+
     let typed: Vec<String> = entries(&core)
         .iter()
         .filter(|e| e.role == MessageRole::User)
         .map(entry_text)
         .collect();
-    assert_eq!(typed, ["hello", "hello", "hello", "hello"], "the transcript keeps what was typed");
+    assert_eq!(typed, ["hello"; 7], "the transcript keeps what was typed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

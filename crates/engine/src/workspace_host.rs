@@ -29,8 +29,8 @@ use tokio::sync::watch;
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
 use zeron_proto::{
-    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskPatch,
-    TaskStep, TaskStepPatch,
+    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskMode,
+    TaskPatch, TaskStep, TaskStepPatch,
 };
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -1359,6 +1359,19 @@ impl WorkspaceHost {
 
     pub fn task_steps_of(&self, task_id: &str) -> Vec<TaskStep> {
         self.read(|doc| doc.task_steps_of(task_id))
+    }
+
+    pub(crate) fn mission_thread(&self, chat_id: &str) -> bool {
+        self.inner.tasks_tx.borrow().iter().any(|task| {
+            task.mode == TaskMode::Orchestrated
+                && !task.deleted
+                && task.chat_id.as_deref() == Some(chat_id)
+        }) || self
+            .inner
+            .task_steps_tx
+            .borrow()
+            .iter()
+            .any(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
     }
 
     pub fn create_task_step(&self, step: &TaskStep) -> Result<bool, EngineError> {
