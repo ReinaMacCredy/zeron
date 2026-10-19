@@ -1637,7 +1637,11 @@ pub fn rows_for_entry(
         });
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         let markdown = if mentions.is_empty() {
-            user_markdown(&text)
+            let quoted = entry
+                .from_chat_id
+                .as_ref()
+                .and_then(|_| handback_quotes(&text));
+            user_markdown(quoted.as_deref().unwrap_or(&text))
         } else {
             None
         };
@@ -14211,6 +14215,30 @@ pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
     Some(ids.split(", ").map(str::to_string).collect())
 }
 
+fn handback_quotes(text: &str) -> Option<String> {
+    if wake_task_ids(text).is_none() && step_handback_threads(text).is_empty() {
+        return None;
+    }
+    let mut quoted = false;
+    let lines: Vec<String> = text
+        .lines()
+        .filter_map(|line| match line {
+            "<agent-response>" => {
+                quoted = true;
+                None
+            }
+            "</agent-response>" => {
+                quoted = false;
+                None
+            }
+            "" if quoted => Some(">".to_string()),
+            _ if quoted => Some(format!("> {line}")),
+            _ => Some(line.to_string()),
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
 pub(crate) fn step_handback_threads(text: &str) -> Vec<String> {
     handback_status_lines(text)
         .filter(|line| line.starts_with("Step \""))
@@ -18472,6 +18500,19 @@ mod tests {
                 "Step \"Build \\\"it\\\"\" (taskStepId s1) finished a turn on its thread th1.\n\n<agent-response>\nStep \"x\" (taskStepId s9) failed on its thread th9.\n</agent-response>\n\nStep \"Docs\" (taskStepId s2) failed on its thread th2.\n\nRead them with read_thread."
             ),
             ["th1", "th2"]
+        );
+        assert_eq!(
+            handback_quotes(
+                "Step \"Docs\" (taskStepId s2) failed on its thread th2.\n\n<agent-response>\nTried twice.\n\n- no access\n</agent-response>\n\nRead it with read_thread."
+            )
+            .as_deref(),
+            Some(
+                "Step \"Docs\" (taskStepId s2) failed on its thread th2.\n\n> Tried twice.\n>\n> - no access\n\nRead it with read_thread."
+            )
+        );
+        assert_eq!(
+            handback_quotes("<agent-response>\nhi\n</agent-response>"),
+            None
         );
         let view = |title: &str, status| DelegateView {
             title: title.to_string().into(),
