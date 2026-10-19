@@ -14,6 +14,7 @@ use crate::theme::Theme;
 
 const IDLE_TITLE: &str = "Compact idle chats before the cache expires";
 const AGENT_TITLE: &str = "Let agents compact themselves";
+const MISSIONS_TITLE: &str = "In Mission Control";
 const COMPACT_TOOL: &str = "compact";
 
 pub struct CompactionCard {
@@ -343,6 +344,10 @@ impl Render for CompactionCard {
             enabled: !settings.enabled,
             ..settings.clone()
         };
+        let missions_toggled = CompactionSettings {
+            missions: !settings.missions,
+            ..settings.clone()
+        };
         let rows: Vec<AnyElement> = vec![
             widgets::card_row(&theme, true)
                 .child(row_text(
@@ -400,6 +405,24 @@ impl Render for CompactionCard {
                     settings.mode,
                     pick_mode,
                 ))
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(row_text(
+                    &theme,
+                    MISSIONS_TITLE,
+                    "Lead and step threads compact by the same rule. Off leaves missions alone.",
+                ))
+                .child(
+                    switch(
+                        &theme,
+                        settings.missions,
+                        "mission-compaction",
+                        MISSIONS_TITLE,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.save(missions_toggled.clone(), cx)
+                    })),
+                )
                 .into_any_element(),
             widgets::card_row(&theme, false)
                 .child(row_text(

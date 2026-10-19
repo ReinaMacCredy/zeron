@@ -931,6 +931,10 @@ impl SessionsEngine {
         self.inner.workspace()
     }
 
+    pub(crate) fn auto_compacts(&self, chat_id: &str) -> bool {
+        self.inner.auto_compacts(chat_id)
+    }
+
     /// Bind generated-image intake to the same profile store used by attachment RPCs.
     /// Where projectless chats' scratch folders resolve (set once at boot).
     pub(crate) fn set_scratch_root(&self, root: std::path::PathBuf) {
@@ -2049,6 +2053,7 @@ impl SessionsEngine {
     ) -> bool {
         let settings = self.inner.registry.compaction_settings();
         if settings.mode != CompactionMode::Classifier
+            || !self.inner.auto_compacts(chat_id)
             || zeron_proto::invocation::leading_command(prompt).is_some()
             || self.turn_in_flight(chat_id)
             || lock(&self.inner.compacting).contains(chat_id)
@@ -3819,6 +3824,7 @@ impl Inner {
             .workspace()
             .and_then(|workspace| workspace.chat_config(chat_id));
         if self.tool_disabled(config.as_ref(), "compact")
+            || !self.auto_compacts(chat_id)
             || self
                 .resolve_for_chat(chat_id, harness_id)
                 .ok()?
@@ -3829,6 +3835,13 @@ impl Inner {
             return None;
         }
         self.past_floor(chat_id, config.as_ref())
+    }
+
+    fn auto_compacts(&self, chat_id: &str) -> bool {
+        self.registry.compaction_settings().missions
+            || !self
+                .workspace()
+                .is_some_and(|workspace| workspace.mission_thread(chat_id))
     }
 
     /// Context tokens once what a compaction could free reaches `nudgeTokens`.

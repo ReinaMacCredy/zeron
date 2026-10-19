@@ -29,6 +29,10 @@ With **Let agents compact themselves** on, agents get a compact tool and can sum
 
 In Classifier mode, the **Classifier** row picks who reads the messages: **Agent model**, or TypeSafe's Jev 1.14 classifier through **Jev · TypeSafe** or **Jev · OpenRouter**. Jev answers in about a second for a fraction of a cent. It needs an API key from the source you picked: copy the key and press **Paste key** to save it in the Keychain, or **Remove key** to delete it. With Jev, an agent's own compaction note is not sent anywhere: the chat compacts and carries the last two turns over.
 
+## Mission Control
+
+**In Mission Control** decides whether a mission's lead and step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminder, and no classifier check. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand.
+
 ## Settings
 
 In [Settings > General](zeron://settings/general):
@@ -39,6 +43,7 @@ In [Settings > General](zeron://settings/general):
 | **Idle threshold** (100K, 150K, 200K) | 100K |
 | **Let agents compact themselves** | On |
 | **Compact new tasks** | Classifier |
+| **In Mission Control** | On |
 | **Check from** or **Remind at** (Off, 100K, 150K, 200K) | 150K |
 
 ## Long context for Claude
