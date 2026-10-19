@@ -1679,11 +1679,10 @@ impl TaskCenter {
             Selection::Step(id) => plan
                 .steps
                 .iter()
-                .position(|row| &row.step.id == id)
-                .map(|ix| (ix, &plan.steps[ix])),
+                .find(|row| &row.step.id == id)
+                .zip(plan.step_label(id)),
             Selection::Lead => None,
         };
-        let total = plan.steps.len();
         let live_chat = self.live.as_ref().and_then(|live| {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == live.chat_id)?;
@@ -1693,25 +1692,22 @@ impl TaskCenter {
                 chat_brand(chat),
             ))
         });
-        let step_has_thread = step.is_some_and(|(_, row)| {
+        let step_has_thread = step.as_ref().is_some_and(|(row, _)| {
             live_chat
                 .as_ref()
                 .is_some_and(|(id, _, _)| row.step.chat_id.as_deref() == Some(id.as_str()))
         });
         let (title, sub) = match step {
-            Some((ix, row)) if !step_has_thread => (
+            Some((row, label)) if !step_has_thread => (
                 row.step.title.clone(),
-                format!(
-                    "Step {} of {total} has not started · messages go to the lead",
-                    ix + 1
-                ),
+                format!("{label} has not started · messages go to the lead"),
             ),
-            Some((ix, _)) => (
+            Some((_, label)) => (
                 live_chat
                     .as_ref()
                     .map(|(_, title, _)| title.clone())
                     .unwrap_or_default(),
-                format!("Step {} of {total}", ix + 1),
+                label,
             ),
             None => (
                 live_chat

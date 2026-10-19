@@ -119,6 +119,11 @@ impl Rollup {
         self.steps.iter().filter(|row| row.status == status).count()
     }
 
+    pub fn step_label(&self, step_id: &str) -> Option<String> {
+        let ix = self.steps.iter().position(|row| row.step.id == step_id)?;
+        Some(format!("Step {} of {}", ix + 1, self.steps.len()))
+    }
+
     pub fn phase(&self, task: &zeron_proto::Task) -> PlanPhase {
         let lead_working = self.lead == Some(ChatIndicator::Working);
         if task.completed_at.is_none()
@@ -1336,21 +1341,14 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MissionRole {
     Lead,
-    Step {
-        step_id: String,
-        place: Option<usize>,
-        of: usize,
-    },
+    Step { step_id: String, label: String },
 }
 
 impl MissionRole {
     pub fn label(&self) -> String {
         match self {
             Self::Lead => "Lead".into(),
-            Self::Step {
-                place: Some(n), of, ..
-            } => format!("Step {n} of {of}"),
-            Self::Step { place: None, .. } => "Step skipped".into(),
+            Self::Step { label, .. } => label.clone(),
         }
     }
 
@@ -1400,13 +1398,7 @@ pub(crate) fn mission_thread(
     let role = match step_id {
         None => MissionRole::Lead,
         Some(step_id) => MissionRole::Step {
-            place: plan
-                .steps
-                .iter()
-                .filter(|row| row.status != StepStatus::Skipped)
-                .position(|row| row.step.id == step_id)
-                .map(|ix| ix + 1),
-            of: plan.progress.total,
+            label: plan.step_label(&step_id)?,
             step_id,
         },
     };

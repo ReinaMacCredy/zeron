@@ -2500,8 +2500,8 @@ mod tests {
         };
         let on = |task: &str, label: &str| Some((task.to_owned(), label.to_owned()));
         assert_eq!(strip("working-lead"), on("working", "Lead"));
-        assert_eq!(strip("child"), on("working", "Step 3 of 4"));
-        assert_eq!(strip("skipped-child"), on("working", "Step skipped"));
+        assert_eq!(strip("child"), on("working", "Step 4 of 5"));
+        assert_eq!(strip("skipped-child"), on("working", "Step 2 of 5"));
         assert_eq!(strip("stuck-child"), on("stuck", "Step 2 of 2"));
         assert_eq!(strip("gone-lead"), None);
         assert_eq!(strip("single-lead"), None);

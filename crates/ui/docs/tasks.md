@@ -82,7 +82,7 @@ Click a step to watch its thread live on the right, with a composer to write to 
 The lead's chat and the chat of every step show a strip at the top of the conversation. It stays in place while you scroll, and shows:
 
 - the task's progress ring and its title;
-- **Lead**, or which step this chat runs, such as **Step 3 of 5**. Skipped steps are not counted, and the chat of a skipped step reads **Step skipped**;
+- **Lead**, or which step this chat runs, such as **Step 3 of 5**, numbered as on the Mission Control page;
 - a bar with the steps done;
 - **Mission Control**.
 
