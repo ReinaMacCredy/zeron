@@ -329,6 +329,10 @@ impl ToolSettings {
         }
         settings
     }
+
+    pub fn chat_tool_off(&self, chat_disabled: &[String], tool: &str) -> bool {
+        self.for_chat(chat_disabled).disabled(&[]).contains(tool)
+    }
 }
 
 pub const ZERON_TOOL_PREFIX: &str = "mcp__zeron__";
