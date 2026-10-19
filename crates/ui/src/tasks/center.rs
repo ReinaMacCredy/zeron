@@ -1102,6 +1102,7 @@ impl TaskCenter {
             workspace_root: None,
             code: None,
             tables: None,
+            math: Default::default(),
         };
         crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
     }

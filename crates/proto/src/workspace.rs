@@ -24,6 +24,9 @@ pub mod capabilities {
     /// (`crate::projectless`) when it runs; older hosts only know `~`.
     pub const PROJECTLESS_SCRATCH_V1: &str = "projectless-scratch-v1";
     pub const LIMIT_RESUME_V1: &str = "limit-resume-v1";
+    /// The host accepts `SidebarSectionChange::Move` and orders sections by
+    /// their placed key; older hosts reject the action outright.
+    pub const SIDEBAR_SECTION_ORDER_V1: &str = "sidebar-section-order-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -40,6 +43,7 @@ pub mod capabilities {
         SOURCE_CONTROL_COMMITS_V1,
         PROJECTLESS_SCRATCH_V1,
         LIMIT_RESUME_V1,
+        SIDEBAR_SECTION_ORDER_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -128,6 +132,7 @@ mod tests {
                     "source-control-commits-v1",
                     "projectless-scratch-v1",
                     "limit-resume-v1",
+                    "sidebar-section-order-v1",
                     "voice-client-media-v1"
                 ],
             })

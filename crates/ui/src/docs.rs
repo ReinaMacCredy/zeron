@@ -263,7 +263,7 @@ mod tests {
                 .chain(rows.iter().flatten())
                 .flatten()
                 .collect(),
-            Block::CodeBlock { .. } | Block::Rule => Vec::new(),
+            Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => Vec::new(),
         }
     }
 

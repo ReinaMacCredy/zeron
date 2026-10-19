@@ -6173,6 +6173,15 @@ impl Shell {
 
         let custom_sections = self.active_sidebar_sections(cx);
         let custom_count = custom_sections.len();
+        let section_order =
+            (custom_count > 1 && self.sidebar_sections_reorderable(cx)).then(|| {
+                std::sync::Arc::new(
+                    custom_sections
+                        .iter()
+                        .map(|section| section.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            });
         let mut custom_groups: Vec<_> = custom_sections
             .iter()
             .map(|section| {
@@ -6641,10 +6650,20 @@ impl Shell {
             };
             if let Some(id) = key.strip_prefix("section:") {
                 if let Some(section) = custom_sections.iter().find(|section| section.id == id) {
+                    let drag =
+                        section_order
+                            .clone()
+                            .zip(profile_key.clone())
+                            .map(|(ids, profile_key)| SidebarSectionDrag {
+                                section_id: section.id.clone(),
+                                profile_key,
+                                ids,
+                            });
                     rendered.push(self.render_custom_sidebar_section(
                         section.clone(),
                         rendered_rows,
                         drag_group,
+                        drag,
                         theme,
                         cx,
                     ));

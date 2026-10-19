@@ -26,12 +26,13 @@ members = [
     "crates/text",
     "crates/visual",
     "crates/visual-gpu",
+    "crates/zatex",
     "apps/zeron",
 ]
 exclude = ["vendor/cua-driver"]
 
 [workspace.package]
-version = "0.2.113"
+version = "0.2.114"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -58,6 +59,7 @@ zeron-mobile = { path = "crates/mobile" }
 zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-text = { path = "crates/text" }
+zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
 
