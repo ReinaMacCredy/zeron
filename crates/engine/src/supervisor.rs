@@ -331,10 +331,8 @@ impl SupervisorStore {
                 .pending
                 .retain(|event| event.task_id() != Some(task_id));
         }
-        let unwatched: Vec<String> = state.file.unwatched.iter().cloned().collect();
-        self.inner
-            .snapshot
-            .send_modify(|snapshot| snapshot.unwatched = unwatched);
+        drop(state);
+        self.mark_stale();
         Ok(())
     }
 
