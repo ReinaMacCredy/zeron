@@ -49,6 +49,17 @@ title = "Plan steps you can drag, edit and illustrate"
 description = "Drag unstarted steps into a new order, right-click a step for its actions, and edit it in place. Paste images into a step, the overview or a Tasks board task, and the agent that runs it gets them."
 
 [[entry.features]]
+id = "mission-tree"
+title = "Follow a mission as a tree"
+description = "The lead's strip draws each step on a branch as it starts, and Mission Control lays the steps around a spine with each step's token count. Click a step to open its thread in a drawer."
+details = "The Supervisor's mission cards use the same tree."
+
+[[entry.features]]
+id = "task-card-context"
+title = "Start a task where it belongs"
+description = "A task's card starts it in a new chat, hands it to an existing thread, or runs it as a mission. Give a mission up to five chats to read, and its lead reads them before it plans."
+
+[[entry.features]]
 id = "fold-mission-threads"
 title = "Fold a mission's threads in the sidebar"
 description = "Collapse a lead's step threads under its row; it still shows what is running and what needs you."
@@ -56,7 +67,7 @@ description = "Collapse a lead's step threads under its row; it still shows what
 [[entry.features]]
 id = "smaller-things-0-2-114"
 title = "Smaller things"
-description = "Pastes over 5,000 characters become a Pasted text chip you can preview, skill chips open their SKILL.md, and you can annotate a browser page for your agent."
+description = "Pastes over 5,000 characters become a Pasted text chip you can preview, skill chips open their SKILL.md, and you can annotate a browser page for your agent. Running steps shimmer, a step thread's images show in the live pane and split view, and a rewritten plan keeps its steps' images."
 
 [[entry.features]]
 id = "upstream-0-2-114"
