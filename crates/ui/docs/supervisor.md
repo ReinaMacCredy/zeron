@@ -1,4 +1,4 @@
-The Supervisor is one agent for this Mac's workspace that sits above the leads of your Mission Control missions. You talk with it about architecture and direction, and it watches the missions you leave on. It does not run all the time: Zeron wakes it when something happens in a mission, and it goes back to sleep when it has nothing to do.
+The Supervisor is one agent for this Mac's workspace that sits above the leads of your [Mission Control](zeron://docs/mission-control) missions. You talk with it about architecture and direction, and it watches the missions you leave on. It does not run all the time: Zeron wakes it when something happens in a mission, and it goes back to sleep when it has nothing to do.
 
 ## Open the Supervisor
 
@@ -101,7 +101,7 @@ A contention wakes the Supervisor once, and again only after it has cleared. Zer
 
 **Missions**, under the feed, lists every Mission Control task that is not done. Each row shows its progress ring, its name, the step it is on (**Step 2 of 5** and its title) and a thin progress bar. A mission the Supervisor does not watch reads **Not watched**; a mission whose lead runs on another device reads **on** that device's name, **not watched**: the Supervisor can only reach threads on its own Mac.
 
-Click a mission to see who works on it: the **Lead**, then each step and its title, in the order Mission Control numbers them. Each one shows its agent's mark and model, and the agent profile's name when its chat runs one. **Open Mission Control** opens the mission's page. **Watched by the Supervisor** at the bottom has a switch: turn it off and that mission stops waking the Supervisor; turn it on again to bring it back.
+Click a mission to see who works on it: the **Lead**, then each step and its title, in the order Mission Control numbers them. Each one shows its agent's mark and model, and the agent profile's name when its chat runs one. **Open Mission Control** opens the mission's page, described in [Mission Control](zeron://docs/mission-control). **Watched by the Supervisor** at the bottom has a switch: turn it off and that mission stops waking the Supervisor; turn it on again to bring it back.
 
 ## Read a brief
 

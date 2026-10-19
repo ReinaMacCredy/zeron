@@ -41,6 +41,6 @@ Turn on **Show predictions** in Settings > General and Zeron suggests your next 
 
 ## Mission Control mode
 
-In an open chat, press Shift+Tab, or click **Mission Control** under the composer, to turn your message into a mission: a lead agent plans the work and runs each step on its own thread. The send button reads **Start mission**. Shift+Tab again turns it back into a message. On a list line, Shift+Tab outdents the line instead. Side chats, split panes, and the pull request chat do not have this mode. On the New chat canvas, the **Mission Control** tab does the same: see [Start a new chat](zeron://docs/new-chat). What happens when you start is in [Tasks](zeron://docs/tasks).
+In an open chat, press Shift+Tab, or click **Mission Control** under the composer, to turn your message into a mission: a lead agent plans the work and runs each step on its own thread. The send button reads **Start mission**. Shift+Tab again turns it back into a message. On a list line, Shift+Tab outdents the line instead. Side chats, split panes, and the pull request chat do not have this mode. On the New chat canvas, the **Mission Control** tab does the same: see [Start a new chat](zeron://docs/new-chat). What happens when you start is in [Mission Control](zeron://docs/mission-control).
 
 > To use `/` commands, `$` skills, and `@` mentions, see [Commands and mentions](zeron://docs/commands-and-mentions).

@@ -21,7 +21,7 @@ Right-click a row for the full menu: **Rename**, **Pin** or **Unpin**, **Archive
 
 ## Step threads
 
-A [Mission Control](zeron://docs/tasks) lead shows its step threads indented under its row. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold them away. A collapsed lead keeps the chevron showing and sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. When a step needs you, an attention dot appears on the lead. Opening a step, from Mission Control or a link, unfolds its lead again. Zeron remembers which leads you collapsed.
+A [Mission Control](zeron://docs/mission-control) lead shows its step threads indented under its row. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold them away. A collapsed lead keeps the chevron showing and sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. When a step needs you, an attention dot appears on the lead. Opening a step, from Mission Control or a link, unfolds its lead again. Zeron remembers which leads you collapsed.
 
 ## Renaming
 
