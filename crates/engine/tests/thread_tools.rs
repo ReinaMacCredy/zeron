@@ -2664,7 +2664,7 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
 
 #[tokio::test]
 async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
-    const FOLD_MS: i64 = 5_000;
+    const FOLD_MS: i64 = 8_000;
     unsafe { std::env::set_var("ZERON_SUPERVISOR_FOLD_MS", FOLD_MS.to_string()) };
     let rig = rig(Duration::from_millis(400));
     let rpc = rig.core.rpc_service();
