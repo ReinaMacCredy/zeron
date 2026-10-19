@@ -2444,9 +2444,6 @@ impl Harness for AskingHarness {
                 }))
                 .await;
             let mut text = "noted".to_string();
-            if holds {
-                tokio::time::sleep(Duration::from_millis(800)).await;
-            }
             if asks {
                 let answers = (request_input)(vec![zeron_proto::UserInputQuestion {
                     id: "q-curl".into(),
@@ -2465,6 +2462,9 @@ impl Harness for AskingHarness {
                     .first()
                     .and_then(|a| a.labels.first().cloned())
                     .unwrap_or_else(|| "no answer".into());
+            }
+            if holds {
+                tokio::time::sleep(Duration::from_millis(800)).await;
             }
             while let Ok(message) = steering.try_recv() {
                 prompts.lock().unwrap().push(message.prompt);
@@ -2742,7 +2742,7 @@ async fn an_input_wake_into_an_owner_parked_on_its_own_question_leaves_that_ques
         "lead",
         "cmd-l",
         "msg-l",
-        "please ask about the scope",
+        "please ask about the scope, then please hold",
     );
     wait_for(
         || pending_request(&rig.core, "lead").is_some(),
@@ -2775,6 +2775,17 @@ async fn an_input_wake_into_an_owner_parked_on_its_own_question_leaves_that_ques
     assert!(rig.core.sessions.awaits_input("lead", &own));
     assert!(prompts_with(&rig, "is waiting for input").is_empty());
     assert_eq!(prompts_with(&rig, "please ask about the scope").len(), 1);
+    let status = || {
+        rig.core
+            .sessions
+            .session_status("lead")
+            .map(|session| session.status)
+    };
+    assert_eq!(
+        status(),
+        Some(SessionStatus::AwaitingInput),
+        "the steered wake leaves the owner waiting on the person"
+    );
 
     assert!(
         rig.core
@@ -2789,6 +2800,11 @@ async fn an_input_wake_into_an_owner_parked_on_its_own_question_leaves_that_ques
             )
             .unwrap()
     );
+    wait_for(
+        || status() == Some(SessionStatus::Working),
+        "the answer to put the owner back to work",
+    )
+    .await;
     wait_for(
         || !prompts_with(&rig, "is waiting for input").is_empty(),
         "the wake to reach the owner after the answer",

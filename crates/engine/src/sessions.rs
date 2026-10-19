@@ -100,7 +100,16 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+struct PendingInput {
+    tx: oneshot::Sender<Vec<UserInputAnswer>>,
+    person: bool,
+}
+
+type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
+
+fn asks_person(questions: &[UserInputQuestion]) -> bool {
+    !questions.iter().any(UserInputQuestion::is_computer)
+}
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -487,7 +496,13 @@ impl RunSetup {
                 if accepts_input {
                     let (answer_tx, answer_rx) = oneshot::channel();
                     let request_id = new_id();
-                    lock(&pending).insert(request_id.clone(), answer_tx);
+                    lock(&pending).insert(
+                        request_id.clone(),
+                        PendingInput {
+                            person: asks_person(&questions),
+                            tx: answer_tx,
+                        },
+                    );
                     let _ = events.send(AgentEvent::InputRequested {
                         request_id: request_id.clone(),
                         questions,
@@ -1484,7 +1499,9 @@ impl SessionsEngine {
                     // impossible for an observer to hold [new message, old status]
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
-                    self.set_status(chat_id, SessionStatus::Working, false);
+                    if !self.inner.awaits_person(chat_id, &run_id, None) {
+                        self.set_status(chat_id, SessionStatus::Working, false);
+                    }
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
@@ -1851,7 +1868,9 @@ impl SessionsEngine {
             if bootstrap.is_some() {
                 history_sent.store(true, std::sync::atomic::Ordering::Release);
             }
-            self.set_status(chat_id, SessionStatus::Working, false);
+            if !self.inner.awaits_person(chat_id, &run_id, None) {
+                self.set_status(chat_id, SessionStatus::Working, false);
+            }
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
@@ -1938,7 +1957,7 @@ impl SessionsEngine {
             return Ok(false); // parked between turns: nothing to stop
         }
         // Unpark questions first: the stopped turn can never be answered.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, input)| input.tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -1984,7 +2003,7 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, input)| input.tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -3126,7 +3145,7 @@ impl SessionsEngine {
         let Some(resolver) = lock(&pending).remove(request_id) else {
             return Ok(false);
         };
-        let _ = resolver.send(answers.clone());
+        let _ = resolver.tx.send(answers.clone());
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
             answers: Some(answers),
@@ -3138,7 +3157,7 @@ impl SessionsEngine {
         lock(&self.inner.runs).get(chat_id).is_some_and(|run| {
             lock(&run.pending_inputs)
                 .get(request_id)
-                .is_some_and(|resolver| !resolver.is_closed())
+                .is_some_and(|resolver| !resolver.tx.is_closed())
         })
     }
 
@@ -3156,7 +3175,13 @@ impl SessionsEngine {
             return Err("The turn that asked has already ended.".into());
         }
         let (tx, rx) = oneshot::channel();
-        lock(&run.pending_inputs).insert(request_id.to_owned(), tx);
+        lock(&run.pending_inputs).insert(
+            request_id.to_owned(),
+            PendingInput {
+                person: asks_person(&questions),
+                tx,
+            },
+        );
         run.engine_tx
             .send(AgentEvent::InputRequested {
                 request_id: request_id.to_owned(),
@@ -4233,6 +4258,18 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn awaits_person(&self, chat_id: &str, run_id: &str, except: Option<&str>) -> bool {
+        lock(&self.runs)
+            .get(chat_id)
+            .filter(|h| h.run_id == run_id)
+            .is_some_and(|h| {
+                // A closed resolver means the harness stopped waiting: the agent withdrew it.
+                lock(&h.pending_inputs).iter().any(|(id, input)| {
+                    input.person && !input.tx.is_closed() && except != Some(id.as_str())
+                })
+            })
     }
 
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
@@ -6488,8 +6525,8 @@ async fn drive_run(
                         let resolver = lock(&inner.runs)
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                        if let Some(tx) = resolver {
-                            let _ = tx.send(Vec::new());
+                        if let Some(input) = resolver {
+                            let _ = input.tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
                         continue;
@@ -6721,7 +6758,7 @@ async fn drive_run(
             } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
-                if !questions.iter().any(UserInputQuestion::is_computer) {
+                if asks_person(questions) {
                     inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
                     if let Some(host) = inner.doc_host() {
                         host.offer_input_wakes(&chat_id, request_id, questions);
@@ -6729,26 +6766,12 @@ async fn drive_run(
                 }
             }
             AgentEvent::InputResolved { request_id, .. } => {
-                let pending = lock(&inner.runs)
-                    .get(&chat_id)
-                    .filter(|h| h.run_id == run_id)
-                    .map(|h| h.pending_inputs.clone());
-                // A closed resolver means the harness stopped waiting: the agent withdrew it.
-                let awaited = |rid: &str| {
-                    pending
-                        .as_ref()
-                        .is_some_and(|p| lock(p).get(rid).is_some_and(|tx| !tx.is_closed()))
-                };
                 let resolved_consent = folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, .. }
                         if rid == request_id && questions.iter().any(UserInputQuestion::is_computer))
                 });
-                let question_open = resolved_consent && folded.iter().any(|part| {
-                    matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
-                        if rid != request_id
-                            && !questions.iter().any(UserInputQuestion::is_computer)
-                            && awaited(rid))
-                });
+                let question_open =
+                    resolved_consent && inner.awaits_person(&chat_id, &run_id, Some(request_id));
                 let status = if question_open {
                     SessionStatus::AwaitingInput
                 } else {
@@ -6841,8 +6864,8 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
+                for (_, input) in lock(&pending).drain() {
+                    let _ = input.tx.send(Vec::new());
                 }
             }
             let message_status = match status {
