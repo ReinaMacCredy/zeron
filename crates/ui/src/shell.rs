@@ -92,6 +92,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
+mod mission_intro;
 mod mission_strip;
 mod navigation_focus;
 #[cfg(test)]
@@ -2738,6 +2739,7 @@ pub struct Shell {
     /// Synara's one-time AppSnap introduction: shown on desktop until the
     /// user dismisses it or follows it into Settings → Appshots.
     appshot_welcome: bool,
+    mission_intro: mission_intro::MissionIntro,
     whats_new_card: Option<whats_new::WhatsNewCard>,
     whats_new_dialog: Option<whats_new::WhatsNewDialog>,
     /// The fork/rewind confirmation, centered like the delete dialog.
@@ -3458,6 +3460,9 @@ impl Shell {
             chat_rename: None,
             delete_confirm: None,
             appshot_welcome,
+            mission_intro: mission_intro::MissionIntro::at_boot(
+                settings.mission_intro_acknowledged,
+            ),
             whats_new_card,
             whats_new_dialog: None,
             branch_modal: None,
@@ -3711,6 +3716,7 @@ impl Shell {
         self.refresh_harness_update_watch(cx);
         self.advance_update_all(cx);
         self.sync_search_warm(cx);
+        self.resolve_mission_intro(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -15403,6 +15409,10 @@ impl Shell {
             self.acknowledge_appshot_welcome(cx);
             return true;
         }
+        if self.mission_intro_visible() {
+            self.close_mission_intro(cx);
+            return true;
+        }
         if self.cancel_device_rename(cx) {
             return true;
         }
@@ -15499,6 +15509,18 @@ impl Shell {
         }
         if event.keystroke.key == "escape" && self.switcher.is_some() {
             self.switcher_close(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.mission_intro_visible()
+            && !event.keystroke.modifiers.modified()
+            && let Some(delta) = match event.keystroke.key.as_str() {
+                "left" => Some(-1),
+                "right" => Some(1),
+                _ => None,
+            }
+        {
+            self.page_mission_intro(delta, cx);
             cx.stop_propagation();
             return;
         }
@@ -15997,100 +16019,75 @@ impl Shell {
         // hero, fixed 19px title, 32px buttons. It waits behind the sync gate
         // so a fresh install never stacks it on the sign-in flow.
         if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
-            let action = |label: &str| {
-                div()
-                    .h(px(32.0))
-                    .px(px(14.0))
-                    .rounded(px(10.0))
-                    .flex()
-                    .items_center()
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .child(SharedString::from(label.to_string()))
-            };
-            let card = popover::dialog_card(&theme)
-                .id("appshot-welcome-card")
-                .role(gpui::Role::Dialog)
-                .aria_label("Zeron Appshots are live!")
-                .w(px(420.0))
-                .rounded(px(20.0))
-                .child(
-                    div().mb(px(32.0)).h(px(64.0)).flex().items_center().child(
-                        div()
-                            .size(px(64.0))
-                            .rounded(px(16.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(crate::theme::ink(0.04))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icons::icon(icons::SCREEN_CAPTURE)
-                                    .size(px(32.0))
-                                    .text_color(theme.text),
-                            ),
-                    ),
-                )
-                .child(
-                    div()
-                        .text_size(px(19.0))
-                        .line_height(px(23.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("Zeron Appshots are live!"),
-                )
-                .child(
-                    div()
-                        .mt(px(8.0))
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .line_height(px(21.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
+            let card =
+                popover::welcome_sheet(&theme, "appshot-welcome-card", "Zeron Appshots are live!")
+                    .child(
+                        div().mb(px(32.0)).h(px(64.0)).flex().items_center().child(
+                            div()
+                                .size(px(64.0))
+                                .rounded(px(16.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(crate::theme::ink(0.04))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    icons::icon(icons::SCREEN_CAPTURE)
+                                        .size(px(32.0))
+                                        .text_color(theme.text),
+                                ),
+                        ),
+                    )
+                    .child(popover::welcome_title(&theme, "Zeron Appshots are live!"))
+                    .child(popover::welcome_body(
+                        &theme,
+                        format!(
                             "Press both {glyph} keys ({glyph}\u{2009}{glyph}) to snap any app\u{2019}s window into the session you\u{2019}re working in.",
                             glyph = crate::appshots::ChordModifier::Command.glyph()
-                        ))),
-                )
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            action("Not now")
-                                .id("appshot-welcome-dismiss")
-                                .role(gpui::Role::Button)
-                                .aria_label("Not now")
-                                .text_color(theme.text_muted)
-                                .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .mt(px(12.0))
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(
+                                popover::welcome_action(
+                                    &theme,
+                                    "appshot-welcome-dismiss",
+                                    "Not now",
+                                    false,
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.acknowledge_appshot_welcome(cx);
                                 })),
-                        )
-                        .child(
-                            action("Set up Appshots")
-                                .id("appshot-welcome-confirm")
-                                .role(gpui::Role::Button)
-                                .aria_label("Set up Appshots")
-                                .bg(theme.text)
-                                .text_color(theme.on_solid)
-                                .hover(|s| s.opacity(0.9))
+                            )
+                            .child(
+                                popover::welcome_action(
+                                    &theme,
+                                    "appshot-welcome-confirm",
+                                    "Set up Appshots",
+                                    true,
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.acknowledge_appshot_welcome(cx);
                                     this.open_settings(SettingsSection::Appshots, cx);
                                 })),
-                        ),
-                )
-                .into_any_element();
+                            ),
+                    )
+                    .into_any_element();
             overlays.push(popover::modal_glass(
                 "appshot-welcome-sheet",
                 viewport,
                 card,
                 20.0,
             ));
+        }
+        if self.mission_intro_visible() {
+            overlays.push(self.render_mission_intro(viewport, &theme, window, cx));
         }
         if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, cx) {
             overlays.push(dialog);

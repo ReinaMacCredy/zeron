@@ -1705,6 +1705,7 @@ pub struct UiSettings {
     /// The one-time Appshots introduction sheet was dismissed or followed.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub appshot_welcome_acknowledged: bool,
+    pub mission_intro_acknowledged: bool,
     pub computer_getting_started_acknowledged: bool,
     pub computer_effort_hint_dismissed: bool,
     /// Whether bare Escape stops the active agent after contextual consumers
@@ -1906,6 +1907,7 @@ impl Default for UiSettings {
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appshot_welcome_acknowledged: false,
+            mission_intro_acknowledged: false,
             computer_getting_started_acknowledged: false,
             computer_effort_hint_dismissed: false,
             appearance: crate::appearance::AppearanceMode::default(),
@@ -2649,6 +2651,7 @@ impl UiSettings {
             open_tabs_stable,
             split_ratio,
             appshot_welcome_acknowledged,
+            mission_intro_acknowledged,
             computer_getting_started_acknowledged,
             computer_effort_hint_dismissed,
             html_open_app,
@@ -4104,6 +4107,7 @@ mod tests {
                 crate::appshots::AppshotDestination::Automatic
             },
             appshot_welcome_acknowledged: cfg!(any(target_os = "macos", target_os = "linux")),
+            mission_intro_acknowledged: true,
             computer_getting_started_acknowledged: true,
             computer_effort_hint_dismissed: true,
             appearance: crate::appearance::AppearanceMode::Light,

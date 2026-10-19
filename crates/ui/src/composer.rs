@@ -7208,6 +7208,7 @@ pub struct Composer {
     running_tab_since: Option<Instant>,
     running_ticker: Option<Task<()>>,
     mission: bool,
+    pub(crate) mission_pending: bool,
     mission_plan_doc: bool,
     mission_review: bool,
     started_missions: HashMap<String, (String, SharedString)>,
@@ -7797,6 +7798,7 @@ impl Composer {
             running_tab_since: None,
             running_ticker: None,
             mission: false,
+            mission_pending: false,
             mission_plan_doc: true,
             mission_review: true,
             started_missions: HashMap::new(),
@@ -14159,6 +14161,9 @@ impl Render for Composer {
             self.focus_pending = false;
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
+        }
+        if std::mem::take(&mut self.mission_pending) {
+            self.set_mission(true, cx);
         }
         let mission_flipped = self.mission != self.mission_motion.on();
         if mission_flipped {

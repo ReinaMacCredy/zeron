@@ -1,5 +1,7 @@
 The Tasks page is a to-do list for your work. Any task can be handed to an agent with one click, and the task then tracks that agent's chat.
 
+Mission Control introduces itself once, in a three-page sheet that appears after the update unless you have already started a mission. **Try Mission Control** on its last page opens New chat in Mission Control mode.
+
 ![Tasks on the Kanban board](kanban.jpg)
 
 ## Open Tasks
