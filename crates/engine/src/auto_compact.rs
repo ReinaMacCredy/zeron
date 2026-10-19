@@ -192,7 +192,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                 let next = sessions
                     .cache_state(&session.chat_id)
                     .and_then(|(stats, tokens)| arm(&stats, tokens, min_tokens))
-                    .filter(|_| settings.enabled)
+                    .filter(|_| settings.enabled && sessions.auto_compacts(&session.chat_id))
                     .filter(|next| fired.get(&session.chat_id) != Some(&next.touched_at));
                 match next {
                     Some(next) => {
@@ -231,6 +231,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                     .cache_state(&chat_id)
                     .and_then(|(stats, tokens)| arm(&stats, tokens, min_tokens));
                 if !registry.compaction_settings().enabled
+                    || !sessions.auto_compacts(&chat_id)
                     || now - at.fire_at > LATE_MS
                     || still != Some(at)
                 {

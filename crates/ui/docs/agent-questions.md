@@ -29,7 +29,7 @@ How often agents ask is set by the permission chip in the composer footer, under
 
 ## Where waiting chats show up
 
-- In the sidebar, a waiting chat shows **Input**.
+- In the sidebar, a waiting chat shows **Input**. A message that reaches the chat while it waits, such as another agent's message, does not clear it; **Input** stays until you answer.
 - The rail's Inbox button shows a count of waiting chats, and the [Inbox](zeron://inbox) lists them under **Needs you**.
 - On the [Tasks](zeron://tasks) board, a started task whose chat stops working, to ask or to finish, moves to **Needs you**.
 - A desktop notification reads **Waiting on your input**. See [Notifications](zeron://docs/notifications) to set it up.

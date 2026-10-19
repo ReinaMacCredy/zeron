@@ -874,7 +874,7 @@ impl DisclosureMotion {
     }
 
     pub(crate) fn current(self) -> f32 {
-        let total = COLLAPSE.total().as_secs_f32();
+        let total = Self::span().as_secs_f32();
         let raw = if total > 0.0 {
             self.started.elapsed().as_secs_f32() / total
         } else {
@@ -884,7 +884,11 @@ impl DisclosureMotion {
     }
 
     pub(crate) fn animating(self) -> bool {
-        self.started.elapsed() < COLLAPSE.total() + Duration::from_millis(120)
+        self.started.elapsed() < Self::span() + Duration::from_millis(120)
+    }
+
+    fn span() -> Duration {
+        COLLAPSE.total().mul_f32(speed_scale())
     }
 }
 

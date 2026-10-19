@@ -27,6 +27,8 @@ Two switches per agent control this, under **Completion** when you expand an age
 
 Both are on by default. Turn off **Use $ for skills** and `$` is plain text again.
 
+When Claude Code loads a skill, its row in the transcript names the skill in violet. Click the name to open the skill's `SKILL.md` in the right pane.
+
 ## `@` mentions
 
 Type `@` to open one menu with two sections:

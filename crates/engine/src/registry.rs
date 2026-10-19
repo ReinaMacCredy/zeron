@@ -226,6 +226,7 @@ pub struct CompactionSettings {
     /// None model picks a Sonnet-class model of the harness.
     pub classifier: TitleSettings,
     pub jev: Option<JevSource>,
+    pub missions: bool,
 }
 
 impl Default for CompactionSettings {
@@ -237,6 +238,7 @@ impl Default for CompactionSettings {
             mode: CompactionMode::default(),
             classifier: TitleSettings::default(),
             jev: None,
+            missions: true,
         }
     }
 }

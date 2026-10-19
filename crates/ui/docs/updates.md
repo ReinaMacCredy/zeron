@@ -35,7 +35,7 @@ To open the changelog any time, choose **Zeron > What's New…** in the menu bar
 
 The question-mark button in the app rail (**Help**) opens a menu with:
 
-- **What's new**: the three most recent releases. Click one to read it in the changelog.
+- **What's new**: the three most recent releases, each with its headline and date. Click one to read it in the changelog.
 - **Full changelog**: the complete [changelog](zeron://changelog).
 - **Keybindings**: opens [Settings > Shortcuts](zeron://settings/shortcuts).
-- **Docs**: opens these help pages.
+- **Docs**: opens these help pages. See [Getting around](zeron://docs/getting-around).

@@ -141,6 +141,31 @@ fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'stat
     }
 }
 
+fn lead_rollup_label(fold: &spaces::LeadFold, theme: &Theme) -> Option<AnyElement> {
+    (!fold.open).then(|| {
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .whitespace_nowrap()
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(fold.rollup.clone())
+            .when(fold.asking, |el| {
+                el.child(
+                    div()
+                        .size(px(7.0))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(theme.warning),
+                )
+            })
+            .into_any_element()
+    })
+}
+
 pub(crate) fn chat_status_tone(
     status: zeron_proto::ChatIndicator,
     theme: &Theme,
@@ -276,6 +301,7 @@ const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
 const CHAT_MENU_ROW_SETTLE: u8 = 9;
+const CHAT_MENU_ROW_STEPS: u8 = 10;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -4063,6 +4089,7 @@ impl Shell {
         }
         if selected != self.active_chat {
             self.last_interaction = Some((selected.clone(), std::time::Instant::now()));
+            self.reveal_sidebar_child(&selected, cx);
         }
         if selected != self.active_chat {
             self.suspend_file_images(cx);
@@ -11352,6 +11379,7 @@ impl Shell {
         in_project_group: bool,
         slim: bool,
         nested: bool,
+        lead: Option<spaces::LeadFold>,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -11383,6 +11411,7 @@ impl Shell {
                 in_project_group,
                 slim,
                 nested,
+                lead,
                 theme,
                 cx,
             );
@@ -11415,6 +11444,23 @@ impl Shell {
         let project_icon = (project_icon && search_query.is_none())
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let lead_chevron = lead
+            .as_ref()
+            .filter(|_| !preview && search_query.is_none())
+            .map(|fold| {
+                self.lead_chevron(
+                    &row_id,
+                    &id,
+                    fold,
+                    corner_hovered,
+                    Theme::SPACE_SM,
+                    theme,
+                    cx,
+                )
+            });
+        let lead_rollup = lead
+            .as_ref()
+            .and_then(|fold| lead_rollup_label(fold, theme));
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let project_icon = project_icon.map(|icon| {
             div()
@@ -11847,10 +11893,13 @@ impl Shell {
                 8.0
             }))
             .px(px(Theme::SPACE_SM))
-            .when(nested, |el| el.pl(px(Theme::SPACE_SM + SIDEBAR_NESTED_INDENT)))
+            .when(nested || lead.is_some(), |el| {
+                el.pl(px(Theme::SPACE_SM + SIDEBAR_NESTED_INDENT))
+            })
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
+            .children(lead_chevron)
             // Line 1: "project @ device", status word / time-ago right.
             .when(!compact && show_label, |el| {
                 el.child(
@@ -11933,6 +11982,7 @@ impl Shell {
                         )
                         .into_any_element(),
                     })
+                    .children(lead_rollup)
                     .when(!compact && !show_label && remote, |el| {
                         el.child(
                             icon(icons::REMOTE_SERVER)
@@ -12135,6 +12185,52 @@ impl Shell {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn lead_chevron(
+        &self,
+        row_id: &str,
+        lead_id: &str,
+        fold: &spaces::LeadFold,
+        hovered: bool,
+        inset: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let lead_id = lead_id.to_owned();
+        let label = if fold.open {
+            "Collapse step threads"
+        } else {
+            "Expand step threads"
+        };
+        div()
+            .id(SharedString::from(format!("{row_id}-steps-toggle")))
+            .debug_selector({
+                let selector = format!("{row_id}-steps-toggle");
+                move || selector.clone()
+            })
+            .absolute()
+            .left(px(inset - 2.0))
+            .top_0()
+            .bottom_0()
+            .w(px(SIDEBAR_NESTED_INDENT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .aria_expanded(fold.open)
+            .opacity(if hovered || !fold.open { 1.0 } else { 0.0 })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_sidebar_lead(&lead_id, cx);
+            }))
+            .tooltip(crate::settings::widgets::text_tooltip_above(label))
+            .child(self.turned_disclosure_chevron(&fold.motion_key, fold.open, -0.25, theme))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_sidebar_card(
         &self,
         id: String,
@@ -12156,6 +12252,7 @@ impl Shell {
         in_project_group: bool,
         slim: bool,
         nested: bool,
+        lead: Option<spaces::LeadFold>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -12213,10 +12310,20 @@ impl Shell {
                 let (label, icon, color) = chat_status_tone(status, theme);
                 (work_label.map(SharedString::from).or(label), icon, color)
             };
-        let unread = !settled_state && matches!(status, Status::Completed | Status::AwaitingInput);
+        let unread = (!settled_state
+            && matches!(status, Status::Completed | Status::AwaitingInput))
+            || lead.as_ref().is_some_and(|fold| !fold.open && fold.asking);
         let failed = undelivered || (!settled_state && status == Status::Errored);
         let recede = !selected && !unread && !failed;
         let hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let lead_chevron = lead
+            .as_ref()
+            .filter(|_| !preview)
+            .map(|fold| self.lead_chevron(&row_id, &id, fold, hovered, 10.0, theme, cx));
+        let lead_rollup = || {
+            lead.as_ref()
+                .and_then(|fold| lead_rollup_label(fold, theme))
+        };
         let unsent = crate::draft_store::has_content(&id, cx) && !selected;
         let secondary = split_side.is_some() && !selected && self.split.is_some();
         let bg = if selected {
@@ -12452,9 +12559,12 @@ impl Shell {
                 .items_center()
                 .gap(px(10.0))
                 .px(px(10.0))
-                .when(nested, |el| el.pl(px(10.0 + SIDEBAR_NESTED_INDENT)))
+                .when(nested || lead.is_some(), |el| {
+                    el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
+                })
                 .rounded(px(8.0))
                 .bg(bg)
+                .children(lead_chevron)
                 .children(project_icon.map(|icon| {
                     div()
                         .flex_none()
@@ -12472,6 +12582,7 @@ impl Shell {
                     },
                     if lifted { theme.text } else { rest },
                 ))
+                .children(lead_rollup())
                 .child(
                     div()
                         .id(SharedString::from(format!("{row_id}-corner")))
@@ -12616,6 +12727,7 @@ impl Shell {
                     ))
                 } else {
                     el.child(title_el(14.0, title_weight, title_color))
+                        .children(lead_rollup())
                 }
             })
             .children(split_glyph)
@@ -12729,19 +12841,28 @@ impl Shell {
                     .size_full()
                     .rounded(px(8.0))
                     .px(px(10.0))
-                    .when(nested, |el| el.pl(px(10.0 + SIDEBAR_NESTED_INDENT)))
+                    .when(nested || lead.is_some(), |el| {
+                        el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
+                    })
                     .py(px(8.0))
                     .flex()
                     .flex_col()
                     .bg(bg)
                     .when(recede && working && !hovered, |el| el.opacity(0.7))
+                    .children(lead_chevron)
                     .child(line_one)
                     .when(show_label, |el| {
-                        el.child(div().mt(px(4.0)).min_w_0().flex().child(title_el(
-                            14.0,
-                            title_weight,
-                            title_color,
-                        )))
+                        el.child(
+                            div()
+                                .mt(px(4.0))
+                                .min_w_0()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(title_el(14.0, title_weight, title_color))
+                                .children(lead_rollup()),
+                        )
                     })
                     .child(line_three),
             )
@@ -14112,6 +14233,10 @@ impl Shell {
             _ => None,
         }
         .filter(|count| *count > 0);
+        let pop = (item == RailItem::Supervisor)
+            .then(|| self.supervisor_badge_pop(needs_you.unwrap_or(0), cx))
+            .flatten();
+        let view = cx.entity_id();
         let button = app_rail::button(
             entry.id,
             entry.label,
@@ -14122,7 +14247,13 @@ impl Shell {
         )
         .relative()
         .when_some(awaiting.or(needs_you), |el, count| {
-            el.child(app_rail::badge(count, theme))
+            el.child(app_rail::badge(count, pop.unwrap_or(1.0), theme))
+        })
+        .when(pop.is_some(), |el| {
+            el.child(gpui::canvas(
+                |_, _, _| {},
+                move |_, _, window, _| window.on_next_frame(move |_, cx| cx.notify(view)),
+            ))
         })
         .on_click(cx.listener(move |this, _, _, cx| this.activate_rail_item(item, cx)));
         if item != RailItem::Settings {
@@ -15515,7 +15646,12 @@ impl Shell {
                     .then(|| spaces::sidebar_settled_at(state, status, chat, now).is_some())
                 })
                 .flatten();
+            let step_threads = (menu_state.tab.is_none()
+                && !chat_id.is_empty()
+                && self.sidebar_has_step_threads(&chat_id, cx))
+            .then(|| self.sidebar_lead_collapsed(&chat_id));
             let rename_id = chat_id.clone();
+            let steps_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let settle_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -15599,9 +15735,36 @@ impl Shell {
                                 }));
                         self.chat_menu_hover_row(CHAT_MENU_ROW_SETTLE, row, cx)
                     });
+                    let steps = step_threads.map(|collapsed| {
+                        let row =
+                            popover::menu_row(&theme, false, format!("chat-menu-steps-{chat_id}"))
+                                .id("chat-menu-steps")
+                                .debug_selector(|| "chat-menu-steps".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    this.toggle_sidebar_lead(&steps_id, cx)
+                                }))
+                                .child(
+                                    icon(icons::LUCIDE_CHEVRON_DOWN)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted)
+                                        .when(collapsed, |el| {
+                                            el.with_transformation(gpui::Transformation::rotate(
+                                                gpui::radians(-std::f32::consts::FRAC_PI_2),
+                                            ))
+                                        }),
+                                )
+                                .child(SharedString::from(if collapsed {
+                                    "Expand step threads"
+                                } else {
+                                    "Collapse step threads"
+                                }));
+                        self.chat_menu_hover_row(CHAT_MENU_ROW_STEPS, row, cx)
+                    });
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
                     menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
                         .children(settle)
+                        .children(steps)
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                 };
