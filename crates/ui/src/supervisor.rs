@@ -682,6 +682,11 @@ impl SupervisorPage {
         .id("supervisor-pane-toggle")
         .debug_selector(|| "supervisor-pane-toggle".into())
         .role(gpui::Role::Button)
+        .aria_label(if self.pane_open {
+            "Hide conversation"
+        } else {
+            "Show conversation"
+        })
         .flex_none()
         .rounded_full()
         .on_click(cx.listener(|page, _: &ClickEvent, _, cx| {
@@ -789,6 +794,7 @@ impl SupervisorPage {
             step_id,
         };
         let brief_key = format!("supervisor-brief-{key}");
+        let brief_label = format!("Brief for {role}");
         let chip = |label: String| {
             div()
                 .flex_none()
@@ -858,6 +864,7 @@ impl SupervisorPage {
                     .id(SharedString::from(brief_key.clone()))
                     .debug_selector(move || brief_key.clone())
                     .role(gpui::Role::Button)
+                    .aria_label(brief_label)
                     .flex_none()
                     .cursor_pointer()
                     .text_size(ui_rems(12.0))
@@ -933,6 +940,7 @@ impl SupervisorPage {
                         .id(SharedString::from(open_key.clone()))
                         .debug_selector(move || open_key.clone())
                         .role(gpui::Role::Button)
+                        .aria_label("Open Mission Control")
                         .cursor_pointer()
                         .text_size(ui_rems(12.0))
                         .text_color(theme.text_muted)
@@ -1022,6 +1030,7 @@ impl SupervisorPage {
                     .id(SharedString::from(header_key.clone()))
                     .debug_selector(move || header_key.clone())
                     .role(gpui::Role::Button)
+                    .aria_label(row.title.clone())
                     .aria_expanded(expanded)
                     .flex()
                     .items_center()
@@ -1276,6 +1285,7 @@ impl SupervisorPage {
             .id("supervisor-wake-log-toggle")
             .debug_selector(|| "supervisor-wake-log-toggle".into())
             .role(gpui::Role::Button)
+            .aria_label("Wake log")
             .aria_expanded(open)
             .flex()
             .items_center()
@@ -1410,6 +1420,7 @@ impl SupervisorPage {
                         .id("supervisor-retry")
                         .debug_selector(|| "supervisor-retry".into())
                         .role(gpui::Role::Button)
+                        .aria_label("Try again")
                         .self_start()
                         .rounded_full()
                         .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.retry_ensure(cx))),
