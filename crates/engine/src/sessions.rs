@@ -2461,10 +2461,14 @@ impl SessionsEngine {
         }
     }
 
-    async fn judge_agent_note(&self, chat_id: &str, note: &str) -> ClassifierVerdict {
+    async fn judge_agent_note(
+        &self,
+        chat_id: &str,
+        note: &str,
+    ) -> (ClassifierVerdict, Option<zeron_doc::ClassifierRecord>) {
         let settings = self.inner.registry.compaction_settings();
         if settings.mode != CompactionMode::Classifier {
-            return ClassifierVerdict::New;
+            return (ClassifierVerdict::New, None);
         }
         let config = self
             .inner
@@ -2475,7 +2479,7 @@ impl SessionsEngine {
             .context_reading(chat_id, config.as_ref())
             .unwrap_or_default();
         let Ok((harness_id, _)) = self.compaction_request(chat_id) else {
-            return ClassifierVerdict::Failed;
+            return (ClassifierVerdict::Failed, None);
         };
         let entries = self
             .doc_handle(chat_id)
@@ -2516,9 +2520,7 @@ impl SessionsEngine {
             },
         };
         record.context_tokens = tokens;
-        let verdict = record.verdict;
-        self.write_classifier_record(chat_id, record);
-        verdict
+        (record.verdict, Some(record))
     }
 
     pub(crate) async fn compact_for_agent(
@@ -2540,9 +2542,12 @@ impl SessionsEngine {
         }
         let verdict = match &request.continue_with {
             Some(note) => {
-                let verdict = self.judge_agent_note(chat_id, note).await;
+                let (verdict, record) = self.judge_agent_note(chat_id, note).await;
                 if !self.agent_compact_due(chat_id, &request).await {
                     return Ok(None);
+                }
+                if let Some(record) = record {
+                    self.write_classifier_record(chat_id, record);
                 }
                 verdict
             }
