@@ -182,6 +182,17 @@ fn png_base64(snapshot: &Value) -> Result<String, String> {
     let path = snapshot["path"]
         .as_str()
         .ok_or_else(|| format!("snapshot reply names no path: {snapshot}"))?;
+    let shots = run_dir().join("shots");
+    let inside = std::fs::canonicalize(path)
+        .ok()
+        .zip(std::fs::canonicalize(&shots).ok())
+        .is_some_and(|(path, shots)| path.starts_with(shots));
+    if !inside {
+        return Err(format!(
+            "snapshot reply names {path}, which is not under {}",
+            shots.display()
+        ));
+    }
     let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
