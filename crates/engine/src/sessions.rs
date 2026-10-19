@@ -2170,6 +2170,10 @@ impl SessionsEngine {
                 return false;
             }
         };
+        // An idle or agent compaction may have run while the classifier was asked.
+        if blocked() || self.inner.past_floor(chat_id, config.as_ref()).is_none() {
+            return false;
+        }
         let carry = (verdict == ClassifierVerdict::Carry)
             .then(|| {
                 crate::compact_boundary::carry_block(
