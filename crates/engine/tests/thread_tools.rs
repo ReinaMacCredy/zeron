@@ -2826,6 +2826,84 @@ async fn an_input_wake_into_an_owner_parked_on_its_own_question_leaves_that_ques
 }
 
 #[tokio::test]
+async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
+    let rig = rig(Duration::from_millis(400));
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Shop" }))
+        .await
+        .unwrap();
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "task-lead",
+        "spaceId": "space-tt", "orchestrate": true,
+    }))
+    .await
+    .unwrap();
+    mutate(serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "steps": [{ "title": "Scaffold" }, { "title": "Layout" }, { "title": "Grid" }, { "title": "Cart" }],
+    }))
+    .await
+    .unwrap();
+    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+        .await
+        .unwrap();
+    let steps = rig.core.workspace.task_steps_of("t1");
+    call(
+        zeron_rpc::methods::CREATE_THREAD,
+        serde_json::json!({ "fromChatId": "task-lead", "prompt": "do it", "taskStepId": steps[0].id }),
+    )
+    .await
+    .unwrap();
+    let ids = |order: [usize; 4]| order.map(|ix| steps[ix].id.clone());
+    let Err(err) = mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1", "order": ids([1, 0, 2, 3]),
+    }))
+    .await
+    else {
+        panic!("a started step keeps its place");
+    };
+    assert!(err.to_string().contains("have not started"), "{err}");
+
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1", "order": ids([0, 3, 1, 2]),
+    }))
+    .await
+    .unwrap();
+    let after = rig.core.workspace.task_steps_of("t1");
+    assert_eq!(
+        after.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+        ["Scaffold", "Cart", "Layout", "Grid"]
+    );
+    let key = |id: &str, rows: &[zeron_proto::TaskStep]| {
+        rows.iter().find(|s| s.id == id).unwrap().order_key.clone()
+    };
+    for ix in [0, 1, 2] {
+        assert_eq!(
+            key(&steps[ix].id, &after),
+            steps[ix].order_key,
+            "only the moved step is written"
+        );
+    }
+    let edited = "The person edited the plan in Mission Control (task id t1)";
+    wait_for(
+        || !prompts_with(&rig, edited).is_empty(),
+        "the lead's edit message",
+    )
+    .await;
+    let message = prompts_with(&rig, edited).remove(0);
+    let line = format!(
+        "- The steps are in a new order: 1. \"Scaffold\", 2. \"Cart\" (moved, taskStepId {}), 3. \"Layout\", 4. \"Grid\".",
+        steps[3].id
+    );
+    assert!(message.contains(&line), "{line} in {message}");
+}
+
+#[tokio::test]
 async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     const FOLD_MS: i64 = 8_000;
     unsafe { std::env::set_var("ZERON_SUPERVISOR_FOLD_MS", FOLD_MS.to_string()) };

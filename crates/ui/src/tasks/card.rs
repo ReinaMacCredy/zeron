@@ -1799,6 +1799,7 @@ mod tests {
         });
         let (center, cx) =
             cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = events.clone();
         cx.update(|_, cx| {
@@ -1849,7 +1850,7 @@ mod tests {
         let rename_s2 = |cx: &mut gpui::VisualTestContext| {
             click(cx, "task-center-edit-s2");
             cx.simulate_input(" now");
-            click(cx, "task-center-edit-done");
+            click(cx, "task-center-edit-save");
         };
         assert!(cx.debug_bounds("task-center-edit-s2").is_none());
         click(cx, "task-center-spec-s2");
@@ -1878,6 +1879,67 @@ mod tests {
                 r#"edit [(Some("s2"), "s2 now")] remove [] approve false"#,
                 r#"edit [] remove ["s2"] approve true"#,
             ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_step_moved_from_its_menu_sends_the_new_order(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![orchestrated(false)];
+            state.chats = vec![chat("lead"), chat("child")];
+            state.task_steps = vec![
+                step("s1", "1", Some("child"), None),
+                step("s2", "2", None, None),
+                step("s3", "3", None, None),
+            ];
+        });
+        let (center, cx) =
+            cx.add_window_view(|_, cx| super::super::TaskCenter::new(state, "orch".into(), cx));
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = sent.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(
+                &center,
+                move |_, event: &super::super::TaskCenterEvent, _| {
+                    if let super::super::TaskCenterEvent::EditPlan { edit, .. } = event {
+                        sink.borrow_mut().push(edit.order.clone());
+                    }
+                },
+            )
+            .detach();
+        });
+        cx.run_until_parked();
+        let menu = |cx: &mut gpui::VisualTestContext, step: &str, item: &'static str| {
+            let at = cx
+                .debug_bounds(Box::leak(
+                    format!("task-center-step-{step}").into_boxed_str(),
+                ))
+                .unwrap()
+                .center();
+            cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+            cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+            cx.run_until_parked();
+            let at = cx.debug_bounds(item).unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+            let away = cx.debug_bounds("task-center-header").unwrap().center();
+            cx.simulate_click(away, gpui::Modifiers::none());
+            std::thread::sleep(crate::motion::MENU_OUT.total());
+            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+        };
+        menu(cx, "s3", "task-center-menu-up");
+        menu(cx, "s3", "task-center-menu-up");
+        assert!(cx.debug_bounds("task-center-edit-bar").is_some());
+        let at = cx.debug_bounds("task-center-send").unwrap().center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            *sent.borrow(),
+            [vec!["s1".to_string(), "s3".into(), "s2".into()]],
+            "a started step keeps its place above the moved one"
         );
     }
 

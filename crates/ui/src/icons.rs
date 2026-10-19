@@ -269,7 +269,6 @@ icon_assets![
     (LUCIDE_TRIANGLE_ALERT, "lucide-triangle-alert"),
     (LUCIDE_CIRCLE_CHECK, "lucide-circle-check"),
     (LUCIDE_CIRCLE_X, "lucide-circle-x"),
-    (LUCIDE_CIRCLE_DOT, "lucide-circle-dot"),
     (LUCIDE_SEARCH, "lucide-search"),
     (LUCIDE_REFRESH_CW, "lucide-refresh-cw"),
     (LUCIDE_ARROW_LEFT, "lucide-arrow-left"),

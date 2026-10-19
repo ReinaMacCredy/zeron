@@ -30,7 +30,6 @@ mod morph;
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
-pub(crate) use morph::ZoomFrame;
 use morph::{Key, Morph, Painted, Rects};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
@@ -620,7 +619,7 @@ impl TasksPage {
                 .items_center()
                 .gap(px(4.0))
                 .child(
-                    icon(icons::LUCIDE_CIRCLE_DOT)
+                    icon(icons::MISSION_CONTROL)
                         .size(px(11.0))
                         .text_color(theme.text_muted),
                 )

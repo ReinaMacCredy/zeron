@@ -1115,6 +1115,8 @@ enum MutateParams {
         steps: Vec<tasks::PlanEdit>,
         #[serde(default)]
         remove_step_ids: Vec<String>,
+        #[serde(default)]
+        order: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     SetMissionSupervised { task_id: String, supervised: bool },
@@ -2448,8 +2450,9 @@ impl EngineRpc {
                 overview,
                 steps,
                 remove_step_ids,
+                order,
             } => self
-                .edit_task_plan(&task_id, overview, steps, &remove_step_ids, None)
+                .edit_task_plan(&task_id, overview, steps, &remove_step_ids, &order, None)
                 .await
                 .map(drop),
             MutateParams::SetMissionSupervised {

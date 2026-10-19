@@ -612,6 +612,72 @@ fn the_task_center_terminal_opens_the_panes_chat_not_the_selection(cx: &mut Test
     });
 }
 
+#[gpui::test]
+fn going_back_to_mission_control_finds_the_page_it_left(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| {
+        shell.reduced_motion = false;
+        shell.state.update(cx, |state, _| {
+            state.tasks = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "t", "title": "Ship", "orderKey": "a", "chatId": "parent",
+                    "mode": "orchestrated",
+                }))
+                .unwrap(),
+            ];
+            state.task_steps = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "s1", "taskId": "t", "title": "Build", "orderKey": "1",
+                    "chatId": "other",
+                }))
+                .unwrap(),
+            ];
+        });
+        shell.nav = NavHistory::new(NavEntry::Chat("parent".into()));
+        shell.open_task_center("t".into(), cx);
+    });
+    let settle = |cx: &mut VisualTestContext| {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        cx.update(|window, cx| window.draw(cx).clear());
+    };
+    settle(cx);
+    let center = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |shell, _| {
+            shell
+                .task_center
+                .as_ref()
+                .map(|(center, _)| center.entity_id())
+        })
+    };
+    let page = center(&shell, cx).expect("the center page");
+
+    shell.update(cx, |shell, cx| shell.open_chat("other".into(), cx));
+    settle(cx);
+    assert_eq!(shell.read_with(cx, |shell, _| shell.route), Route::Chat);
+    assert_eq!(
+        center(&shell, cx),
+        Some(page),
+        "the page outlives the route"
+    );
+
+    shell.update(cx, |shell, cx| shell.navigate_back(cx));
+    assert!(
+        shell.read_with(cx, |shell, _| shell.task_chat_slide_t().is_some()),
+        "going back to the mission slides its page in over the chat"
+    );
+    settle(cx);
+    assert_eq!(center(&shell, cx), Some(page), "the same page comes back");
+
+    shell.update(cx, |shell, cx| {
+        shell.open_chat("parent".into(), cx);
+        shell
+            .state
+            .update(cx, |state, _| state.tasks[0].deleted = true);
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert_eq!(center(&shell, cx), None, "a deleted task lets its page go");
+}
+
 fn swipe(cx: &mut VisualTestContext, at: Point<Pixels>, travel: f32) {
     for (phase, dx) in [
         (gpui::TouchPhase::Started, 0.),
