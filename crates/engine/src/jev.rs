@@ -178,6 +178,9 @@ struct Scores {
 
 impl Scores {
     fn verdict(&self) -> ClassifierVerdict {
+        if self.p.new + self.p.carry + self.p.cont <= 0.0 {
+            return ClassifierVerdict::Failed;
+        }
         if self.p.new >= NEW_MIN && self.new_task >= NEW_TASK_MIN {
             return ClassifierVerdict::New;
         }
@@ -286,7 +289,7 @@ mod tests {
         assert_eq!(scores(0.0, 0.16, 0.84, 0.0).verdict(), Carry);
         assert_eq!(scores(0.6, 0.0, 0.4, 0.1).verdict(), Continue);
         assert_eq!(scores(1.0, 0.0, 0.0, 0.2).verdict(), Carry);
-        assert_eq!(scores(0.0, 0.0, 0.0, 0.0).verdict(), Carry);
+        assert_eq!(scores(0.0, 0.0, 0.0, 0.9).verdict(), Failed);
     }
 
     #[test]
