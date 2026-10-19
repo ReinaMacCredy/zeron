@@ -426,9 +426,10 @@ pub fn parse_findings(result: &str) -> Option<Vec<ReviewFinding>> {
     let total = items.len();
     let findings: Vec<ReviewFinding> = items
         .into_iter()
-        .filter_map(|value| serde_json::from_value::<RawFinding>(value).ok())
         .enumerate()
-        .filter_map(|(ix, raw)| finding_from(ix, raw))
+        .filter_map(|(ix, value)| {
+            finding_from(ix, serde_json::from_value::<RawFinding>(value).ok()?)
+        })
         .collect();
     (total == 0 || !findings.is_empty()).then_some(findings)
 }
@@ -488,14 +489,16 @@ mod tests {
         let found = parse_findings(&reply(
             "[{\"path\":\"a\",\"line\":1,\"severity\":\"bug\",\"title\":\"first\"},\
              {\"path\":\"b\",\"line\":2,\"severity\":\"high\",\"title\":\"dropped\"},\
-             {\"path\":\"c\",\"line\":3,\"severity\":\"nit\",\"title\":\"third\"}]",
+             {\"path\":\"c\",\"line\":3,\"severity\":\"nit\",\"title\":\"third\"},\
+             {\"path\":\"d\",\"line\":4,\"severity\":\"nit\"},\
+             {\"path\":\"e\",\"line\":5,\"severity\":\"nit\",\"title\":\"fifth\"}]",
         ))
         .unwrap();
         let ids: Vec<(&str, &str)> = found
             .iter()
             .map(|f| (f.id.as_str(), f.title.as_str()))
             .collect();
-        assert_eq!(ids, [("F1", "first"), ("F3", "third")]);
+        assert_eq!(ids, [("F1", "first"), ("F3", "third"), ("F5", "fifth")]);
     }
 
     fn profile(id: &str, name: &str, harness: HarnessId) -> AgentProfile {
