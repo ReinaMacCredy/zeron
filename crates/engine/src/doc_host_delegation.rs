@@ -135,7 +135,7 @@ pub(super) fn failure(code: &str, message: impl std::fmt::Display) -> EngineErro
     EngineError::Other(format!("{code}: {message}"))
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(super) fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
         return text.to_string();
@@ -157,7 +157,7 @@ pub(super) fn wake_text(task_ids: &[String]) -> String {
     }
 }
 
-const WAKE_QUESTION_CHARS: usize = 1_500;
+pub(super) const WAKE_QUESTION_CHARS: usize = 1_500;
 
 fn input_wake_text(
     asker: &Chat,
@@ -180,31 +180,41 @@ fn input_wake_text(
         )
     };
     let mut text = format!("{who} is waiting for input, requestId {request_id}:\n");
-    for question in questions {
-        let what = if question.approval {
-            "tool approval"
-        } else {
-            "question"
-        };
-        text.push_str(&format!(
-            "- {what} {}: {}",
-            question.id,
-            clip(&question.question, WAKE_QUESTION_CHARS)
-        ));
-        if !question.options.is_empty() {
-            let options: Vec<String> = question
-                .options
-                .iter()
-                .map(|option| format!("\"{option}\""))
-                .collect();
-            text.push_str(&format!(" Options: {}", options.join(" | ")));
-        }
+    for line in question_lines(questions) {
+        text.push_str(&line);
         text.push('\n');
     }
     text.push_str(
         "Answer with respond_to_input (threadId, requestId, answers) when the answer follows from the task or an earlier decision; a tool approval needs this chat at Full access. Otherwise ask the person with ask_user, or leave it to them. They see the same question and may answer first, in which case respond_to_input reports nothing pending.",
     );
     text
+}
+
+pub(super) fn question_lines(questions: &[UserInputQuestion]) -> Vec<String> {
+    questions
+        .iter()
+        .map(|question| {
+            let what = if question.approval {
+                "tool approval"
+            } else {
+                "question"
+            };
+            let mut line = format!(
+                "- {what} {}: {}",
+                question.id,
+                clip(&question.question, WAKE_QUESTION_CHARS)
+            );
+            if !question.options.is_empty() {
+                let options: Vec<String> = question
+                    .options
+                    .iter()
+                    .map(|option| format!("\"{option}\""))
+                    .collect();
+                line.push_str(&format!(" Options: {}", options.join(" | ")));
+            }
+            line
+        })
+        .collect()
 }
 
 fn status_name(status: DelegationStatus) -> &'static str {
@@ -1137,6 +1147,7 @@ impl DocHost {
         else {
             return;
         };
+        self.supervisor_input(&asker, request_id, questions);
         let owner = asker
             .delegation
             .as_ref()

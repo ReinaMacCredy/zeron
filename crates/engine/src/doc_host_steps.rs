@@ -214,6 +214,7 @@ impl DocHost {
             }
         }
         for (step, thread, ended) in wakes {
+            self.supervisor_step_ended(&step, &thread, ended);
             self.wake_step_lead(workspace, &step, &thread, ended).await;
         }
     }

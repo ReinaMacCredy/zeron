@@ -50,6 +50,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod supervisor;
 mod tasks;
 mod voice_chat;
 mod voice_remote;
@@ -1105,6 +1106,8 @@ enum MutateParams {
         #[serde(default)]
         remove_step_ids: Vec<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    SetMissionSupervised { task_id: String, supervised: bool },
 }
 
 fn approve_plan_default() -> bool {
@@ -2400,6 +2403,10 @@ impl EngineRpc {
                 self.edit_task_plan(&task_id, overview, steps, &remove_step_ids)
                     .await
             }
+            MutateParams::SetMissionSupervised {
+                task_id,
+                supervised,
+            } => self.set_mission_supervised(&task_id, supervised),
         }
     }
 }
@@ -4077,6 +4084,10 @@ impl RpcService for EngineRpc {
             methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
+            methods::ENSURE_SUPERVISOR
+            | methods::WATCH_SUPERVISOR
+            | methods::GET_SUPERVISOR_SETTINGS
+            | methods::SET_SUPERVISOR_SETTINGS => self.supervisor_rpc(method, params).await,
             methods::WATCH_TASKS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
             }

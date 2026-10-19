@@ -360,6 +360,7 @@ impl EngineRpc {
     ) -> Result<(), RpcError> {
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id)?;
+        let before = self.workspace.task_steps_of(task_id);
         let now = chrono::Utc::now();
         let steps: Vec<TaskStep> = steps
             .into_iter()
@@ -388,6 +389,8 @@ impl EngineRpc {
         if patch != TaskPatch::default() {
             self.update_task(task_id, &patch)?;
         }
+        self.doc_host
+            .supervisor_replanned(&task, &before, &steps, from_chat_id);
         Ok(())
     }
 
@@ -604,6 +607,7 @@ impl EngineRpc {
             "The person edited the plan in Mission Control (task id {task_id}):\n- {}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
             changes.join("\n- ")
         );
+        self.doc_host.supervisor_plan_edited(&task, &changes);
         self.send_to_task_thread(&task, &lead, None, &text).await
     }
 

@@ -98,6 +98,7 @@ struct HarnessPrefsFile {
     titles: TitleSettings,
     predictions: PredictionSettings,
     delegation: DelegationSettings,
+    supervisor: zeron_proto::supervisor::SupervisorSettings,
     #[serde(alias = "idleCompaction")]
     compaction: CompactionSettings,
     tools: zeron_proto::tools::ToolSettings,
@@ -659,6 +660,15 @@ impl HarnessRegistry {
         self.prefs().delegation = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    pub fn supervisor_settings(&self) -> zeron_proto::supervisor::SupervisorSettings {
+        self.prefs().supervisor
+    }
+
+    pub fn set_supervisor_settings(&self, settings: zeron_proto::supervisor::SupervisorSettings) {
+        self.prefs().supervisor = settings;
+        self.persist_prefs();
     }
 
     pub fn compaction_settings(&self) -> CompactionSettings {
