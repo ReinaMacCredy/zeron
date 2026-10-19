@@ -134,6 +134,8 @@ mod tests {
             mode: Default::default(),
             plan_pending: false,
             send_error: None,
+            plan: String::new(),
+            plan_doc: false,
         }
     }
 

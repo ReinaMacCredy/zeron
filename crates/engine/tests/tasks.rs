@@ -207,7 +207,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         let rpc = rpc.clone();
         async move { rpc.handle(methods::MUTATE, params).await }
     };
-    for id in ["t1", "t2", "t3"] {
+    for id in ["t1", "t2", "t3", "t4"] {
         mutate(json!({ "op": "createTask", "taskId": id, "title": "Shop backend" }))
             .await
             .unwrap();
@@ -257,6 +257,30 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     let led = core.workspace.task("t1").unwrap();
     assert_eq!(led.mode, zeron_proto::TaskMode::Orchestrated);
     assert!(led.plan_pending);
+    assert!(!led.plan_doc, "a start without planDoc is steps only");
+
+    mutate(json!({
+        "op": "startTask", "taskId": "t4", "chatId": "lead-4", "orchestrate": true, "planDoc": true,
+    }))
+    .await
+    .unwrap();
+    wait_for(
+        || prompts.lock().unwrap().len() == 3,
+        "the plan.md lead's turn",
+    )
+    .await;
+    let doc_brief = prompts.lock().unwrap()[2].clone();
+    assert!(
+        doc_brief.contains("taskId \"t4\", overview, steps [{title, notes}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
+        "{doc_brief}"
+    );
+    assert!(core.workspace.task("t4").unwrap().plan_doc);
+    assert!(
+        prompts.lock().unwrap()[..2]
+            .iter()
+            .all(|brief| !brief.contains("overview")),
+        "only a plan.md lead is asked for an overview"
+    );
     let unapproved = core.workspace.task("t2").unwrap();
     assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);
     assert!(!unapproved.plan_pending);

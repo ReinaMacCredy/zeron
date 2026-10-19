@@ -2688,6 +2688,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     let plan = serde_json::json!({
         "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
         "steps": [{ "title": "Build the API" }, { "title": "Write the docs", "notes": "README" }],
+        "overview": "Ship the API",
     });
     let mut stranger = plan.clone();
     stranger["fromChatId"] = "lead".into();
@@ -2794,6 +2795,84 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     assert!(
         thread.delegation.is_none(),
         "a step runs on an ordinary thread"
+    );
+
+    assert_eq!(rig.core.workspace.task("t1").unwrap().plan, "Ship the API");
+    let edit = |remove: Vec<&str>| {
+        serde_json::json!({
+            "op": "editTaskPlan", "taskId": "t1", "overview": "Ship the API, then its docs",
+            "steps": [
+                { "stepId": steps[1].id, "title": "Write the docs", "notes": "README and a guide" },
+                { "title": "Tag the release", "notes": "After both steps" },
+            ],
+            "removeStepIds": remove,
+        })
+    };
+    let err = refused(mutate(edit(vec![steps[0].id.as_str()])).await);
+    assert!(err.contains("has started"), "{err}");
+    let task = rig.core.workspace.task("t1").unwrap();
+    assert_eq!(task.plan, "Ship the API", "a refused edit applies nothing");
+    let titles = |rig: &Rig| {
+        rig.core
+            .workspace
+            .task_steps_of("t1")
+            .iter()
+            .map(|s| (s.title.clone(), s.notes.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&rig).len(), 2);
+    assert_eq!(titles(&rig)[1].1, "README");
+
+    mutate(edit(Vec::new())).await.unwrap();
+    let edited = "The person edited the plan in Mission Control (task id t1)";
+    wait_for(
+        || !prompts_with(&rig, edited).is_empty(),
+        "the lead's edit message",
+    )
+    .await;
+    assert_eq!(
+        rig.core.workspace.task("t1").unwrap().plan,
+        "Ship the API, then its docs"
+    );
+    let after = titles(&rig);
+    assert_eq!(after[1].1, "README and a guide");
+    assert_eq!(after[2].0, "Tag the release");
+    let added = rig
+        .core
+        .workspace
+        .task_steps_of("t1")
+        .into_iter()
+        .find(|s| s.title == "Tag the release")
+        .unwrap();
+    let message = prompts_with(&rig, edited).remove(0);
+    for change in [
+        "- The overview changed.".to_string(),
+        format!(
+            "- Step \"Write the docs\" (taskStepId {}) has a new spec.",
+            steps[1].id
+        ),
+        format!("- New step \"Tag the release\" (taskStepId {}).", added.id),
+    ] {
+        assert!(message.contains(&change), "{change} in {message}");
+    }
+
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1", "removeStepIds": [added.id],
+    }))
+    .await
+    .unwrap();
+    wait_for(
+        || prompts_with(&rig, edited).len() == 2,
+        "the removal message",
+    )
+    .await;
+    assert!(prompts_with(&rig, edited)[1].contains("is removed"));
+    assert_eq!(titles(&rig).len(), 2, "a planned step can be removed");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        prompts_with(&rig, edited).len(),
+        2,
+        "each edit reaches the lead as one message"
     );
     rig.core.shutdown().await;
 }

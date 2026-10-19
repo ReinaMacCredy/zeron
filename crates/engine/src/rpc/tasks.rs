@@ -20,12 +20,29 @@ fn task_prompt(task: &Task) -> String {
 pub(super) struct Lead {
     pub approve_plan: bool,
     pub same_agents: bool,
+    pub plan_doc: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PlanEdit {
+    #[serde(default)]
+    step_id: Option<String>,
+    title: String,
+    #[serde(default)]
+    notes: String,
 }
 
 fn lead_brief(task_id: &str, lead: Lead) -> String {
-    let plan = format!(
-        "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", steps [{{title, notes}}]. Keep each step small enough for one agent."
-    );
+    let plan = if lead.plan_doc {
+        format!(
+            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", overview, steps [{{title, notes}}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
+        )
+    } else {
+        format!(
+            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", steps [{{title, notes}}]. Keep each step small enough for one agent."
+        )
+    };
     let mut lines = vec![plan.as_str()];
     if lead.approve_plan {
         lines.push(
@@ -98,6 +115,8 @@ impl EngineRpc {
                 mode: Default::default(),
                 plan_pending: false,
                 send_error: None,
+                plan: String::new(),
+                plan_doc: false,
             })
             .map_err(failed)
             .map(drop)
@@ -187,6 +206,7 @@ impl EngineRpc {
                     chat_id: Some(None),
                     mode: lead.map(|_| task.mode),
                     plan_pending: lead.map(|_| task.plan_pending),
+                    plan_doc: lead.map(|_| task.plan_doc),
                     ..Default::default()
                 };
                 self.workspace.update_task(task_id, &cleared).ok();
@@ -296,6 +316,7 @@ impl EngineRpc {
         &self,
         task_id: &str,
         steps: Vec<(String, String)>,
+        overview: Option<String>,
         from_chat_id: Option<&str>,
     ) -> Result<(), RpcError> {
         let task = self.task_or_refuse(task_id)?;
@@ -320,11 +341,12 @@ impl EngineRpc {
         self.workspace
             .plan_task_steps(task_id, &steps)
             .map_err(failed)?;
-        if task.mode != TaskMode::Orchestrated {
-            let patch = TaskPatch {
-                mode: Some(TaskMode::Orchestrated),
-                ..Default::default()
-            };
+        let patch = TaskPatch {
+            mode: (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated),
+            plan: overview,
+            ..Default::default()
+        };
+        if patch != TaskPatch::default() {
             self.update_task(task_id, &patch)?;
         }
         Ok(())
@@ -426,6 +448,126 @@ impl EngineRpc {
         self.send_to_task_thread(&task, &lead, None, &text).await
     }
 
+    fn unstarted(&self, step: &TaskStep) -> Result<bool, RpcError> {
+        if step.outcome.is_some() {
+            return Ok(false);
+        }
+        match step.chat_id.as_deref() {
+            Some(chat_id) => Ok(self.workspace.chat(chat_id).map_err(failed)?.is_none()),
+            None => Ok(true),
+        }
+    }
+
+    /// Every edit is checked before the first write, so a refusal applies nothing.
+    pub(super) async fn edit_task_plan(
+        &self,
+        task_id: &str,
+        overview: Option<String>,
+        steps: Vec<PlanEdit>,
+        remove_step_ids: &[String],
+    ) -> Result<(), RpcError> {
+        let task = self.task_or_refuse(task_id)?;
+        let lead = self.lead_of(&task)?;
+        let current = self.workspace.task_steps_of(task_id);
+        let find = |id: &str| {
+            current
+                .iter()
+                .find(|step| step.id == id)
+                .ok_or_else(|| refused("Step no longer exists"))
+        };
+        let mut removed = Vec::new();
+        for id in remove_step_ids {
+            let step = find(id)?;
+            if !self.unstarted(step)? {
+                return Err(refused(&format!(
+                    "Step \"{}\" has started, so it cannot be removed; skip it instead",
+                    step.title
+                )));
+            }
+            removed.push(step);
+        }
+        let too_long = |text: &str, max: usize| text.chars().count() > max;
+        if overview
+            .as_deref()
+            .is_some_and(|text| too_long(text, zeron_doc::TASK_NOTES_MAX_CHARS))
+        {
+            return Err(refused("The overview is limited to 10,000 characters"));
+        }
+        for edit in &steps {
+            let title = edit.title.trim();
+            if title.is_empty() || too_long(title, zeron_doc::TASK_TITLE_MAX_CHARS) {
+                return Err(refused("A step needs a title of up to 500 characters"));
+            }
+            if too_long(&edit.notes, zeron_doc::TASK_NOTES_MAX_CHARS) {
+                return Err(refused("A step's spec is limited to 10,000 characters"));
+            }
+            if let Some(id) = &edit.step_id {
+                find(id)?;
+                if remove_step_ids.contains(id) {
+                    return Err(refused("A step cannot be both edited and removed"));
+                }
+            }
+        }
+        let mut changes = Vec::new();
+        if let Some(overview) = overview.filter(|overview| *overview != task.plan) {
+            let patch = TaskPatch {
+                plan: Some(overview),
+                ..Default::default()
+            };
+            self.update_task(task_id, &patch)?;
+            changes.push("The overview changed.".to_string());
+        }
+        for edit in steps {
+            let title = edit.title.trim().to_string();
+            let Some(id) = edit.step_id else {
+                let id = crate::new_id();
+                self.create_task_step(
+                    task_id.to_string(),
+                    id.clone(),
+                    title.clone(),
+                    edit.notes,
+                    None,
+                )?;
+                changes.push(format!("New step \"{title}\" (taskStepId {id})."));
+                continue;
+            };
+            let step = find(&id)?;
+            let patch = TaskStepPatch {
+                title: (title != step.title).then(|| title.clone()),
+                notes: (edit.notes != step.notes).then_some(edit.notes),
+                ..Default::default()
+            };
+            let what = match (patch.title.is_some(), patch.notes.is_some()) {
+                (true, true) => format!("is now \"{title}\", and its spec changed"),
+                (true, false) => format!("is now \"{title}\""),
+                (false, true) => "has a new spec".to_string(),
+                (false, false) => continue,
+            };
+            self.update_task_step(&id, &patch, None)?;
+            changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
+        }
+        for step in removed {
+            self.delete_task_step(&step.id)?;
+            changes.push(format!(
+                "Step \"{}\" (taskStepId {}) is removed.",
+                step.title, step.id
+            ));
+        }
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let next = if task.plan_pending {
+            "The plan still waits for the person's approval: do not run any step until the approval message comes."
+        } else {
+            "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
+        };
+        let text = format!(
+            "The person edited the plan in Mission Control (task id {task_id}):\n- {}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
+            changes.join("\n- ")
+        );
+        self.send_to_task_thread(&task, &lead, None, &text).await
+    }
+
     fn link_and_send(
         &self,
         task: &Task,
@@ -443,6 +585,7 @@ impl EngineRpc {
                 space_id: space_id.filter(|_| task.space_id.is_none()).map(Some),
                 mode: lead.map(|_| TaskMode::Orchestrated),
                 plan_pending: lead.map(|lead| lead.approve_plan),
+                plan_doc: lead.map(|lead| lead.plan_doc),
                 send_error: task.send_error.is_some().then_some(None),
                 ..Default::default()
             },

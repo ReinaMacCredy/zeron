@@ -380,7 +380,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. An orchestrated task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}]: steps that have not started are replaced, the rest are kept, and the new ones follow them. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`.",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,6 +406,7 @@ fn thread_tool_list() -> Value {
                             "additionalProperties": false
                         }
                     },
+                    "overview": { "type": "string", "maxLength": 10000 },
                     "stepId": { "type": "string" },
                     "state": { "type": "string", "enum": ["done", "skipped", "open"] }
                 },
@@ -2047,17 +2048,16 @@ impl ThreadTools {
                         })
                     })
                     .collect();
-                let planned = self
-                    .call_engine(
-                        methods::MUTATE,
-                        json!({
-                            "op": "planSteps",
-                            "taskId": task_id,
-                            "steps": steps,
-                            "fromChatId": self.chat_id,
-                        }),
-                    )
-                    .await?;
+                let mut params = json!({
+                    "op": "planSteps",
+                    "taskId": task_id,
+                    "steps": steps,
+                    "fromChatId": self.chat_id,
+                });
+                if let Some(overview) = args["overview"].as_str() {
+                    params["overview"] = json!(overview);
+                }
+                let planned = self.call_engine(methods::MUTATE, params).await?;
                 let task: Task = serde_json::from_value(planned["task"].clone())
                     .map_err(|_| format!("no task {task_id}"))?;
                 let steps: Vec<TaskStep> = serde_json::from_value(planned["steps"].clone())
@@ -3219,6 +3219,8 @@ fn add_plan(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)], whol
     let statuses: Vec<StepStatus> = own.iter().map(|(_, status)| *status).collect();
     row["progress"] = json!(zeron_proto::plan_progress(&statuses));
     if whole {
+        row["plan"] = json!(task.plan);
+        row["planDoc"] = json!(task.plan_doc);
         row["steps"] = own
             .iter()
             .map(|(step, status)| {
@@ -3791,7 +3793,7 @@ mod tests {
             release: tokio::sync::Notify::new(),
             disabled: vec![],
             tasks: vec![
-                json!({ "id": "t1", "title": "Shop backend", "chatId": "a", "mode": "orchestrated", "planPending": true }),
+                json!({ "id": "t1", "title": "Shop backend", "chatId": "a", "mode": "orchestrated", "planPending": true, "plan": "Ship the shop API", "planDoc": true }),
                 json!({ "id": "t2", "title": "Fix the redirect", "chatId": "c", "sendError": "offline" }),
             ],
             task_steps: vec![
@@ -4896,12 +4898,18 @@ mod tests {
         );
         assert_eq!(one["task"]["steps"][0]["threadId"], "b");
         assert!(one["task"]["steps"][2].get("threadId").is_none());
+        assert_eq!(one["task"]["plan"], "Ship the shop API");
+        assert_eq!(one["task"]["planDoc"], true);
+        assert!(
+            lead.get("plan").is_none(),
+            "the list leaves the overview out"
+        );
 
         let planned = rig
             .tools
             .call(
                 "tasks",
-                &json!({ "action": "plan", "taskId": "t1", "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
+                &json!({ "action": "plan", "taskId": "t1", "overview": "Goal: a shop API", "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
             )
             .await
             .unwrap();
@@ -4933,7 +4941,7 @@ mod tests {
             logged(&rig.calls, methods::MUTATE),
             [
                 json!({
-                    "op": "planSteps", "taskId": "t1", "fromChatId": "a",
+                    "op": "planSteps", "taskId": "t1", "fromChatId": "a", "overview": "Goal: a shop API",
                     "steps": [{ "title": "API", "notes": "" }, { "title": "Docs", "notes": "README" }],
                 }),
                 json!({ "op": "updateTaskStep", "stepId": "s5", "patch": { "outcome": "skipped" }, "fromChatId": "a" }),

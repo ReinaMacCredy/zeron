@@ -1043,6 +1043,8 @@ enum MutateParams {
         approve_plan: bool,
         #[serde(default)]
         same_agents: bool,
+        #[serde(default)]
+        plan_doc: bool,
     },
     #[serde(rename_all = "camelCase")]
     AssignTask {
@@ -1057,6 +1059,8 @@ enum MutateParams {
     PlanSteps {
         task_id: String,
         steps: Vec<PlannedStep>,
+        #[serde(default)]
+        overview: Option<String>,
         #[serde(default)]
         from_chat_id: Option<String>,
     },
@@ -1083,6 +1087,16 @@ enum MutateParams {
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
     RetryTaskStep { step_id: String },
+    #[serde(rename_all = "camelCase")]
+    EditTaskPlan {
+        task_id: String,
+        #[serde(default)]
+        overview: Option<String>,
+        #[serde(default)]
+        steps: Vec<tasks::PlanEdit>,
+        #[serde(default)]
+        remove_step_ids: Vec<String>,
+    },
 }
 
 fn approve_plan_default() -> bool {
@@ -2314,10 +2328,12 @@ impl EngineRpc {
                 orchestrate,
                 approve_plan,
                 same_agents,
+                plan_doc,
             } => {
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
+                    plan_doc,
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
@@ -2334,13 +2350,14 @@ impl EngineRpc {
             MutateParams::PlanSteps {
                 task_id,
                 steps,
+                overview,
                 from_chat_id,
             } => {
                 let steps = steps
                     .into_iter()
                     .map(|step| (step.title, step.notes))
                     .collect();
-                self.plan_steps(&task_id, steps, from_chat_id.as_deref())
+                self.plan_steps(&task_id, steps, overview, from_chat_id.as_deref())
             }
             MutateParams::CreateTaskStep {
                 task_id,
@@ -2357,6 +2374,15 @@ impl EngineRpc {
             MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
             MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await,
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
+            MutateParams::EditTaskPlan {
+                task_id,
+                overview,
+                steps,
+                remove_step_ids,
+            } => {
+                self.edit_task_plan(&task_id, overview, steps, &remove_step_ids)
+                    .await
+            }
         }
     }
 }

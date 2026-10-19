@@ -36,6 +36,10 @@ struct RawTask {
     plan_pending: bool,
     #[serde(default)]
     send_error: Option<String>,
+    #[serde(default)]
+    plan: String,
+    #[serde(default)]
+    plan_doc: bool,
 }
 
 pub(super) fn at(ms: i64) -> DateTime<Utc> {
@@ -59,6 +63,8 @@ impl From<RawTask> for Task {
             mode: raw.mode,
             plan_pending: raw.plan_pending,
             send_error: raw.send_error,
+            plan: raw.plan,
+            plan_doc: raw.plan_doc,
         }
     }
 }
@@ -116,6 +122,8 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("mode", json!(task.mode)),
         ("planPending", json!(task.plan_pending)),
         ("sendError", opt_str(task.send_error.as_deref())),
+        ("plan", json!(task.plan)),
+        ("planDoc", json!(task.plan_doc)),
     ])
 }
 
@@ -271,6 +279,13 @@ impl RegistryDoc {
         }
         if let Some(send_error) = &patch.send_error {
             set.insert("sendError".into(), opt_str(send_error.as_deref()));
+        }
+        if let Some(plan) = &patch.plan {
+            check_notes(plan)?;
+            set.insert("plan".into(), json!(plan));
+        }
+        if let Some(plan_doc) = patch.plan_doc {
+            set.insert("planDoc".into(), json!(plan_doc));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();
