@@ -53,7 +53,10 @@ const BODIES: &[(&str, &str)] = &[
     ("git", include_str!("../docs/git.md")),
     ("pull-requests", include_str!("../docs/pull-requests.md")),
     ("tasks", include_str!("../docs/tasks.md")),
-    ("mission-control", include_str!("../docs/mission-control.md")),
+    (
+        "mission-control",
+        include_str!("../docs/mission-control.md"),
+    ),
     ("supervisor", include_str!("../docs/supervisor.md")),
     ("inbox", include_str!("../docs/inbox.md")),
     ("usage", include_str!("../docs/usage.md")),
