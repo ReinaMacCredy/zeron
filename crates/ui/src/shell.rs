@@ -92,6 +92,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
+mod mission_strip;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -16444,6 +16445,20 @@ impl Shell {
         let chat_work_toggle = (chip_opacity > 0.001 && (!has_selection || dock_frame.active))
             .then(|| self.render_chat_work_toggle(has_selection, theme, window, cx));
         let status = self.render_status_strip(composer_width, cx);
+        let split_header = if self.split.is_some() && has_selection {
+            split::SPLIT_HEADER_HEIGHT
+        } else {
+            0.0
+        };
+        let mission_strip = has_selection
+            .then(|| self.render_mission_strip(composer_width, cx))
+            .flatten();
+        let strip_band = if mission_strip.is_some() {
+            mission_strip::STRIP_BAND
+        } else {
+            0.0
+        };
+        let zoom_fade = self.task_zoom_fade();
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -16457,6 +16472,7 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
+            .opacity(zoom_fade)
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
@@ -16492,11 +16508,7 @@ impl Shell {
                     // starting the underlay below it moves the transcript's
                     // own titlebar inset and fade down with it, while the
                     // backgrounds above stay put.
-                    let header_inset = if self.split.is_some() && has_selection {
-                        split::SPLIT_HEADER_HEIGHT
-                    } else {
-                        0.0
-                    };
+                    let header_inset = split_header + strip_band;
                     div().absolute().inset_0().top(px(header_inset)).child(
                         crate::terminal::dock::above_terminal(
                             crate::edge_fade::edge_faded(
@@ -16516,6 +16528,20 @@ impl Shell {
                     )
                 },
             )
+            .when_some(mission_strip, |column, strip| {
+                column.child(
+                    div()
+                        .absolute()
+                        .top(px(Theme::TITLEBAR_HEIGHT
+                            + split_header
+                            + mission_strip::STRIP_GAP))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(strip),
+                )
+            })
             .when_some(
                 has_selection
                     .then(|| self.render_device_float(cx))
@@ -16530,7 +16556,7 @@ impl Shell {
                         div()
                             .absolute()
                             .inset_0()
-                            .top(px(Theme::TITLEBAR_HEIGHT + header))
+                            .top(px(Theme::TITLEBAR_HEIGHT + header + strip_band))
                             .overflow_hidden()
                             .child(crate::terminal::dock::above_terminal(
                                 float,

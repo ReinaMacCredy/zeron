@@ -67,7 +67,7 @@ In an open chat, press Shift+Tab in the composer, or click **Mission Control** u
 
 ## The Mission Control page
 
-A Mission Control task opens its own page instead of the card, from the list, the board, or the Inbox. **Tasks** in the titlebar takes you back.
+A Mission Control task opens its own page instead of the card, from the list, the board, the Inbox, or the strip at the top of its chats. The back button in the titlebar takes you back: to the chat you came from, named after it, or else to **Tasks**.
 
 The header reads **MISSION CONTROL** above the task's title, and shows the task's status, **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
 
@@ -76,6 +76,17 @@ The header reads **MISSION CONTROL** above the task's title, and shows the task'
 - The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**. Click **spec** under a step to read what the lead wrote for it.
 
 Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
+
+## Open Mission Control from a chat
+
+The lead's chat and the chat of every step show a strip at the top of the conversation. It stays in place while you scroll, and shows:
+
+- the task's progress ring and its title;
+- **Lead**, or which step this chat runs, such as **Step 3 of 5**, numbered as on the Mission Control page;
+- a bar with the steps done;
+- **Mission Control**.
+
+Click the strip to open the task's Mission Control page with this chat live on the right. From a step's chat, that step is selected. On the way in, the chat shrinks into the right-hand pane while the steps slide in. Back, or the chat's name in the titlebar, returns you to the chat where you left it, and the pane grows back into the chat. With reduced motion, the page fades in instead. The strip goes away when the task is deleted.
 
 ## Approve the plan
 

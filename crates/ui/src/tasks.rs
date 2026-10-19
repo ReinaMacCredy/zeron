@@ -28,8 +28,9 @@ mod logic;
 mod morph;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
-pub use center::{LiveThread, PlanEdit, TaskCenter, TaskCenterEvent};
+pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
+pub(crate) use morph::ZoomFrame;
 use morph::{Key, Morph, Painted, Rects};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
@@ -116,6 +117,11 @@ pub(crate) struct Rollup {
 impl Rollup {
     pub fn count(&self, status: StepStatus) -> usize {
         self.steps.iter().filter(|row| row.status == status).count()
+    }
+
+    pub fn step_label(&self, step_id: &str) -> Option<String> {
+        let ix = self.steps.iter().position(|row| row.step.id == step_id)?;
+        Some(format!("Step {} of {}", ix + 1, self.steps.len()))
     }
 
     pub fn phase(&self, task: &zeron_proto::Task) -> PlanPhase {
@@ -1330,6 +1336,78 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
         progress: plan_progress(&statuses),
         steps,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MissionRole {
+    Lead,
+    Step { step_id: String, label: String },
+}
+
+impl MissionRole {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Lead => "Lead".into(),
+            Self::Step { label, .. } => label.clone(),
+        }
+    }
+
+    pub fn selection(&self) -> Selection {
+        match self {
+            Self::Lead => Selection::Lead,
+            Self::Step { step_id, .. } => Selection::Step(step_id.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MissionThread {
+    pub task_id: String,
+    pub title: String,
+    pub role: MissionRole,
+    pub progress: PlanProgress,
+}
+
+pub(crate) fn mission_thread(
+    state: &AppState,
+    chat_id: &str,
+    now: DateTime<Utc>,
+) -> Option<MissionThread> {
+    let mission = |task: &&zeron_proto::Task| task.mode == TaskMode::Orchestrated && !task.deleted;
+    let lead = state
+        .tasks
+        .iter()
+        .filter(mission)
+        .find(|task| task.chat_id.as_deref() == Some(chat_id));
+    let (task, step_id) = match lead {
+        Some(task) => (task, None),
+        None => state
+            .task_steps
+            .iter()
+            .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
+            .find_map(|step| {
+                let task = state
+                    .tasks
+                    .iter()
+                    .filter(mission)
+                    .find(|task| task.id == step.task_id)?;
+                Some((task, Some(step.id.clone())))
+            })?,
+    };
+    let plan = rollup(state, task, now);
+    let role = match step_id {
+        None => MissionRole::Lead,
+        Some(step_id) => MissionRole::Step {
+            label: plan.step_label(&step_id)?,
+            step_id,
+        },
+    };
+    Some(MissionThread {
+        task_id: task.id.clone(),
+        title: task.title.clone(),
+        role,
+        progress: plan.progress,
+    })
 }
 
 fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {
