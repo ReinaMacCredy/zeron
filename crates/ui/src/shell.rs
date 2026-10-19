@@ -3664,13 +3664,20 @@ impl Shell {
         // the composer only merges on its next key change.
         let key = target
             .unwrap_or_else(|| self.state.read(cx).focused_id().unwrap_or_default());
-        self.composer.update(cx, |composer, cx| {
-            composer.stage_appshot_for(key.clone(), appshot, cx)
+        let (composer, stage_key) = match self.active_btw_tab(cx) {
+            Some((source, tab)) if source == key => (
+                tab.composer.clone(),
+                self.btw[&source].active.clone().unwrap_or_default(),
+            ),
+            _ => (self.composer.clone(), key.clone()),
+        };
+        composer.update(cx, |composer, cx| {
+            composer.stage_appshot_for(stage_key, appshot, cx)
         });
         // A fresh canvas has no id yet; the next snap within the window
         // resolves to it through the interaction the composer focus records.
         self.appshot_last_target = Some((key, std::time::Instant::now()));
-        window.focus(&self.composer.focus_handle(cx), cx);
+        window.focus(&composer.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -3694,9 +3701,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.set_route(Route::Chat, cx);
-        self.composer
-            .update(cx, |composer, cx| composer.show_appshot_error(message, cx));
-        window.focus(&self.composer.focus_handle(cx), cx);
+        let composer = self.chat_composer(cx);
+        composer.update(cx, |composer, cx| composer.show_appshot_error(message, cx));
+        window.focus(&composer.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -16749,7 +16756,7 @@ impl Shell {
             Some((strip, band)) => (Some(strip), band),
             None => (None, 0.0),
         };
-        self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
+        self.chat_dropzone("chat-dropzone", self.chat_composer(cx), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
