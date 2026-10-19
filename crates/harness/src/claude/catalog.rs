@@ -294,8 +294,8 @@ fn model(
 
 /// The curated model list, mirroring claude.ts's `claudeEffortsFor` /
 /// `claudeOptionsFor` ladders: full ladder (through ultracode/ultrathink) on
-/// Fable 5, `max`-topped ladders on Opus/Sonnet, no efforts but a thinking
-/// toggle on Haiku; context-window select on the long-context families and
+/// Fable 5, `max`-topped ladders on Opus/Sonnet/Haiku 5.5, no efforts but a
+/// thinking toggle on Haiku 4.5; context-window select on the long-context families and
 /// fast mode on Opus 4.5+.
 ///
 /// `pub`: besides the discovery-side enrichment here, the UI's display-side
@@ -514,9 +514,23 @@ pub fn static_models() -> Vec<Model> {
             vec![toggle("fastMode", "Fast Mode")],
         ),
         model(
+            "claude-sonnet-5-5",
+            "Sonnet 5.5",
+            "Most efficient for simpler tasks",
+            XHIGH_LADDER,
+            vec![context_window(), auto_compact()],
+        ),
+        model(
             "claude-sonnet-5",
             "Sonnet 5",
             "Balanced speed and intelligence",
+            XHIGH_LADDER,
+            vec![context_window(), auto_compact()],
+        ),
+        model(
+            "claude-haiku-5-5",
+            "Haiku 5.5",
+            "Fastest for quick answers",
             XHIGH_LADDER,
             vec![context_window(), auto_compact()],
         ),
