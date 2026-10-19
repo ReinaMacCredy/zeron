@@ -6,7 +6,7 @@ const TASKS_VIEW_SEGMENT: f32 = 72.0;
 const TASKS_VIEW_THUMB: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_DRAWER);
 const CENTER_SLIDE_IN: motion::MotionSpec = motion::MotionSpec::new(380, motion::EASE_DRAWER);
 const CENTER_SLIDE_OUT: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_DRAWER);
-const CENTER_FADE: motion::MotionSpec = motion::MotionSpec::new(150, motion::EASE);
+pub(super) const CENTER_FADE: motion::MotionSpec = motion::MotionSpec::new(150, motion::EASE);
 const UNDER_SHIFT: f32 = 0.24;
 const UNDER_DIM: f32 = 0.45;
 const CENTER_SHADOW: f32 = 0.55;
@@ -14,6 +14,8 @@ const CENTER_SHADOW: f32 = 0.55;
 pub(super) struct TaskSlide {
     tween: motion::Tween,
     under: Route,
+    pub(super) zoom: Option<super::mission_strip::TaskZoom>,
+    pub(super) armed: bool,
 }
 
 impl TaskSlide {
@@ -21,6 +23,8 @@ impl TaskSlide {
         Self {
             tween: motion::Tween::at(Self::rest(route), std::time::Instant::now()),
             under: Route::Tasks,
+            zoom: None,
+            armed: false,
         }
     }
 
@@ -360,7 +364,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn back_to_tasks(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn back_to_tasks(&mut self, cx: &mut Context<Self>) {
         if self.nav.previous() == Some(&NavEntry::Tasks) {
             self.navigate_back(cx);
         } else {
@@ -371,6 +375,23 @@ impl Shell {
     pub(super) fn route_task_slide(&mut self, to: Route, cx: &mut Context<Self>) {
         let from = self.route;
         if from == to {
+            return;
+        }
+        let zoom = match (from, to) {
+            (Route::Chat, Route::TaskCenter) => self.task_slide.armed,
+            (Route::TaskCenter, Route::Chat) => self.task_slide.under == Route::Chat,
+            _ => false,
+        };
+        if zoom {
+            self.task_slide = TaskSlide {
+                under: Route::Chat,
+                zoom: Some(super::mission_strip::TaskZoom::new(
+                    to == Route::TaskCenter,
+                    self.reduced_motion,
+                )),
+                ..TaskSlide::resting(to)
+            };
+            self.swipe.yield_to_slide();
             return;
         }
         let under = match (from, to) {
@@ -393,6 +414,8 @@ impl Shell {
             CENTER_SLIDE_OUT
         };
         self.task_slide.under = under;
+        self.task_slide.zoom = None;
+        self.task_slide.armed = false;
         self.task_slide
             .tween
             .retarget(TaskSlide::rest(to), spec, false, self.motion_time());
@@ -416,6 +439,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if let Some(page) = self.render_task_zoom(window, cx) {
+            return Some(page);
+        }
         let Some(t) = self.task_slide_t() else {
             if self.route != Route::TaskCenter && self.task_center.is_some() {
                 self.close_task_center(cx);
@@ -496,6 +522,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if let Some(bar) = self.render_task_zoom_title_bar(cx) {
+            return Some(bar);
+        }
         let t = self.task_slide_t()?;
         let under = match self.task_slide.under {
             Route::Inbox => self.render_session_title_bar(window, cx),
@@ -726,18 +755,7 @@ impl Shell {
         let Some(task_id) = self.task_center_task.clone() else {
             return div().flex_1().into_any_element();
         };
-        let center = match &self.task_center {
-            Some((center, _)) if center.read(cx).task_id() == task_id => center.clone(),
-            _ => {
-                self.close_task_center(cx);
-                let center = cx.new(|cx| TaskCenter::new(self.state.clone(), task_id, cx));
-                let events = cx.subscribe(&center, |shell, _, event: &TaskCenterEvent, cx| {
-                    shell.on_task_center_event(event, cx)
-                });
-                self.task_center = Some((center.clone(), events));
-                center
-            }
-        };
+        let center = self.task_center_for(task_id, cx);
         let target = center.read(cx).live_target(cx);
         if target.as_deref() != center.read(cx).live_chat_id() {
             self.close_task_center_pane(cx);
@@ -756,6 +774,25 @@ impl Shell {
             .h_full()
             .child(center)
             .into_any_element()
+    }
+
+    pub(super) fn task_center_for(
+        &mut self,
+        task_id: String,
+        cx: &mut Context<Self>,
+    ) -> Entity<TaskCenter> {
+        if let Some((center, _)) = &self.task_center
+            && center.read(cx).task_id() == task_id
+        {
+            return center.clone();
+        }
+        self.close_task_center(cx);
+        let center = cx.new(|cx| TaskCenter::new(self.state.clone(), task_id, cx));
+        let events = cx.subscribe(&center, |shell, _, event: &TaskCenterEvent, cx| {
+            shell.on_task_center_event(event, cx)
+        });
+        self.task_center = Some((center.clone(), events));
+        center
     }
 
     fn on_task_center_event(&mut self, event: &TaskCenterEvent, cx: &mut Context<Self>) {
@@ -835,11 +872,15 @@ impl Shell {
     pub(super) fn render_task_center_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
+        let back_chat = self.center_back_chat(cx);
         let back = div()
             .id("task-center-back")
             .debug_selector(|| "task-center-back".into())
             .role(gpui::Role::Button)
-            .aria_label("Back to Tasks")
+            .aria_label(match &back_chat {
+                Some(title) => format!("Back to {title}"),
+                None => "Back to Tasks".into(),
+            })
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -855,8 +896,14 @@ impl Shell {
                     .size(px(14.0))
                     .text_color(theme.text_muted),
             )
-            .child("Tasks")
-            .on_click(cx.listener(|shell, _: &gpui::ClickEvent, _, cx| shell.back_to_tasks(cx)));
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(260.0))
+                    .truncate()
+                    .child(back_chat.unwrap_or_else(|| "Tasks".into())),
+            )
+            .on_click(cx.listener(|shell, _: &gpui::ClickEvent, _, cx| shell.center_back(cx)));
         let inner = div()
             .size_full()
             .flex()
