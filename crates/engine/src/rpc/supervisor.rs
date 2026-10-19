@@ -391,7 +391,7 @@ impl EngineRpc {
         };
         let stopped = match step.chat_id.as_deref() {
             Some(thread) => self.doc_host.stop_for_pause(thread).map_err(failed)?,
-            None => None,
+            None => false,
         };
         let row_id = basis.id().to_string();
         let reason = reason.trim();
@@ -405,14 +405,13 @@ impl EngineRpc {
                 at: chrono::Utc::now(),
                 thread_id: step.chat_id.clone(),
                 pids,
-                froze: stopped == Some(true),
                 freed_at: None,
                 resumed_at: None,
             })
             .map_err(failed)?;
         let thread = match (&step.chat_id, stopped) {
-            (Some(thread), Some(_)) => format!("Its thread {thread} was stopped."),
-            (Some(thread), None) => format!("Its thread {thread} was not running."),
+            (Some(thread), true) => format!("Its thread {thread} was stopped."),
+            (Some(thread), false) => format!("Its thread {thread} was not running."),
             (None, _) => "It has not started.".to_string(),
         };
         let text = format!(
@@ -439,7 +438,7 @@ impl EngineRpc {
         });
         store.poke();
         Ok(serde_json::json!({
-            "stepId": step.id, "leadThreadId": lead, "messageId": message_id, "stopped": stopped.is_some(),
+            "stepId": step.id, "leadThreadId": lead, "messageId": message_id, "stopped": stopped,
         }))
     }
 
@@ -474,11 +473,6 @@ impl EngineRpc {
             Some(step_id),
         );
         store.resume_hold(&hold.row_id).map_err(failed)?;
-        if hold.froze
-            && let Some(thread) = &hold.thread_id
-        {
-            self.doc_host.thaw_after_pause(thread).await;
-        }
         let reason = reason.trim();
         let text = format!(
             "The Supervisor resumed step \"{}\" (taskStepId {}), paused for {}.\n\nWhy: {reason}\n\nStart it again with create_thread and taskStepId {} when it is next to run.",

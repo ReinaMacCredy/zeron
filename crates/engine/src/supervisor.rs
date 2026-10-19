@@ -124,8 +124,6 @@ pub(crate) struct PauseHold {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pids: Vec<u32>,
-    #[serde(default)]
-    pub froze: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -12,7 +12,7 @@ pub(crate) const RECHECK_MS: i64 = 2 * 60 * 1000;
 pub(crate) const PAGE_CHECK_MS: i64 = 60 * 1000;
 pub(crate) const AFTER_PAUSE_MS: [i64; 2] = [30_000, 2 * 60 * 1000];
 const SLOT_SAMPLE_GAP: Duration = Duration::from_secs(10);
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 const USES_PER_OWNER: usize = 8;
 pub(crate) const MAX_KEYS: usize = 16;
 
@@ -451,11 +451,17 @@ async fn run(program: &str, args: &[&str]) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(COMMAND_TIMEOUT, output)
-        .await
-        .ok()?
-        .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    match tokio::time::timeout(COMMAND_TIMEOUT, output).await {
+        Ok(Ok(output)) => Some(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Ok(Err(err)) => {
+            tracing::warn!(program, error = %err, "a shared-resource check could not run");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(program, "a shared-resource check timed out");
+            None
+        }
+    }
 }
 
 async fn listeners(port: u16) -> Option<Vec<LsofProcess>> {
@@ -670,12 +676,15 @@ impl Resources {
         let current: HashSet<&ResourceKey> = candidates.iter().map(|c| &c.key).collect();
         self.checks.retain(|key, _| current.contains(key));
         self.open.retain(|key, _| current.contains(key));
-        let touched = self.open.values().any(|open| {
-            missions
-                .iter()
-                .filter(|mission| open.missions.contains(&mission.task_id))
-                .any(|mission| mission.threads.iter().any(|thread| edges.contains(thread)))
-        });
+        let touched = candidates
+            .iter()
+            .filter(|candidate| candidate.verifiable())
+            .any(|candidate| {
+                missions
+                    .iter()
+                    .filter(|mission| candidate.involves(&mission.task_id))
+                    .any(|mission| mission.threads.iter().any(|thread| edges.contains(thread)))
+            });
         if touched && self.last_check.is_none_or(|at| now - at >= RECHECK_MS) {
             self.wanted = true;
         }

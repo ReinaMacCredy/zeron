@@ -123,7 +123,7 @@ impl DocHost {
             return Err(failure(
                 "step_paused",
                 format!(
-                    "The Supervisor paused this step because {} is contended ({}). Run it again only after the Supervisor's resume message.",
+                    "The Supervisor paused this step because {} is contended. Run it again only after the Supervisor's resume message. Why: {}",
                     hold.resource, hold.reason
                 ),
             ));

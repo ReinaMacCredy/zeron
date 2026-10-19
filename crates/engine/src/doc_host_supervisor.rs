@@ -890,23 +890,15 @@ impl DocHost {
         event
     }
 
-    pub(crate) fn stop_for_pause(&self, thread: &str) -> Result<Option<bool>, EngineError> {
+    pub(crate) fn stop_for_pause(&self, thread: &str) -> Result<bool, EngineError> {
         let Some(sessions) = self.sessions() else {
-            return Ok(None);
+            return Ok(false);
         };
         if !sessions.turn_in_flight(thread) && !sessions.holds_background_work(thread) {
-            return Ok(None);
+            return Ok(false);
         }
-        let froze = !self.queue_paused(thread);
         self.queue_command_with_transfers(thread, SessionCommandPayload::Interrupt {}, Vec::new())?;
-        Ok(Some(froze))
-    }
-
-    pub(crate) async fn thaw_after_pause(&self, thread: &str) {
-        if let Ok(handle) = self.open(thread) {
-            handle.queue_paused.store(false, Ordering::Release);
-            self.drain_queue(&handle).await;
-        }
+        Ok(true)
     }
 
     fn queue_paused(&self, chat_id: &str) -> bool {

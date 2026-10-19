@@ -92,7 +92,7 @@ A mission's lead can declare, in its plan, what the mission needs to itself whil
 - **Declared by both, not verified**: two missions in the same checkout declared overlapping folders. Zeron does not check files and does not wake the Supervisor for it.
 - **Not verified**: the check could not run.
 
-A contention wakes the Supervisor once, and again only after it has cleared. Zeron checks again when you open this page (at most once a minute), after a pause, and while a contention lasts. This section is not shown on Windows.
+A contention wakes the Supervisor once, and again only after it has cleared. Zeron checks again when you open this page (at most once a minute), half a minute and two minutes after a pause, and when a thread of the missions sharing it starts or stops work (at most every two minutes). This section is not shown on Windows.
 
 ## Read a brief
 
