@@ -15,6 +15,7 @@ use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, Use
 
 use crate::EngineError;
 use crate::project_actions::persist_json;
+use crate::sessions::asks_person;
 use crate::supervisor_resources::Resources;
 
 const STORE_FILE: &str = "supervisor.json";
@@ -911,10 +912,6 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     )
 }
 
-fn person_answerable(questions: &[UserInputQuestion]) -> bool {
-    !questions.iter().any(|q| q.kind.is_some())
-}
-
 pub(crate) fn open_inputs(
     entries: &[SessionMessageEntry],
 ) -> Vec<(String, Vec<UserInputQuestion>, i64)> {
@@ -927,7 +924,7 @@ pub(crate) fn open_inputs(
                 questions,
                 resolved: false,
                 ..
-            } if person_answerable(questions) => {
+            } if asks_person(questions) => {
                 Some((request_id.clone(), questions.clone(), entry.created_at))
             }
             _ => None,
@@ -993,7 +990,7 @@ pub(crate) fn lead_questions(
             else {
                 return None;
             };
-            if !person_answerable(questions) || questions.iter().any(|q| q.approval) {
+            if !asks_person(questions) || questions.iter().any(|q| q.approval) {
                 return None;
             }
             let state = match (resolved, answers) {

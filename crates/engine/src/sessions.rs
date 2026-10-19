@@ -107,7 +107,7 @@ struct PendingInput {
 
 type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
 
-fn asks_person(questions: &[UserInputQuestion]) -> bool {
+pub(crate) fn asks_person(questions: &[UserInputQuestion]) -> bool {
     !questions.iter().any(UserInputQuestion::is_computer)
 }
 
