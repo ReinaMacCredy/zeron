@@ -8,12 +8,18 @@ use crate::theme::Theme;
 
 pub(crate) type Field = fn(&mut HomeWidgets) -> &mut bool;
 
-pub(crate) const WIDGETS: [(&str, &str, &str, Field); 7] = [
+pub(crate) const WIDGETS: [(&str, &str, &str, Field); 8] = [
     (
         "home-toggle-working-now",
         "Working now",
         "Chats with a running turn, their elapsed time and current command.",
         |w| &mut w.working_now,
+    ),
+    (
+        "home-toggle-missions",
+        "Missions",
+        "Running Mission Control tasks, their progress and what needs you.",
+        |w| &mut w.missions,
     ),
     (
         "home-toggle-pull-requests",

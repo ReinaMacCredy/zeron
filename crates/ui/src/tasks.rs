@@ -118,20 +118,35 @@ impl Rollup {
         self.steps.iter().filter(|row| row.status == status).count()
     }
 
-    pub fn label(&self, task: &zeron_proto::Task) -> (&'static str, TaskStatus) {
+    pub fn phase(&self, task: &zeron_proto::Task) -> PlanPhase {
         let lead_working = self.lead == Some(ChatIndicator::Working);
         if task.completed_at.is_none()
             && task.plan_pending
             && !self.steps.is_empty()
             && !lead_working
         {
-            ("Plan ready", TaskStatus::NeedsYou)
+            PlanPhase::PlanReady
         } else if task.completed_at.is_none() && lead_working && self.steps.is_empty() {
-            ("Planning", TaskStatus::Working)
+            PlanPhase::Planning
         } else {
-            (logic::column_title(self.status), self.status)
+            PlanPhase::Status(self.status)
         }
     }
+
+    pub fn label(&self, task: &zeron_proto::Task) -> (&'static str, TaskStatus) {
+        match self.phase(task) {
+            PlanPhase::PlanReady => ("Plan ready", TaskStatus::NeedsYou),
+            PlanPhase::Planning => ("Planning", TaskStatus::Working),
+            PlanPhase::Status(status) => (logic::column_title(status), status),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlanPhase {
+    PlanReady,
+    Planning,
+    Status(TaskStatus),
 }
 
 struct Row {
