@@ -14841,7 +14841,7 @@ mod tests {
         );
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5.5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
+            vec!["Opus 5.5", "Fable 5", "Sonnet 5.5", "Haiku 4.5", "Nova 1"]
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),

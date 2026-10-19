@@ -514,6 +514,13 @@ pub fn static_models() -> Vec<Model> {
             vec![toggle("fastMode", "Fast Mode")],
         ),
         model(
+            "claude-sonnet-5-5",
+            "Sonnet 5.5",
+            "Most efficient for simpler tasks",
+            XHIGH_LADDER,
+            vec![context_window(), auto_compact()],
+        ),
+        model(
             "claude-sonnet-5",
             "Sonnet 5",
             "Balanced speed and intelligence",
