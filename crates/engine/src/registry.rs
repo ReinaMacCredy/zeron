@@ -936,17 +936,7 @@ fn native_instance(driver: HarnessId, launch: LaunchOverrides) -> Result<Arc<dyn
         HarnessId::ClaudeCode => Arc::new(zeron_harness::ClaudeHarness::new().with_launch(launch)),
         HarnessId::Codex => Arc::new(zeron_harness::CodexHarness::new().with_launch(launch)),
         HarnessId::Pi => Arc::new(zeron_harness::PiHarness::new().with_launch(launch)),
-        HarnessId::Opencode if launch.home.is_some() => {
-            return Err(format!("{name} instances take no home directory"));
-        }
         HarnessId::Opencode => Arc::new(zeron_harness::OpencodeHarness::new().with_launch(launch)),
-        HarnessId::Cursor
-            if launch.home.is_some() || launch.executable.is_some() || !launch.args.is_empty() =>
-        {
-            return Err(format!(
-                "{name} instances run on Zeron's managed Cursor SDK and take only environment variables"
-            ));
-        }
         HarnessId::Cursor => Arc::new(zeron_harness::CursorHarness::new().with_launch(launch)),
         _ => return Err(format!("{name} does not run as a provider instance yet")),
     })
