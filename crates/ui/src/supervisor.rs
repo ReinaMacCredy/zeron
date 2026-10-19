@@ -1,18 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, IntoElement, Render, SharedString,
-    Subscription, Task, Window, div, prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, Hsla, IntoElement, Render,
+    SharedString, Subscription, Task, Window, div, prelude::*, px, relative,
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    SupervisorEventKind, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
-    WakeDelivery, is_supervisor_chat,
+    InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy, LeadQuestion,
+    NeedsYouInput, NeedsYouRow, QuestionState, Raiser, SettledBy, SupervisorEventKind,
+    SupervisorIntervention, SupervisorItem, SupervisorSettings, SupervisorSnapshot,
+    SupervisorState, SupervisorWake, WakeDelivery, is_supervisor_chat,
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
-    SessionStatus, TaskStatus,
+    SessionStatus, TaskStatus, UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
@@ -35,15 +38,108 @@ const ROLE: &str = "Talks direction with you, watches every mission for drift an
 const HEARTBEATS: [(u32, &str); 3] = [(0, "Off"), (30, "30 min"), (60, "60 min")];
 const DRAWER_WIDTH: f32 = 380.0;
 const MESSAGE_CHARS: usize = 600;
+const TITLE_CHARS: usize = 120;
+const RECENTLY_ACTIVE: Duration = Duration::from_secs(180);
+const NO_EFFECT_AFTER_MINUTES: i64 = 10;
 
-// Needs-you items join the snapshot with U2 and U4; until then nothing waits on the person.
-pub(crate) fn needs_you_count(_snapshot: &SupervisorSnapshot) -> usize {
-    0
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NeedsYouRoute {
+    Quiet,
+    InApp,
+    Banner,
+}
+
+pub(crate) fn needs_you_route(
+    looking: bool,
+    focused: bool,
+    since_interaction: Option<Duration>,
+) -> NeedsYouRoute {
+    if looking && focused {
+        return NeedsYouRoute::Quiet;
+    }
+    match since_interaction {
+        Some(since) if since <= RECENTLY_ACTIVE => NeedsYouRoute::InApp,
+        _ => NeedsYouRoute::Banner,
+    }
+}
+
+pub(crate) fn row_key(row: &NeedsYouRow) -> String {
+    match row {
+        NeedsYouRow::Item(item) => format!("item:{}", item.id),
+        NeedsYouRow::Input(input) => format!("input:{}:{}", input.chat_id, input.request_id),
+    }
+}
+
+pub(crate) fn row_origin(row: &NeedsYouRow) -> (Option<&str>, &str) {
+    match row {
+        NeedsYouRow::Item(item) => (item.task_id.as_deref(), item.raiser_chat_id.as_str()),
+        NeedsYouRow::Input(input) => (input.task_id.as_deref(), input.chat_id.as_str()),
+    }
+}
+
+pub(crate) fn row_title(row: &NeedsYouRow) -> String {
+    match row {
+        NeedsYouRow::Item(item) => clip_to(&item.title, TITLE_CHARS),
+        NeedsYouRow::Input(input) => input_title(&input.questions),
+    }
+}
+
+fn input_title(questions: &[UserInputQuestion]) -> String {
+    let Some(first) = questions.first() else {
+        return "A question".into();
+    };
+    let text = if first.header.trim().is_empty() {
+        &first.question
+    } else {
+        &first.header
+    };
+    clip_to(&crate::transcript::single_line(text), TITLE_CHARS)
+}
+
+pub(crate) fn fresh_needs_you(
+    seen: &mut Option<HashSet<String>>,
+    rows: &[NeedsYouRow],
+) -> Vec<NeedsYouRow> {
+    let fresh = match seen.as_ref() {
+        Some(seen) => rows
+            .iter()
+            .filter(|row| !seen.contains(&row_key(row)))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    *seen = Some(rows.iter().map(row_key).collect());
+    fresh
+}
+
+fn no_effect_since(at: DateTime<Utc>) -> DateTime<Utc> {
+    at + chrono::Duration::minutes(NO_EFFECT_AFTER_MINUTES)
+}
+
+pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) -> bool {
+    matches!(row.chips.as_slice(), [InterventionChip::Sent]) && now > no_effect_since(row.at)
+}
+
+fn next_effect_check(rows: &[SupervisorIntervention], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    rows.iter()
+        .filter(|row| matches!(row.chips.as_slice(), [InterventionChip::Sent]))
+        .map(|row| no_effect_since(row.at))
+        .filter(|at| *at > now)
+        .min()
 }
 
 pub enum SupervisorEvent {
     OpenTaskCenter(String),
+    OpenChat(String),
     WatchDoc(Option<String>),
+    Discuss(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Reply {
+    Sending,
+    Sent(String),
+    Failed(String),
 }
 
 pub struct Pane {
@@ -187,8 +283,170 @@ fn delivery_label(delivery: &WakeDelivery) -> String {
         WakeDelivery::Started => "Started a turn".into(),
         WakeDelivery::Steered => "Steered its turn".into(),
         WakeDelivery::HeldForTurnEnd => "Held for turn end".into(),
+        WakeDelivery::HeldByStop => "Held while stopped".into(),
         WakeDelivery::Failed { error } => format!("Failed: {error}"),
         WakeDelivery::Dropped => "Dropped".into(),
+    }
+}
+
+fn why_label(why: ItemWhy) -> &'static str {
+    match why {
+        ItemWhy::Goal => "Goal",
+        ItemWhy::Spend => "Spend",
+        ItemWhy::Decision => "Decision",
+    }
+}
+
+fn intervention_kind_label(kind: InterventionKind) -> &'static str {
+    match kind {
+        InterventionKind::Send => "Message",
+        InterventionKind::Respond => "Answer",
+        InterventionKind::Rebrief => "Re-brief",
+        InterventionKind::Start => "Start a mission",
+    }
+}
+
+fn step_numbers(steps: &[usize]) -> String {
+    steps
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn chip_label(chip: &InterventionChip) -> String {
+    match chip {
+        InterventionChip::Sent => "Sent".into(),
+        InterventionChip::LeadRanTurn => "Lead ran a turn".into(),
+        InterventionChip::PlanEdited { steps } => format!(
+            "Plan edited on {} {}",
+            plural(steps.len(), "step", "steps"),
+            step_numbers(steps)
+        ),
+        InterventionChip::StepCompletedTurn { steps } => match steps.as_slice() {
+            [one] => format!("Step {one} thread completed a turn"),
+            _ => format!("Step {} threads completed a turn", step_numbers(steps)),
+        },
+    }
+}
+
+fn answers_text(answers: &[UserInputAnswer]) -> String {
+    answers
+        .iter()
+        .map(|answer| answer.labels.join(", "))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn question_text(questions: &[UserInputQuestion]) -> String {
+    questions
+        .iter()
+        .map(|question| crate::transcript::single_line(&question.question))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn question_state(state: &QuestionState) -> (&'static str, Option<String>) {
+    let settled = |by: &str, answers: &[UserInputAnswer]| match answers_text(answers) {
+        text if text.is_empty() => by.to_owned(),
+        text => format!("{by}: {text}"),
+    };
+    match state {
+        QuestionState::Open => ("Open", None),
+        QuestionState::Settled { by, answers } => (
+            "Settled",
+            Some(settled(
+                match by {
+                    SettledBy::Lead => "by the Lead",
+                    SettledBy::Supervisor => "by the Supervisor",
+                    SettledBy::Outside => "answered outside the Lead",
+                },
+                answers,
+            )),
+        ),
+        QuestionState::Dropped => ("Dropped", Some("the step's turn ended unanswered".into())),
+    }
+}
+
+fn trigger_label(trigger: &InterventionTrigger, wakes: &[SupervisorWake]) -> String {
+    match trigger {
+        InterventionTrigger::Person => "after your message".into(),
+        InterventionTrigger::Wake { wake_id } => match wakes.iter().find(|w| &w.id == wake_id) {
+            Some(wake) => format!("after the {} wake", clock(wake.at)),
+            None => "after a wake".into(),
+        },
+    }
+}
+
+fn step_name(state: &AppState, task_id: &str, step_id: &str, now: DateTime<Utc>) -> Option<String> {
+    let task = state.tasks.iter().find(|task| task.id == task_id)?;
+    let plan = rollup(state, task, now);
+    let row = plan.steps.iter().find(|row| row.step.id == step_id)?;
+    Some(format!(
+        "{} · {}",
+        plan.step_label(step_id)?,
+        row.step.title
+    ))
+}
+
+fn mission_title(state: &AppState, task_id: Option<&str>) -> Option<String> {
+    let task_id = task_id?;
+    state
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .map(|task| task.title.clone())
+}
+
+fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
+    if is_supervisor_chat(chat_id) {
+        return "Supervisor".into();
+    }
+    if let Some(task) = state
+        .tasks
+        .iter()
+        .find(|task| task.chat_id.as_deref() == Some(chat_id))
+    {
+        return format!("Lead · {}", task.title);
+    }
+    if let Some(step) = state
+        .task_steps
+        .iter()
+        .find(|step| step.chat_id.as_deref() == Some(chat_id) && !step.deleted)
+        && let Some(name) = step_name(state, &step.task_id, &step.id, now)
+    {
+        let mission = mission_title(state, Some(&step.task_id));
+        return match mission {
+            Some(mission) => format!("{name} · {mission}"),
+            None => name,
+        };
+    }
+    state
+        .chats
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
+        .unwrap_or_else(|| "a thread".into())
+}
+
+fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> String {
+    let mission = mission_title(state, input.task_id.as_deref());
+    let who = match (
+        input.asker,
+        input.task_id.as_deref(),
+        input.step_id.as_deref(),
+    ) {
+        (InputAsker::Supervisor, _, _) => return "Supervisor".into(),
+        (InputAsker::Step, Some(task_id), Some(step_id)) => {
+            step_name(state, task_id, step_id, now).unwrap_or_else(|| "A step".into())
+        }
+        (InputAsker::Step, _, _) => "A step".into(),
+        (InputAsker::Lead, _, _) => "Lead".into(),
+    };
+    match mission {
+        Some(mission) => format!("{who} · {mission}"),
+        None => who,
     }
 }
 
@@ -210,6 +468,15 @@ fn state_line(snapshot: Option<&SupervisorSnapshot>) -> String {
     };
     let word = match snapshot.state {
         SupervisorState::Off => return "Off".into(),
+        SupervisorState::Stopped => {
+            return match snapshot.waiting {
+                0 => "Stopped · send a message to resume".into(),
+                n => format!(
+                    "Stopped · {n} {} waiting · send a message to resume",
+                    plural(n, "wake", "wakes")
+                ),
+            };
+        }
         SupervisorState::Asleep => "Asleep",
         SupervisorState::Awake => "Awake",
     };
@@ -224,7 +491,11 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 }
 
 fn clip(text: &str) -> String {
-    match text.char_indices().nth(MESSAGE_CHARS) {
+    clip_to(text, MESSAGE_CHARS)
+}
+
+fn clip_to(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_owned(),
     }
@@ -298,9 +569,12 @@ pub struct SupervisorPage {
     wakes_open: bool,
     pane_open: bool,
     pane: Option<Pane>,
+    replies: HashMap<String, Reply>,
+    picks: HashMap<String, HashMap<String, Vec<String>>>,
     profiles_task: Option<Task<()>>,
     settings_task: Option<Task<()>>,
     ensure_task: Option<Task<()>>,
+    effect_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -329,9 +603,12 @@ impl SupervisorPage {
             wakes_open: false,
             pane_open: true,
             pane: None,
+            replies: HashMap::new(),
+            picks: HashMap::new(),
             profiles_task: None,
             settings_task: None,
             ensure_task: None,
+            effect_task: None,
             _subscriptions: subscriptions,
         };
         page.load_profiles(cx);
@@ -387,8 +664,150 @@ impl SupervisorPage {
         if known {
             self.ensured = None;
         }
+        let open: HashSet<String> = self
+            .state
+            .read(cx)
+            .supervisor
+            .as_ref()
+            .map(|snapshot| snapshot.needs_you.iter().map(row_key).collect())
+            .unwrap_or_default();
+        self.replies.retain(|key, _| open.contains(key));
+        self.picks.retain(|key, _| open.contains(key));
+        self.schedule_effect_check(cx);
         self.try_ensure(cx);
         cx.notify();
+    }
+
+    fn schedule_effect_check(&mut self, cx: &mut Context<Self>) {
+        let now = Utc::now();
+        let next = self
+            .state
+            .read(cx)
+            .supervisor
+            .as_ref()
+            .and_then(|snapshot| next_effect_check(&snapshot.interventions, now));
+        self.effect_task = next.map(|at| {
+            let wait = (at - now).to_std().unwrap_or_default() + Duration::from_secs(1);
+            cx.spawn(async move |page, cx| {
+                cx.background_executor().timer(wait).await;
+                page.update(cx, |page, cx| {
+                    page.schedule_effect_check(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+    }
+
+    fn resolve_item(&mut self, item_id: String, choice: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let key = format!("item:{item_id}");
+        self.replies.insert(key.clone(), Reply::Sending);
+        let params = serde_json::json!({
+            "op": "resolveSupervisorItem", "itemId": item_id, "choice": choice,
+        });
+        cx.spawn(async move |page, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            page.update(cx, |page, cx| {
+                let reply = match result {
+                    Ok(_) => Reply::Sent(choice),
+                    Err(err) => Reply::Failed(err.to_string()),
+                };
+                if page.replies.contains_key(&key) {
+                    page.replies.insert(key, reply);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn answer_input(
+        &mut self,
+        input: &NeedsYouInput,
+        answers: Vec<UserInputAnswer>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let key = row_key(&NeedsYouRow::Input(input.clone()));
+        let summary = answers_text(&answers);
+        self.replies.insert(key.clone(), Reply::Sending);
+        let (chat_id, request_id) = (input.chat_id.clone(), input.request_id.clone());
+        cx.spawn(async move |page, cx| {
+            let result =
+                crate::composer::respond_input(&engine, &chat_id, &request_id, answers).await;
+            page.update(cx, |page, cx| {
+                let reply = match result {
+                    Ok(()) => Reply::Sent(summary),
+                    Err(err) => Reply::Failed(err),
+                };
+                if page.replies.contains_key(&key) {
+                    page.replies.insert(key, reply);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn pick_option(
+        &mut self,
+        input: &NeedsYouInput,
+        question: &UserInputQuestion,
+        option: String,
+        cx: &mut Context<Self>,
+    ) {
+        if input.questions.len() == 1 && !question.multi_select {
+            let answer = UserInputAnswer {
+                question_id: question.id.clone(),
+                labels: vec![option],
+            };
+            self.answer_input(input, vec![answer], cx);
+            return;
+        }
+        let key = row_key(&NeedsYouRow::Input(input.clone()));
+        let picked = self
+            .picks
+            .entry(key)
+            .or_default()
+            .entry(question.id.clone())
+            .or_default();
+        if !question.multi_select {
+            picked.clear();
+            picked.push(option);
+        } else if let Some(at) = picked.iter().position(|label| *label == option) {
+            picked.remove(at);
+        } else {
+            picked.push(option);
+        }
+        cx.notify();
+    }
+
+    fn picked_answers(&self, input: &NeedsYouInput) -> Option<Vec<UserInputAnswer>> {
+        let picks = self
+            .picks
+            .get(&row_key(&NeedsYouRow::Input(input.clone())))?;
+        input
+            .questions
+            .iter()
+            .map(|question| {
+                let labels = picks
+                    .get(&question.id)
+                    .filter(|labels| !labels.is_empty())?;
+                Some(UserInputAnswer {
+                    question_id: question.id.clone(),
+                    labels: labels.clone(),
+                })
+            })
+            .collect()
     }
 
     fn load_profiles(&mut self, cx: &mut Context<Self>) {
@@ -1272,6 +1691,566 @@ impl SupervisorPage {
             .into_any_element()
     }
 
+    fn render_reply(&self, key: &str, buttons: gpui::Div, theme: &Theme) -> AnyElement {
+        let note = |text: String| {
+            div()
+                .text_size(ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(text)
+                .into_any_element()
+        };
+        match self.replies.get(key) {
+            Some(Reply::Sent(choice)) if choice.is_empty() => note("Answered".into()),
+            Some(Reply::Sent(choice)) => note(format!("Answered: {choice}")),
+            Some(Reply::Sending) => note("Sending…".into()),
+            Some(Reply::Failed(error)) => div()
+                .flex()
+                .flex_col()
+                .child(buttons)
+                .child(widgets::error_strip(
+                    theme,
+                    format!("Could not send the answer: {error}"),
+                ))
+                .into_any_element(),
+            None => buttons.into_any_element(),
+        }
+    }
+
+    fn render_item_card(
+        &self,
+        item: &SupervisorItem,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("item:{}", item.id);
+        let sel = format!("supervisor-needs-item-{}", item.id);
+        let mission = mission_title(self.state.read(cx), item.task_id.as_deref());
+        let raised = match item.raised_by {
+            Raiser::Lead => "Raised by Lead",
+            Raiser::Supervisor => "Raised by Supervisor",
+        };
+        let meta = match &mission {
+            Some(mission) => format!("{raised} · {mission}"),
+            None => raised.to_owned(),
+        };
+        let mut quote = vec![
+            format!("Needs you: {}", item.title),
+            format!("{meta} · {}", why_label(item.why)),
+        ];
+        if !item.detail.trim().is_empty() {
+            quote.push(item.detail.trim().to_owned());
+        }
+        if !item.options.is_empty() {
+            quote.push(format!("Options: {}", item.options.join(" | ")));
+        }
+        let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
+        for (ix, option) in item.options.iter().enumerate() {
+            let (id, choice) = (item.id.clone(), option.clone());
+            buttons = buttons.child(
+                pill_button(
+                    theme,
+                    format!("{sel}-option-{ix}"),
+                    option.clone(),
+                    if ix == 0 {
+                        widgets::ActionTone::Solid
+                    } else {
+                        widgets::ActionTone::Outlined
+                    },
+                )
+                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                    page.resolve_item(id.clone(), choice.clone(), cx)
+                })),
+            );
+        }
+        let quote = quote.join("\n");
+        buttons = buttons.child(
+            pill_button(
+                theme,
+                format!("{sel}-discuss"),
+                "Discuss".into(),
+                widgets::ActionTone::Outlined,
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(SupervisorEvent::Discuss(quote.clone()))
+            })),
+        );
+        needs_card(theme, sel)
+            .child(
+                div()
+                    .text_size(ui_rems(13.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(item.title.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(meta)
+                    .child(tone_chip(
+                        theme,
+                        why_label(item.why),
+                        Some(needs_tone(theme)),
+                    )),
+            )
+            .when(!item.detail.trim().is_empty(), |el| {
+                el.child(
+                    div()
+                        .mt(px(2.0))
+                        .pl(px(10.0))
+                        .border_l_2()
+                        .border_color(theme.border)
+                        .text_size(ui_rems(12.5))
+                        .line_height(ui_rems(18.0))
+                        .text_color(theme.text_muted)
+                        .child(clip(item.detail.trim())),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .child(self.render_reply(&key, buttons, theme)),
+            )
+            .into_any_element()
+    }
+
+    fn render_input_card(
+        &self,
+        input: &NeedsYouInput,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = NeedsYouRow::Input(input.clone());
+        let key = row_key(&row);
+        let sel = format!(
+            "supervisor-needs-input-{}",
+            input.request_id.replace(':', "-")
+        );
+        let who = asker_name(input, self.state.read(cx), Utc::now());
+        let approval = input.questions.iter().any(|question| question.approval);
+        let picks = self.picks.get(&key);
+        let submit = input.questions.len() > 1 || input.questions.iter().any(|q| q.multi_select);
+        let answerable = input.questions.iter().all(|q| !q.options.is_empty());
+        let mut quote = vec![
+            format!("Needs you: {}", row_title(&row)),
+            format!("Asked by {who}"),
+        ];
+        let mut questions = div().flex().flex_col().gap(px(10.0));
+        for (qx, question) in input.questions.iter().enumerate() {
+            quote.push(match question.options.as_slice() {
+                [] => crate::transcript::single_line(&question.question),
+                options => format!(
+                    "{} Options: {}",
+                    crate::transcript::single_line(&question.question),
+                    options.join(" | ")
+                ),
+            });
+            let picked = picks.and_then(|picks| picks.get(&question.id));
+            let mut options = div().flex().flex_wrap().items_center().gap(px(6.0));
+            for (ix, option) in question.options.iter().enumerate() {
+                let chosen = picked.is_some_and(|labels| labels.contains(option));
+                let tone = match (submit, chosen, ix) {
+                    (true, true, _) => widgets::ActionTone::Solid,
+                    (true, false, _) => widgets::ActionTone::Outlined,
+                    (false, _, 0) => widgets::ActionTone::Solid,
+                    (false, _, _) => widgets::ActionTone::Outlined,
+                };
+                let (row, question, option) = (input.clone(), question.clone(), option.clone());
+                options = options.child(
+                    pill_button(
+                        theme,
+                        format!("{sel}-q{qx}-option-{ix}"),
+                        option.clone(),
+                        tone,
+                    )
+                    .when(submit, |el| el.aria_selected(chosen))
+                    .on_click(cx.listener(
+                        move |page, _: &ClickEvent, _, cx| {
+                            page.pick_option(&row, &question, option.clone(), cx)
+                        },
+                    )),
+                );
+            }
+            questions = questions.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .when(
+                        input.questions.len() > 1 && !question.header.trim().is_empty(),
+                        |el| {
+                            el.child(
+                                div()
+                                    .text_size(ui_rems(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(question.header.clone()),
+                            )
+                        },
+                    )
+                    .when(
+                        input.questions.len() > 1 || !question.header.trim().is_empty(),
+                        |el| {
+                            el.child(
+                                div()
+                                    .pl(px(10.0))
+                                    .border_l_2()
+                                    .border_color(theme.border)
+                                    .text_size(ui_rems(12.5))
+                                    .line_height(ui_rems(18.0))
+                                    .text_color(theme.text_muted)
+                                    .child(clip(question.question.trim())),
+                            )
+                        },
+                    )
+                    .when(
+                        self.replies
+                            .get(&key)
+                            .is_none_or(|reply| matches!(reply, Reply::Failed(_))),
+                        |el| el.child(options),
+                    ),
+            );
+        }
+        let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
+        if submit && answerable {
+            let ready = self.picked_answers(input);
+            let row = input.clone();
+            buttons = buttons.child(
+                pill_button(
+                    theme,
+                    format!("{sel}-send"),
+                    "Send answers".into(),
+                    widgets::ActionTone::Solid,
+                )
+                .when(ready.is_none(), |el| el.opacity(0.5).cursor_default())
+                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                    if let Some(answers) = page.picked_answers(&row) {
+                        page.answer_input(&row, answers, cx);
+                    }
+                })),
+            );
+        }
+        if input.asker != InputAsker::Supervisor {
+            let chat_id = input.chat_id.clone();
+            buttons = buttons.child(
+                pill_button(
+                    theme,
+                    format!("{sel}-open"),
+                    "Open thread".into(),
+                    widgets::ActionTone::Outlined,
+                )
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    cx.emit(SupervisorEvent::OpenChat(chat_id.clone()))
+                })),
+            );
+        }
+        let quote = quote.join("\n");
+        buttons = buttons.child(
+            pill_button(
+                theme,
+                format!("{sel}-discuss"),
+                "Discuss".into(),
+                widgets::ActionTone::Outlined,
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(SupervisorEvent::Discuss(quote.clone()))
+            })),
+        );
+        needs_card(theme, sel)
+            .child(
+                div()
+                    .text_size(ui_rems(13.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(row_title(&row)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(format!("Asked by {who}"))
+                    .child(tone_chip(
+                        theme,
+                        if approval { "Approval" } else { "Question" },
+                        Some(needs_tone(theme)),
+                    )),
+            )
+            .child(questions)
+            .when(!answerable, |el| {
+                el.child(
+                    div()
+                        .text_size(ui_rems(12.0))
+                        .text_color(theme.text_faint)
+                        .child(if input.asker == InputAsker::Supervisor {
+                            "This question takes a typed answer: answer it in the Supervisor's conversation."
+                        } else {
+                            "This question takes a typed answer: answer it in its thread."
+                        }),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .child(self.render_reply(&key, buttons, theme)),
+            )
+            .into_any_element()
+    }
+
+    fn render_needs_you(
+        &self,
+        rows: &[NeedsYouRow],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body: Vec<AnyElement> = if rows.is_empty() {
+            vec![empty_line(theme, "Nothing waits on you.")]
+        } else {
+            rows.iter()
+                .map(|row| match row {
+                    NeedsYouRow::Item(item) => self.render_item_card(item, theme, cx),
+                    NeedsYouRow::Input(input) => self.render_input_card(input, theme, cx),
+                })
+                .collect()
+        };
+        div()
+            .id("supervisor-needs-you")
+            .debug_selector(|| "supervisor-needs-you".into())
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(widgets::section_label(
+                theme,
+                format!("Needs you · {}", rows.len()),
+            ))
+            .children(body)
+            .into_any_element()
+    }
+
+    fn render_questions(
+        &self,
+        questions: &[LeadQuestion],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = Utc::now();
+        let body = if questions.is_empty() {
+            empty_line(theme, "No step has asked its lead anything yet.")
+        } else {
+            let state = self.state.read(cx);
+            let rows: Vec<(LeadQuestion, String)> = questions
+                .iter()
+                .map(|question| {
+                    let step = step_name(state, &question.task_id, &question.step_id, now)
+                        .unwrap_or_else(|| "A step".into());
+                    let place = match mission_title(state, Some(&question.task_id)) {
+                        Some(mission) => format!("{step} · {mission}"),
+                        None => step,
+                    };
+                    (question.clone(), place)
+                })
+                .collect();
+            div()
+                .rounded(px(12.0))
+                .bg(widgets::block_fill(theme))
+                .flex()
+                .flex_col()
+                .children(rows.into_iter().enumerate().map(|(ix, (question, place))| {
+                    let (label, detail) = question_state(&question.state);
+                    let tone = match question.state {
+                        QuestionState::Open => Some(needs_tone(theme)),
+                        QuestionState::Settled { .. } => Some(ok_tone(theme)),
+                        QuestionState::Dropped => None,
+                    };
+                    let sel = format!(
+                        "supervisor-question-{}",
+                        question.request_id.replace(':', "-")
+                    );
+                    let text = question_text(&question.questions);
+                    let chat_id = question.chat_id.clone();
+                    div()
+                        .id(SharedString::from(sel.clone()))
+                        .debug_selector(move || sel.clone())
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("{label}: {text}"))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.wash(0.04)))
+                        .mx(px(6.0))
+                        .px(px(8.0))
+                        .py(px(9.0))
+                        .when(ix > 0, |el| {
+                            el.border_t_1().border_color(widgets::row_divider(theme))
+                        })
+                        .flex()
+                        .items_start()
+                        .gap(px(10.0))
+                        .child(div().mt(px(1.0)).child(tone_chip(theme, label, tone)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .child(
+                                    div()
+                                        .text_size(ui_rems(12.5))
+                                        .line_height(ui_rems(18.0))
+                                        .text_color(theme.text)
+                                        .child(clip(&text)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(ui_rems(11.5))
+                                        .text_color(theme.text_muted)
+                                        .child(match detail {
+                                            Some(detail) => format!("{place} · {detail}"),
+                                            None => place,
+                                        }),
+                                ),
+                        )
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(SupervisorEvent::OpenChat(chat_id.clone()))
+                        }))
+                }))
+                .into_any_element()
+        };
+        div()
+            .id("supervisor-questions")
+            .debug_selector(|| "supervisor-questions".into())
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(widgets::section_label(
+                theme,
+                format!("Open questions to the Lead · {}", questions.len()),
+            ))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn render_interventions(
+        &self,
+        rows: &[SupervisorIntervention],
+        wakes: &[SupervisorWake],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = Utc::now();
+        let body = if rows.is_empty() {
+            empty_line(theme, "The Supervisor has not acted yet.")
+        } else {
+            let state = self.state.read(cx);
+            div()
+                .rounded(px(12.0))
+                .bg(widgets::block_fill(theme))
+                .flex()
+                .flex_col()
+                .children(rows.iter().enumerate().map(|(ix, row)| {
+                    let target = row
+                        .target
+                        .as_deref()
+                        .map(|target| thread_name(state, target, now))
+                        .or_else(|| mission_title(state, row.task_id.as_deref()));
+                    let mut chips: Vec<gpui::Div> = row
+                        .chips
+                        .iter()
+                        .map(|chip| {
+                            let tone = (*chip != InterventionChip::Sent).then(|| ok_tone(theme));
+                            tone_chip(theme, chip_label(chip), tone)
+                        })
+                        .collect();
+                    if no_effect_yet(row, now) {
+                        chips.push(tone_chip(theme, "No effect yet", Some(needs_tone(theme))));
+                    }
+                    let id = row.id.clone();
+                    div()
+                        .debug_selector(move || format!("supervisor-intervention-{id}"))
+                        .mx(px(14.0))
+                        .py(px(10.0))
+                        .when(ix > 0, |el| {
+                            el.border_t_1().border_color(widgets::row_divider(theme))
+                        })
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(ui_rems(12.5))
+                                .child(
+                                    div()
+                                        .font_family(theme.font_mono.clone())
+                                        .text_size(ui_rems(11.5))
+                                        .text_color(theme.text_muted)
+                                        .child(clock(row.at)),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(theme.text)
+                                        .child(intervention_kind_label(row.kind)),
+                                )
+                                .children(target.map(|target| {
+                                    div()
+                                        .text_color(theme.text_muted)
+                                        .child(format!("→ {target}"))
+                                })),
+                        )
+                        .when(!row.text.trim().is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .pl(px(10.0))
+                                    .border_l_2()
+                                    .border_color(theme.border)
+                                    .text_size(ui_rems(12.5))
+                                    .line_height(ui_rems(18.0))
+                                    .text_color(theme.text)
+                                    .child(clip(row.text.trim())),
+                            )
+                        })
+                        .children(row.trigger.as_ref().map(|trigger| {
+                            div()
+                                .text_size(ui_rems(11.5))
+                                .text_color(theme.text_muted)
+                                .child(trigger_label(trigger, wakes))
+                        }))
+                        .when(!chips.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .children(chips),
+                            )
+                        })
+                }))
+                .into_any_element()
+        };
+        div()
+            .id("supervisor-interventions")
+            .debug_selector(|| "supervisor-interventions".into())
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(widgets::section_label(
+                theme,
+                format!("Interventions · {}", rows.len()),
+            ))
+            .child(body)
+            .into_any_element()
+    }
+
     fn render_wake_log(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let wakes: Vec<SupervisorWake> = self
             .state
@@ -1750,6 +2729,67 @@ impl SupervisorPage {
     }
 }
 
+fn needs_tone(theme: &Theme) -> Hsla {
+    crate::shell::chat_status_tone(ChatIndicator::AwaitingInput, theme).2
+}
+
+fn ok_tone(theme: &Theme) -> Hsla {
+    crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
+}
+
+fn tone_chip(theme: &Theme, label: impl Into<SharedString>, tone: Option<Hsla>) -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(7.0))
+        .rounded_full()
+        .border_1()
+        .border_color(tone.map_or(theme.border, |tone| tone.opacity(0.45)))
+        .text_size(ui_rems(11.0))
+        .text_color(tone.unwrap_or(theme.text_muted))
+        .child(label.into())
+}
+
+fn pill_button(
+    theme: &Theme,
+    key: String,
+    label: String,
+    tone: widgets::ActionTone,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = key.clone();
+    widgets::text_action(theme, tone, label.clone())
+        .id(SharedString::from(key))
+        .debug_selector(move || selector.clone())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .min_h(px(28.0))
+        .rounded_full()
+}
+
+fn needs_card(theme: &Theme, selector: String) -> gpui::Div {
+    let tone = needs_tone(theme);
+    div()
+        .debug_selector(move || selector.clone())
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(tone.opacity(0.45))
+        .bg(tone.opacity(0.06))
+        .px(px(14.0))
+        .py(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+}
+
+fn empty_line(theme: &Theme, text: &'static str) -> AnyElement {
+    div()
+        .px(px(8.0))
+        .text_size(ui_rems(12.5))
+        .text_color(theme.text_muted)
+        .child(text)
+        .into_any_element()
+}
+
 fn step_labels(plan: &Rollup) -> Vec<(String, String)> {
     plan.steps
         .iter()
@@ -1762,11 +2802,15 @@ impl Render for SupervisorPage {
         let theme = Theme::of(cx).clone();
         let missions = missions(self.state.read(cx), Utc::now());
         let watches: Vec<Watch> = missions.iter().map(|m| m.watch.clone()).collect();
+        let snapshot = self.state.read(cx).supervisor.clone().unwrap_or_default();
         let column = widgets::page_column()
             .max_w(px(820.0))
             .gap(px(26.0))
             .child(self.render_header(watched_count(&watches), &theme, cx))
+            .child(self.render_needs_you(&snapshot.needs_you, &theme, cx))
             .child(self.render_missions(missions, &theme, cx))
+            .child(self.render_questions(&snapshot.questions, &theme, cx))
+            .child(self.render_interventions(&snapshot.interventions, &snapshot.wakes, &theme, cx))
             .child(self.render_authority(&theme, cx))
             .child(self.render_wake_log(&theme, cx));
         let scroll = widgets::scroll_faded(
@@ -1906,5 +2950,91 @@ mod tests {
             ]
         );
         assert_eq!(watched_count(&watches), 3);
+    }
+
+    #[test]
+    fn needs_you_route_by_presence() {
+        let secs = |n: u64| Some(Duration::from_secs(n));
+        let cases = [
+            (true, true, secs(5), NeedsYouRoute::Quiet),
+            (true, true, None, NeedsYouRoute::Quiet),
+            (true, false, secs(5), NeedsYouRoute::InApp),
+            (false, true, secs(179), NeedsYouRoute::InApp),
+            (false, true, secs(180), NeedsYouRoute::InApp),
+            (false, true, secs(181), NeedsYouRoute::Banner),
+            (true, false, secs(600), NeedsYouRoute::Banner),
+            (false, false, None, NeedsYouRoute::Banner),
+        ];
+        for (looking, focused, since, want) in cases {
+            assert_eq!(
+                needs_you_route(looking, focused, since),
+                want,
+                "looking {looking}, focused {focused}, since {since:?}"
+            );
+        }
+    }
+
+    fn item(id: &str) -> NeedsYouRow {
+        NeedsYouRow::Item(SupervisorItem {
+            id: id.into(),
+            at: Utc::now(),
+            raised_by: Raiser::Lead,
+            raiser_chat_id: "lead".into(),
+            task_id: Some("task".into()),
+            title: format!("Decide {id}"),
+            why: ItemWhy::Decision,
+            detail: String::new(),
+            options: vec!["Yes".into(), "No".into()],
+            answer: None,
+        })
+    }
+
+    #[test]
+    fn the_first_snapshot_seeds_silently_and_later_ones_report_new_rows() {
+        let mut seen = None;
+        let keys = |rows: Vec<NeedsYouRow>| rows.iter().map(row_key).collect::<Vec<_>>();
+        assert!(fresh_needs_you(&mut seen, &[item("a")]).is_empty());
+        assert_eq!(
+            keys(fresh_needs_you(&mut seen, &[item("a"), item("b")])),
+            vec!["item:b"]
+        );
+        assert!(fresh_needs_you(&mut seen, &[item("b")]).is_empty());
+        assert_eq!(
+            keys(fresh_needs_you(&mut seen, &[item("b"), item("a")])),
+            vec!["item:a"]
+        );
+    }
+
+    #[test]
+    fn no_effect_yet_needs_sent_alone_for_ten_minutes() {
+        let now = Utc::now();
+        let row = |minutes: i64, chips: Vec<InterventionChip>| SupervisorIntervention {
+            id: format!("i{minutes}"),
+            at: now - chrono::Duration::minutes(minutes),
+            kind: InterventionKind::Send,
+            task_id: None,
+            step_ids: Vec::new(),
+            target: Some("lead".into()),
+            message_id: Some("m".into()),
+            request_id: None,
+            text: "Use the mock.".into(),
+            trigger: Some(InterventionTrigger::Person),
+            chips,
+        };
+        let stale = row(11, vec![InterventionChip::Sent]);
+        let fresh = row(9, vec![InterventionChip::Sent]);
+        let answered = row(
+            11,
+            vec![InterventionChip::Sent, InterventionChip::LeadRanTurn],
+        );
+        let unsent = row(11, Vec::new());
+        assert!(no_effect_yet(&stale, now));
+        assert!(!no_effect_yet(&fresh, now));
+        assert!(!no_effect_yet(&answered, now));
+        assert!(!no_effect_yet(&unsent, now));
+        assert_eq!(
+            next_effect_check(&[stale, fresh.clone(), answered, unsent], now),
+            Some(fresh.at + chrono::Duration::minutes(10))
+        );
     }
 }

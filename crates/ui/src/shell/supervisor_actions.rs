@@ -1,11 +1,13 @@
 use super::*;
-use crate::supervisor::{Pane, SupervisorEvent, SupervisorPage};
+use crate::supervisor::{NeedsYouRoute, Pane, SupervisorEvent, SupervisorPage};
+use zeron_proto::supervisor::NeedsYouRow;
 
 #[derive(Default)]
 pub(super) struct SupervisorShell {
     page: Option<(Entity<SupervisorPage>, Subscription)>,
     pane: Option<SupervisorPane>,
     doc: Option<String>,
+    seen: Option<std::collections::HashSet<String>>,
 }
 
 pub(super) struct SupervisorPane {
@@ -242,7 +244,67 @@ impl Shell {
     fn on_supervisor_event(&mut self, event: &SupervisorEvent, cx: &mut Context<Self>) {
         match event {
             SupervisorEvent::OpenTaskCenter(task_id) => self.open_task_center(task_id.clone(), cx),
+            SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
+            SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
+        }
+    }
+
+    fn discuss_with_supervisor(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(pane) = &self.supervisor.pane else {
+            return;
+        };
+        let (chat_id, composer) = (pane.chat_id.clone(), pane.composer.clone());
+        self.state.update(cx, |state, cx| {
+            state.add_quote(&chat_id, crate::quotes::Quote::new(text));
+            cx.notify();
+        });
+        self.defer_in_active_window(cx, move |_, window, cx| {
+            window.focus(&composer.focus_handle(cx), cx)
+        });
+    }
+
+    fn looking_at_needs_you(&self, row: &NeedsYouRow, cx: &App) -> bool {
+        let (task_id, raiser) = crate::supervisor::row_origin(row);
+        match self.route {
+            Route::Supervisor => true,
+            Route::TaskCenter => task_id.is_some() && self.task_center_task.as_deref() == task_id,
+            Route::Chat => self.state.read(cx).selected_chat.as_deref() == Some(raiser),
+            _ => false,
+        }
+    }
+
+    pub(super) fn route_supervisor_needs(&mut self, cx: &mut Context<Self>) {
+        let fresh: Vec<NeedsYouRow> = match self.state.read(cx).supervisor.as_ref() {
+            None => {
+                self.supervisor.seen = None;
+                return;
+            }
+            Some(snapshot) => {
+                crate::supervisor::fresh_needs_you(&mut self.supervisor.seen, &snapshot.needs_you)
+            }
+        };
+        let focused = cx.active_window().is_some();
+        let since = self.last_interaction.as_ref().map(|(_, at)| at.elapsed());
+        for row in fresh {
+            let looking = self.looking_at_needs_you(&row, cx);
+            let title = crate::supervisor::row_title(&row);
+            match crate::supervisor::needs_you_route(looking, focused, since) {
+                NeedsYouRoute::Quiet => {}
+                NeedsYouRoute::InApp => crate::toast::show(
+                    cx,
+                    crate::toast::ToastKind::Info,
+                    format!("Supervisor needs you: {title}"),
+                ),
+                NeedsYouRoute::Banner if self.settings.notifications_enabled => {
+                    crate::notify::post(
+                        "Supervisor needs you",
+                        &title,
+                        Some(crate::notify::SUPERVISOR_TARGET),
+                    )
+                }
+                NeedsYouRoute::Banner => {}
+            }
         }
     }
 }
