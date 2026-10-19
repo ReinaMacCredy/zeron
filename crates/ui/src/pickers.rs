@@ -2229,6 +2229,10 @@ impl Pickers {
             .is_some_and(|list| self.offered(list).is_empty())
     }
 
+    pub(crate) fn harnesses_error(&self) -> Option<&str> {
+        self.harnesses.error()
+    }
+
     /// The resolved harness's steering mode, from the loaded descriptor list.
     /// `None` while the catalog is loading.
     pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {
@@ -2612,7 +2616,7 @@ impl Pickers {
 
     // ---- loads ----
 
-    fn ensure_harnesses(&mut self, force: bool, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_harnesses(&mut self, force: bool, cx: &mut Context<Self>) {
         // Non-forced (the render loop's eager kick) only loads from Idle: an
         // Error that could re-trigger a load would flip back to Loading
         // before the retry row ever painted (and spam the engine); Retry

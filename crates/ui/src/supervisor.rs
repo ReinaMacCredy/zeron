@@ -34,6 +34,8 @@ use crate::typography::ui_rems;
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
 const PROFILE_ID: &str = "slp-supervisor";
+const NO_AGENT: &str =
+    "no agent is installed and turned on. Turn one on in Settings > Providers, then try again.";
 const ROLE: &str = "Talks direction with you, watches every mission for drift and cross-scope \
                     problems, and steps in through each Lead within the authority you set.";
 const HEARTBEATS: [(u32, &str); 3] = [(0, "Off"), (30, "30 min"), (60, "60 min")];
@@ -1046,6 +1048,21 @@ impl SupervisorPage {
             return;
         }
         let Some(config) = self.start_config(cx) else {
+            let pickers = self.pickers.read(cx);
+            let failure = if pickers.no_agents_available() {
+                Some(NO_AGENT.to_owned())
+            } else {
+                pickers.harnesses_error().map(str::to_owned)
+            };
+            match failure {
+                Some(reason) => {
+                    self.ensure = Ensure::Failed(reason);
+                    cx.notify();
+                }
+                None => self
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.ensure_harnesses(false, cx)),
+            }
             return;
         };
         self.ensure = Ensure::Running;
@@ -1079,6 +1096,8 @@ impl SupervisorPage {
     fn retry_ensure(&mut self, cx: &mut Context<Self>) {
         self.ensure = Ensure::Wanted;
         self.load_profiles(cx);
+        self.pickers
+            .update(cx, |pickers, cx| pickers.ensure_harnesses(true, cx));
         self.try_ensure(cx);
     }
 
