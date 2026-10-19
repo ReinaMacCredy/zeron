@@ -118,6 +118,7 @@ impl ChatReview {
                     finding.id == id
                         && finding.placement != Placement::Outdated
                         && run.outcome(id).is_none()
+                        && !run.handed(id)
                 })
                 .cloned()
                 .collect(),
@@ -287,12 +288,16 @@ impl ReviewRun {
         self.findings.iter().filter(|finding| {
             finding.placement != Placement::Outdated
                 && self.state(&finding.id) == FindingState::Open
-                && !self.handed_here.contains(&finding.id)
-                && !self
-                    .delegation
-                    .as_ref()
-                    .is_some_and(|d| d.findings_handed.contains(&finding.id))
+                && !self.handed(&finding.id)
         })
+    }
+
+    fn handed(&self, id: &str) -> bool {
+        self.handed_here.contains(id)
+            || self
+                .delegation
+                .as_ref()
+                .is_some_and(|d| d.findings_handed.contains(id))
     }
 
     pub fn unsent_hands(&self) -> Vec<String> {
@@ -706,6 +711,10 @@ mod tests {
         assert!(
             review.take_fixable(Some("F1")).is_empty(),
             "a fixed row is done"
+        );
+        assert!(
+            review.take_fixable(Some("F3")).is_empty(),
+            "a second Fix never stages a handed row again"
         );
     }
 
