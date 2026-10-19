@@ -103,11 +103,11 @@ pub fn tool_list() -> Value {
 fn supervisor_tool() -> Value {
     json!({
         "name": "supervisor",
-        "description": "Act as the Supervisor of this device's Mission Control missions, within the Authority the person set; every wake's footer says what is on. `ask` puts a decision in the person's Needs you list and returns its `itemId` without waiting: `title`, `why` (goal, spend or decision), `detail`, one to three `options`, and `taskId` when it concerns a mission. A change to a mission's goal or spend always goes this way. The person's choice comes back to you as a message, and to that mission's lead. `rebrief` rewrites one step's spec through its lead: `stepId` from the tasks tool, the new `notes`, `title` when it changes, and `reason`, which the lead reads in its one message about it. It never touches the overview and never adds or removes a step. `start` creates a mission and starts its lead on `title` and `notes`, in `projectId` (from list_projects) when given, with `planDoc` for a plan doc; the lead writes a plan the person reviews before any step runs.",
+        "description": "Act as the Supervisor of this device's Mission Control missions, within the Authority the person set; every wake's footer says what is on. `ask` puts a decision in the person's Needs you list and returns its `itemId` without waiting: `title`, `why` (goal, spend or decision), `detail`, one to three `options`, and `taskId` when it concerns a mission. A change to a mission's goal or spend always goes this way. The person's choice comes back to you as a message, and to that mission's lead. `rebrief` rewrites one step's spec through its lead: `stepId` from the tasks tool, the new `notes`, `title` when it changes, and `reason`, which the lead reads in its one message about it. It never touches the overview and never adds or removes a step. `start` creates a mission and starts its lead on `title` and `notes`, in `projectId` (from list_projects) when given, with `planDoc` for a plan doc; the lead writes a plan the person reviews before any step runs. Missions declare shared `resources` (port:<n>, slot:<name>, path:<path>) in their plan. `check` reads the machine for every resource two running missions share, with lsof for ports and ps for CPU slots (two samples 10 s apart), and returns each one's state, `taskId` narrowing it to one mission. `pause` stops one step that blocks a shared resource: `stepId`, the `resource` as declared, and `reason`; it needs a contention the machine verified, stops the step's thread, refuses create_thread with that `taskStepId` until you `resume` it (`stepId`, `reason`), and tells the lead each time.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["ask", "rebrief", "start"] },
+                "action": { "type": "string", "enum": ["ask", "rebrief", "start", "check", "pause", "resume"] },
                 "taskId": { "type": "string" },
                 "stepId": { "type": "string" },
                 "title": { "type": "string", "maxLength": 500 },
@@ -117,7 +117,8 @@ fn supervisor_tool() -> Value {
                 "options": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3 },
                 "reason": { "type": "string", "maxLength": 2000 },
                 "projectId": { "type": "string" },
-                "planDoc": { "type": "boolean" }
+                "planDoc": { "type": "boolean" },
+                "resource": { "type": "string" }
             },
             "required": ["action"],
             "additionalProperties": false
@@ -405,7 +406,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. `plan` also takes `resources`, what the mission needs to itself while it runs: `port:<n>` for a port its servers listen on, `slot:<name>` for a quiet CPU (slot:benchmark for timing runs), `path:<path inside the project>` for files it rewrites; it replaces the declared list, `[]` clears it, and the Supervisor checks them against other missions. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -432,6 +433,11 @@ fn thread_tool_list() -> Value {
                         }
                     },
                     "overview": { "type": "string", "maxLength": 10000 },
+                    "resources": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": { "type": "string", "pattern": "^(port:[0-9]{1,5}|slot:[A-Za-z0-9._-]{1,64}|path:[^/~].*)$" }
+                    },
                     "stepId": { "type": "string" },
                     "state": { "type": "string", "enum": ["done", "skipped", "open"] },
                     "why": { "type": "string", "enum": ["goal", "spend", "decision"] },
@@ -1608,7 +1614,10 @@ impl ThreadTools {
             "ask" => &["taskId", "title", "why", "detail", "options"],
             "rebrief" => &["stepId", "title", "notes", "reason"],
             "start" => &["title", "notes", "projectId", "planDoc"],
-            _ => return Err("action must be ask, rebrief or start".into()),
+            "check" => &["taskId"],
+            "pause" => &["stepId", "resource", "reason"],
+            "resume" => &["stepId", "resource", "reason"],
+            _ => return Err("action must be ask, rebrief, start, check, pause or resume".into()),
         };
         if let Some(extra) = args
             .as_object()
@@ -1621,7 +1630,7 @@ impl ThreadTools {
                 takes.join(", ")
             ));
         }
-        if action != "ask" {
+        if !matches!(action, "ask" | "check") {
             self.spend_send()?;
         }
         let mut params = args.clone();
@@ -2121,6 +2130,9 @@ impl ThreadTools {
                 });
                 if let Some(overview) = args["overview"].as_str() {
                     params["overview"] = json!(overview);
+                }
+                if let Some(resources) = args.get("resources") {
+                    params["resources"] = resources.clone();
                 }
                 let planned = self.call_engine(methods::MUTATE, params).await?;
                 let task: Task = serde_json::from_value(planned["task"].clone())
@@ -3311,6 +3323,7 @@ fn add_plan(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)], whol
     if whole {
         row["plan"] = json!(task.plan);
         row["planDoc"] = json!(task.plan_doc);
+        row["resources"] = json!(task.resources);
         row["steps"] = own
             .iter()
             .map(|(step, status)| {
@@ -5010,7 +5023,7 @@ mod tests {
             .tools
             .call(
                 "tasks",
-                &json!({ "action": "plan", "taskId": "t1", "overview": "Goal: a shop API", "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
+                &json!({ "action": "plan", "taskId": "t1", "overview": "Goal: a shop API", "resources": ["port:5173"], "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
             )
             .await
             .unwrap();
@@ -5043,6 +5056,7 @@ mod tests {
             [
                 json!({
                     "op": "planSteps", "taskId": "t1", "fromChatId": "a", "overview": "Goal: a shop API",
+                    "resources": ["port:5173"],
                     "steps": [{ "title": "API", "notes": "" }, { "title": "Docs", "notes": "README" }],
                 }),
                 json!({ "op": "updateTaskStep", "stepId": "s5", "patch": { "outcome": "skipped" }, "fromChatId": "a" }),

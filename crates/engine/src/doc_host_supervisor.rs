@@ -15,10 +15,14 @@ use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
 use super::*;
 use crate::registry::HarnessRegistry;
 use crate::supervisor::{
-    Flush, InterventionRecord, MissionFacts, Projections, Reply, Stall, StepSnap, StepThread,
-    SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader, chips, fold_ms,
-    lead_questions, open_inputs, plan_flush, plan_stalls, utc, wake_text,
+    Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
+    StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader,
+    chips, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc, wake_text,
 };
+use crate::supervisor_resources::{
+    CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
+};
+use zeron_proto::supervisor::ResourceKey;
 
 const MAX_NAP: Duration = Duration::from_secs(60);
 const HOUR_MS: i64 = 60 * 60 * 1000;
@@ -62,7 +66,7 @@ struct Observed {
 }
 
 impl Observed {
-    fn sessions(&mut self, sessions: &[Session], now: i64) -> Vec<String> {
+    fn sessions(&mut self, sessions: &[Session], now: i64) -> (Vec<String>, HashSet<String>) {
         let mut live_now = HashSet::new();
         for session in sessions.iter().filter(|session| live(session.status)) {
             live_now.insert(session.chat_id.clone());
@@ -72,8 +76,9 @@ impl Observed {
         for thread in &ended {
             self.last_live.insert(thread.clone(), now);
         }
+        let edges = self.live.symmetric_difference(&live_now).cloned().collect();
         self.live = live_now;
-        ended
+        (ended, edges)
     }
 
     fn missions_done(&mut self, tasks: &[Task]) -> Vec<Task> {
@@ -104,10 +109,13 @@ struct Round {
     missions: HashMap<String, MissionFacts>,
     done: Vec<Task>,
     step_titles: HashMap<String, String>,
+    resources: Vec<ResourceMission>,
+    edges: HashSet<String>,
 }
 
 /// What an intervention row needs from before the action: a re-brief's snapshot predates its own edit.
 pub(crate) struct InterventionBasis {
+    id: String,
     kind: InterventionKind,
     task_id: Option<String>,
     steps: Vec<StepSnap>,
@@ -116,6 +124,10 @@ pub(crate) struct InterventionBasis {
 }
 
 impl InterventionBasis {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn with_task(mut self, task_id: &str, target: &str) -> Self {
         self.task_id = Some(task_id.to_string());
         self.target = Some(target.to_string());
@@ -379,6 +391,7 @@ impl DocHost {
             None => (None, Vec::new()),
         };
         InterventionBasis {
+            id: new_id(),
             kind,
             task_id,
             steps,
@@ -399,7 +412,7 @@ impl DocHost {
         };
         store.add_intervention(InterventionRecord {
             row: SupervisorIntervention {
-                id: new_id(),
+                id: basis.id,
                 at: chrono::Utc::now(),
                 kind: basis.kind,
                 task_id: basis.task_id,
@@ -497,7 +510,7 @@ impl DocHost {
         tasks: &[Task],
         steps: &[TaskStep],
     ) -> Round {
-        let ended = observed.sessions(sessions, now);
+        let (ended, edges) = observed.sessions(sessions, now);
         let done = observed.missions_done(tasks);
         let sessions: HashMap<&str, &Session> = sessions
             .iter()
@@ -515,6 +528,7 @@ impl DocHost {
         };
         let mut missions = HashMap::new();
         let mut step_titles = HashMap::new();
+        let mut resources = Vec::new();
         for task in tasks {
             if task.mode != TaskMode::Orchestrated
                 || task.deleted
@@ -561,6 +575,43 @@ impl DocHost {
                 }
                 facts.steps.push(step_thread);
             }
+            let threads: Vec<&Chat> = std::iter::once(*lead)
+                .chain(
+                    steps
+                        .iter()
+                        .filter(|step| step.task_id == task.id)
+                        .filter_map(|step| step.chat_id.as_deref())
+                        .filter_map(|id| chats.get(id).copied()),
+                )
+                .collect();
+            let mut cwds: Vec<String> = threads.iter().filter_map(|t| t.cwd.clone()).collect();
+            cwds.sort();
+            cwds.dedup();
+            let mut checkouts: Vec<String> = threads
+                .iter()
+                .filter_map(|t| t.checkout_id.clone().or_else(|| t.cwd.clone()))
+                .collect();
+            checkouts.sort();
+            checkouts.dedup();
+            let held = |facts: &ThreadFacts| {
+                facts.live
+                    || facts.background
+                    || facts
+                        .last_active()
+                        .is_some_and(|at| now - at < MISSION_SILENT_MS)
+            };
+            resources.push(ResourceMission {
+                task_id: task.id.clone(),
+                keys: task
+                    .resources
+                    .iter()
+                    .filter_map(|key| ResourceKey::parse(key))
+                    .collect(),
+                active: std::iter::once(&facts.lead).chain(&facts.steps).any(held),
+                threads: threads.iter().map(|t| t.id.clone()).collect(),
+                cwds,
+                checkouts,
+            });
             missions.insert(task.id.clone(), facts);
         }
         if store
@@ -573,6 +624,8 @@ impl DocHost {
             missions,
             done,
             step_titles,
+            resources,
+            edges,
         }
     }
 
@@ -583,7 +636,7 @@ impl DocHost {
         workspace: &WorkspaceHost,
         sessions: &SessionsEngine,
         registry: &HarnessRegistry,
-        round: Round,
+        mut round: Round,
         now: i64,
         started: i64,
     ) -> Option<i64> {
@@ -618,6 +671,10 @@ impl DocHost {
         }
         for stall in stalls {
             self.supervisor_event(stall_event(stall, &round.step_titles));
+        }
+        let missions_held = std::mem::take(&mut round.resources);
+        if let Some(at) = self.supervise_resources(store, missions_held, &round.edges, now) {
+            next = Some(next.map_or(at, |n| n.min(at)));
         }
         let settings = registry.supervisor_settings();
         let interval = i64::from(settings.heartbeat_minutes) * 60_000;
@@ -661,6 +718,189 @@ impl DocHost {
         next
     }
 
+    fn supervise_resources(
+        &self,
+        store: &SupervisorStore,
+        missions: Vec<ResourceMission>,
+        edges: &HashSet<String>,
+        now: i64,
+    ) -> Option<i64> {
+        let candidates = if cfg!(unix) {
+            find_candidates(&missions)
+        } else {
+            Vec::new()
+        };
+        let (next, wanted) = store.resources(|resources| {
+            let next = resources.observe(missions, candidates, edges, now);
+            (next, resources.wanted())
+        });
+        if wanted {
+            self.spawn_resource_check(store);
+        }
+        next
+    }
+
+    fn hold_probes(&self, store: &SupervisorStore) -> Vec<Probe> {
+        store
+            .holds()
+            .into_iter()
+            .filter(|hold| hold.resumed_at.is_none() && hold.freed_at.is_none())
+            .filter_map(|hold| {
+                Some(Probe {
+                    key: ResourceKey::parse(&hold.resource)?,
+                    row_id: hold.row_id,
+                    pids: hold.pids,
+                })
+            })
+            .collect()
+    }
+
+    fn spawn_resource_check(&self, store: &SupervisorStore) {
+        let Ok(checking) = store.checking().try_lock_owned() else {
+            return;
+        };
+        let probes = self.hold_probes(store);
+        let Some(input) = store.resources(|resources| resources.take_input(probes)) else {
+            return;
+        };
+        let (host, store) = (self.clone(), store.clone());
+        self.spawn_worker(async move {
+            let outcome = run_check(input).await;
+            host.apply_resource_check(&store, outcome);
+            drop(checking);
+            store.poke();
+        });
+    }
+
+    pub(crate) async fn check_resources_now(&self) {
+        let Some(store) = self.supervisor().cloned() else {
+            return;
+        };
+        let checking = store.checking().lock_owned().await;
+        let probes = self.hold_probes(&store);
+        if let Some(input) = store.resources(|resources| resources.take_input(probes)) {
+            let outcome = run_check(input).await;
+            self.apply_resource_check(&store, outcome);
+        }
+        drop(checking);
+        store.poke();
+    }
+
+    pub(crate) fn request_resource_check(&self) {
+        if let Some(store) = self.supervisor() {
+            store.resources(|resources| resources.request_if_older(now_ms(), PAGE_CHECK_MS));
+            store.poke();
+        }
+    }
+
+    fn apply_resource_check(&self, store: &SupervisorStore, outcome: CheckOutcome) {
+        let opened = store.resources(|resources| resources.apply(outcome.verdicts, now_ms()));
+        if !outcome.freed.is_empty()
+            && let Err(err) = store.mark_freed(&outcome.freed)
+        {
+            tracing::warn!(error = %err, "recording a freed resource failed");
+        }
+        store.mark_stale();
+        for (key, contention) in opened {
+            self.supervisor_event(self.contention_event(&key, &contention));
+        }
+    }
+
+    fn contention_event(&self, key: &ResourceKey, contention: &Contention) -> SupervisorEvent {
+        let workspace = self.workspace();
+        let mission = |id: &str| {
+            workspace
+                .and_then(|workspace| workspace.task(id))
+                .map_or_else(
+                    || format!("task {id}"),
+                    |task| format!("{} (task {})", clip(&task.title, TITLE_CHARS), task.id),
+                )
+        };
+        let mut event = SupervisorEvent::new(
+            Kind::Resource,
+            format!("res:{key}:{}", contention.since),
+            contention.blocked.as_deref(),
+            format!("Resource contention on {key}"),
+        );
+        event.since = Some(contention.since);
+        let involved: Vec<String> = contention.missions.iter().map(|id| mission(id)).collect();
+        event
+            .detail
+            .push(format!("Missions: {}.", involved.join("; ")));
+        let at = contention
+            .check
+            .at
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S");
+        match key {
+            ResourceKey::Port(port) => {
+                for used in &contention.check.uses {
+                    let owner = used
+                        .task_id
+                        .as_deref()
+                        .map(|id| format!(", which belongs to {}", mission(id)))
+                        .unwrap_or_default();
+                    event.detail.push(format!(
+                        "Verified by lsof {at}: port {port} is open by {} (pid {}) in {}{owner}.",
+                        used.command,
+                        used.pid,
+                        used.cwd.as_deref().unwrap_or("an unknown folder"),
+                    ));
+                }
+            }
+            _ => {
+                for load in &contention.loads {
+                    let who = match load.owners.as_slice() {
+                        [one] => mission(one),
+                        _ => format!(
+                            "a process in {}",
+                            load.cwd
+                                .as_deref()
+                                .unwrap_or("a folder these missions share")
+                        ),
+                    };
+                    event.detail.push(format!(
+                        "Verified by ps {at}, two samples 10 s apart: {who} used {:.0}% of a core in both.",
+                        load.cpu
+                    ));
+                }
+            }
+        }
+        if let Some(workspace) = workspace {
+            for id in &contention.missions {
+                for step in workspace
+                    .task_steps_of(id)
+                    .into_iter()
+                    .filter(|step| step.outcome.is_none())
+                {
+                    if let Some(thread) = &step.chat_id {
+                        event.detail.push(format!(
+                            "{}: step \"{}\" (taskStepId {}) on thread {thread}.",
+                            mission(id),
+                            clip(&step.title, TITLE_CHARS),
+                            step.id
+                        ));
+                    }
+                }
+            }
+        }
+        event.detail.push(format!(
+            "To stop the step that blocks it, use the supervisor tool, action \"pause\", with its stepId, resource \"{key}\" and a reason; \"resume\" it once the resource is free."
+        ));
+        event
+    }
+
+    pub(crate) fn stop_for_pause(&self, thread: &str) -> Result<bool, EngineError> {
+        let Some(sessions) = self.sessions() else {
+            return Ok(false);
+        };
+        if !sessions.turn_in_flight(thread) && !sessions.holds_background_work(thread) {
+            return Ok(false);
+        }
+        self.queue_command_with_transfers(thread, SessionCommandPayload::Interrupt {}, Vec::new())?;
+        Ok(true)
+    }
+
     fn queue_paused(&self, chat_id: &str) -> bool {
         self.open(chat_id)
             .is_ok_and(|handle| handle.queue_paused.load(Ordering::Acquire))
@@ -691,6 +931,7 @@ impl DocHost {
         supervisor: Option<&str>,
     ) -> Projections {
         let interventions = store.interventions();
+        let holds = store.holds();
         let mut transcripts: HashMap<String, Vec<zeron_doc::SessionMessageEntry>> = HashMap::new();
         let mut read = |chat_id: &str| {
             transcripts
@@ -797,9 +1038,20 @@ impl DocHost {
                 .clone()
                 .filter(|target| lead.as_ref() == Some(target))
                 .map(|target| read(&target));
+            let hold = holds
+                .iter()
+                .find(|hold| hold.row_id == record.row.id)
+                .map(|hold| {
+                    let running = hold
+                        .thread_id
+                        .as_deref()
+                        .and_then(|thread| sessions.session_status(thread))
+                        .is_some_and(|session| live(session.status));
+                    (hold, running)
+                });
             projections.chips.insert(
                 record.row.id.clone(),
-                chips(record, &plan, target.as_deref()),
+                chips(record, &plan, target.as_deref(), hold),
             );
         }
         projections
@@ -963,7 +1215,18 @@ impl DocHost {
                 .strip_prefix("escalation:")
                 .and_then(|item| self.supervisor().map(|store| store.item_open(item)))
                 .unwrap_or(false),
-            Kind::MissionDone | Kind::PlanEdited | Kind::Resource | Kind::Heartbeat => true,
+            Kind::Resource => summary
+                .key
+                .strip_prefix("res:")
+                .and_then(|rest| rest.rsplit_once(':'))
+                .and_then(|(key, since)| {
+                    Some((ResourceKey::parse(key)?, since.parse::<i64>().ok()?))
+                })
+                .zip(self.supervisor())
+                .is_some_and(|((key, since), store)| {
+                    store.resources(|r| r.open(&key).is_some_and(|open| open.since == since))
+                }),
+            Kind::MissionDone | Kind::PlanEdited | Kind::Heartbeat => true,
         }
     }
 

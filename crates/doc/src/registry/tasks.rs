@@ -40,6 +40,8 @@ struct RawTask {
     plan: String,
     #[serde(default)]
     plan_doc: bool,
+    #[serde(default)]
+    resources: Vec<String>,
 }
 
 pub(super) fn at(ms: i64) -> DateTime<Utc> {
@@ -65,6 +67,7 @@ impl From<RawTask> for Task {
             send_error: raw.send_error,
             plan: raw.plan,
             plan_doc: raw.plan_doc,
+            resources: raw.resources,
         }
     }
 }
@@ -124,6 +127,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("sendError", opt_str(task.send_error.as_deref())),
         ("plan", json!(task.plan)),
         ("planDoc", json!(task.plan_doc)),
+        ("resources", json!(task.resources)),
     ])
 }
 
@@ -286,6 +290,9 @@ impl RegistryDoc {
         }
         if let Some(plan_doc) = patch.plan_doc {
             set.insert("planDoc".into(), json!(plan_doc));
+        }
+        if let Some(resources) = &patch.resources {
+            set.insert("resources".into(), json!(resources));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();

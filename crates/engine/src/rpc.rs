@@ -1079,6 +1079,8 @@ enum MutateParams {
         #[serde(default)]
         overview: Option<String>,
         #[serde(default)]
+        resources: Option<Vec<String>>,
+        #[serde(default)]
         from_chat_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
@@ -2411,13 +2413,20 @@ impl EngineRpc {
                 task_id,
                 steps,
                 overview,
+                resources,
                 from_chat_id,
             } => {
                 let steps = steps
                     .into_iter()
                     .map(|step| (step.title, step.notes))
                     .collect();
-                self.plan_steps(&task_id, steps, overview, from_chat_id.as_deref())
+                self.plan_steps(
+                    &task_id,
+                    steps,
+                    overview,
+                    resources,
+                    from_chat_id.as_deref(),
+                )
             }
             MutateParams::CreateTaskStep {
                 task_id,
@@ -4200,7 +4209,8 @@ impl RpcService for EngineRpc {
             | methods::WATCH_SUPERVISOR
             | methods::GET_SUPERVISOR_SETTINGS
             | methods::SET_SUPERVISOR_SETTINGS
-            | methods::SUPERVISOR_ACT => self.supervisor_rpc(method, params).await,
+            | methods::SUPERVISOR_ACT
+            | methods::REQUEST_SUPERVISOR_CHECK => self.supervisor_rpc(method, params).await,
             methods::WATCH_TASKS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
             }

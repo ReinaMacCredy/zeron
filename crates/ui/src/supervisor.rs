@@ -8,10 +8,11 @@ use gpui::{
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy, LeadQuestion,
-    NeedsYouInput, NeedsYouRow, QuestionState, Raiser, SettledBy, SupervisorEventKind,
-    SupervisorIntervention, SupervisorItem, SupervisorSettings, SupervisorSnapshot,
-    SupervisorState, SupervisorWake, WakeDelivery, is_supervisor_chat,
+    CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy,
+    LeadQuestion, NeedsYouInput, NeedsYouRow, QuestionState, Raiser, ResourceState, SettledBy,
+    SharedResource, SupervisorEventKind, SupervisorIntervention, SupervisorItem,
+    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake, WakeDelivery,
+    is_supervisor_chat,
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
@@ -303,6 +304,8 @@ fn intervention_kind_label(kind: InterventionKind) -> &'static str {
         InterventionKind::Respond => "Answer",
         InterventionKind::Rebrief => "Re-brief",
         InterventionKind::Start => "Start a mission",
+        InterventionKind::Pause => "Pause a step",
+        InterventionKind::Resume => "Resume a step",
     }
 }
 
@@ -327,6 +330,8 @@ fn chip_label(chip: &InterventionChip) -> String {
             [one] => format!("Step {one} thread completed a turn"),
             _ => format!("Step {} threads completed a turn", step_numbers(steps)),
         },
+        InterventionChip::StepPaused => "Step paused".into(),
+        InterventionChip::ResourceFreed => "Resource freed".into(),
     }
 }
 
@@ -486,6 +491,76 @@ fn state_line(snapshot: Option<&SupervisorSnapshot>) -> String {
     }
 }
 
+fn resource_label(state: ResourceState) -> &'static str {
+    match state {
+        ResourceState::Free => "Free",
+        ResourceState::Held => "Held",
+        ResourceState::Checking => "Checking…",
+        ResourceState::Clear => "Clear",
+        ResourceState::Contended => "Contended",
+        ResourceState::CheckFailed => "Not verified",
+        ResourceState::NotVerified => "Declared by both, not verified",
+    }
+}
+
+fn verified_line(resource: &SharedResource, title: &dyn Fn(&str) -> String) -> Option<String> {
+    let check = resource.check.as_ref()?;
+    let at = clock(check.at);
+    if let Some(error) = &check.error {
+        return Some(format!("Could not verify at {at}: {error}"));
+    }
+    let place = |task_id: Option<&str>, cwd: Option<&str>| match task_id {
+        Some(id) => title(id),
+        None => format!("a process in {}", cwd.unwrap_or("an unknown folder")),
+    };
+    let (tool, found) = match check.tool {
+        CheckTool::Lsof if check.uses.is_empty() => ("lsof", "nothing listens on it".to_string()),
+        CheckTool::Lsof => (
+            "lsof",
+            check
+                .uses
+                .iter()
+                .map(|used| {
+                    format!(
+                        "{} (pid {}) listens · {}",
+                        used.command,
+                        used.pid,
+                        place(used.task_id.as_deref(), used.cwd.as_deref())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        CheckTool::Ps if check.uses.is_empty() => (
+            "ps",
+            "no other mission used more than half a core".to_string(),
+        ),
+        CheckTool::Ps => {
+            let mut loads: Vec<(String, f32, String)> = Vec::new();
+            for used in &check.uses {
+                let who = place(used.task_id.as_deref(), used.cwd.as_deref());
+                match loads.iter_mut().find(|(at, _, _)| *at == who) {
+                    Some((_, cpu, _)) => *cpu += used.cpu.unwrap_or_default(),
+                    None => loads.push((
+                        who,
+                        used.cpu.unwrap_or_default(),
+                        format!("{}, pid {}", used.command, used.pid),
+                    )),
+                }
+            }
+            (
+                "ps",
+                loads
+                    .iter()
+                    .map(|(who, cpu, top)| format!("{who} used {cpu:.0}% CPU ({top})"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        }
+    };
+    Some(format!("Verified by {tool} {at} · {found}"))
+}
+
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
@@ -623,6 +698,24 @@ impl SupervisorPage {
         }
         self.load_settings(cx);
         self.try_ensure(cx);
+        self.request_check(cx);
+    }
+
+    fn request_check(&mut self, cx: &mut Context<Self>) {
+        if cfg!(windows) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        cx.background_spawn(async move {
+            engine
+                .client()
+                .call(methods::REQUEST_SUPERVISOR_CHECK, serde_json::json!({}))
+                .await
+                .ok();
+        })
+        .detach();
     }
 
     pub fn left(&mut self, cx: &mut Context<Self>) {
@@ -1592,7 +1685,7 @@ impl SupervisorPage {
                 .text_color(theme.text)
         };
         type Set = fn(SupervisorSettings, bool) -> SupervisorSettings;
-        let toggles: [(&'static str, &'static str, bool, Set); 3] = [
+        let mut toggles: Vec<(&'static str, &'static str, bool, Set)> = vec![
             (
                 "supervisor-auth-message",
                 "Message a Lead or Peer directly",
@@ -1608,16 +1701,27 @@ impl SupervisorPage {
                 settings.rebrief,
                 |s, on| SupervisorSettings { rebrief: on, ..s },
             ),
-            (
-                "supervisor-auth-start",
-                "Start a new mission",
-                settings.start_missions,
+        ];
+        if !cfg!(windows) {
+            toggles.push((
+                "supervisor-auth-pause",
+                "Pause a step that blocks a shared resource",
+                settings.pause_steps,
                 |s, on| SupervisorSettings {
-                    start_missions: on,
+                    pause_steps: on,
                     ..s
                 },
-            ),
-        ];
+            ));
+        }
+        toggles.push((
+            "supervisor-auth-start",
+            "Start a new mission",
+            settings.start_missions,
+            |s, on| SupervisorSettings {
+                start_missions: on,
+                ..s
+            },
+        ));
         let mut card = div()
             .rounded(px(12.0))
             .bg(widgets::block_fill(theme))
@@ -2251,6 +2355,110 @@ impl SupervisorPage {
             .into_any_element()
     }
 
+    fn render_resources(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.state.read(cx);
+        let resources: Vec<SharedResource> = state
+            .supervisor
+            .as_ref()
+            .map(|snapshot| snapshot.resources.clone())
+            .unwrap_or_default();
+        let title = |id: &str| {
+            state
+                .tasks
+                .iter()
+                .find(|task| task.id == id)
+                .map_or_else(|| format!("task {id}"), |task| task.title.clone())
+        };
+        let names = |ids: &[String]| {
+            ids.iter()
+                .map(|id| title(id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let body = if resources.is_empty() {
+            div()
+                .px(px(8.0))
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child("No mission declares a port, CPU slot or path. A lead declares them with its plan.")
+                .into_any_element()
+        } else {
+            div()
+                .rounded(px(12.0))
+                .bg(widgets::block_fill(theme))
+                .flex()
+                .flex_col()
+                .children(resources.iter().enumerate().map(|(ix, resource)| {
+                    let tone = match resource.state {
+                        ResourceState::Contended => theme.danger,
+                        ResourceState::Clear => {
+                            crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
+                        }
+                        _ => theme.text_muted,
+                    };
+                    let held = match resource.holders.as_slice() {
+                        [] => "held by none".to_string(),
+                        holders => format!("held by {}", names(holders)),
+                    };
+                    let key = resource.key.clone();
+                    div()
+                        .debug_selector(move || format!("supervisor-resource-{key}"))
+                        .mx(px(14.0))
+                        .py(px(9.0))
+                        .when(ix > 0, |el| {
+                            el.border_t_1().border_color(widgets::row_divider(theme))
+                        })
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(ui_rems(12.5))
+                                .child(
+                                    div()
+                                        .font_family(theme.font_mono.clone())
+                                        .text_color(theme.text)
+                                        .child(resource.key.clone()),
+                                )
+                                .child(
+                                    div().text_color(tone).child(resource_label(resource.state)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child(format!(
+                                    "Declared by {} · {held}",
+                                    names(&resource.declared_by)
+                                )),
+                        )
+                        .children(verified_line(resource, &title).map(|line| {
+                            div()
+                                .text_size(ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child(line)
+                        }))
+                }))
+                .into_any_element()
+        };
+        div()
+            .id("supervisor-resources")
+            .debug_selector(|| "supervisor-resources".into())
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(widgets::section_label(
+                theme,
+                format!("Shared resources · {}", resources.len()),
+            ))
+            .child(body)
+            .into_any_element()
+    }
+
     fn render_wake_log(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let wakes: Vec<SupervisorWake> = self
             .state
@@ -2811,6 +3019,9 @@ impl Render for SupervisorPage {
             .child(self.render_missions(missions, &theme, cx))
             .child(self.render_questions(&snapshot.questions, &theme, cx))
             .child(self.render_interventions(&snapshot.interventions, &snapshot.wakes, &theme, cx))
+            .when(!cfg!(windows), |el| {
+                el.child(self.render_resources(&theme, cx))
+            })
             .child(self.render_authority(&theme, cx))
             .child(self.render_wake_log(&theme, cx));
         let scroll = widgets::scroll_faded(

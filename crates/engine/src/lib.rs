@@ -56,6 +56,7 @@ pub mod sessions;
 pub mod source_control;
 pub mod spaces;
 mod supervisor;
+mod supervisor_resources;
 pub mod terminals;
 pub mod thread_watches;
 pub mod titles;

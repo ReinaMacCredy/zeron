@@ -64,8 +64,9 @@ pub mod methods {
     pub const WATCH_SUPERVISOR: &str = "WatchSupervisor";
     pub const GET_SUPERVISOR_SETTINGS: &str = "GetSupervisorSettings";
     pub const SET_SUPERVISOR_SETTINGS: &str = "SetSupervisorSettings";
-    /// IPC-only like the thread tools: `{fromChatId, action: ask|rebrief|start, …}` from the Supervisor's `zeron mcp`.
+    /// IPC-only like the thread tools: `{fromChatId, action: ask|rebrief|start|pause|resume|check, …}` from the Supervisor's `zeron mcp`.
     pub const SUPERVISOR_ACT: &str = "SupervisorAct";
+    pub const REQUEST_SUPERVISOR_CHECK: &str = "RequestSupervisorCheck";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
     /// `CompactionSettingsUpdate` (settings plus a write-only `jevApiKey`) →
     /// `CompactionSettingsState`.
