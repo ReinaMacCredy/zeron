@@ -113,6 +113,7 @@ struct PageElementContext {
 }
 
 const CONTEXT_TEXT_LIMIT: usize = 4_000;
+const PAGE_CONTEXT_BYTES: usize = 96 * 1024;
 
 fn clip(text: String) -> String {
     text.chars().take(CONTEXT_TEXT_LIMIT).collect()
@@ -203,12 +204,14 @@ fn plain_css_value(value: &str) -> bool {
 
 impl Annotation {
     pub fn title(&self) -> String {
-        self.page_title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .unwrap_or(&self.page_url)
-            .to_string()
+        clip(
+            self.page_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or(&self.page_url)
+                .to_string(),
+        )
     }
 
     pub fn user_text(&self) -> String {
@@ -228,7 +231,7 @@ impl Annotation {
 
     // Page-reported, so it rides the Appshot's untrusted observed-content block.
     pub fn page_context(&self) -> String {
-        let mut text = format!("Page: {}\nURL: {}", self.title(), self.page_url);
+        let mut text = format!("Page: {}\nURL: {}", self.title(), clip(self.page_url.clone()));
         let count = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
         let targets: Vec<String> = [
             (self.elements.len(), "selected element"),
@@ -253,7 +256,7 @@ impl Annotation {
             }
             let label = match element.component_name.as_deref().map(str::trim) {
                 Some(name) if !name.is_empty() => format!("<{name}>"),
-                _ => format!("<{}>", element.tag_name.trim().to_lowercase()),
+                _ => format!("<{}>", clip(element.tag_name.trim().to_lowercase())),
             };
             let source = element.source.as_ref().and_then(|frame| {
                 let file = frame.file_name.as_deref()?.trim();
@@ -272,7 +275,7 @@ impl Annotation {
                 }
             }
             text.push(':');
-            let _ = write!(text, "\n  url: {}", element.page_url.trim());
+            let _ = write!(text, "\n  url: {}", clip(element.page_url.trim().to_string()));
             if let Some(selector) = element
                 .selector
                 .as_deref()
@@ -334,6 +337,19 @@ impl Annotation {
         }
         text.push_str("\n</element_context>");
         text
+    }
+
+    fn bounded_page_context(&self) -> (String, bool) {
+        let mut text = self.page_context();
+        if text.len() <= PAGE_CONTEXT_BYTES {
+            return (text, false);
+        }
+        let mut end = PAGE_CONTEXT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        (text, true)
     }
 }
 
@@ -529,6 +545,7 @@ mod host {
 
         fn annotation_capture(&self, picked: Picked, png: Option<Vec<u8>>) -> AnnotationCapture {
             let annotation = picked.annotation;
+            let (content, truncated) = annotation.bounded_page_context();
             let appshot = png
                 .and_then(|png| crate::appshots::stage_appshot_png("Browser", png).ok())
                 .map(
@@ -539,8 +556,8 @@ mod host {
                         window_title: Some(annotation.title()),
                         accessibility: crate::appshots::AccessibilitySnapshot {
                             format_version: 1,
-                            content: annotation.page_context(),
-                            truncated: false,
+                            content,
+                            truncated,
                         },
                         screenshot,
                         screenshot_dimensions: Some(dimensions),
