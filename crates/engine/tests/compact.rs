@@ -508,6 +508,7 @@ async fn an_agent_compaction_waits_for_its_turn_then_continues() {
         .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
         .expect("queue second run");
     wait_for(|| core.sessions.turn_in_flight(CHAT), "second turn starts").await;
+    wait_for(|| requests.lock().unwrap().len() == 2, "its prompt is built").await;
 
     zeron_rpc::memory_client(core.rpc_service())
         .call(
@@ -554,6 +555,7 @@ async fn a_message_before_the_agent_compaction_cancels_it() {
         .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
         .expect("queue second run");
     wait_for(|| core.sessions.turn_in_flight(CHAT), "second turn starts").await;
+    wait_for(|| requests.lock().unwrap().len() == 2, "its prompt is built").await;
 
     let client = zeron_rpc::memory_client(core.rpc_service());
     let request = || {
