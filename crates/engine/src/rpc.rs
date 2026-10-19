@@ -3681,11 +3681,27 @@ impl RpcService for EngineRpc {
             methods::GET_USAGE_SUMMARY => {
                 let p: UsageSummaryParams = parse_params(params)?;
                 let config = self.agent_accounts.config();
-                let roots = crate::usage::UsageRoots::new(
+                let mut roots = crate::usage::UsageRoots::new(
                     &config.claude_config_dir,
                     &config.codex_home,
                     &config.grok_home,
                 );
+                if let Ok(store) = self.provider_instances_store() {
+                    for instance in store.snapshot().instances {
+                        if let zeron_proto::InstanceConfig::Native {
+                            home_dir: Some(home),
+                            ..
+                        } = &instance.config
+                            && let Ok(home) = crate::provider_instances::home_path(
+                                &instance.id,
+                                home,
+                                store.data_dir(),
+                            )
+                        {
+                            roots.add_home(instance.driver, &home);
+                        }
+                    }
+                }
                 let summary = tokio::task::spawn_blocking(move || {
                     crate::usage::summary(&roots, p.days, chrono::Local::now())
                 })
