@@ -16450,13 +16450,12 @@ impl Shell {
         } else {
             0.0
         };
-        let mission_strip = has_selection
+        let (mission_strip, strip_band) = match has_selection
             .then(|| self.render_mission_strip(composer_width, cx))
-            .flatten();
-        let strip_band = if mission_strip.is_some() {
-            mission_strip::STRIP_BAND
-        } else {
-            0.0
+            .flatten()
+        {
+            Some((strip, reveal)) => (Some(strip), mission_strip::STRIP_BAND * reveal),
+            None => (None, 0.0),
         };
         let zoom_fade = self.task_zoom_fade();
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)

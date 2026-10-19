@@ -16,15 +16,18 @@ pub(super) struct TaskSlide {
     under: Route,
     pub(super) zoom: Option<super::mission_strip::TaskZoom>,
     pub(super) armed: bool,
+    pub(super) strip: (Option<String>, motion::Tween),
 }
 
 impl TaskSlide {
     pub(super) fn resting(route: Route) -> Self {
+        let now = std::time::Instant::now();
         Self {
-            tween: motion::Tween::at(Self::rest(route), std::time::Instant::now()),
+            tween: motion::Tween::at(Self::rest(route), now),
             under: Route::Tasks,
             zoom: None,
             armed: false,
+            strip: (None, motion::Tween::at(0.0, now)),
         }
     }
 
