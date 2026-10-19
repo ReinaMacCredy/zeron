@@ -2795,6 +2795,46 @@ pub(super) fn nest_step_threads<T>(
     out
 }
 
+#[derive(Clone)]
+pub(super) struct LeadFold {
+    pub(super) motion_key: String,
+    pub(super) open: bool,
+    pub(super) rollup: SharedString,
+    pub(super) asking: bool,
+}
+
+pub(super) fn lead_rollup(children: &[(ChatIndicator, bool)]) -> (String, bool) {
+    let count = |hit: &dyn Fn(ChatIndicator, bool) -> bool| {
+        children
+            .iter()
+            .filter(|(status, needs_you)| hit(*status, *needs_you))
+            .count()
+    };
+    let asking = count(&|status, needs_you| needs_you || status == ChatIndicator::AwaitingInput);
+    let failed = count(&|status, needs_you| !needs_you && status == ChatIndicator::Errored);
+    let running = count(&|status, _| status == ChatIndicator::Working);
+    let total = children.len();
+    let text = match [(asking, "asking"), (failed, "failed"), (running, "running")]
+        .into_iter()
+        .find(|(count, _)| *count > 0)
+    {
+        Some((count, word)) => format!("{total} · {count} {word}"),
+        None => total.to_string(),
+    };
+    (text, asking > 0)
+}
+
+fn step_needs_you(state: &AppState, chat: &zeron_proto::Chat, status: ChatIndicator) -> bool {
+    state
+        .task_steps
+        .iter()
+        .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
+        .any(|step| {
+            zeron_proto::step_status(step, Some(chat), Some(status))
+                == zeron_proto::StepStatus::NeedsYou
+        })
+}
+
 /// Project-mode group of a chat as (key, label). Projects sharing a
 /// repository identity fold into one group named for their representative
 /// space; project-less sessions on every device share one "Chats" group.
@@ -3319,6 +3359,16 @@ impl Shell {
         open: bool,
         theme: &Theme,
     ) -> AnyElement {
+        self.turned_disclosure_chevron(key, open, 0.5, theme)
+    }
+
+    pub(super) fn turned_disclosure_chevron(
+        &self,
+        key: &str,
+        open: bool,
+        closed_turn: f32,
+        theme: &Theme,
+    ) -> AnyElement {
         let resting_reveal = if open { 1.0 } else { 0.0 };
         let chevron = icon(icons::LUCIDE_CHEVRON_DOWN)
             .size(px(12.0))
@@ -3340,8 +3390,8 @@ impl Shell {
                     motion::COLLAPSE.animation(),
                     move |el, t| {
                         let reveal = motion::lerp(from, to, t);
-                        el.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                            (1.0 - reveal) * 0.5,
+                        el.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            (1.0 - reveal) * closed_turn * std::f32::consts::TAU,
                         )))
                     },
                 ))
@@ -3351,8 +3401,8 @@ impl Shell {
                 .flex_none()
                 .size(px(12.0))
                 .child(
-                    chevron.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                        (1.0 - resting_reveal) * 0.5,
+                    chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        (1.0 - resting_reveal) * closed_turn * std::f32::consts::TAU,
                     ))),
                 )
                 .into_any_element()
@@ -5550,6 +5600,7 @@ impl Shell {
         if let Some(pair) = &pair {
             pair.adjoin(&mut visible);
         }
+        step_threads.retain(|lead, _| !self.sidebar_lead_collapsed(lead));
         nest_step_threads(visible, |id| id, &mut step_threads, pair.as_ref())
     }
 
@@ -5889,6 +5940,58 @@ impl Shell {
         format!("{organization}:{group}")
     }
 
+    pub(super) fn sidebar_lead_collapsed(&self, lead: &str) -> bool {
+        self.settings
+            .sidebar_collapsed_leads
+            .iter()
+            .any(|id| id == lead)
+    }
+
+    pub(super) fn toggle_sidebar_lead(&mut self, lead: &str, cx: &mut Context<Self>) {
+        if self.sidebar_lead_collapsed(lead) {
+            self.settings
+                .sidebar_collapsed_leads
+                .retain(|id| id != lead);
+        } else {
+            self.settings.sidebar_collapsed_leads.push(lead.to_owned());
+        }
+        self.queue_sidebar_reveal(&format!("lead:{lead}"));
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn expand_sidebar_lead(&mut self, lead: &str, cx: &mut Context<Self>) {
+        if self.sidebar_lead_collapsed(lead) {
+            self.toggle_sidebar_lead(lead, cx);
+        }
+    }
+
+    pub(super) fn sidebar_lead_of(&self, chat_id: &str, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        let chats = state.sidebar_chats(Utc::now(), self.settings.space_filter.as_deref());
+        let listed: HashSet<&str> = chats.iter().map(|&(_, chat)| chat.id.as_str()).collect();
+        sidebar_step_threads(state, &listed)
+            .into_iter()
+            .find(|(_, children)| children.iter().any(|child| child == chat_id))
+            .map(|(lead, _)| lead)
+    }
+
+    pub(super) fn sidebar_has_step_threads(&self, lead: &str, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let chats = state.sidebar_chats(Utc::now(), self.settings.space_filter.as_deref());
+        let listed: HashSet<&str> = chats.iter().map(|&(_, chat)| chat.id.as_str()).collect();
+        sidebar_step_threads(state, &listed).contains_key(lead)
+    }
+
+    pub(super) fn reveal_sidebar_child(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if self.settings.sidebar_collapsed_leads.is_empty() {
+            return;
+        }
+        if let Some(lead) = self.sidebar_lead_of(chat_id, cx) {
+            self.expand_sidebar_lead(&lead, cx);
+        }
+    }
+
     /// Open whatever hides `chat_id`'s sidebar row — the sidebar itself, the
     /// Pinned / Sessions / Archived disclosure, its custom section or group,
     /// the Archived page — so an inline rename has a row to draw on. Each
@@ -5897,14 +6000,14 @@ impl Shell {
     /// clear), or a synced section could not be expanded. Either way the
     /// sidebar notice says why.
     pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
+        let lead = self.sidebar_lead_of(chat_id, cx);
+        if let Some(lead) = &lead {
+            self.expand_sidebar_lead(lead, cx);
+        }
+        let row_id = lead.unwrap_or_else(|| chat_id.to_owned());
         let (active, archived) = {
             let state = self.state.read(cx);
             let chats = state.sidebar_chats(Utc::now(), self.settings.space_filter.as_deref());
-            let listed: HashSet<&str> = chats.iter().map(|&(_, chat)| chat.id.as_str()).collect();
-            let row_id = sidebar_step_threads(state, &listed)
-                .into_iter()
-                .find(|(_, children)| children.iter().any(|child| child == chat_id))
-                .map_or_else(|| chat_id.to_owned(), |(lead, _)| lead);
             let active = chats
                 .iter()
                 .find(|(_, chat)| chat.id == row_id)
@@ -5999,6 +6102,85 @@ impl Shell {
     pub(super) fn begin_queued_sidebar_reveal(&mut self, key: &str, open: bool, body_height: f32) {
         if open && self.sidebar_reveal_motions.remove(key) {
             self.begin_sidebar_disclosure_motion(key, 0.0, body_height);
+        }
+    }
+
+    fn fold_step_threads(
+        &mut self,
+        rows: &mut Vec<(String, f32, AnyElement)>,
+        folds: &std::collections::HashMap<String, LeadFold>,
+        lead_of: &std::collections::HashMap<String, String>,
+        pair: Option<&split::SplitPair>,
+    ) {
+        for (lead, fold) in folds {
+            let mut children = Vec::new();
+            let mut ix = 0;
+            while ix < rows.len() {
+                let child = rows[ix]
+                    .0
+                    .strip_prefix("c:")
+                    .and_then(|id| lead_of.get(id))
+                    .is_some_and(|of| of == lead);
+                if child {
+                    children.push(rows.remove(ix));
+                } else {
+                    ix += 1;
+                }
+            }
+            if children.is_empty() {
+                continue;
+            }
+            let host = format!("c:{lead}");
+            let partner = pair
+                .and_then(|pair| pair.partner(lead))
+                .map(|(id, _)| format!("c:{id}"));
+            let Some(at) = rows
+                .iter()
+                .position(|(key, _, _)| *key == host || partner.as_ref() == Some(key))
+            else {
+                rows.extend(children);
+                continue;
+            };
+            let body_height = children
+                .iter()
+                .map(|(_, height, _)| height + SIDEBAR_LIST_GAP)
+                .sum::<f32>();
+            if self.sidebar_reveal_motions.remove(&fold.motion_key) {
+                let (from, to) = if fold.open {
+                    (0.0, body_height)
+                } else {
+                    (body_height, 0.0)
+                };
+                self.begin_sidebar_disclosure_motion(&fold.motion_key, from, to);
+            }
+            let shown = self
+                .sidebar_disclosure_motion
+                .get(&fold.motion_key)
+                .copied()
+                .filter(|motion| motion.animating() && !self.reduced_motion)
+                .map_or(
+                    if fold.open { body_height } else { 0.0 },
+                    SidebarDisclosureMotion::current,
+                );
+            let body = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .pt(px(SIDEBAR_LIST_GAP))
+                .gap(px(SIDEBAR_LIST_GAP))
+                .children(children.into_iter().map(|(_, _, row)| row))
+                .into_any_element();
+            let body =
+                self.render_sidebar_disclosure_body(&fold.motion_key, fold.open, body_height, body);
+            let (key, height, row) = rows.remove(at);
+            let row = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(row)
+                .child(body)
+                .into_any_element();
+            rows.insert(at, (key, height + shown, row));
         }
     }
 
@@ -6119,7 +6301,6 @@ impl Shell {
                 nested_rows.insert(child.clone(), row);
             }
         }
-        let nested_keys: HashSet<String> = nested_rows.keys().map(|id| format!("c:{id}")).collect();
         let mut step_rows: std::collections::HashMap<String, Vec<ActiveChatRow>> = step_threads
             .drain()
             .map(|(lead, children)| {
@@ -6129,6 +6310,47 @@ impl Shell {
                     .collect();
                 (lead, rows)
             })
+            .collect();
+        let lead_folds: std::collections::HashMap<String, LeadFold> = {
+            let state = self.state.read(cx);
+            step_rows
+                .iter()
+                .filter(|(_, children)| !children.is_empty())
+                .map(|(lead, children)| {
+                    let statuses: Vec<_> = children
+                        .iter()
+                        .map(|row| (row.status, step_needs_you(state, &row.chat, row.status)))
+                        .collect();
+                    let (rollup, asking) = lead_rollup(&statuses);
+                    let fold = LeadFold {
+                        motion_key: format!("lead:{lead}"),
+                        open: !self.sidebar_lead_collapsed(lead),
+                        rollup: rollup.into(),
+                        asking,
+                    };
+                    (lead.clone(), fold)
+                })
+                .collect()
+        };
+        let lead_of: std::collections::HashMap<String, String> = step_rows
+            .iter()
+            .flat_map(|(lead, children)| {
+                children
+                    .iter()
+                    .map(move |row| (row.chat.id.clone(), lead.clone()))
+            })
+            .collect();
+        let folded_leads: HashSet<&str> = lead_folds
+            .iter()
+            .filter(|(_, fold)| {
+                !fold.open
+                    && !self.sidebar_reveal_motions.contains(&fold.motion_key)
+                    && !self
+                        .sidebar_disclosure_motion
+                        .get(&fold.motion_key)
+                        .is_some_and(|motion| motion.animating())
+            })
+            .map(|(lead, _)| lead.as_str())
             .collect();
         let pinned_order = frozen_pinned
             .as_ref()
@@ -6423,6 +6645,19 @@ impl Shell {
                     slim,
                     self.settings.sidebar_show_project_label && !project_group,
                 );
+                if lead_of
+                    .get(&row.chat.id)
+                    .is_some_and(|lead| folded_leads.contains(lead.as_str()))
+                {
+                    slot += 1;
+                    rendered_rows.push((
+                        format!("c:{}", row.chat.id),
+                        height,
+                        div().into_any_element(),
+                    ));
+                    continue;
+                }
+                let lead = lead_folds.get(&row.chat.id).cloned();
                 let ActiveChatRow {
                     status,
                     chat,
@@ -6517,6 +6752,7 @@ impl Shell {
                         project_group,
                         slim,
                         nested,
+                        lead,
                         None,
                         theme,
                         cx,
@@ -6620,6 +6856,13 @@ impl Shell {
             if let Some(pair) = &split_card {
                 self.join_split_rows(&mut rendered_rows, pair, theme, cx);
             }
+            let session_count = rendered_rows.len();
+            self.fold_step_threads(
+                &mut rendered_rows,
+                &lead_folds,
+                &lead_of,
+                split_card.as_ref(),
+            );
 
             let Some((key, label)) = group else {
                 rendered.extend(rendered_rows);
@@ -6658,13 +6901,7 @@ impl Shell {
             let more_height = sidebar_row_height(self.settings.sidebar_compact, true, true);
             let hidden = if slim {
                 let shown = self.sidebar_settled_shown.max(SHELF_INITIAL_ROWS);
-                let mut cut = shown.min(row_count);
-                while rendered_rows
-                    .get(cut)
-                    .is_some_and(|(key, _, _)| nested_keys.contains(key))
-                {
-                    cut += 1;
-                }
+                let cut = shown.min(row_count);
                 let mut tail = rendered_rows.split_off(cut);
                 let pulled = [
                     selected.as_deref(),
@@ -6796,7 +7033,7 @@ impl Shell {
                     theme,
                     group_icon,
                     visible_label.clone(),
-                    collapsed.then_some(row_count),
+                    collapsed.then_some(session_count),
                     new_chat_button,
                     chevron,
                 )
@@ -7154,6 +7391,7 @@ impl Shell {
                         false,
                         false,
                         false,
+                        None,
                         None,
                         theme,
                         cx,
@@ -8925,7 +9163,7 @@ mod tests {
 
     use super::{
         CHATS_GROUP_KEY, ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
-        grouped_visible_order, inbox_rank, inbox_settled_at, promote_group,
+        grouped_visible_order, inbox_rank, inbox_settled_at, lead_rollup, promote_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -9308,8 +9546,17 @@ mod tests {
                     ];
                 });
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                assert_eq!(keys(shell, cx), ["c:b1", "c:a2", "c:a1"]);
+                assert_eq!(keys(shell, cx), ["c:b1", "c:a2"]);
                 assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
+                shell.toggle_sidebar_lead("a2", cx);
+                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2"]);
+                assert_eq!(keys(shell, cx), ["c:b1", "c:a2"]);
+                assert!(shell.reveal_sidebar_chat("a1", cx));
+                assert!(!shell.sidebar_lead_collapsed("a2"));
+                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
+                shell.toggle_sidebar_lead("a2", cx);
+                shell.reveal_sidebar_child("a1", cx);
+                assert!(!shell.sidebar_lead_collapsed("a2"));
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 assert_eq!(keys(shell, cx), ["g:project:b", "g:project:a"]);
                 assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
@@ -9343,6 +9590,36 @@ mod tests {
                 assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn lead_rollup_names_the_most_urgent_live_state() {
+        use ChatIndicator::{AwaitingInput, Completed, Errored, Idle, Working};
+        assert_eq!(
+            lead_rollup(&[
+                (Completed, false),
+                (Working, false),
+                (Idle, false),
+                (Idle, false)
+            ]),
+            ("4 · 1 running".to_owned(), false)
+        );
+        assert_eq!(
+            lead_rollup(&[(Working, false), (Errored, false), (Idle, true)]),
+            ("3 · 1 asking".to_owned(), true)
+        );
+        assert_eq!(
+            lead_rollup(&[(Working, false), (AwaitingInput, false)]),
+            ("2 · 1 asking".to_owned(), true)
+        );
+        assert_eq!(
+            lead_rollup(&[(Working, false), (Errored, false)]),
+            ("2 · 1 failed".to_owned(), false)
+        );
+        assert_eq!(
+            lead_rollup(&[(Completed, false), (Idle, false)]),
+            ("2".to_owned(), false)
+        );
     }
 
     #[test]
