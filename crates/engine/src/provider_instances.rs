@@ -138,7 +138,19 @@ impl ProviderInstancesStore {
                     )));
                 }
                 Some(existing) => *existing = instance,
-                None => instances.push(instance),
+                // The id names directories, and a case-insensitive filesystem would share them.
+                None => match instances
+                    .iter()
+                    .find(|existing| existing.id.eq_ignore_ascii_case(&instance.id))
+                {
+                    Some(existing) => {
+                        return Err(EngineError::Other(format!(
+                            "Provider instance ID '{}' is taken by '{}'",
+                            instance.id, existing.id
+                        )));
+                    }
+                    None => instances.push(instance),
+                },
             }
             Ok(())
         })
@@ -775,6 +787,7 @@ done
                 .upsert(instance("work", HarnessId::ClaudeCode))
                 .is_err()
         );
+        assert!(store.upsert(instance("Work", HarnessId::Codex)).is_err());
         assert_eq!(ids(&store.snapshot()), ["work"]);
     }
 }
