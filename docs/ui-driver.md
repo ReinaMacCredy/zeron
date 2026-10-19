@@ -88,8 +88,12 @@ The wire format is newline-delimited JSON over the socket: request
 `{"id":1,"action":"state","window"?:<id>,...}`, reply `{"id":1,"ok":<value>}` or
 `{"id":1,"error":"<msg>"}`. The client sends one request per connection and waits for the
 longest the request can take plus 10 s, and at least 30 s. That estimate adds the largest of
-`timeoutMs`, `ms` and `quietMs` (at most 60000), `holdMs`, 100 ms per drag step or typed
-character, and the same for a nested `during`.
+`timeoutMs`, `ms` and `quietMs` (at most 60000), `holdMs` (at most 60000), 100 ms per click,
+drag step, keystroke or typed character, and the same for a nested `during`. A drive takes at
+most 600 clicks (`count`), drag `steps`, keystrokes or typed characters, and `holdMs` up to
+60000; the app refuses more. Closing the connection, including shutting down its write side,
+stops a drive at its next step and releases a held drag button. A drive waits up to 5 s for
+another drive in the same app to finish, then fails with `another drive is still running`.
 
 ## Launching a Dev bundle to drive
 
@@ -160,7 +164,7 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 | `audit` | none | `{counts{nodes,interactive,tabStops,unlabeledInteractive},issues[{ref,rule,role,label?,bounds?,view?,source?}]}` |
 
 `route.kind` is one of `newChat`, `chat`, `pullRequests`, `usage`, `inbox`, `settings` (with
-`section`, such as `"General"`), `terminal`, `tasks`, `taskCenter`, `docs`.
+`section`, such as `"General"`), `terminal`, `tasks`, `taskCenter`, `supervisor`, `docs`.
 
 ```sh
 zui state
@@ -188,7 +192,7 @@ zui audit
 | `drag` | `from`, `to` (each `[x,y]`, `{x,y}`, `{ref}` or `{select,nth}`), `steps` (12), `holdMs` (0), `modifiers` | `{frame}` |
 | `scroll` | target, `dx`, `dy` (pixels, 0), `trackpad` (false) | `{frame}` |
 | `key` | `keys`: an array of strokes, or one string of space-separated strokes | `{frame,handled[bool per stroke]}` |
-| `type` | `text`, optional target | `{frame}` |
+| `type` | `text`, optional target | `{frame,unhandled?}`: `unhandled` counts characters no handler took, such as with nothing focused |
 | `press` | `ref` or `select`+`nth`, `do` (`click`), `value` (for `setValue`) | `{frame,ref}` |
 | `action` | `name` (gpui action), `args` | `{frame}` |
 | `set` | `theme` (`light`, `dark`, `system`), `size` (`{w,h}` or `[w,h]`), `motionScale` | `{frame,size,motionScale,theme}` |
@@ -585,7 +589,7 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `no element matches ...; near:` | Read the near list or `tree` with `query`; the element may lack a node. |
 | `... is outside the WxH window; scroll it into view first` | Scroll its container (`scroll` with `select` on the scroll area), then retry. |
 | `timed out after N ms; last seen: ...` / `not idle after ...` | The UI never reached the state, or an animation or spinner keeps drawing. Read the last-seen part, raise `timeoutMs`, or wait on an element instead of `idle`. |
-| `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. |
+| `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. The timed-out drive stops when the app sees the connection close, so a retry does not repeat it. |
 | `` `timeoutMs` must be at most 60000 ms `` | Waits are capped at 60 s. Wait on an element or for `idle` in steps instead of one long wait. |
 | `` `text` must not be empty `` | A `text` or `gone` wait (or a scenario `text` assert) got `""`, which every node contains. Pass the text to wait for. |
 | `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The chat is at Ask or Auto, where Zeron declines Codex's approval request. Drive from a chat at Full. |

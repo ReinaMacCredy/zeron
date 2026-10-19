@@ -16,12 +16,14 @@ use gpui::{AnyWindowHandle, App, AsyncApp};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use zeron_proto::ui_driver::{DRIVE_ACTIONS as DRIVE, MAX_WAIT_MS, OBSERVE_ACTIONS as OBSERVE};
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+type Cancel = Arc<AtomicBool>;
 
 #[cfg(debug_assertions)]
 use input::{Drive, run as drive};
@@ -38,7 +40,7 @@ impl<'de> Deserialize<'de> for Drive {
 }
 
 #[cfg(not(debug_assertions))]
-async fn drive(_: Option<u64>, drive: Drive, _: &mut AsyncApp) -> Result<Value, String> {
+async fn drive(_: Option<u64>, drive: Drive, _: Cancel, _: &mut AsyncApp) -> Result<Value, String> {
     match drive {}
 }
 
@@ -237,18 +239,18 @@ impl Until {
     }
 }
 
-async fn handle(raw: Value, cx: &mut AsyncApp) -> Value {
+async fn handle(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Value {
     let id = raw.get("id").cloned().unwrap_or(Value::Null);
-    match run(raw, cx).await {
+    match run(raw, cancel, cx).await {
         Ok(ok) => json!({ "id": id, "ok": ok }),
         Err(error) => json!({ "id": id, "error": error }),
     }
 }
 
-async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
+async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, String> {
     let Request { window, action } = parse(raw)?;
     let observe = match action {
-        Action::Drive(action) => return drive(window, action, cx).await,
+        Action::Drive(action) => return drive(window, action, cancel, cx).await,
         Action::Observe(observe) => observe,
     };
     match observe {
@@ -276,8 +278,8 @@ async fn run(raw: Value, cx: &mut AsyncApp) -> Result<Value, String> {
             Ok(reply)
         }
         Observe::Wait(until) => wait(window, until, cx).await,
-        Observe::Frames(request) => frames::frames(window, request, cx).await,
-        Observe::Track(request) => frames::track(window, request, cx).await,
+        Observe::Frames(request) => frames::frames(window, request, cancel, cx).await,
+        Observe::Track(request) => frames::track(window, request, cancel, cx).await,
     }
 }
 

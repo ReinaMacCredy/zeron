@@ -5,8 +5,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{
-    DRAG_STEPS, DRIVE_ACTIONS, MAX_WAIT_MS, OBSERVE_ACTIONS, STEP_CAP_MS, UiDriverBuild,
-    UiDriverDescriptor, descriptor_pid, run_dir, socket_path,
+    DRAG_STEPS, DRIVE_ACTIONS, MAX_DRIVE_STEPS, MAX_WAIT_MS, OBSERVE_ACTIONS, STEP_CAP_MS,
+    UiDriverBuild, UiDriverDescriptor, descriptor_pid, run_dir, socket_path,
 };
 
 pub const TOOL: &str = "ui_driver";
@@ -386,18 +386,29 @@ fn work_ms(request: &Map<String, Value>) -> u64 {
         .min(MAX_WAIT_MS);
     let steps = match request.get("action").and_then(Value::as_str) {
         Some("drag") => number("steps").unwrap_or(u64::from(DRAG_STEPS)).max(1),
+        Some("click") => number("count").unwrap_or(1).max(1),
         Some("type") => request
             .get("text")
             .and_then(Value::as_str)
             .map_or(0, |text| text.chars().count() as u64),
+        Some("key") => match request.get("keys") {
+            Some(Value::String(keys)) => keys.split_whitespace().count() as u64,
+            Some(Value::Array(keys)) => keys
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|keys| keys.split_whitespace().count() as u64)
+                .sum(),
+            _ => 0,
+        },
         _ => 0,
     };
     let during = match request.get("during") {
         Some(Value::Object(during)) => work_ms(during),
         _ => 0,
     };
-    wait.saturating_add(number("holdMs").unwrap_or(0))
-        .saturating_add(steps.saturating_mul(STEP_CAP_MS))
+    let hold = number("holdMs").unwrap_or(0).min(MAX_WAIT_MS);
+    wait.saturating_add(hold)
+        .saturating_add(steps.min(MAX_DRIVE_STEPS).saturating_mul(STEP_CAP_MS))
         .saturating_add(during)
 }
 
@@ -582,6 +593,23 @@ mod tests {
         assert_eq!(
             timeout(json!({ "action": "type", "text": text })),
             40_000 + 10_000
+        );
+        assert_eq!(
+            timeout(json!({ "action": "click", "x": 1, "y": 2, "count": 400 })),
+            40_000 + 10_000
+        );
+        let keys = vec!["down"; 350];
+        assert_eq!(
+            timeout(json!({ "action": "key", "keys": keys })),
+            35_000 + 10_000
+        );
+        assert_eq!(
+            timeout(json!({ "action": "key", "keys": "a ".repeat(320) })),
+            32_000 + 10_000
+        );
+        assert_eq!(
+            timeout(json!({ "action": "drag", "holdMs": u64::MAX, "steps": u64::MAX })),
+            MAX_WAIT_MS + MAX_DRIVE_STEPS * STEP_CAP_MS + 10_000
         );
         assert_eq!(
             timeout(

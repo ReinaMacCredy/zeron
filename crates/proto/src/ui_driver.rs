@@ -14,6 +14,8 @@ pub const MAX_WAIT_MS: u64 = 60_000;
 
 pub const STEP_CAP_MS: u64 = 100;
 
+pub const MAX_DRIVE_STEPS: u64 = MAX_WAIT_MS / STEP_CAP_MS;
+
 pub const DRAG_STEPS: u32 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
