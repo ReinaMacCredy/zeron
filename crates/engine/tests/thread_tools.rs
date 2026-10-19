@@ -3290,7 +3290,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
             "- Step \"Tag the release\" (taskStepId {}) is removed.",
             added.id
         ),
-        "Last reply from the lead: \"noted\"".to_string(),
+        "Last reply from the lead:\n<agent-response>\nnoted\n</agent-response>".to_string(),
     ] {
         assert!(first.contains(&line), "{line} in {first}");
     }
