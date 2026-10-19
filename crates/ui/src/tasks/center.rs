@@ -2620,25 +2620,23 @@ impl TaskCenter {
         } else {
             top + height + 1.0
         };
-        Some(
-            div()
-                .debug_selector(|| "task-center-drop-line".into())
-                .absolute()
-                .left(px(6.0))
-                .right(px(6.0))
-                .top(px(y - drag.origin))
-                .h(px(2.0))
-                .rounded(px(1.0))
-                .bg(theme.accent)
-                .shadow(vec![gpui::BoxShadow {
-                    color: theme.accent.opacity(0.25),
-                    offset: gpui::point(px(0.0), px(0.0)),
-                    blur_radius: px(0.0),
-                    spread_radius: px(3.0),
-                    inset: false,
-                }])
-                .into_any_element(),
-        )
+        let line = div()
+            .debug_selector(|| "task-center-drop-line".into())
+            .absolute()
+            .left(px(6.0))
+            .right(px(6.0))
+            .top(px(y - drag.origin))
+            .h(px(2.0))
+            .rounded(px(1.0))
+            .bg(theme.accent)
+            .shadow(vec![gpui::BoxShadow {
+                color: theme.accent.opacity(0.25),
+                offset: gpui::point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(3.0),
+                inset: false,
+            }]);
+        Some(gpui::deferred(line).priority(1).into_any_element())
     }
 
     fn row_offset(&self, ix: usize, step_id: &str, now: Instant) -> (f32, bool) {
