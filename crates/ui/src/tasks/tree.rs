@@ -121,8 +121,10 @@ struct Node {
     draw: Tween,
     leave: Option<Tween>,
     fade: Option<Tween>,
-    y: Option<f32>,
+    at: Option<(f32, f32)>,
+    extra: (f32, f32),
     glide: Tween,
+    glide_from: (f32, f32),
     from: Status,
     status: Status,
     tone: Tween,
@@ -140,8 +142,10 @@ impl Node {
             draw: rise(DRAW.with_delay(delay_ms.saturating_sub(DRAW_LEAD_MS))),
             leave: None,
             fade: None,
-            y: None,
+            at: None,
             glide: Tween::at(0.0, now),
+            glide_from: (0.0, 0.0),
+            extra: (0.0, 0.0),
             from: status,
             status,
             tone: Tween::at(1.0, now),
@@ -203,9 +207,9 @@ impl TreeMotion {
                         fresh += 1;
                         base + (fresh - 1) * STAGGER_MS
                     };
-                    let y = self.nodes.get(node.id).and_then(|old| old.y);
+                    let at = self.nodes.get(node.id).and_then(|old| old.at);
                     let mut entering = Node::entering(delay, node.status, reduced, now);
-                    entering.y = y;
+                    entering.at = at;
                     self.nodes.insert(node.id.to_string(), entering);
                 }
             }
@@ -278,19 +282,41 @@ impl TreeMotion {
         }
     }
 
-    pub fn place(&mut self, id: &str, y: f32, reduced: bool, now: Instant) -> f32 {
+    // FLIP: a moved node, or one whose drag offset was let go, glides from where it was drawn.
+    pub fn place(
+        &mut self,
+        id: &str,
+        at: (f32, f32),
+        extra: (f32, f32),
+        reduced: bool,
+        now: Instant,
+    ) -> (f32, f32) {
         let Some(node) = self.nodes.get_mut(id) else {
-            return 0.0;
+            return (0.0, 0.0);
         };
-        if let Some(previous) = node.y
-            && (previous - y).abs() > 0.5
+        let glide = |node: &Node| {
+            let t = node.glide.value_at(now);
+            (node.glide_from.0 * t, node.glide_from.1 * t)
+        };
+        let moved = node.at.is_some_and(|previous| {
+            (previous.0 - at.0).abs() > 0.5 || (previous.1 - at.1).abs() > 0.5
+        });
+        let dropped = node.extra != (0.0, 0.0) && extra == (0.0, 0.0);
+        if let Some(previous) = node.at
+            && (moved || dropped)
             && !reduced
         {
-            node.glide = Tween::at(node.glide.value_at(now) + previous - y, now);
+            let (gx, gy) = glide(node);
+            node.glide_from = (
+                previous.0 + gx + node.extra.0 - at.0 - extra.0,
+                previous.1 + gy + node.extra.1 - at.1 - extra.1,
+            );
+            node.glide = Tween::at(1.0, now);
             node.glide.retarget(0.0, GLIDE, false, now);
         }
-        node.y = Some(y);
-        node.glide.value_at(now)
+        node.at = Some(at);
+        node.extra = extra;
+        glide(node)
     }
 
     pub fn tint(&self, id: &str, now: Instant, color: impl Fn(Status) -> Hsla) -> Hsla {

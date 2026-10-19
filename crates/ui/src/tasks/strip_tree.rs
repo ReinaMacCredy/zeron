@@ -273,7 +273,9 @@ impl Render for StripTree {
             }
             let layout = k as f32 * (ROW + GAP);
             k += 1;
-            let glide = self.motion.place(&row.id, layout, reduced, now);
+            let (_, glide) = self
+                .motion
+                .place(&row.id, (0.0, layout), (0.0, 0.0), reduced, now);
             let frame = self.motion.frame(&row.id, now);
             let left = PAD_X + row.depth as f32 * INDENT;
             placed.push(Some((left, layout + glide + frame.y, frame)));
