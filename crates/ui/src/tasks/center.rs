@@ -215,6 +215,27 @@ fn move_range(slots: &[Slot], from: usize) -> Option<(usize, usize)> {
     }
 }
 
+enum Place {
+    Up,
+    Down,
+    Beside { anchor: String, after: bool },
+}
+
+fn landing(ids: &[&str], from: usize, place: &Place) -> Option<usize> {
+    match place {
+        Place::Up => from.checked_sub(1),
+        Place::Down => Some(from + 1).filter(|to| *to < ids.len()),
+        Place::Beside { anchor, after } => {
+            let at = ids
+                .iter()
+                .enumerate()
+                .filter(|(ix, _)| *ix != from)
+                .position(|(_, id)| id == anchor)?;
+            Some(at + usize::from(*after))
+        }
+    }
+}
+
 fn drop_index(rows: &[(f32, f32)], from: usize, (lo, hi): (usize, usize), dy: f32) -> usize {
     let (top, height) = rows[from];
     let mid = top + height / 2.0 + dy;
@@ -267,6 +288,7 @@ impl Render for StepDragGhost {
 
 struct StepDrag {
     id: String,
+    ids: Vec<String>,
     from: usize,
     range: (usize, usize),
     rows: Vec<(f32, f32)>,
@@ -287,7 +309,6 @@ enum Outcome {
 #[derive(Clone)]
 struct StepActions {
     step_id: String,
-    index: usize,
     edit: bool,
     thread: Option<String>,
     up: bool,
@@ -758,12 +779,19 @@ impl TaskCenter {
             .collect()
     }
 
-    fn move_step(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    fn move_step(&mut self, step_id: &str, place: Place, cx: &mut Context<Self>) {
         let Some((task, plan)) = self.task_and_plan(cx) else {
             return;
         };
         let shown = self.shown(&task, &plan, cx);
+        let ids: Vec<&str> = shown.iter().map(|(row, ..)| row.step.id.as_str()).collect();
         let slots = Self::slots(&shown);
+        let Some(from) = ids.iter().position(|id| *id == step_id) else {
+            return;
+        };
+        let Some(to) = landing(&ids, from, &place) else {
+            return;
+        };
         let Some((lo, hi)) = move_range(&slots, from) else {
             return;
         };
@@ -803,6 +831,7 @@ impl TaskCenter {
             .collect::<Option<Vec<_>>>()?;
         Some(StepDrag {
             id: step_id.to_string(),
+            ids: shown.iter().map(|(row, ..)| row.step.id.clone()).collect(),
             from,
             range,
             rows,
@@ -859,7 +888,13 @@ impl TaskCenter {
             std::cmp::Ordering::Greater => over_top + over_height - height,
             std::cmp::Ordering::Equal => top,
         };
-        self.move_step(drag.from, drag.over, cx);
+        if drag.over != drag.from {
+            let place = Place::Beside {
+                anchor: drag.ids[drag.over].clone(),
+                after: drag.over > drag.from,
+            };
+            self.move_step(&drag.id, place, cx);
+        }
         self.settle(drag.id, top + drag.dy - slot, cx);
     }
 
@@ -903,8 +938,8 @@ impl TaskCenter {
                     cx.emit(TaskCenterEvent::OpenChat(chat));
                 }
             }
-            MenuAction::Up => self.move_step(actions.index, actions.index.saturating_sub(1), cx),
-            MenuAction::Down => self.move_step(actions.index, actions.index + 1, cx),
+            MenuAction::Up => self.move_step(&id, Place::Up, cx),
+            MenuAction::Down => self.move_step(&id, Place::Down, cx),
             MenuAction::Outcome => match actions.outcome {
                 Outcome::Skip => self.set_outcome(&id, Some(StepOutcome::Skipped), cx),
                 Outcome::Reopen => self.set_outcome(&id, None, cx),
@@ -2131,7 +2166,6 @@ impl TaskCenter {
         });
         let actions = StepActions {
             step_id: step_id.clone(),
-            index,
             edit: editable && tag != Some(Tag::Removed),
             thread: thread.and(row.step.chat_id.clone()),
             up: editable
@@ -2641,7 +2675,7 @@ impl TaskCenter {
 
     fn row_offset(&self, ix: usize, step_id: &str, now: Instant) -> (f32, bool) {
         if let Some(drag) = &self.drag {
-            if ix == drag.from {
+            if step_id == drag.id {
                 return (drag.dy, true);
             }
             let shift = drag
@@ -2876,6 +2910,27 @@ mod tests {
             0,
             "a short drag stays above the floor"
         );
+    }
+
+    #[test]
+    fn a_move_lands_by_id_when_the_list_changed_under_it() {
+        let place = Place::Beside {
+            anchor: "b".into(),
+            after: false,
+        };
+        assert_eq!(landing(&["a", "b", "d", "c"], 3, &place), Some(1));
+        assert_eq!(
+            landing(&["a", "b", "c", "d"], 2, &place),
+            Some(1),
+            "a draft order dropped mid-drag still moves c before b"
+        );
+        let gone = Place::Beside {
+            anchor: "x".into(),
+            after: true,
+        };
+        assert_eq!(landing(&["a", "b"], 1, &gone), None);
+        assert_eq!(landing(&["a", "b"], 0, &Place::Up), None);
+        assert_eq!(landing(&["a", "b"], 1, &Place::Down), None);
     }
 
     #[test]
