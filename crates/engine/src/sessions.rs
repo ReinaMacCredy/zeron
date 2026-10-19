@@ -1433,6 +1433,7 @@ impl SessionsEngine {
             }
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
+            let mut owed = Owed::default();
             let same_runtime = route.is_some();
             let reconfigure = route == Some(true);
             let accepted = if steerable && same_runtime {
@@ -1448,10 +1449,16 @@ impl SessionsEngine {
                     // must see the canonical selection before it decodes the
                     // provider command.
                     prompt: {
-                        let wrapped = self
-                            .inner
-                            .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer)
-                            .map_or_else(|| delivered.to_owned(), |wrapped| wrapped.prompt);
+                        let (wrapped, took) = self.inner.harness_prompt(
+                            chat_id,
+                            harness_id,
+                            delivered,
+                            &user_id,
+                            turn_computer,
+                        );
+                        owed = took;
+                        let wrapped =
+                            wrapped.map_or_else(|| delivered.to_owned(), |wrapped| wrapped.prompt);
                         if harness_id == HarnessId::Opencode {
                             wrapped
                         } else {
@@ -1549,6 +1556,7 @@ impl SessionsEngine {
             // Mailbox closed (runtime mid-teardown / non-steering harness) or
             // the routed run died with the message reclaimed, or the launch
             // configuration changed: replace the runtime.
+            self.inner.restore_owed(chat_id, owed);
             self.terminate(chat_id).await?;
         }
 
@@ -1831,15 +1839,16 @@ impl SessionsEngine {
             request.attachments = Vec::new();
             Box::new(request)
         });
+        let (wrapped, owed) =
+            self.inner
+                .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer);
         let message = SteerMessage {
             // Held-queue release and queued sends reach the harness through
             // here without ever entering `dispatch`, so a sidechat's wrap has
             // to happen on this path too.
             prompt: {
-                let wrapped = self
-                    .inner
-                    .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer)
-                    .map_or_else(|| delivered.to_string(), |wrapped| wrapped.prompt);
+                let wrapped =
+                    wrapped.map_or_else(|| delivered.to_string(), |wrapped| wrapped.prompt);
                 if harness_id == HarnessId::Opencode {
                     wrapped
                 } else {
@@ -1853,6 +1862,7 @@ impl SessionsEngine {
         // Saturation is backpressure, not a dead runtime. Waiting for room
         // preserves the live process and every accepted message in a burst.
         let Ok(permit) = steer_tx.reserve().await else {
+            self.inner.restore_owed(chat_id, owed);
             return Ok(SteerOutcome::NotSteerable);
         };
         let accepted = self.inner.registry.while_update_clear(harness_id, || {
@@ -1873,6 +1883,7 @@ impl SessionsEngine {
             permit.send(message);
         });
         if accepted.is_none() {
+            self.inner.restore_owed(chat_id, owed);
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
@@ -1903,6 +1914,7 @@ impl SessionsEngine {
             ledger.len() != before
         };
         if reclaimed {
+            self.inner.restore_owed(chat_id, owed);
             return Ok(SteerOutcome::NotSteerable);
         }
         self.inner.note_message(chat_id, prompt);
@@ -3782,6 +3794,13 @@ struct HarnessPrompt {
     handoff: Option<String>,
 }
 
+/// What a prompt took from the chat's owed state: put back when the prompt never reaches the agent.
+#[derive(Default)]
+struct Owed {
+    carry: Option<String>,
+    note: Option<String>,
+}
+
 #[derive(Default)]
 struct SidechatContext {
     completed_assistant: Option<usize>,
@@ -3803,12 +3822,15 @@ impl Inner {
         typed: &str,
         user_entry_id: &str,
         computer: bool,
-    ) -> Option<HarnessPrompt> {
+    ) -> (Option<HarnessPrompt>, Owed) {
         let wrapped = self.wrapped_prompt(chat_id, typed, user_entry_id, computer);
-        let nudge = self.context_nudge(chat_id, harness_id, typed);
-        let carry = self.take_carry(chat_id, typed);
-        if nudge.is_none() && carry.is_none() {
-            return wrapped;
+        let owed = Owed {
+            carry: self.take_carry(chat_id, typed),
+            note: self.take_compact_note(chat_id, typed),
+        };
+        let nudge = self.context_nudge(chat_id, harness_id, typed, owed.note.as_deref());
+        if nudge.is_none() && owed.carry.is_none() {
+            return (wrapped, owed);
         }
         let mut wrapped = wrapped.unwrap_or_else(|| HarnessPrompt {
             prompt: typed.to_owned(),
@@ -3817,10 +3839,23 @@ impl Inner {
         if let Some(nudge) = nudge {
             wrapped.prompt = format!("{}\n\n{nudge}", wrapped.prompt);
         }
-        if let Some(carry) = carry {
+        if let Some(carry) = &owed.carry {
             wrapped.prompt = format!("{carry}\n\n{}", wrapped.prompt);
         }
-        Some(wrapped)
+        (Some(wrapped), owed)
+    }
+
+    fn restore_owed(&self, chat_id: &str, owed: Owed) {
+        if let Some(carry) = owed.carry {
+            lock(&self.carry_owed)
+                .entry(chat_id.to_string())
+                .or_insert(carry);
+        }
+        if let Some(note) = owed.note {
+            lock(&self.compact_owed)
+                .entry(chat_id.to_string())
+                .or_insert(note);
+        }
     }
 
     /// An idle start or a slash command leaves the carry for the next real prompt.
@@ -3924,7 +3959,7 @@ impl Inner {
     }
 
     /// Slash commands go out untouched: the note would become their arguments.
-    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+    fn take_compact_note(&self, chat_id: &str, typed: &str) -> Option<String> {
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
@@ -3934,7 +3969,19 @@ impl Inner {
         {
             self.drop_agent_compact(chat_id, &request);
         }
-        let owed = lock(&self.compact_owed).remove(chat_id);
+        lock(&self.compact_owed).remove(chat_id)
+    }
+
+    fn context_nudge(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        typed: &str,
+        owed: Option<&str>,
+    ) -> Option<String> {
+        if zeron_proto::invocation::leading_command(typed).is_some() {
+            return None;
+        }
         let reminder = if lock(&self.agent_compacted).remove(chat_id)
             || self.registry.compaction_settings().mode != CompactionMode::Threshold
         {
@@ -3949,7 +3996,7 @@ impl Inner {
             })
         };
         let findings = self.findings_reminder(chat_id);
-        let lines: Vec<&str> = [owed.as_deref(), findings.as_deref(), reminder.as_deref()]
+        let lines: Vec<&str> = [owed, findings.as_deref(), reminder.as_deref()]
             .into_iter()
             .flatten()
             .collect();
@@ -5626,13 +5673,16 @@ async fn drive_run(
     }
     // After the retry snapshot and the titler's capture, both of which want the
     // typed text: only what crosses into the harness carries the sidechat wrap.
-    let mut request = match inner.harness_prompt(
-        &chat_id,
-        harness_id,
-        &request.prompt,
-        &resume_state.user_message_id,
-        resume_state.turn_computer,
-    ) {
+    let mut request = match inner
+        .harness_prompt(
+            &chat_id,
+            harness_id,
+            &request.prompt,
+            &resume_state.user_message_id,
+            resume_state.turn_computer,
+        )
+        .0
+    {
         Some(HarnessPrompt { prompt, handoff }) => {
             if let Some(text) = handoff {
                 // Idempotent by part id: the startup-crash retry runs this
