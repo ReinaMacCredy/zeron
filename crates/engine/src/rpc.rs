@@ -3371,6 +3371,14 @@ impl RpcService for EngineRpc {
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // The seen-models record is per driver; an instance's models must not mark them seen.
+                if p.instance_id.is_some() {
+                    return RpcReply::value(&zeron_proto::ModelCatalog {
+                        models,
+                        new_ids: Vec::new(),
+                        announce_ids: Vec::new(),
+                    });
+                }
                 RpcReply::value(
                     &self
                         .registry
