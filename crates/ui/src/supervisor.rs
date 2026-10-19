@@ -1018,8 +1018,11 @@ impl SupervisorPage {
             .as_ref()
             .map(|snapshot| snapshot.needs_you.iter().map(row_key).collect())
             .unwrap_or_default();
-        self.replies.retain(|key, _| open.contains(key));
-        self.picks.retain(|key, _| open.contains(key));
+        let rows = &self.rows;
+        self.replies
+            .retain(|key, _| open.contains(key) || rows.contains_key(key));
+        self.picks
+            .retain(|key, _| open.contains(key) || rows.contains_key(key));
         self.schedule_effect_check(cx);
         self.try_ensure(cx);
         cx.notify();
