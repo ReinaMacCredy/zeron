@@ -3248,4 +3248,92 @@ mod tests {
             Some(fresh.at + chrono::Duration::minutes(10))
         );
     }
+
+    #[gpui::test]
+    fn a_fresh_install_starts_the_supervisor_from_the_harness_catalog_or_says_why_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use zeron_engine::registry::HarnessDescriptor;
+        use zeron_proto::HarnessId;
+
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        for (installed, listed) in [(true, true), (false, true), (true, false)] {
+            let listed = Arc::new(AtomicBool::new(listed));
+            let ensured = Arc::new(Mutex::new(Vec::new()));
+            let rpc = ScriptedRpc::new({
+                let listed = listed.clone();
+                let ensured = ensured.clone();
+                move |method, params| {
+                    let listed = listed.load(Ordering::SeqCst);
+                    let ensured = ensured.clone();
+                    async move {
+                        match method.as_str() {
+                            methods::LIST_AGENT_PROFILES => {
+                                zeron_rpc::RpcReply::value(&serde_json::json!({ "profiles": [] }))
+                            }
+                            methods::LIST_HARNESSES if listed => {
+                                zeron_rpc::RpcReply::value(&[HarnessDescriptor {
+                                    id: HarnessId::ClaudeCode,
+                                    name: "Claude Code".into(),
+                                    supports_steering: false,
+                                    steering_mode: zeron_proto::SteeringMode::StepBoundary,
+                                    reasoning_levels: Vec::new(),
+                                    installed,
+                                    can_install: false,
+                                    enabled: Some(true),
+                                }])
+                            }
+                            methods::ENSURE_SUPERVISOR => {
+                                ensured.lock().unwrap().push(params["config"].clone());
+                                zeron_rpc::RpcReply::value(
+                                    &serde_json::json!({ "chatId": "supervisor-1" }),
+                                )
+                            }
+                            other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                        }
+                    }
+                }
+            });
+            let page = cx.update(|cx| {
+                let state = fixture::state(cx, Some(rpc.client()));
+                state.update(cx, |state, _| {
+                    state.supervisor = Some(SupervisorSnapshot::default())
+                });
+                cx.new(|cx| SupervisorPage::new(state, cx))
+            });
+            let settled = |cx: &mut gpui::TestAppContext| {
+                page.read_with(cx, |page, _| {
+                    page.ensured.is_some() || matches!(page.ensure, Ensure::Failed(_))
+                })
+            };
+            page.update(cx, |page, cx| page.entered(cx));
+            rpc.settle(cx, &runtime, settled);
+            if !listed.load(Ordering::SeqCst) {
+                assert!(page.read_with(cx, |page, _| matches!(page.ensure, Ensure::Failed(_))));
+                listed.store(true, Ordering::SeqCst);
+                page.update(cx, |page, cx| page.retry_ensure(cx));
+                rpc.settle(cx, &runtime, settled);
+            }
+            let configs = ensured.lock().unwrap().clone();
+            if installed {
+                assert_eq!(
+                    page.read_with(cx, |page, _| page.ensured.clone())
+                        .as_deref(),
+                    Some("supervisor-1")
+                );
+                let config: ChatConfig = serde_json::from_value(configs[0].clone()).unwrap();
+                assert_eq!(config.harness, HarnessId::ClaudeCode);
+                assert_eq!(config.permission_mode, PermissionMode::Full);
+            } else {
+                assert!(configs.is_empty());
+                let ensure = page.read_with(cx, |page, _| page.ensure.clone());
+                assert!(matches!(ensure, Ensure::Failed(_)), "{ensure:?}");
+            }
+        }
+    }
 }
