@@ -190,6 +190,8 @@ pub enum InterventionKind {
     Respond,
     Rebrief,
     Start,
+    Pause,
+    Resume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +212,8 @@ pub enum InterventionChip {
     LeadRanTurn,
     PlanEdited { steps: Vec<usize> },
     StepCompletedTurn { steps: Vec<usize> },
+    StepPaused,
+    ResourceFreed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +257,123 @@ pub struct SupervisorSnapshot {
     pub questions: Vec<LeadQuestion>,
     #[serde(default)]
     pub interventions: Vec<SupervisorIntervention>,
+    #[serde(default)]
+    pub resources: Vec<SharedResource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ResourceKey {
+    Port(u16),
+    Slot(String),
+    Path(String),
+}
+
+impl ResourceKey {
+    pub fn parse(key: &str) -> Option<Self> {
+        let (kind, value) = key.trim().split_once(':')?;
+        let value = value.trim();
+        match kind.trim() {
+            "port" => value.parse().ok().filter(|port| *port > 0).map(Self::Port),
+            "slot" => (!value.is_empty()
+                && value.len() <= 64
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            .then(|| Self::Slot(value.to_string())),
+            "path" => {
+                if value.starts_with('/') || value.starts_with('~') {
+                    return None;
+                }
+                let parts: Vec<&str> = value
+                    .split('/')
+                    .filter(|part| !part.is_empty() && *part != ".")
+                    .collect();
+                (!parts.is_empty() && !parts.contains(&"..")).then(|| Self::Path(parts.join("/")))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Path(a), Self::Path(b)) => {
+                let inside = |inner: &str, outer: &str| {
+                    inner
+                        .strip_prefix(outer)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                };
+                inside(a, b) || inside(b, a)
+            }
+            _ => self == other,
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Port(port) => write!(f, "port:{port}"),
+            Self::Slot(name) => write!(f, "slot:{name}"),
+            Self::Path(path) => write!(f, "path:{path}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourceState {
+    Free,
+    Held,
+    Checking,
+    Clear,
+    Contended,
+    CheckFailed,
+    NotVerified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckTool {
+    Lsof,
+    Ps,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUse {
+    pub pid: u32,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceCheck {
+    pub at: DateTime<Utc>,
+    pub tool: CheckTool,
+    pub contended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<ResourceUse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedResource {
+    pub key: String,
+    #[serde(default)]
+    pub declared_by: Vec<String>,
+    #[serde(default)]
+    pub holders: Vec<String>,
+    pub state: ResourceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<ResourceCheck>,
 }
 
 impl SupervisorSnapshot {

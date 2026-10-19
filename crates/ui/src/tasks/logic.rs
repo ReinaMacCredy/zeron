@@ -136,6 +136,7 @@ mod tests {
             send_error: None,
             plan: String::new(),
             plan_doc: false,
+            resources: Vec::new(),
         }
     }
 

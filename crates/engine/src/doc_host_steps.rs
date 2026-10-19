@@ -75,6 +75,15 @@ impl DocHost {
                 "This step is already marked done or skipped; reopen it with the tasks tool first",
             ));
         }
+        if let Some(hold) = self.supervisor().and_then(|store| store.hold_of(step_id)) {
+            return Err(failure(
+                "step_paused",
+                format!(
+                    "The Supervisor paused this step because {} is contended ({}). Run it again only after the Supervisor's resume message.",
+                    hold.resource, hold.reason
+                ),
+            ));
+        }
         let status = |chat_id: &str| {
             self.sessions()
                 .and_then(|sessions| sessions.session_status(chat_id))

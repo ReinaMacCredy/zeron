@@ -15,6 +15,7 @@ use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, Use
 
 use crate::EngineError;
 use crate::project_actions::persist_json;
+use crate::supervisor_resources::Resources;
 
 const STORE_FILE: &str = "supervisor.json";
 const STORE_VERSION: u32 = 1;
@@ -23,6 +24,7 @@ const SNAPSHOT_WAKES: usize = 50;
 const KEPT_INTERVENTIONS: usize = 200;
 const SNAPSHOT_INTERVENTIONS: usize = 50;
 const KEPT_ANSWERED_ITEMS: usize = 200;
+const KEPT_HOLDS: usize = 200;
 /// Long enough for the run's coalesced doc commit to land the input or turn being refreshed for.
 const REFRESH_DELAY_MS: i64 = 500;
 const HOUR_MS: i64 = 60 * 60 * 1000;
@@ -111,6 +113,27 @@ pub(crate) struct InterventionRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PauseHold {
+    pub row_id: String,
+    pub step_id: String,
+    pub task_id: String,
+    pub resource: String,
+    pub reason: String,
+    pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pids: Vec<u32>,
+    #[serde(default)]
+    pub froze: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SupervisorFile {
     version: u32,
     #[serde(default)]
@@ -122,7 +145,7 @@ struct SupervisorFile {
     #[serde(default)]
     interventions: Vec<InterventionRecord>,
     #[serde(default)]
-    holds: Vec<serde_json::Value>,
+    holds: Vec<PauseHold>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -141,6 +164,7 @@ struct Router {
     held: Option<(String, Vec<SupervisorEvent>)>,
     projections: Projections,
     refresh_at: Option<i64>,
+    resources: Resources,
 }
 
 struct State {
@@ -196,6 +220,7 @@ impl State {
                     ..record.row.clone()
                 })
                 .collect(),
+            resources: self.router.resources.rows().to_vec(),
         }
     }
 
@@ -214,6 +239,7 @@ struct Inner {
     wake: Notify,
     snapshot: watch::Sender<SupervisorSnapshot>,
     ensuring: Mutex<()>,
+    checking: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Written only at a flush or a toggle: events arrive on every step turn end and input raise.
@@ -253,12 +279,84 @@ impl SupervisorStore {
                 wake: Notify::new(),
                 snapshot,
                 ensuring: Mutex::new(()),
+                checking: Arc::default(),
             }),
         })
     }
 
     pub(crate) fn ensuring(&self) -> MutexGuard<'_, ()> {
         lock(&self.inner.ensuring)
+    }
+
+    pub(crate) fn checking(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner.checking.clone()
+    }
+
+    pub(crate) fn resources<R>(&self, f: impl FnOnce(&mut Resources) -> R) -> R {
+        f(&mut lock(&self.inner.state).router.resources)
+    }
+
+    pub(crate) fn hold_of(&self, step_id: &str) -> Option<PauseHold> {
+        lock(&self.inner.state)
+            .file
+            .holds
+            .iter()
+            .find(|hold| hold.step_id == step_id && hold.resumed_at.is_none())
+            .cloned()
+    }
+
+    pub(crate) fn holds(&self) -> Vec<PauseHold> {
+        lock(&self.inner.state).file.holds.clone()
+    }
+
+    pub(crate) fn add_hold(&self, hold: PauseHold) -> Result<(), EngineError> {
+        self.write_holds(|holds| {
+            holds.push(hold);
+            let resumed = holds.iter().filter(|h| h.resumed_at.is_some()).count();
+            let mut excess = resumed.saturating_sub(KEPT_HOLDS);
+            holds.retain(|h| {
+                let drop = excess > 0 && h.resumed_at.is_some();
+                excess -= usize::from(drop);
+                !drop
+            });
+        })
+    }
+
+    pub(crate) fn drop_hold(&self, row_id: &str) -> Result<(), EngineError> {
+        self.write_holds(|holds| holds.retain(|hold| hold.row_id != row_id))
+    }
+
+    pub(crate) fn resume_hold(&self, row_id: &str) -> Result<(), EngineError> {
+        let now = Utc::now();
+        self.write_holds(|holds| {
+            for hold in holds.iter_mut().filter(|hold| hold.row_id == row_id) {
+                hold.resumed_at = Some(now);
+            }
+        })
+    }
+
+    pub(crate) fn mark_freed(&self, row_ids: &[String]) -> Result<(), EngineError> {
+        let now = Utc::now();
+        self.write_holds(|holds| {
+            for hold in holds
+                .iter_mut()
+                .filter(|hold| hold.freed_at.is_none() && row_ids.contains(&hold.row_id))
+            {
+                hold.freed_at = Some(now);
+            }
+        })
+    }
+
+    fn write_holds(&self, change: impl FnOnce(&mut Vec<PauseHold>)) -> Result<(), EngineError> {
+        {
+            let mut state = lock(&self.inner.state);
+            let mut file = state.file.clone();
+            change(&mut file.holds);
+            persist_json(&self.inner.path, &file)?;
+            state.file = file;
+        }
+        self.mark_stale();
+        Ok(())
     }
 
     pub(crate) fn watch(&self) -> watch::Receiver<SupervisorSnapshot> {
@@ -620,7 +718,7 @@ pub(crate) struct ThreadFacts {
 }
 
 impl ThreadFacts {
-    fn last_active(&self) -> Option<i64> {
+    pub fn last_active(&self) -> Option<i64> {
         self.last_message.max(self.last_live)
     }
 }
@@ -798,8 +896,16 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     } else {
         ""
     };
+    let resources = if cfg!(unix) {
+        format!(
+            "\n- pause a step that blocks a shared resource with the supervisor tool, action \"pause\" (stepId, resource, reason; it needs a verified contention), and \"resume\" it: {}\n- check the shared ports and CPU slots against the machine with the supervisor tool, action \"check\"",
+            on(settings.pause_steps)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
         on(settings.rebrief),
@@ -930,6 +1036,7 @@ pub(crate) fn chips(
     record: &InterventionRecord,
     plan: &[TaskStep],
     lead_target: Option<&[SessionMessageEntry]>,
+    hold: Option<(&PauseHold, bool)>,
 ) -> Vec<InterventionChip> {
     let mut chips = Vec::new();
     let Some(message_id) = record.row.message_id.as_deref() else {
@@ -975,6 +1082,14 @@ pub(crate) fn chips(
         .collect();
     if !completed.is_empty() {
         chips.push(InterventionChip::StepCompletedTurn { steps: completed });
+    }
+    if let Some((hold, thread_live)) = hold {
+        if hold.resumed_at.is_none() && !thread_live {
+            chips.push(InterventionChip::StepPaused);
+        }
+        if hold.freed_at.is_some() {
+            chips.push(InterventionChip::ResourceFreed);
+        }
     }
     chips
 }

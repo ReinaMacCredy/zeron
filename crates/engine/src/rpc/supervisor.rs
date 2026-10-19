@@ -1,13 +1,16 @@
 use super::*;
-use crate::supervisor::SupervisorStore;
+use crate::supervisor::{PauseHold, SupervisorStore};
+use crate::supervisor_resources::AFTER_PAUSE_MS;
 use zeron_proto::supervisor::{
-    CHAT_PREFIX, CHAT_TITLE, InterventionKind, ItemWhy, Raiser, SupervisorItem, SupervisorSettings,
-    is_supervisor_chat,
+    CHAT_PREFIX, CHAT_TITLE, InterventionKind, ItemWhy, Raiser, ResourceKey, SupervisorItem,
+    SupervisorSettings, is_supervisor_chat,
 };
 
 pub(super) const MESSAGE_OFF: &str = "Messaging leads and step threads is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 pub(super) const START_OFF: &str = "Starting missions is off in the Supervisor's Authority, and create_thread and delegate_task go with it; the person can turn it on on the Supervisor page.";
-pub(super) const NO_INTERRUPT: &str = "The Supervisor does not interrupt threads: stopping a step goes through supervisor pause, which this build does not have yet. Message the step's lead instead.";
+pub(super) const NO_INTERRUPT: &str = "The Supervisor does not interrupt threads: a step that blocks a shared resource is stopped with supervisor pause, which needs a verified contention. Otherwise message the step's lead.";
+const PAUSE_OFF: &str = "Pausing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
+const UNIX_ONLY: &str = "Shared resources are checked against the machine on macOS and Linux only";
 pub(super) const GOAL_OR_SPEND: &str = "A task's title, notes and thread are the person's: the Supervisor cannot change them, delete the task or reassign it. Raise it with the supervisor tool, action \"ask\".";
 const MAX_OPTIONS: usize = 3;
 
@@ -47,6 +50,24 @@ enum SupervisorAction {
         project_id: Option<String>,
         #[serde(default)]
         plan_doc: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    Pause {
+        step_id: String,
+        resource: String,
+        reason: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Resume {
+        step_id: String,
+        #[serde(default)]
+        resource: Option<String>,
+        reason: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Check {
+        #[serde(default)]
+        task_id: Option<String>,
     },
 }
 
@@ -125,6 +146,10 @@ impl EngineRpc {
                 let p: SupervisorActParams = parse_params(params)?;
                 let reply = self.supervisor_act(&p.from_chat_id, p.action).await?;
                 RpcReply::value(&reply)
+            }
+            methods::REQUEST_SUPERVISOR_CHECK => {
+                self.doc_host.request_resource_check();
+                RpcReply::value(&serde_json::json!({}))
             }
             _ => Err(RpcError::UnknownMethod(method.to_string())),
         }
@@ -284,7 +309,221 @@ impl EngineRpc {
                     .record_intervention(basis, message_id, None, &text);
                 Ok(serde_json::json!({ "taskId": task_id, "leadThreadId": lead }))
             }
+            SupervisorAction::Pause {
+                step_id,
+                resource,
+                reason,
+            } => self.pause_step(from, &step_id, &resource, &reason).await,
+            SupervisorAction::Resume {
+                step_id,
+                resource,
+                reason,
+            } => {
+                self.resume_step(from, &step_id, resource.as_deref(), &reason)
+                    .await
+            }
+            SupervisorAction::Check { task_id } => self.check_resources(task_id.as_deref()).await,
         }
+    }
+
+    fn pause_ready(&self, reason: &str, does: &str) -> Result<(), RpcError> {
+        if !cfg!(unix) {
+            return Err(refused(UNIX_ONLY));
+        }
+        if !self.registry.supervisor_settings().pause_steps {
+            return Err(refused(PAUSE_OFF));
+        }
+        if reason.trim().is_empty() {
+            return Err(refused(&format!(
+                "reason is required: the lead reads why its step {does}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn pause_step(
+        &self,
+        from: &str,
+        step_id: &str,
+        resource: &str,
+        reason: &str,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.pause_ready(reason, "stopped")?;
+        let key = ResourceKey::parse(resource).ok_or_else(|| {
+            refused("resource is port:<n>, slot:<name> or path:<path>, as the mission declared it")
+        })?;
+        let step = self.step_or_refuse(step_id)?;
+        if step.outcome.is_some() {
+            return Err(refused("This step is already marked done or skipped"));
+        }
+        let task = self.task_or_refuse(&step.task_id)?;
+        let lead = self.lead_of(&task)?;
+        let store = self.supervisor_store()?;
+        if store.hold_of(step_id).is_some() {
+            return Err(refused("This step is already paused"));
+        }
+        let contention = store
+            .resources(|resources| resources.open(&key).cloned())
+            .filter(|contention| contention.missions.contains(&task.id))
+            .ok_or_else(|| {
+                refused(&format!(
+                    "No verified contention on {key} involves this step's mission: a pause needs the machine to show one. Check with the supervisor tool, action \"check\"."
+                ))
+            })?;
+        let basis = self.doc_host.intervention_basis(
+            InterventionKind::Pause,
+            from,
+            Some(&lead),
+            Some(step_id),
+        );
+        let used = |own: bool| -> Vec<u32> {
+            contention
+                .check
+                .uses
+                .iter()
+                .filter(|used| !own || used.task_id.as_deref() == Some(task.id.as_str()))
+                .map(|used| used.pid)
+                .collect()
+        };
+        let pids = match used(true) {
+            own if own.is_empty() => used(false),
+            own => own,
+        };
+        let stopped = match step.chat_id.as_deref() {
+            Some(thread) => self.doc_host.stop_for_pause(thread).map_err(failed)?,
+            None => None,
+        };
+        let row_id = basis.id().to_string();
+        let reason = reason.trim();
+        store
+            .add_hold(PauseHold {
+                row_id: row_id.clone(),
+                step_id: step.id.clone(),
+                task_id: task.id.clone(),
+                resource: key.to_string(),
+                reason: reason.to_string(),
+                at: chrono::Utc::now(),
+                thread_id: step.chat_id.clone(),
+                pids,
+                froze: stopped == Some(true),
+                freed_at: None,
+                resumed_at: None,
+            })
+            .map_err(failed)?;
+        let thread = match (&step.chat_id, stopped) {
+            (Some(thread), Some(_)) => format!("Its thread {thread} was stopped."),
+            (Some(thread), None) => format!("Its thread {thread} was not running."),
+            (None, _) => "It has not started.".to_string(),
+        };
+        let text = format!(
+            "The Supervisor paused step \"{}\" (taskStepId {}) because {key} is contended with another mission.\n\nWhy: {reason}\n\n{thread} Do not run it again until the Supervisor resumes it: create_thread with this taskStepId is refused until then. Keep working on steps that do not need {key}.",
+            step.title, step.id
+        );
+        let message_id = match self
+            .send_to_task_thread(&task, &lead, Some(from), &text)
+            .await
+        {
+            Ok(id) => id,
+            Err(err) => {
+                store.drop_hold(&row_id).ok();
+                return Err(err);
+            }
+        };
+        self.doc_host
+            .record_intervention(basis, Some(message_id.clone()), None, reason);
+        let now = chrono::Utc::now().timestamp_millis();
+        store.resources(|resources| {
+            for after in AFTER_PAUSE_MS {
+                resources.schedule(now + after);
+            }
+        });
+        store.poke();
+        Ok(serde_json::json!({
+            "stepId": step.id, "leadThreadId": lead, "messageId": message_id, "stopped": stopped.is_some(),
+        }))
+    }
+
+    async fn resume_step(
+        &self,
+        from: &str,
+        step_id: &str,
+        resource: Option<&str>,
+        reason: &str,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.pause_ready(reason, "resumes")?;
+        let store = self.supervisor_store()?;
+        let hold = store
+            .hold_of(step_id)
+            .ok_or_else(|| refused("This step is not paused"))?;
+        if let Some(resource) = resource
+            && ResourceKey::parse(resource).map(|key| key.to_string())
+                != Some(hold.resource.clone())
+        {
+            return Err(refused(&format!(
+                "This step is paused for {}, not {resource}",
+                hold.resource
+            )));
+        }
+        let step = self.step_or_refuse(step_id)?;
+        let task = self.task_or_refuse(&step.task_id)?;
+        let lead = self.lead_of(&task)?;
+        let basis = self.doc_host.intervention_basis(
+            InterventionKind::Resume,
+            from,
+            Some(&lead),
+            Some(step_id),
+        );
+        store.resume_hold(&hold.row_id).map_err(failed)?;
+        if hold.froze
+            && let Some(thread) = &hold.thread_id
+        {
+            self.doc_host.thaw_after_pause(thread).await;
+        }
+        let reason = reason.trim();
+        let text = format!(
+            "The Supervisor resumed step \"{}\" (taskStepId {}), paused for {}.\n\nWhy: {reason}\n\nStart it again with create_thread and taskStepId {} when it is next to run.",
+            step.title, step.id, hold.resource, step.id
+        );
+        let message_id = self
+            .send_to_task_thread(&task, &lead, Some(from), &text)
+            .await?;
+        self.doc_host
+            .record_intervention(basis, Some(message_id.clone()), None, reason);
+        Ok(serde_json::json!({ "stepId": step.id, "leadThreadId": lead, "messageId": message_id }))
+    }
+
+    async fn check_resources(&self, task_id: Option<&str>) -> Result<serde_json::Value, RpcError> {
+        if !cfg!(unix) {
+            return Err(refused(UNIX_ONLY));
+        }
+        if let Some(task_id) = task_id {
+            self.task_or_refuse(task_id)?;
+        }
+        self.doc_host.check_resources_now().await;
+        let store = self.supervisor_store()?;
+        let (rows, checked) =
+            store.resources(|resources| (resources.rows().to_vec(), resources.checked()));
+        let mine = |id: &str| task_id.is_none_or(|task_id| task_id == id);
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.declared_by.iter().any(|id| mine(id)))
+            .collect();
+        let paused: Vec<serde_json::Value> = store
+            .holds()
+            .into_iter()
+            .filter(|hold| hold.resumed_at.is_none() && mine(&hold.task_id))
+            .map(|hold| {
+                serde_json::json!({
+                    "stepId": hold.step_id, "taskId": hold.task_id, "resource": hold.resource,
+                    "reason": hold.reason, "at": hold.at, "freed": hold.freed_at.is_some(),
+                })
+            })
+            .collect();
+        let mut reply = serde_json::json!({ "resources": rows, "paused": paused });
+        if !checked {
+            reply["note"] = "No two running missions share a declared resource, so the machine was not checked.".into();
+        }
+        Ok(reply)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -148,6 +148,7 @@ impl EngineRpc {
                 send_error: None,
                 plan: String::new(),
                 plan_doc: false,
+                resources: Vec::new(),
             })
             .map_err(failed)
             .map(drop)
@@ -389,10 +390,16 @@ impl EngineRpc {
         task_id: &str,
         steps: Vec<(String, String)>,
         overview: Option<String>,
+        resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
     ) -> Result<(), RpcError> {
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id, "writes its plan")?;
+        let resources = resources
+            .map(|keys| crate::supervisor_resources::checked_keys(&keys))
+            .transpose()
+            .map_err(|message| refused(&message))?
+            .filter(|keys| *keys != task.resources);
         let before = self.workspace.task_steps_of(task_id);
         let now = chrono::Utc::now();
         let steps: Vec<TaskStep> = steps
@@ -417,6 +424,7 @@ impl EngineRpc {
         let patch = TaskPatch {
             mode: (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated),
             plan: overview,
+            resources,
             ..Default::default()
         };
         if patch != TaskPatch::default() {
