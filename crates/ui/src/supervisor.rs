@@ -283,7 +283,7 @@ fn delivery_label(delivery: &WakeDelivery) -> String {
         WakeDelivery::Started => "Started a turn".into(),
         WakeDelivery::Steered => "Steered its turn".into(),
         WakeDelivery::HeldForTurnEnd => "Held for turn end".into(),
-        WakeDelivery::HeldByStop => "Held while stopped".into(),
+        WakeDelivery::HeldByStop => "Held by your Stop".into(),
         WakeDelivery::Failed { error } => format!("Failed: {error}"),
         WakeDelivery::Dropped => "Dropped".into(),
     }

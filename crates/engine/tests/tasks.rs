@@ -238,19 +238,19 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         )
     };
     let run = "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time.";
-    let tail = "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.\n{n}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
+    let tail = "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.\n{n}. When a decision changes the goal or costs money the person has not approved, or you cannot settle it from the plan, use the tasks tool action \"escalate\" and keep working on what does not depend on it.\n{m}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
     assert_eq!(
         prompts.lock().unwrap().as_slice(),
         [
             format!(
                 "{}2. Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.\n3. {run}\n4. Pick the harness and model for each step; orchestrator_capabilities lists them.\n5. {}",
                 header("t1"),
-                tail.replace("{n}", "6")
+                tail.replace("{n}", "6").replace("{m}", "7")
             ),
             format!(
                 "{}2. {run}\n3. Run every step on your own harness and model: do not pass harness or model to create_thread.\n4. {}",
                 header("t2"),
-                tail.replace("{n}", "5")
+                tail.replace("{n}", "5").replace("{m}", "6")
             ),
         ]
     );
@@ -374,4 +374,188 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         None,
         "a send that lands clears the old failure"
     );
+}
+
+async fn supervisor_snapshot(
+    rpc: &Arc<zeron_engine::EngineRpc>,
+    ready: impl Fn(&zeron_proto::supervisor::SupervisorSnapshot) -> bool,
+) -> zeron_proto::supervisor::SupervisorSnapshot {
+    let RpcReply::Stream(mut watch) = rpc
+        .handle(methods::WATCH_SUPERVISOR, json!({}))
+        .await
+        .unwrap()
+    else {
+        panic!("a snapshot stream")
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, watch.next())
+            .await
+            .expect("timed out waiting for the Supervisor snapshot")
+            .unwrap();
+        let snapshot = serde_json::from_value(item).unwrap();
+        if ready(&snapshot) {
+            return snapshot;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_lead_once() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Recording(prompts.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    let rpc = core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { rpc.handle(methods::MUTATE, params).await }
+    };
+    let count = |needle: &str| {
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|prompt| prompt.contains(needle))
+            .count()
+    };
+    let RpcReply::Value(ensured) = rpc
+        .handle(
+            methods::ENSURE_SUPERVISOR,
+            json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("a chat id")
+    };
+    let supervisor = ensured["chatId"].as_str().unwrap().to_string();
+    mutate(json!({ "op": "createTask", "taskId": "t1", "title": "Shop backend" }))
+        .await
+        .unwrap();
+    mutate(json!({ "op": "startTask", "taskId": "t1", "chatId": "lead-1", "orchestrate": true }))
+        .await
+        .unwrap();
+    wait_for(
+        || count("You lead this task (task id t1)") == 1,
+        "the lead's brief",
+    )
+    .await;
+    core.workspace
+        .create_chat_from("other", None, Some("dev-a"), None, None, None)
+        .unwrap();
+
+    let escalate = |from: Option<&str>| {
+        let mut params = json!({
+            "op": "escalateTask", "taskId": "t1", "title": "Pay for a Stripe test account?",
+            "why": "spend", "detail": "The checkout tests need a live key.",
+            "options": ["Pay $20", "Use the mock"],
+        });
+        if let Some(from) = from {
+            params["fromChatId"] = json!(from);
+        }
+        mutate(params)
+    };
+    for from in [None, Some("other"), Some(supervisor.as_str())] {
+        let Err(err) = escalate(from).await else {
+            panic!("{from:?} cannot escalate")
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("Only the task's lead thread escalates"),
+            "{err}"
+        );
+    }
+    let RpcReply::Value(raised) = escalate(Some("lead-1")).await.unwrap() else {
+        panic!("an item id")
+    };
+    let item_id = raised["itemId"].as_str().unwrap().to_string();
+    let snapshot = supervisor_snapshot(&rpc, |s| s.needs_you_count() > 0).await;
+    let [zeron_proto::supervisor::NeedsYouRow::Item(item)] = snapshot.needs_you.as_slice() else {
+        panic!("one item: {:?}", snapshot.needs_you)
+    };
+    assert_eq!(item.id, item_id);
+    assert_eq!(item.raised_by, zeron_proto::supervisor::Raiser::Lead);
+    assert_eq!(item.options, ["Pay $20", "Use the mock"]);
+    wait_for(|| count("Lead escalated") == 1, "the Supervisor's wake").await;
+    let wake = prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|prompt| prompt.contains("Lead escalated"))
+        .cloned()
+        .unwrap();
+    assert!(wake.starts_with("Supervisor wake 1 of 12"), "{wake}");
+    assert!(
+        wake.contains(&format!("itemId {item_id} · why: spend")),
+        "{wake}"
+    );
+    assert!(wake.contains("Options: Pay $20 | Use the mock"), "{wake}");
+
+    let answered = "The person answered Needs-you item";
+    mutate(json!({ "op": "resolveSupervisorItem", "itemId": item_id, "choice": "Use the mock" }))
+        .await
+        .unwrap();
+    wait_for(|| count(answered) == 1, "the lead's answer").await;
+    assert!(
+        mutate(json!({ "op": "resolveSupervisorItem", "itemId": item_id, "choice": "Pay $20" }))
+            .await
+            .is_err(),
+        "an item is answered once"
+    );
+
+    let RpcReply::Value(asked) = rpc
+        .handle(
+            methods::SUPERVISOR_ACT,
+            json!({
+                "fromChatId": supervisor, "action": "ask", "taskId": "t1",
+                "title": "Drop the Adyen step?", "why": "goal", "options": ["Drop it", "Keep it"],
+            }),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("an item id")
+    };
+    let asked = asked["itemId"].as_str().unwrap().to_string();
+    mutate(json!({ "op": "resolveSupervisorItem", "itemId": asked, "choice": "Keep it" }))
+        .await
+        .unwrap();
+    wait_for(
+        || count("The person answered your Needs-you item") == 1,
+        "the Supervisor's answer",
+    )
+    .await;
+    wait_for(|| count(answered) == 2, "the lead's second answer").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let to_lead: Vec<String> = prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|prompt| prompt.contains(answered))
+        .cloned()
+        .collect();
+    assert_eq!(
+        to_lead,
+        [
+            format!(
+                "{answered} {item_id} \"Pay for a Stripe test account?\", raised by the lead: Use the mock\n\nApply it to this mission (task id t1)."
+            ),
+            format!(
+                "{answered} {asked} \"Drop the Adyen step?\", raised by the Supervisor: Keep it\n\nApply it to this mission (task id t1)."
+            ),
+        ]
+    );
+    assert_eq!(count("The person answered your Needs-you item"), 1);
+    assert_eq!(
+        count("Supervisor wake"),
+        1,
+        "the Supervisor's own item wakes nobody"
+    );
+    let snapshot = supervisor_snapshot(&rpc, |s| s.needs_you_count() == 0).await;
+    assert!(snapshot.needs_you.is_empty());
+    core.shutdown().await;
 }

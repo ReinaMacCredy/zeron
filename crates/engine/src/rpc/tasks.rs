@@ -50,10 +50,15 @@ pub(super) struct Lead {
 #[serde(rename_all = "camelCase")]
 pub(super) struct PlanEdit {
     #[serde(default)]
-    step_id: Option<String>,
-    title: String,
+    pub step_id: Option<String>,
+    pub title: String,
     #[serde(default)]
-    notes: String,
+    pub notes: String,
+}
+
+pub(super) struct Rebrief<'a> {
+    pub supervisor: &'a str,
+    pub reason: &'a str,
 }
 
 fn lead_brief(task_id: &str, lead: Lead) -> String {
@@ -82,6 +87,9 @@ fn lead_brief(task_id: &str, lead: Lead) -> String {
     });
     lines.push(
         "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.",
+    );
+    lines.push(
+        "When a decision changes the goal or costs money the person has not approved, or you cannot settle it from the plan, use the tasks tool action \"escalate\" and keep working on what does not depend on it.",
     );
     lines.push(
         "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.",
@@ -159,7 +167,7 @@ impl EngineRpc {
         space_id: Option<String>,
         config: Option<ChatConfig>,
         lead: Option<Lead>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Option<String>, RpcError> {
         let first = self
             .starting_tasks
             .lock()
@@ -177,7 +185,7 @@ impl EngineRpc {
             .task(task_id)
             .ok_or_else(|| refused("Task no longer exists"))?;
         if task.chat_id.as_deref() == Some(chat_id) {
-            return Ok(());
+            return Ok(None);
         }
         if let Some(linked) = task.chat_id.as_deref()
             && self.workspace.chat(linked).map_err(failed)?.is_some()
@@ -236,7 +244,7 @@ impl EngineRpc {
             }
             self.delete_chat(chat_id).ok();
         }
-        started
+        started.map(Some)
     }
 
     /// Unlike `start_task`, a lead chat keeps its title and a busy turn is steered, not interrupted.
@@ -293,19 +301,19 @@ impl EngineRpc {
         Ok(())
     }
 
-    async fn send_to_task_thread(
+    pub(super) async fn send_to_task_thread(
         &self,
         task: &Task,
         chat_id: &str,
         from_chat_id: Option<&str>,
         text: &str,
-    ) -> Result<(), RpcError> {
+    ) -> Result<String, RpcError> {
         let sent = self
             .doc_host
             .queue_thread_message(chat_id, from_chat_id, text)
             .await;
         let send_error = match &sent {
-            Ok(_) if task.send_error.is_none() => return Ok(()),
+            Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
             Ok(_) => None,
             Err(error) => Some(error.to_string()),
         };
@@ -316,10 +324,10 @@ impl EngineRpc {
         self.workspace
             .update_task(&task.id, &patch)
             .map_err(failed)?;
-        sent.map(drop).map_err(failed)
+        sent.map_err(failed)
     }
 
-    fn lead_of(&self, task: &Task) -> Result<String, RpcError> {
+    pub(super) fn lead_of(&self, task: &Task) -> Result<String, RpcError> {
         let lead = task
             .chat_id
             .clone()
@@ -330,25 +338,50 @@ impl EngineRpc {
         }
     }
 
-    fn task_or_refuse(&self, task_id: &str) -> Result<Task, RpcError> {
+    pub(super) fn task_or_refuse(&self, task_id: &str) -> Result<Task, RpcError> {
         self.workspace
             .task(task_id)
             .ok_or_else(|| refused("Task no longer exists"))
     }
 
-    fn step_or_refuse(&self, step_id: &str) -> Result<TaskStep, RpcError> {
+    pub(super) fn step_or_refuse(&self, step_id: &str) -> Result<TaskStep, RpcError> {
         self.workspace
             .task_step(step_id)
             .ok_or_else(|| refused("Step no longer exists"))
     }
 
-    fn check_lead(task: &Task, from_chat_id: Option<&str>) -> Result<(), RpcError> {
+    fn check_lead(task: &Task, from_chat_id: Option<&str>, does: &str) -> Result<(), RpcError> {
         match from_chat_id {
             Some(from) if task.chat_id.as_deref() != Some(from) => {
-                Err(refused("Only the task's lead thread writes its plan"))
+                Err(refused(&format!("Only the task's lead thread {does}")))
             }
             _ => Ok(()),
         }
+    }
+
+    pub(super) fn escalate_task(
+        &self,
+        task_id: &str,
+        from_chat_id: Option<&str>,
+        title: String,
+        why: zeron_proto::supervisor::ItemWhy,
+        detail: String,
+        options: Vec<String>,
+    ) -> Result<String, RpcError> {
+        let task = self.task_or_refuse(task_id)?;
+        let from = from_chat_id.ok_or_else(|| refused("Only the task's lead thread escalates"))?;
+        Self::check_lead(&task, Some(from), "escalates")?;
+        let item = self.raise_item(
+            zeron_proto::supervisor::Raiser::Lead,
+            from,
+            Some(task.id),
+            title,
+            why,
+            detail,
+            options,
+        )?;
+        self.doc_host.supervisor_escalated(&item);
+        Ok(item.id)
     }
 
     pub(super) fn plan_steps(
@@ -359,7 +392,7 @@ impl EngineRpc {
         from_chat_id: Option<&str>,
     ) -> Result<(), RpcError> {
         let task = self.task_or_refuse(task_id)?;
-        Self::check_lead(&task, from_chat_id)?;
+        Self::check_lead(&task, from_chat_id, "writes its plan")?;
         let before = self.workspace.task_steps_of(task_id);
         let now = chrono::Utc::now();
         let steps: Vec<TaskStep> = steps
@@ -429,7 +462,11 @@ impl EngineRpc {
     ) -> Result<(), RpcError> {
         let step = self.step_or_refuse(step_id)?;
         if from_chat_id.is_some() {
-            Self::check_lead(&self.task_or_refuse(&step.task_id)?, from_chat_id)?;
+            Self::check_lead(
+                &self.task_or_refuse(&step.task_id)?,
+                from_chat_id,
+                "writes its plan",
+            )?;
         }
         match self
             .workspace
@@ -472,6 +509,7 @@ impl EngineRpc {
         self.update_task(task_id, &patch)?;
         self.send_to_task_thread(&task, &lead, None, "The plan is approved. Run it.")
             .await
+            .map(drop)
     }
 
     pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {
@@ -487,7 +525,9 @@ impl EngineRpc {
                 "Step \"{title}\" has not started (taskStepId {id}). Run it with create_thread and taskStepId {id}."
             ),
         };
-        self.send_to_task_thread(&task, &lead, None, &text).await
+        self.send_to_task_thread(&task, &lead, None, &text)
+            .await
+            .map(drop)
     }
 
     fn unstarted(&self, step: &TaskStep) -> Result<bool, RpcError> {
@@ -507,7 +547,17 @@ impl EngineRpc {
         overview: Option<String>,
         steps: Vec<PlanEdit>,
         remove_step_ids: &[String],
-    ) -> Result<(), RpcError> {
+        rebrief: Option<Rebrief<'_>>,
+    ) -> Result<Option<String>, RpcError> {
+        if rebrief.is_some()
+            && (overview.is_some()
+                || !remove_step_ids.is_empty()
+                || steps.iter().any(|edit| edit.step_id.is_none()))
+        {
+            return Err(refused(
+                "A re-brief changes an existing step's title and spec only: the overview, new steps and removals are the person's",
+            ));
+        }
         let task = self.task_or_refuse(task_id)?;
         let lead = self.lead_of(&task)?;
         let current = self.workspace.task_steps_of(task_id);
@@ -596,19 +646,29 @@ impl EngineRpc {
             ));
         }
         if changes.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let next = if task.plan_pending {
             "The plan still waits for the person's approval: do not run any step until the approval message comes."
         } else {
             "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
         };
+        let (who, why, from) = match &rebrief {
+            Some(rebrief) => (
+                "The Supervisor re-briefed",
+                format!("\n\nWhy: {}", rebrief.reason.trim()),
+                Some(rebrief.supervisor),
+            ),
+            None => ("The person edited", String::new(), None),
+        };
         let text = format!(
-            "The person edited the plan in Mission Control (task id {task_id}):\n- {}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
+            "{who} the plan in Mission Control (task id {task_id}):\n- {}{why}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
             changes.join("\n- ")
         );
-        self.doc_host.supervisor_plan_edited(&task, &changes);
-        self.send_to_task_thread(&task, &lead, None, &text).await
+        self.doc_host.supervisor_plan_edited(&task, &changes, from);
+        self.send_to_task_thread(&task, &lead, from, &text)
+            .await
+            .map(Some)
     }
 
     fn link_and_send(
@@ -617,7 +677,7 @@ impl EngineRpc {
         chat_id: &str,
         space_id: Option<String>,
         lead: Option<Lead>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<String, RpcError> {
         self.workspace
             .rename_chat(chat_id, &task.title)
             .map_err(failed)?;
@@ -628,6 +688,7 @@ impl EngineRpc {
                 ..lead_patch(chat_id, space_id, task, lead)
             },
         )?;
+        let message_id = crate::new_id();
         self.doc_host
             .request_from_chat_row(chat_id, &first_turn(task, lead))
             .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
@@ -636,12 +697,12 @@ impl EngineRpc {
                     chat_id,
                     SessionCommandPayload::Run {
                         request,
-                        message_id: crate::new_id(),
+                        message_id: message_id.clone(),
                     },
                     Vec::new(),
                 )
             })
-            .map(drop)
+            .map(|_| message_id)
             .map_err(failed)
     }
 }

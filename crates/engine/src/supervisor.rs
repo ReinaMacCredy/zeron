@@ -5,11 +5,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
-use zeron_proto::PermissionMode;
+use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    SupervisorEventKind, SupervisorEventSummary, SupervisorSettings, SupervisorSnapshot,
-    SupervisorState, SupervisorWake,
+    InterventionChip, ItemAnswer, LeadQuestion, NeedsYouInput, NeedsYouRow, QuestionState,
+    SettledBy, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
+    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
+use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
 use crate::EngineError;
 use crate::project_actions::persist_json;
@@ -18,6 +20,11 @@ const STORE_FILE: &str = "supervisor.json";
 const STORE_VERSION: u32 = 1;
 const KEPT_WAKES: usize = 200;
 const SNAPSHOT_WAKES: usize = 50;
+const KEPT_INTERVENTIONS: usize = 200;
+const SNAPSHOT_INTERVENTIONS: usize = 50;
+const KEPT_ANSWERED_ITEMS: usize = 200;
+/// Long enough for the run's coalesced doc commit to land the input or turn being refreshed for.
+const REFRESH_DELAY_MS: i64 = 500;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 pub(crate) const WAKES_PER_HOUR: usize = 12;
 pub(crate) const MISSION_SILENT_MS: i64 = 30 * 60 * 1000;
@@ -72,6 +79,36 @@ impl SupervisorEvent {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StepSnap {
+    pub id: String,
+    pub title: String,
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<StepTurn>,
+}
+
+impl From<&TaskStep> for StepSnap {
+    fn from(step: &TaskStep) -> Self {
+        Self {
+            id: step.id.clone(),
+            title: step.title.clone(),
+            notes: step.notes.clone(),
+            turn: step.turn.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InterventionRecord {
+    #[serde(flatten)]
+    pub row: SupervisorIntervention,
+    #[serde(default)]
+    pub steps: Vec<StepSnap>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SupervisorFile {
@@ -81,9 +118,18 @@ struct SupervisorFile {
     #[serde(default)]
     unwatched: BTreeSet<String>,
     #[serde(default)]
-    items: Vec<serde_json::Value>,
+    items: Vec<SupervisorItem>,
+    #[serde(default)]
+    interventions: Vec<InterventionRecord>,
     #[serde(default)]
     holds: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Projections {
+    pub inputs: Vec<NeedsYouInput>,
+    pub questions: Vec<LeadQuestion>,
+    pub chips: HashMap<String, Vec<InterventionChip>>,
 }
 
 #[derive(Default)]
@@ -93,6 +139,8 @@ struct Router {
     reported: HashSet<String>,
     failed_at: HashMap<String, i64>,
     held: Option<(String, Vec<SupervisorEvent>)>,
+    projections: Projections,
+    refresh_at: Option<i64>,
 }
 
 struct State {
@@ -101,10 +149,27 @@ struct State {
 }
 
 impl State {
-    fn snapshot(&self, chat_id: Option<String>, state: SupervisorState) -> SupervisorSnapshot {
+    fn snapshot(
+        &self,
+        chat_id: Option<String>,
+        state: SupervisorState,
+        waiting: usize,
+    ) -> SupervisorSnapshot {
+        let projections = &self.router.projections;
+        let mut needs_you: Vec<NeedsYouRow> = self
+            .file
+            .items
+            .iter()
+            .rev()
+            .filter(|item| item.answer.is_none())
+            .cloned()
+            .map(NeedsYouRow::Item)
+            .collect();
+        needs_you.extend(projections.inputs.iter().cloned().map(NeedsYouRow::Input));
         SupervisorSnapshot {
             chat_id,
             state,
+            waiting,
             wakes: self
                 .file
                 .wakes
@@ -114,7 +179,23 @@ impl State {
                 .cloned()
                 .collect(),
             unwatched: self.file.unwatched.iter().cloned().collect(),
-            ..SupervisorSnapshot::default()
+            needs_you,
+            questions: projections.questions.clone(),
+            interventions: self
+                .file
+                .interventions
+                .iter()
+                .rev()
+                .take(SNAPSHOT_INTERVENTIONS)
+                .map(|record| SupervisorIntervention {
+                    chips: projections
+                        .chips
+                        .get(&record.row.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    ..record.row.clone()
+                })
+                .collect(),
         }
     }
 
@@ -159,11 +240,12 @@ impl SupervisorStore {
         let state = State {
             router: Router {
                 reported: State::reported_keys(&file.wakes),
+                refresh_at: Some(0),
                 ..Router::default()
             },
             file,
         };
-        let (snapshot, _) = watch::channel(state.snapshot(None, SupervisorState::Off));
+        let (snapshot, _) = watch::channel(state.snapshot(None, SupervisorState::Off, 0));
         Ok(Self {
             inner: Arc::new(Inner {
                 path,
@@ -249,10 +331,8 @@ impl SupervisorStore {
                 .pending
                 .retain(|event| event.task_id() != Some(task_id));
         }
-        let unwatched: Vec<String> = state.file.unwatched.iter().cloned().collect();
-        self.inner
-            .snapshot
-            .send_modify(|snapshot| snapshot.unwatched = unwatched);
+        drop(state);
+        self.mark_stale();
         Ok(())
     }
 
@@ -342,8 +422,136 @@ impl SupervisorStore {
         self.persist(&state);
     }
 
-    pub(crate) fn publish(&self, chat_id: Option<String>, live: SupervisorState) {
-        let next = lock(&self.inner.state).snapshot(chat_id, live);
+    pub(crate) fn add_item(&self, item: SupervisorItem) -> Result<(), EngineError> {
+        {
+            let mut state = lock(&self.inner.state);
+            let mut file = state.file.clone();
+            file.items.push(item);
+            persist_json(&self.inner.path, &file)?;
+            state.file = file;
+        }
+        self.mark_stale();
+        Ok(())
+    }
+
+    pub(crate) fn item(&self, item_id: &str) -> Option<SupervisorItem> {
+        let state = lock(&self.inner.state);
+        state
+            .file
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .cloned()
+    }
+
+    pub(crate) fn answer_item(
+        &self,
+        item_id: &str,
+        choice: &str,
+    ) -> Result<SupervisorItem, EngineError> {
+        let answered = {
+            let mut state = lock(&self.inner.state);
+            let mut file = state.file.clone();
+            let item = file
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or_else(|| EngineError::Other(format!("no Needs-you item {item_id}")))?;
+            if item.answer.is_some() {
+                return Err(EngineError::Other(format!(
+                    "item {item_id} is already answered"
+                )));
+            }
+            item.answer = Some(ItemAnswer {
+                at: Utc::now(),
+                choice: choice.to_string(),
+            });
+            let answered = item.clone();
+            let answered_count = file.items.iter().filter(|i| i.answer.is_some()).count();
+            let mut excess = answered_count.saturating_sub(KEPT_ANSWERED_ITEMS);
+            file.items.retain(|i| {
+                let drop = excess > 0 && i.answer.is_some();
+                excess -= usize::from(drop);
+                !drop
+            });
+            persist_json(&self.inner.path, &file)?;
+            state.file = file;
+            answered
+        };
+        self.mark_stale();
+        Ok(answered)
+    }
+
+    pub(crate) fn item_open(&self, item_id: &str) -> bool {
+        self.item(item_id).is_some_and(|item| item.answer.is_none())
+    }
+
+    pub(crate) fn add_intervention(&self, record: InterventionRecord) {
+        {
+            let mut state = lock(&self.inner.state);
+            state.file.interventions.push(record);
+            let excess = state
+                .file
+                .interventions
+                .len()
+                .saturating_sub(KEPT_INTERVENTIONS);
+            state.file.interventions.drain(..excess);
+            self.persist(&state);
+        }
+        self.mark_stale();
+    }
+
+    pub(crate) fn interventions(&self) -> Vec<InterventionRecord> {
+        let state = lock(&self.inner.state);
+        let all = &state.file.interventions;
+        all[all.len().saturating_sub(SNAPSHOT_INTERVENTIONS)..].to_vec()
+    }
+
+    pub(crate) fn wake_ids(&self) -> HashSet<String> {
+        let state = lock(&self.inner.state);
+        state
+            .file
+            .wakes
+            .iter()
+            .map(|wake| wake.id.clone())
+            .collect()
+    }
+
+    /// Republishes now so a new row shows at once; the projections follow after the delay.
+    pub(crate) fn mark_stale(&self) {
+        let at = Utc::now().timestamp_millis() + REFRESH_DELAY_MS;
+        {
+            let mut state = lock(&self.inner.state);
+            let due = state.router.refresh_at.map_or(at, |due| due.min(at));
+            state.router.refresh_at = Some(due);
+        }
+        let (chat_id, live, waiting) = {
+            let snapshot = self.inner.snapshot.borrow();
+            (snapshot.chat_id.clone(), snapshot.state, snapshot.waiting)
+        };
+        self.publish(chat_id, live, waiting);
+        self.poke();
+    }
+
+    pub(crate) fn refresh_at(&self) -> Option<i64> {
+        lock(&self.inner.state).router.refresh_at
+    }
+
+    pub(crate) fn take_refresh(&self, now: i64) -> bool {
+        let mut state = lock(&self.inner.state);
+        let due = state.router.refresh_at.is_some_and(|at| at <= now);
+        if due {
+            state.router.refresh_at = None;
+        }
+        due
+    }
+
+    pub(crate) fn set_projections(&self, projections: Projections) {
+        lock(&self.inner.state).router.projections = projections;
+    }
+
+    pub(crate) fn publish(&self, chat_id: Option<String>, live: SupervisorState, waiting: usize) {
+        let next = lock(&self.inner.state).snapshot(chat_id, live, waiting);
         self.inner.snapshot.send_if_modified(|snapshot| {
             if *snapshot == next {
                 return false;
@@ -366,6 +574,7 @@ fn empty_file() -> SupervisorFile {
         wakes: Vec::new(),
         unwatched: BTreeSet::new(),
         items: Vec::new(),
+        interventions: Vec::new(),
         holds: Vec::new(),
     }
 }
@@ -589,16 +798,185 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     } else {
         ""
     };
-    let rebrief = if settings.rebrief && settings.message_threads {
-        "on, by telling the step's lead what to change"
-    } else {
-        "off"
-    };
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step: {rebrief}\nA change to a mission's goal or spend is the person's decision: name it in your reply.\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
+        on(settings.rebrief),
+        on(settings.start_missions),
     )
+}
+
+fn person_answerable(questions: &[UserInputQuestion]) -> bool {
+    !questions.iter().any(|q| q.kind.is_some())
+}
+
+pub(crate) fn open_inputs(
+    entries: &[SessionMessageEntry],
+) -> Vec<(String, Vec<UserInputQuestion>, i64)> {
+    entries
+        .iter()
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter_map(|(entry, part)| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } if person_answerable(questions) => {
+                Some((request_id.clone(), questions.clone(), entry.created_at))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn respond_input_of(call: &ToolCall) -> Option<&serde_json::Value> {
+    match call {
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } if server == "zeron" && tool == "respond_to_input" => input.as_ref(),
+        ToolCall::Unknown { name, input } if name.ends_with("respond_to_input") => input.as_ref(),
+        _ => None,
+    }
+}
+
+/// A call without `requestId` answered whatever that thread had pending, so it counts too.
+fn answered_by_lead(lead: &[SessionMessageEntry], thread: &str, request_id: &str) -> bool {
+    lead.iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .flat_map(|entry| &entry.parts)
+        .any(|part| match part {
+            MessagePart::Tool {
+                call,
+                is_error: false,
+                ..
+            } => respond_input_of(call).is_some_and(|input| {
+                input["threadId"] == thread
+                    && input["requestId"]
+                        .as_str()
+                        .is_none_or(|asked| asked == request_id)
+            }),
+            _ => false,
+        })
+}
+
+pub(crate) struct StepThread<'a> {
+    pub task_id: &'a str,
+    pub step_id: &'a str,
+    pub chat_id: &'a str,
+}
+
+pub(crate) fn lead_questions(
+    step: &StepThread,
+    entries: &[SessionMessageEntry],
+    lead: &[SessionMessageEntry],
+    interventions: &[InterventionRecord],
+) -> Vec<LeadQuestion> {
+    entries
+        .iter()
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter_map(|(entry, part)| {
+            let MessagePart::Input {
+                request_id,
+                questions,
+                resolved,
+                answers,
+                ..
+            } = part
+            else {
+                return None;
+            };
+            if !person_answerable(questions) || questions.iter().any(|q| q.approval) {
+                return None;
+            }
+            let state = match (resolved, answers) {
+                (false, _) => QuestionState::Open,
+                (true, None) => QuestionState::Dropped,
+                (true, Some(answers)) => {
+                    let by_supervisor = interventions.iter().any(|record| {
+                        record.row.target.as_deref() == Some(step.chat_id)
+                            && record.row.request_id.as_deref() == Some(request_id.as_str())
+                    });
+                    let by = if by_supervisor {
+                        SettledBy::Supervisor
+                    } else if answered_by_lead(lead, step.chat_id, request_id) {
+                        SettledBy::Lead
+                    } else {
+                        SettledBy::Outside
+                    };
+                    QuestionState::Settled {
+                        by,
+                        answers: answers.clone(),
+                    }
+                }
+            };
+            Some(LeadQuestion {
+                task_id: step.task_id.to_string(),
+                step_id: step.step_id.to_string(),
+                chat_id: step.chat_id.to_string(),
+                request_id: request_id.clone(),
+                at: utc(entry.created_at),
+                questions: questions.clone(),
+                state,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn chips(
+    record: &InterventionRecord,
+    plan: &[TaskStep],
+    lead_target: Option<&[SessionMessageEntry]>,
+) -> Vec<InterventionChip> {
+    let mut chips = Vec::new();
+    let Some(message_id) = record.row.message_id.as_deref() else {
+        return chips;
+    };
+    chips.push(InterventionChip::Sent);
+    if let Some(entries) = lead_target
+        && let Some(at) = entries.iter().position(|entry| entry.id == message_id)
+        && entries[at..]
+            .iter()
+            .any(|entry| entry.role == MessageRole::Assistant)
+    {
+        chips.push(InterventionChip::LeadRanTurn);
+    }
+    let now = |snap: &StepSnap| {
+        plan.iter()
+            .position(|step| step.id == snap.id)
+            .map(|at| (at + 1, &plan[at]))
+    };
+    let edited: Vec<usize> = record
+        .steps
+        .iter()
+        .filter_map(|snap| {
+            now(snap).filter(|(_, s)| s.title != snap.title || s.notes != snap.notes)
+        })
+        .map(|(n, _)| n)
+        .collect();
+    if !edited.is_empty() {
+        chips.push(InterventionChip::PlanEdited { steps: edited });
+    }
+    let completed: Vec<usize> = record
+        .steps
+        .iter()
+        .filter_map(|snap| {
+            now(snap).filter(|(_, s)| {
+                s.turn != snap.turn
+                    && s.turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.ended == StepTurnEnd::Completed)
+            })
+        })
+        .map(|(n, _)| n)
+        .collect();
+    if !completed.is_empty() {
+        chips.push(InterventionChip::StepCompletedTurn { steps: completed });
+    }
+    chips
 }
 
 #[cfg(test)]
@@ -668,6 +1046,150 @@ mod tests {
             steps,
             failed: Vec::new(),
         }
+    }
+
+    fn transcript(role: &str, parts: serde_json::Value) -> SessionMessageEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("e-{}", parts[0]["id"].as_str().unwrap()),
+            "role": role,
+            "parts": parts,
+            "createdAt": 1_000,
+            "deviceId": "dev-a",
+        }))
+        .unwrap()
+    }
+
+    fn input(request: &str, resolved: bool, answer: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "input", "id": format!("p-{request}"), "requestId": request, "resolved": resolved,
+            "questions": [{ "id": "q1", "header": "", "question": "Stripe or Adyen?", "options": ["Stripe", "Adyen"] }],
+            "answers": answer.map(|label| serde_json::json!([{ "questionId": "q1", "labels": [label] }])),
+        })
+    }
+
+    fn respond(id: &str, input: serde_json::Value, is_error: bool) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "tool", "id": id, "isError": is_error, "resolved": true,
+            "call": { "kind": "mcp", "server": "zeron", "tool": "respond_to_input", "input": input },
+        })
+    }
+
+    #[test]
+    fn a_step_question_reads_open_settled_by_whom_or_dropped() {
+        let mut approval = input("r-approval", false, None);
+        approval["questions"][0]["approval"] = true.into();
+        let mut consent = input("r-consent", false, None);
+        consent["questions"][0]["kind"] = serde_json::json!({ "type": "consent", "scope": "call" });
+        let step = [
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-open", false, None)]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-lead", true, Some("Stripe"))]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-out", true, Some("Adyen"))]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-sup", true, Some("Adyen"))]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-drop", true, None)]),
+            ),
+            transcript("assistant", serde_json::json!([approval, consent])),
+        ];
+        let lead = [
+            transcript(
+                "assistant",
+                serde_json::json!([
+                    respond(
+                        "t1",
+                        serde_json::json!({ "threadId": "step-1", "requestId": "r-lead" }),
+                        false
+                    ),
+                    respond(
+                        "t2",
+                        serde_json::json!({ "threadId": "step-1", "requestId": "r-out" }),
+                        true
+                    ),
+                    respond(
+                        "t3",
+                        serde_json::json!({ "threadId": "other", "requestId": "r-out" }),
+                        false
+                    ),
+                ]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([respond(
+                    "t4",
+                    serde_json::json!({ "threadId": "step-2" }),
+                    false
+                )]),
+            ),
+        ];
+        let supervisor = InterventionRecord {
+            row: SupervisorIntervention {
+                id: "i1".into(),
+                at: utc(2_000),
+                kind: zeron_proto::supervisor::InterventionKind::Respond,
+                task_id: Some("t".into()),
+                step_ids: Vec::new(),
+                target: Some("step-1".into()),
+                message_id: Some("cmd-1".into()),
+                request_id: Some("r-sup".into()),
+                text: "q1: Adyen".into(),
+                trigger: None,
+                chips: Vec::new(),
+            },
+            steps: Vec::new(),
+        };
+        let at = StepThread {
+            task_id: "t",
+            step_id: "s1",
+            chat_id: "step-1",
+        };
+        let read: Vec<(String, QuestionState)> = lead_questions(&at, &step, &lead, &[supervisor])
+            .into_iter()
+            .map(|row| (row.request_id, row.state))
+            .collect();
+        let settled = |by, label: &str| QuestionState::Settled {
+            by,
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec![label.into()],
+            }],
+        };
+        assert_eq!(
+            read,
+            [
+                ("r-open".to_string(), QuestionState::Open),
+                ("r-lead".to_string(), settled(SettledBy::Lead, "Stripe")),
+                ("r-out".to_string(), settled(SettledBy::Outside, "Adyen")),
+                ("r-sup".to_string(), settled(SettledBy::Supervisor, "Adyen")),
+                ("r-drop".to_string(), QuestionState::Dropped),
+            ]
+        );
+        let bare = StepThread {
+            task_id: "t",
+            step_id: "s2",
+            chat_id: "step-2",
+        };
+        let answered = [transcript(
+            "assistant",
+            serde_json::json!([input("r-bare", true, Some("Stripe"))]),
+        )];
+        let read = lead_questions(&bare, &answered, &lead, &[]);
+        assert_eq!(
+            read[0].state,
+            settled(SettledBy::Lead, "Stripe"),
+            "a call without requestId answered what that thread had pending"
+        );
     }
 
     #[test]

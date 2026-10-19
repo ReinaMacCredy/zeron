@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use zeron_proto::supervisor::{
-    SupervisorEventKind as Kind, SupervisorEventSummary, SupervisorState, SupervisorWake,
-    WakeDelivery,
+    InputAsker, InterventionKind, InterventionTrigger, NeedsYouInput, Raiser,
+    SupervisorEventKind as Kind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
+    SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
     Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskMode, TaskStep,
@@ -14,8 +15,9 @@ use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
 use super::*;
 use crate::registry::HarnessRegistry;
 use crate::supervisor::{
-    Flush, MissionFacts, Reply, Stall, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry,
-    WakeHeader, fold_ms, plan_flush, plan_stalls, utc, wake_text,
+    Flush, InterventionRecord, MissionFacts, Projections, Reply, Stall, StepSnap, StepThread,
+    SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader, chips, fold_ms,
+    lead_questions, open_inputs, plan_flush, plan_stalls, utc, wake_text,
 };
 
 const MAX_NAP: Duration = Duration::from_secs(60);
@@ -60,16 +62,18 @@ struct Observed {
 }
 
 impl Observed {
-    fn sessions(&mut self, sessions: &[Session], now: i64) {
+    fn sessions(&mut self, sessions: &[Session], now: i64) -> Vec<String> {
         let mut live_now = HashSet::new();
         for session in sessions.iter().filter(|session| live(session.status)) {
             live_now.insert(session.chat_id.clone());
             self.last_live.insert(session.chat_id.clone(), now);
         }
-        for ended in self.live.difference(&live_now) {
-            self.last_live.insert(ended.clone(), now);
+        let ended: Vec<String> = self.live.difference(&live_now).cloned().collect();
+        for thread in &ended {
+            self.last_live.insert(thread.clone(), now);
         }
         self.live = live_now;
+        ended
     }
 
     fn missions_done(&mut self, tasks: &[Task]) -> Vec<Task> {
@@ -100,6 +104,23 @@ struct Round {
     missions: HashMap<String, MissionFacts>,
     done: Vec<Task>,
     step_titles: HashMap<String, String>,
+}
+
+/// What an intervention row needs from before the action: a re-brief's snapshot predates its own edit.
+pub(crate) struct InterventionBasis {
+    kind: InterventionKind,
+    task_id: Option<String>,
+    steps: Vec<StepSnap>,
+    target: Option<String>,
+    trigger: Option<InterventionTrigger>,
+}
+
+impl InterventionBasis {
+    pub(crate) fn with_task(mut self, task_id: &str, target: &str) -> Self {
+        self.task_id = Some(task_id.to_string());
+        self.target = Some(target.to_string());
+        self
+    }
 }
 
 impl DocHost {
@@ -154,13 +175,20 @@ impl DocHost {
             .is_some_and(|lead| lead.device_id == self.device_id() && !lead.archived)
     }
 
-    pub(super) fn supervisor_step_ended(&self, step: &TaskStep, thread: &str, ended: StepTurnEnd) {
-        if ended != StepTurnEnd::Failed {
-            return;
+    pub(crate) fn supervisor_stale(&self) {
+        if let Some(store) = self.supervisor() {
+            store.mark_stale();
         }
+    }
+
+    pub(super) fn supervisor_step_ended(&self, step: &TaskStep, thread: &str, ended: StepTurnEnd) {
         let Some(store) = self.supervisor() else {
             return;
         };
+        store.mark_stale();
+        if ended != StepTurnEnd::Failed {
+            return;
+        }
         let at = now_ms();
         store.note_failed(&step.id, at);
         let mut event = SupervisorEvent::new(
@@ -180,6 +208,7 @@ impl DocHost {
         request_id: &str,
         questions: &[UserInputQuestion],
     ) {
+        self.supervisor_stale();
         let Some(workspace) = self.workspace() else {
             return;
         };
@@ -231,7 +260,12 @@ impl DocHost {
         self.supervisor_event(event);
     }
 
-    pub(crate) fn supervisor_plan_edited(&self, task: &Task, changes: &[String]) {
+    pub(crate) fn supervisor_plan_edited(
+        &self,
+        task: &Task,
+        changes: &[String],
+        actor: Option<&str>,
+    ) {
         let mut event = SupervisorEvent::new(
             Kind::PlanEdited,
             format!("plan:{}:{}", task.id, new_id()),
@@ -239,7 +273,146 @@ impl DocHost {
             "Plan edited by the person".to_string(),
         );
         event.detail = changes.iter().map(|change| format!("- {change}")).collect();
+        event.actor = actor.map(str::to_owned);
         self.supervisor_event(event);
+    }
+
+    pub(crate) fn supervisor_escalated(&self, item: &SupervisorItem) {
+        let mut event = SupervisorEvent::new(
+            Kind::Escalation,
+            format!("escalation:{}", item.id),
+            item.task_id.as_deref(),
+            "Lead escalated".to_string(),
+        );
+        let why = serde_json::to_value(item.why)
+            .ok()
+            .and_then(|why| why.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        event.detail = vec![format!(
+            "itemId {} · why: {why} · \"{}\"",
+            item.id,
+            clip(&item.title, TITLE_CHARS)
+        )];
+        if !item.detail.trim().is_empty() {
+            event
+                .detail
+                .push(clip(&item.detail, WAKE_QUESTION_CHARS).replace('\n', "\n   "));
+        }
+        if !item.options.is_empty() {
+            event
+                .detail
+                .push(format!("Options: {}", item.options.join(" | ")));
+        }
+        event.detail.push(
+            "The person answers it on the Supervisor page; their choice goes to the lead.".into(),
+        );
+        event.actor = (item.raised_by == Raiser::Supervisor).then(|| item.raiser_chat_id.clone());
+        self.supervisor_event(event);
+    }
+
+    pub(crate) fn is_live_supervisor(&self, chat_id: &str) -> bool {
+        self.supervisor_chat()
+            .is_some_and(|supervisor| supervisor.id == chat_id)
+    }
+
+    fn mission_of_thread(
+        &self,
+        workspace: &WorkspaceHost,
+        thread: &str,
+    ) -> Option<(Task, Vec<TaskStep>)> {
+        let tasks = workspace.watch_tasks().borrow().clone();
+        if let Some(task) = tasks.iter().find(|task| {
+            task.mode == TaskMode::Orchestrated
+                && !task.deleted
+                && task.completed_at.is_none()
+                && task.chat_id.as_deref() == Some(thread)
+        }) {
+            let steps = workspace.task_steps_of(&task.id);
+            return Some((task.clone(), steps));
+        }
+        let step = workspace
+            .watch_task_steps()
+            .borrow()
+            .iter()
+            .filter(|step| step.chat_id.as_deref() == Some(thread))
+            .max_by_key(|step| step.outcome.is_none())
+            .cloned()?;
+        let task = workspace.task(&step.task_id)?;
+        Some((task, vec![step]))
+    }
+
+    fn supervisor_trigger(&self, supervisor: &str) -> Option<InterventionTrigger> {
+        let store = self.supervisor()?;
+        let entries = self.open(supervisor).ok()?.doc.read_entries().ok()?;
+        let last = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.role == MessageRole::User)?;
+        if store.wake_ids().contains(&last.id) {
+            Some(InterventionTrigger::Wake {
+                wake_id: last.id.clone(),
+            })
+        } else {
+            last.from_chat_id
+                .is_none()
+                .then_some(InterventionTrigger::Person)
+        }
+    }
+
+    pub(crate) fn intervention_basis(
+        &self,
+        kind: InterventionKind,
+        supervisor: &str,
+        target: Option<&str>,
+        step: Option<&str>,
+    ) -> InterventionBasis {
+        let workspace = self.workspace();
+        let named = match (workspace, step, target) {
+            (Some(workspace), Some(step), _) => workspace
+                .task_step(step)
+                .and_then(|step| workspace.task(&step.task_id).map(|task| (task, vec![step]))),
+            (Some(workspace), None, Some(target)) => self.mission_of_thread(workspace, target),
+            _ => None,
+        };
+        let (task_id, steps) = match named {
+            Some((task, steps)) => (Some(task.id), steps.iter().map(StepSnap::from).collect()),
+            None => (None, Vec::new()),
+        };
+        InterventionBasis {
+            kind,
+            task_id,
+            steps,
+            target: target.map(str::to_owned),
+            trigger: self.supervisor_trigger(supervisor),
+        }
+    }
+
+    pub(crate) fn record_intervention(
+        &self,
+        basis: InterventionBasis,
+        message_id: Option<String>,
+        request_id: Option<String>,
+        text: &str,
+    ) {
+        let Some(store) = self.supervisor() else {
+            return;
+        };
+        store.add_intervention(InterventionRecord {
+            row: SupervisorIntervention {
+                id: new_id(),
+                at: chrono::Utc::now(),
+                kind: basis.kind,
+                task_id: basis.task_id,
+                step_ids: basis.steps.iter().map(|step| step.id.clone()).collect(),
+                target: basis.target,
+                message_id,
+                request_id,
+                text: text.to_string(),
+                trigger: basis.trigger,
+                chips: Vec::new(),
+            },
+            steps: basis.steps,
+        });
     }
 
     pub(crate) fn supervisor_replanned(
@@ -324,7 +497,7 @@ impl DocHost {
         tasks: &[Task],
         steps: &[TaskStep],
     ) -> Round {
-        observed.sessions(sessions, now);
+        let ended = observed.sessions(sessions, now);
         let done = observed.missions_done(tasks);
         let sessions: HashMap<&str, &Session> = sessions
             .iter()
@@ -357,6 +530,14 @@ impl DocHost {
                 continue;
             }
             let own: Vec<&TaskStep> = steps.iter().filter(|s| s.task_id == task.id).collect();
+            let threads = std::iter::once(lead.id.as_str())
+                .chain(own.iter().filter_map(|step| step.chat_id.as_deref()));
+            if threads
+                .into_iter()
+                .any(|thread| ended.contains(&thread.to_string()))
+            {
+                store.mark_stale();
+            }
             let mut facts = MissionFacts {
                 task_id: task.id.clone(),
                 waiting_on_person: task.plan_pending && !own.is_empty(),
@@ -381,6 +562,12 @@ impl DocHost {
                 facts.steps.push(step_thread);
             }
             missions.insert(task.id.clone(), facts);
+        }
+        if store
+            .chat_id()
+            .is_some_and(|supervisor| ended.contains(&supervisor))
+        {
+            store.mark_stale();
         }
         Round {
             missions,
@@ -409,13 +596,26 @@ impl DocHost {
                 "Mission marked done".to_string(),
             ));
         }
-        let Some(supervisor) = self.supervisor_chat() else {
+        let supervisor = self.supervisor_chat();
+        if store.take_refresh(now) {
+            store.set_projections(self.projections(
+                store,
+                workspace,
+                sessions,
+                supervisor.as_ref().map(|chat| chat.id.as_str()),
+            ));
+        }
+        let refresh = store.refresh_at();
+        let Some(supervisor) = supervisor else {
             store.take_pending();
-            store.publish(None, SupervisorState::Off);
-            return None;
+            store.publish(None, SupervisorState::Off, 0);
+            return refresh;
         };
         let missions: Vec<MissionFacts> = round.missions.values().cloned().collect();
         let (stalls, mut next) = plan_stalls(now, &missions, |key| store.reported(key));
+        if let Some(at) = refresh {
+            next = Some(next.map_or(at, |n| n.min(at)));
+        }
         for stall in stalls {
             self.supervisor_event(stall_event(stall, &round.step_titles));
         }
@@ -449,12 +649,160 @@ impl DocHost {
         if let Some(until) = held {
             next = Some(next.map_or(until, |n| n.min(until)));
         }
-        let state = match sessions.session_status(&supervisor.id) {
-            Some(session) if live(session.status) => SupervisorState::Awake,
-            _ => SupervisorState::Asleep,
+        let (state, waiting) = match sessions.session_status(&supervisor.id) {
+            Some(session) if live(session.status) => (SupervisorState::Awake, 0),
+            _ if self.queue_paused(&supervisor.id) => (
+                SupervisorState::Stopped,
+                self.waiting_wakes(store, &supervisor.id),
+            ),
+            _ => (SupervisorState::Asleep, 0),
         };
-        store.publish(Some(supervisor.id), state);
+        store.publish(Some(supervisor.id), state, waiting);
         next
+    }
+
+    fn queue_paused(&self, chat_id: &str) -> bool {
+        self.open(chat_id)
+            .is_ok_and(|handle| handle.queue_paused.load(Ordering::Acquire))
+    }
+
+    fn waiting_wakes(&self, store: &SupervisorStore, chat_id: &str) -> usize {
+        let wakes = store.wake_ids();
+        self.open(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc.read_queue().ok())
+            .map_or(0, |queue| {
+                queue.iter().filter(|row| wakes.contains(&row.id)).count()
+            })
+    }
+
+    fn entries_of(&self, chat_id: &str) -> Vec<zeron_doc::SessionMessageEntry> {
+        self.open(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc.read_entries().ok())
+            .unwrap_or_default()
+    }
+
+    fn projections(
+        &self,
+        store: &SupervisorStore,
+        workspace: &WorkspaceHost,
+        sessions: &SessionsEngine,
+        supervisor: Option<&str>,
+    ) -> Projections {
+        let interventions = store.interventions();
+        let mut transcripts: HashMap<String, Vec<zeron_doc::SessionMessageEntry>> = HashMap::new();
+        let mut read = |chat_id: &str| {
+            transcripts
+                .entry(chat_id.to_string())
+                .or_insert_with(|| self.entries_of(chat_id))
+                .clone()
+        };
+        let mut projections = Projections::default();
+        let pending = |chat_id: &str,
+                       entries: &[zeron_doc::SessionMessageEntry],
+                       asker: InputAsker,
+                       task_id: Option<&str>,
+                       step_id: Option<&str>| {
+            open_inputs(entries)
+                .into_iter()
+                .filter(|(request_id, questions, _)| {
+                    (asker != InputAsker::Step || questions.iter().any(|q| q.approval))
+                        && sessions.awaits_input(chat_id, request_id)
+                })
+                .map(|(request_id, questions, at)| NeedsYouInput {
+                    chat_id: chat_id.to_string(),
+                    request_id,
+                    asker,
+                    task_id: task_id.map(str::to_owned),
+                    step_id: step_id.map(str::to_owned),
+                    at: utc(at),
+                    questions,
+                })
+                .collect::<Vec<_>>()
+        };
+        let tasks = workspace.watch_tasks().borrow().clone();
+        let steps = workspace.watch_task_steps().borrow().clone();
+        for task in tasks.iter().filter(|task| {
+            task.completed_at.is_none()
+                && !store.is_unwatched(&task.id)
+                && self.hosts_mission(workspace, &task.id)
+        }) {
+            let Some(lead) = task.chat_id.as_deref() else {
+                continue;
+            };
+            let lead_entries = read(lead);
+            projections.inputs.extend(pending(
+                lead,
+                &lead_entries,
+                InputAsker::Lead,
+                Some(&task.id),
+                None,
+            ));
+            for step in steps.iter().filter(|step| step.task_id == task.id) {
+                let Some(thread) = step.chat_id.as_deref() else {
+                    continue;
+                };
+                let entries = read(thread);
+                projections.inputs.extend(pending(
+                    thread,
+                    &entries,
+                    InputAsker::Step,
+                    Some(&task.id),
+                    Some(&step.id),
+                ));
+                let at = StepThread {
+                    task_id: &task.id,
+                    step_id: &step.id,
+                    chat_id: thread,
+                };
+                projections.questions.extend(lead_questions(
+                    &at,
+                    &entries,
+                    &lead_entries,
+                    &interventions,
+                ));
+            }
+        }
+        if let Some(supervisor) = supervisor {
+            let entries = read(supervisor);
+            projections.inputs.extend(pending(
+                supervisor,
+                &entries,
+                InputAsker::Supervisor,
+                None,
+                None,
+            ));
+        }
+        projections
+            .inputs
+            .sort_by_key(|input| std::cmp::Reverse(input.at));
+        projections
+            .questions
+            .sort_by_key(|question| std::cmp::Reverse(question.at));
+        for record in &interventions {
+            let task = record
+                .row
+                .task_id
+                .as_deref()
+                .and_then(|id| workspace.task(id));
+            let plan = task
+                .as_ref()
+                .map(|task| workspace.task_steps_of(&task.id))
+                .unwrap_or_default();
+            let lead = task.and_then(|task| task.chat_id);
+            let target = record
+                .row
+                .target
+                .clone()
+                .filter(|target| lead.as_ref() == Some(target))
+                .map(|target| read(&target));
+            projections.chips.insert(
+                record.row.id.clone(),
+                chips(record, &plan, target.as_deref()),
+            );
+        }
+        projections
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -546,20 +894,28 @@ impl DocHost {
                 let text =
                     self.render_wake(workspace, header, &events, &dropped, settings, permission);
                 let busy = sessions.turn_in_flight(&supervisor.id);
-                let (id, delivery) =
-                    match self.queue_thread_message(&supervisor.id, None, &text).await {
-                        Ok(id) if self.queued_row(&supervisor.id, &id).is_some() => {
-                            (id, WakeDelivery::HeldForTurnEnd)
-                        }
-                        Ok(id) if busy => (id, WakeDelivery::Steered),
-                        Ok(id) => (id, WakeDelivery::Started),
-                        Err(err) => (
-                            new_id(),
-                            WakeDelivery::Failed {
-                                error: err.to_string(),
-                            },
-                        ),
-                    };
+                let delivered = if self.queue_paused(&supervisor.id) {
+                    self.push_thread_row(&supervisor.id, None, &text)
+                        .map(|(_, id)| (id, true))
+                } else {
+                    self.queue_thread_message(&supervisor.id, None, &text)
+                        .await
+                        .map(|id| (id, false))
+                };
+                let (id, delivery) = match delivered {
+                    Ok((id, true)) => (id, WakeDelivery::HeldByStop),
+                    Ok((id, _)) if self.queued_row(&supervisor.id, &id).is_some() => {
+                        (id, WakeDelivery::HeldForTurnEnd)
+                    }
+                    Ok((id, _)) if busy => (id, WakeDelivery::Steered),
+                    Ok((id, _)) => (id, WakeDelivery::Started),
+                    Err(err) => (
+                        new_id(),
+                        WakeDelivery::Failed {
+                            error: err.to_string(),
+                        },
+                    ),
+                };
                 let wake = SupervisorWake {
                     id,
                     at: utc(now),
@@ -602,11 +958,12 @@ impl DocHost {
                         && mission.lead_silent_after(failed.failed_at)
                 })
             }),
-            Kind::MissionDone
-            | Kind::PlanEdited
-            | Kind::Escalation
-            | Kind::Resource
-            | Kind::Heartbeat => true,
+            Kind::Escalation => summary
+                .key
+                .strip_prefix("escalation:")
+                .and_then(|item| self.supervisor().map(|store| store.item_open(item)))
+                .unwrap_or(false),
+            Kind::MissionDone | Kind::PlanEdited | Kind::Resource | Kind::Heartbeat => true,
         }
     }
 
