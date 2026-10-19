@@ -31,6 +31,10 @@ What each level exposes:
 - Observe reads what the app's windows show, text field values included (a key typed into
   the Add provider form is in `tree` and in a `snapshot`), to any chat that has the `ui_driver`
   tool on. Turn the tool off in Settings > Tools to withhold it.
+- Observe changes no app state, so `ui_driver` is annotated read-only, but it has local
+  effects: `snapshot` writes a PNG under `~/.zeron/run/shots` that nothing prunes, `frames` and
+  `track` turn on the frame trace while they record, and a tree read keeps the window's
+  accessibility tree on for 60 s.
 - Drive in a Dev bundle goes around the chat permission gates of that bundle: an agent can click
   Approve on a pending request there, or type into its terminal panel. Keep Dev bundles on test
   data.
