@@ -18,13 +18,15 @@ const HANDOFF: motion::MotionSpec = motion::MotionSpec::new(
     motion::LINEAR,
 );
 const HANDOFF_SHIFT: f32 = 40.0;
+const CHAT_SLIDE_IN: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_OUT_QUINT);
+const CHAT_SLIDE_OUT: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_TAILWIND);
+const CHAT_PARALLAX: f32 = 30.0;
 pub(super) const HANDOFF_RISE: f32 = 30.0;
 
 pub(super) struct TaskSlide {
     tween: motion::Tween,
     under: Route,
-    pub(super) zoom: Option<super::mission_strip::TaskZoom>,
-    pub(super) armed: bool,
+    chat: bool,
     handoff: bool,
     pub(super) strip: (Option<String>, motion::Tween),
 }
@@ -35,8 +37,7 @@ impl TaskSlide {
         Self {
             tween: motion::Tween::at(Self::rest(route), now),
             under: Route::Tasks,
-            zoom: None,
-            armed: false,
+            chat: false,
             handoff: false,
             strip: (None, motion::Tween::at(0.0, now)),
         }
@@ -513,20 +514,19 @@ impl Shell {
             self.swipe.yield_to_slide();
             return;
         }
-        let zoom = match (from, to) {
-            (Route::Chat, Route::TaskCenter) => self.task_slide.armed,
-            (Route::TaskCenter, Route::Chat) => self.task_slide.under == Route::Chat,
-            _ => false,
-        };
-        if zoom {
-            self.task_slide = TaskSlide {
-                under: Route::Chat,
-                zoom: Some(super::mission_strip::TaskZoom::new(
-                    to == Route::TaskCenter,
-                    self.reduced_motion,
-                )),
-                ..TaskSlide::resting(to)
+        if matches!(
+            (from, to),
+            (Route::Chat, Route::TaskCenter) | (Route::TaskCenter, Route::Chat)
+        ) {
+            let spec = match (self.reduced_motion, to) {
+                (true, _) => CENTER_FADE,
+                (false, Route::TaskCenter) => CHAT_SLIDE_IN,
+                (false, _) => CHAT_SLIDE_OUT,
             };
+            self.task_slide.chat = true;
+            self.task_slide
+                .tween
+                .retarget(TaskSlide::rest(to), spec, false, self.motion_time());
             self.swipe.yield_to_slide();
             return;
         }
@@ -535,9 +535,6 @@ impl Shell {
                 page
             }
             _ => {
-                if to != Route::TaskCenter {
-                    self.close_task_center(cx);
-                }
                 self.task_slide = TaskSlide::resting(to);
                 return;
             }
@@ -550,8 +547,7 @@ impl Shell {
             CENTER_SLIDE_OUT
         };
         self.task_slide.under = under;
-        self.task_slide.zoom = None;
-        self.task_slide.armed = false;
+        self.task_slide.chat = false;
         self.task_slide
             .tween
             .retarget(TaskSlide::rest(to), spec, false, self.motion_time());
@@ -560,6 +556,7 @@ impl Shell {
 
     fn task_slide_t(&self) -> Option<f32> {
         if self.task_slide.handoff
+            || self.task_slide.chat
             || !matches!(self.route, Route::Tasks | Route::TaskCenter | Route::Inbox)
         {
             return None;
@@ -582,6 +579,91 @@ impl Shell {
         }
         self.motion_active.set(true);
         Some(self.task_slide.tween.value_at(now))
+    }
+
+    pub(super) fn task_chat_slide_t(&self) -> Option<f32> {
+        if !self.task_slide.chat || !matches!(self.route, Route::Chat | Route::TaskCenter) {
+            return None;
+        }
+        let now = self.render_time.unwrap_or_else(|| self.motion_time());
+        if self.task_slide.tween.settled_at(now) {
+            return None;
+        }
+        self.motion_active.set(true);
+        Some(self.task_slide.tween.value_at(now))
+    }
+
+    pub(super) fn render_task_chat_slide(
+        &mut self,
+        chat: gpui::Div,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(t) = self.task_chat_slide_t() else {
+            return chat.into_any_element();
+        };
+        let travel = !self.reduced_motion;
+        let leaving = self.route == Route::Chat;
+        let inset = self.settings.inset_shell;
+        let body = Theme::of(cx).inset_tones().body;
+        let center = self.render_task_center_page(window, cx);
+        let backdrop = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .when(inset, |el| {
+                el.top(px(Theme::TITLEBAR_HEIGHT)).rounded(px(CARD_RADIUS))
+            })
+            .when(!inset, |el| el.top_0())
+            .bg(body)
+            .when(travel, |el| {
+                el.shadow(vec![gpui::BoxShadow {
+                    color: gpui::black().opacity(CENTER_SHADOW * t),
+                    offset: gpui::point(px(-20.0), px(0.0)),
+                    blur_radius: px(40.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }])
+            });
+        let center = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w_full()
+            .left(gpui::relative(if travel { 1.0 - t } else { 0.0 }))
+            .flex()
+            .opacity(if travel { 0.6 + 0.4 * t } else { t })
+            .child(backdrop)
+            .child(center)
+            .when(leaving, |el| el.child(div().absolute().inset_0().occlude()));
+        let shift = if travel && leaving {
+            -CHAT_PARALLAX * t
+        } else {
+            0.0
+        };
+        let alpha = if travel && leaving {
+            1.0 - 0.3 * t
+        } else {
+            1.0
+        };
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .relative()
+            .overflow_hidden()
+            .child(
+                chat.size_full()
+                    .relative()
+                    .left(px(shift))
+                    .opacity(alpha)
+                    .when(!leaving, |el| {
+                        el.child(div().absolute().inset_0().occlude())
+                    }),
+            )
+            .child(center)
+            .into_any_element()
     }
 
     pub(super) fn render_task_handoff(
@@ -639,11 +721,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if let Some(page) = self.render_task_zoom(window, cx) {
-            return Some(page);
-        }
         let Some(t) = self.task_slide_t() else {
-            if self.route != Route::TaskCenter && self.task_center.is_some() {
+            if self.route != Route::TaskCenter && self.task_center_ended(cx) {
                 self.close_task_center(cx);
             }
             return None;
@@ -722,8 +801,27 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if let Some(bar) = self.render_task_zoom_title_bar(cx) {
-            return Some(bar);
+        if let Some(t) = self.task_chat_slide_t() {
+            let chat = self.render_session_title_bar(window, cx);
+            let center = self.render_task_center_title_bar(cx);
+            let entering = self.route == Route::TaskCenter;
+            let layer = |bar: AnyElement, alpha: f32, live: bool| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(alpha)
+                    .child(bar)
+                    .when(!live, |el| el.child(div().absolute().inset_0().occlude()))
+            };
+            return Some(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(Theme::TITLEBAR_HEIGHT))
+                    .child(layer(chat, 1.0 - t, !entering))
+                    .child(layer(center, t, entering))
+                    .into_any_element(),
+            );
         }
         let handoff = self.task_handoff_t().map(|t| HANDOFF_ARRIVE.progress(t));
         let t = match handoff {
@@ -810,6 +908,19 @@ impl Shell {
         self.task_center_pane
             .as_ref()
             .is_some_and(|pane| pane.chat_id == chat_id)
+    }
+
+    fn task_center_ended(&self, cx: &App) -> bool {
+        let Some((center, _)) = &self.task_center else {
+            return false;
+        };
+        let id = center.read(cx).task_id();
+        !self
+            .state
+            .read(cx)
+            .tasks
+            .iter()
+            .any(|task| task.id == id && !task.deleted && task.completed_at.is_none())
     }
 
     pub(super) fn close_task_center(&mut self, cx: &mut Context<Self>) {

@@ -16165,7 +16165,10 @@ impl Shell {
             return self.render_tasks_page(window, cx);
         }
 
-        if matches!(self.route, Route::TaskCenter) && self.task_handoff_t().is_none() {
+        if matches!(self.route, Route::TaskCenter)
+            && self.task_handoff_t().is_none()
+            && self.task_chat_slide_t().is_none()
+        {
             return self.render_task_center_page(window, cx);
         }
 
@@ -16488,7 +16491,6 @@ impl Shell {
             Some((strip, reveal)) => (Some(strip), mission_strip::STRIP_BAND * reveal),
             None => (None, 0.0),
         };
-        let zoom_fade = self.task_zoom_fade();
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -16502,7 +16504,6 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .opacity(zoom_fade)
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
@@ -19758,6 +19759,7 @@ impl Render for Shell {
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
                 let pr_route = matches!(self.route, Route::PullRequests);
+                let chat_under = self.task_chat_slide_t().is_some();
                 let page_route = pr_route
                     || matches!(
                         self.route,
@@ -19765,10 +19767,10 @@ impl Render for Shell {
                             | Route::Usage
                             | Route::Inbox
                             | Route::Tasks
-                            | Route::TaskCenter
                             | Route::Supervisor
                             | Route::Docs
-                    );
+                    )
+                    || (self.route == Route::TaskCenter && !chat_under);
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     let swipe = self.swipe_layers(0.0, cx);
@@ -19818,7 +19820,7 @@ impl Render for Shell {
                 }
                 // The Pull requests route shares this layout without the
                 // chat's side pane.
-                let on_chat = matches!(self.route, Route::Chat);
+                let on_chat = matches!(self.route, Route::Chat) || chat_under;
                 let right_target_width = if on_chat {
                     self.right_visible_width(cx)
                 } else {
@@ -20094,26 +20096,38 @@ impl Render for Shell {
                     .flex_row()
                     .child(sidebar)
                     .child(sidebar_seam)
-                    .child(card)
-                    // The right pane is ONE container: the surface host column
-                    // and the docked explorer column sit side by side under a
-                    // shared titlebar strip; the resize seam straddles its
-                    // left edge.
                     .child(
-                        div()
-                            .h_full()
-                            .flex_none()
-                            .relative()
-                            .opacity(under_stage)
-                            .child(
-                                div()
-                                    .h_full()
-                                    .flex()
-                                    .flex_row()
-                                    .child(right)
-                                    .child(files_panel),
-                            )
-                            .child(right_seam),
+                        self.render_task_chat_slide(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .flex()
+                                .flex_row()
+                                .child(card)
+                                // The right pane is ONE container: the surface host column
+                                // and the docked explorer column sit side by side under a
+                                // shared titlebar strip; the resize seam straddles its
+                                // left edge.
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .flex_none()
+                                        .relative()
+                                        .opacity(under_stage)
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .flex()
+                                                .flex_row()
+                                                .child(right)
+                                                .child(files_panel),
+                                        )
+                                        .child(right_seam),
+                                ),
+                            window,
+                            cx,
+                        ),
                     );
                 let page = div()
                     .size_full()

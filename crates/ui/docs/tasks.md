@@ -77,6 +77,10 @@ The header reads **MISSION CONTROL** above the task's title, and shows the task'
 
 Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
 
+Right-click a step for **Edit spec**, **Open thread** (when the step has a thread), **Move up**, **Move down**, **Skip** or **Reopen**, and **Remove**. An item that does not apply to that step is greyed out. Escape or a click outside closes the menu.
+
+The page keeps its place while you are away: go back to it from a chat, and the specs you opened, the edit you were writing, your unsent changes and the scroll position are as you left them.
+
 ## Open Mission Control from a chat
 
 The lead's chat and the chat of every step show a strip at the top of the conversation. It stays in place while you scroll, and shows:
@@ -86,7 +90,7 @@ The lead's chat and the chat of every step show a strip at the top of the conver
 - a bar with the steps done;
 - **Mission Control**.
 
-Click the strip to open the task's Mission Control page with this chat live on the right. From a step's chat, that step is selected. On the way in, the chat shrinks into the right-hand pane while the steps slide in. Back, or the chat's name in the titlebar, returns you to the chat where you left it, and the pane grows back into the chat. With reduced motion, the page fades in instead. The strip goes away when the task is deleted.
+Click the strip to open the task's Mission Control page with this chat live on the right. From a step's chat, that step is selected. The page slides in from the right over the chat. Back, or the chat's name in the titlebar, slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
 
 ## Approve the plan
 
@@ -96,12 +100,13 @@ While the lead writes the plan, the page reads **The lead is planning**. Then **
 
 You can change the plan before you approve it and while the steps run, in both **plan.md** and **Steps only**:
 
-- Open a step's **spec** and click **Edit** to change its title and its spec. Press Cmd+Enter or click **Done** to keep the change, or Escape to drop it.
-- With **plan.md**, **Edit** on the **Overview** changes the overview.
+- Open a step's **spec** and click **Edit**, or right-click the step and pick **Edit spec**, to change its title and its spec. The step opens as a card. Press Cmd+Enter or click **Save** to keep the change, or press Escape or click **Cancel** to drop it. Enter in the title saves too.
+- With **plan.md**, **Edit** on the **Overview** changes the overview in the same kind of card.
 - Type a new step in **Add a step** and press Enter.
 - **Remove** takes out a step that has not started. **Restore** brings it back.
+- Drag a step that has not started by the grip at its left edge, which shows when you hover the step, to change the order, or right-click it and pick **Move up** or **Move down**. A step can only land below the last step that has started; steps that are done or running keep their place, and their grip says so. Steps you added and have not sent stay at the end, in the order you put them.
 
-Your changes are tagged **Edited**, **New**, or **Removed**, and stay on this page until you send them: a bar at the bottom reads how many changes are unsent. **Undo** drops them all. **Send to lead** saves them all at once and sends the lead one message that lists what changed, so the lead never works from a half-edited plan. When a step whose thread is already running changed, the lead tells that thread. Leaving the page drops changes you have not sent.
+Your changes are tagged **Edited**, **New**, **Removed**, or **New order**, and stay on this page until you send them: a bar at the bottom reads how many changes are unsent. **Undo** drops them all. **Send to lead** saves them all at once and sends the lead one message that lists what changed, including the new order of the steps, so the lead never works from a half-edited plan. When a step whose thread is already running changed, the lead tells that thread. Opening another task's Mission Control page, or the task being done or deleted, drops changes you have not sent.
 
 ## While the steps run
 

@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Edges, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, Render, SharedString, Subscription,
+    AnyElement, App, ClickEvent, Context, CursorStyle, DragMoveEvent, Edges, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Subscription,
     Window, div, prelude::*, px, relative,
 };
 use zeron_proto::{
@@ -12,11 +13,12 @@ use zeron_proto::{
     TaskStatus, TaskStepPatch,
 };
 
-use super::morph::{self, Key, Painted, ZOOM_DROP, ZOOM_SLIDE, ZoomFrame};
+use super::morph::{self, Key, Painted};
 use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec, Tween};
+use crate::popover;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -27,6 +29,9 @@ const ICON_SLOT: f32 = 16.0;
 const STEP_IN: MotionSpec = MotionSpec::new(350, motion::EASE_DRAWER);
 const STEP_RISE: f32 = 6.0;
 const PROGRESS_FILL: MotionSpec = MotionSpec::new(500, motion::EASE_DRAWER);
+const ROW_PAD_LEFT: f32 = 16.0;
+const ROW_SHIFT: MotionSpec = MotionSpec::new(200, motion::EASE_DRAWER);
+const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
 
 pub enum TaskCenterEvent {
     Update {
@@ -56,6 +61,8 @@ pub struct PlanEdit {
     pub overview: Option<String>,
     pub steps: Vec<PlanStepEdit>,
     pub remove_step_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -91,6 +98,8 @@ struct Draft {
     edited: HashMap<String, StepText>,
     added: Vec<(String, StepText)>,
     removed: Vec<String>,
+    order: Option<Vec<String>>,
+    moved: HashSet<String>,
 }
 
 impl Draft {
@@ -99,6 +108,7 @@ impl Draft {
             + self.edited.len()
             + self.added.len()
             + self.removed.len()
+            + self.moved.len()
     }
 
     fn retain_live(&mut self, plan: &Rollup) {
@@ -106,6 +116,27 @@ impl Draft {
         self.edited.retain(|id, _| row(id).is_some());
         self.removed
             .retain(|id| row(id).is_some_and(|row| row.status == StepStatus::Planned));
+        self.moved.retain(|id| row(id).is_some());
+        if let Some(order) = &mut self.order {
+            order.retain(|id| row(id).is_some());
+            for row in &plan.steps {
+                if !order.contains(&row.step.id) {
+                    order.push(row.step.id.clone());
+                }
+            }
+        }
+        let started = self
+            .moved
+            .iter()
+            .any(|id| row(id).is_some_and(|row| row.status != StepStatus::Planned));
+        let unchanged = self
+            .order
+            .as_ref()
+            .is_none_or(|order| order.iter().eq(plan.steps.iter().map(|row| &row.step.id)));
+        if started || unchanged || self.moved.is_empty() {
+            self.order = None;
+            self.moved.clear();
+        }
     }
 
     fn edit(&self, plan: &Rollup) -> PlanEdit {
@@ -135,8 +166,67 @@ impl Draft {
                 .filter(|row| self.removed.contains(&row.step.id))
                 .map(|row| row.step.id.clone())
                 .collect(),
+            order: self
+                .order
+                .iter()
+                .flatten()
+                .filter(|id| !self.removed.contains(id))
+                .cloned()
+                .collect(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Started,
+    Planned,
+    Removed,
+    Added,
+}
+
+fn arrange(ids: &[&str], order: Option<&[String]>) -> Vec<usize> {
+    let mut out: Vec<usize> = order
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|id| ids.iter().position(|row| row == id))
+        .collect();
+    let rest: Vec<usize> = (0..ids.len()).filter(|ix| !out.contains(ix)).collect();
+    out.extend(rest);
+    out
+}
+
+fn move_range(slots: &[Slot], from: usize) -> Option<(usize, usize)> {
+    match slots.get(from)? {
+        Slot::Planned => {
+            let floor = slots
+                .iter()
+                .rposition(|slot| *slot == Slot::Started)
+                .map_or(0, |ix| ix + 1);
+            let lo = if from < floor { floor - 1 } else { floor };
+            let hi = slots.iter().rposition(|slot| *slot != Slot::Added)?;
+            Some((lo, hi))
+        }
+        Slot::Added => Some((
+            slots.iter().position(|slot| *slot == Slot::Added)?,
+            slots.len() - 1,
+        )),
+        Slot::Started | Slot::Removed => None,
+    }
+}
+
+fn drop_index(rows: &[(f32, f32)], from: usize, (lo, hi): (usize, usize), dy: f32) -> usize {
+    let (top, height) = rows[from];
+    let mid = top + height / 2.0 + dy;
+    let center = |k: usize| rows[k].0 + rows[k].1 / 2.0;
+    if let Some(k) = (lo..from).find(|&k| mid < center(k)) {
+        return k;
+    }
+    (from + 1..=hi)
+        .filter(|&k| mid > center(k))
+        .last()
+        .filter(|&k| k >= lo)
+        .unwrap_or(from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +234,7 @@ enum Tag {
     Edited,
     New,
     Removed,
+    Moved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +247,68 @@ struct Editor {
     target: EditTarget,
     title: Option<Entity<ComposerInput>>,
     body: Entity<ComposerInput>,
+    from: f32,
+    grow: Tween,
     _subscriptions: Vec<Subscription>,
+}
+
+pub struct StepDragPayload {
+    task_id: String,
+    step_id: String,
+}
+
+struct StepDragGhost;
+
+impl Render for StepDragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+struct StepDrag {
+    id: String,
+    from: usize,
+    range: (usize, usize),
+    rows: Vec<(f32, f32)>,
+    origin: f32,
+    start: f32,
+    dy: f32,
+    over: usize,
+    shifts: HashMap<usize, Tween>,
+}
+
+#[derive(Clone)]
+enum Outcome {
+    Skip,
+    Reopen,
+    Locked,
+}
+
+#[derive(Clone)]
+struct StepActions {
+    step_id: String,
+    index: usize,
+    edit: bool,
+    thread: Option<String>,
+    up: bool,
+    down: bool,
+    outcome: Outcome,
+    remove: bool,
+}
+
+struct StepMenu {
+    position: Point<Pixels>,
+    actions: StepActions,
+}
+
+#[derive(Clone, Copy)]
+enum MenuAction {
+    Edit,
+    Open,
+    Up,
+    Down,
+    Outcome,
+    Remove,
 }
 
 struct Thread {
@@ -188,8 +340,12 @@ pub struct TaskCenter {
     live: Option<LiveThread>,
     fill: Option<Tween>,
     arrivals: Option<HashMap<String, Tween>>,
-    zoom: Option<ZoomFrame>,
     painted: Painted,
+    scroll: ScrollHandle,
+    menu: popover::Popup<StepMenu>,
+    drag: Option<StepDrag>,
+    press: f32,
+    settle: Option<(String, f32, Tween)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -227,8 +383,12 @@ impl TaskCenter {
             live: None,
             fill: None,
             arrivals: None,
-            zoom: None,
             painted: Painted::default(),
+            scroll: ScrollHandle::new(),
+            menu: popover::Popup::default(),
+            drag: None,
+            press: 0.0,
+            settle: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![add_events, state_changes],
         }
@@ -271,15 +431,6 @@ impl TaskCenter {
     pub fn set_live(&mut self, live: Option<LiveThread>, cx: &mut Context<Self>) {
         self.live = live;
         cx.notify();
-    }
-
-    pub fn set_zoom(&mut self, zoom: Option<ZoomFrame>) {
-        self.zoom = zoom;
-    }
-
-    pub fn zoom_ready(&self) -> bool {
-        let painted = self.painted.borrow();
-        painted.contains_key(&Key::Center) && painted.contains_key(&Key::Live)
     }
 
     fn add_step(&mut self, cx: &mut Context<Self>) {
@@ -379,10 +530,26 @@ impl TaskCenter {
         if let EditTarget::Step(id) = &target {
             self.expanded.insert(id.clone());
         }
+        let key = match &target {
+            EditTarget::Overview => Key::Overview,
+            EditTarget::Step(id) => Key::Task(id.clone()),
+        };
+        let from = {
+            let mut painted = self.painted.borrow_mut();
+            painted.remove(&Key::Editor);
+            painted
+                .get(&key)
+                .map_or(0.0, |rect| f32::from(rect.size.height))
+        };
+        let now = Instant::now();
+        let mut grow = Tween::at(0.0, now);
+        grow.retarget(1.0, EDIT_GROW, motion::reduced_motion(cx), now);
         self.editor = Some(Editor {
             target,
             title,
             body,
+            from,
+            grow,
             _subscriptions: subscriptions,
         });
         cx.notify();
@@ -512,6 +679,239 @@ impl TaskCenter {
                 ..Default::default()
             },
         });
+    }
+
+    fn shown(
+        &self,
+        task: &zeron_proto::Task,
+        plan: &Rollup,
+        cx: &App,
+    ) -> Vec<(StepRow, Option<Tag>, Option<Thread>)> {
+        let mut threads = self.threads(plan, cx);
+        let ids: Vec<&str> = plan.steps.iter().map(|row| row.step.id.as_str()).collect();
+        let mut shown: Vec<(StepRow, Option<Tag>, Option<Thread>)> =
+            arrange(&ids, self.draft.order.as_deref())
+                .into_iter()
+                .map(|ix| {
+                    let row = &plan.steps[ix];
+                    let text = self.shown_step(&row.step);
+                    let tag = if self.draft.removed.contains(&row.step.id) {
+                        Some(Tag::Removed)
+                    } else {
+                        self.draft
+                            .edited
+                            .contains_key(&row.step.id)
+                            .then_some(Tag::Edited)
+                    };
+                    let mut step = row.step.clone();
+                    step.title = text.title;
+                    step.notes = text.notes;
+                    (
+                        StepRow {
+                            step,
+                            status: row.status,
+                            indicator: row.indicator,
+                            brand: row.brand,
+                        },
+                        tag,
+                        threads[ix].take(),
+                    )
+                })
+                .collect();
+        for (id, text) in &self.draft.added {
+            let step = zeron_proto::TaskStep {
+                id: id.clone(),
+                task_id: task.id.clone(),
+                title: text.title.clone(),
+                notes: text.notes.clone(),
+                order_key: String::new(),
+                chat_id: None,
+                outcome: None,
+                created_at: Default::default(),
+                updated_at: Default::default(),
+                deleted: false,
+                turn: None,
+            };
+            shown.push((
+                StepRow {
+                    step,
+                    status: StepStatus::Planned,
+                    indicator: None,
+                    brand: None,
+                },
+                Some(Tag::New),
+                None,
+            ));
+        }
+        shown
+    }
+
+    fn slots(shown: &[(StepRow, Option<Tag>, Option<Thread>)]) -> Vec<Slot> {
+        shown
+            .iter()
+            .map(|(row, tag, _)| match tag {
+                Some(Tag::New) => Slot::Added,
+                Some(Tag::Removed) => Slot::Removed,
+                _ if row.status == StepStatus::Planned => Slot::Planned,
+                _ => Slot::Started,
+            })
+            .collect()
+    }
+
+    fn move_step(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let Some((task, plan)) = self.task_and_plan(cx) else {
+            return;
+        };
+        let shown = self.shown(&task, &plan, cx);
+        let slots = Self::slots(&shown);
+        let Some((lo, hi)) = move_range(&slots, from) else {
+            return;
+        };
+        if to == from || to < lo || to > hi {
+            return;
+        }
+        let persisted = slots.iter().filter(|slot| **slot != Slot::Added).count();
+        if from >= persisted {
+            let row = self.draft.added.remove(from - persisted);
+            self.draft.added.insert(to - persisted, row);
+        } else {
+            let mut order: Vec<String> = shown[..persisted]
+                .iter()
+                .map(|(row, ..)| row.step.id.clone())
+                .collect();
+            let id = order.remove(from);
+            order.insert(to, id.clone());
+            self.draft.moved.insert(id);
+            self.draft.order = Some(order);
+            self.draft.retain_live(&plan);
+        }
+        cx.notify();
+    }
+
+    fn begin_drag(&self, step_id: &str, cx: &App) -> Option<StepDrag> {
+        let (task, plan) = self.task_and_plan(cx)?;
+        let shown = self.shown(&task, &plan, cx);
+        let from = shown.iter().position(|(row, ..)| row.step.id == step_id)?;
+        let range = move_range(&Self::slots(&shown), from)?;
+        let painted = self.painted.borrow();
+        let rows = shown
+            .iter()
+            .map(|(row, ..)| {
+                let rect = painted.get(&Key::Task(row.step.id.clone()))?;
+                Some((f32::from(rect.top()), f32::from(rect.size.height)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(StepDrag {
+            id: step_id.to_string(),
+            from,
+            range,
+            rows,
+            origin: f32::from(painted.get(&Key::Steps)?.top()),
+            start: self.press,
+            dy: 0.0,
+            over: from,
+            shifts: HashMap::new(),
+        })
+    }
+
+    fn drag_to(&mut self, step_id: &str, y: f32, cx: &mut Context<Self>) {
+        if self.drag.as_ref().is_none_or(|drag| drag.id != step_id) {
+            self.drag = self.begin_drag(step_id, cx);
+        }
+        let reduced = motion::reduced_motion(cx);
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        let now = Instant::now();
+        let (lo, hi) = drag.range;
+        let (top, height) = drag.rows[drag.from];
+        let first = drag.rows[lo.min(drag.from)];
+        let last = drag.rows[hi.max(drag.from)];
+        drag.dy = (y - drag.start).clamp(first.0 - top - 6.0, last.0 + last.1 - top - height + 6.0);
+        let over = drop_index(&drag.rows, drag.from, drag.range, drag.dy);
+        if over != drag.over {
+            drag.over = over;
+            for k in (0..drag.rows.len()).filter(|k| *k != drag.from) {
+                let target = if drag.from < k && k <= over {
+                    -1.0
+                } else if over <= k && k < drag.from {
+                    1.0
+                } else {
+                    0.0
+                };
+                let tween = drag.shifts.entry(k).or_insert_with(|| Tween::at(0.0, now));
+                if tween.target() != target {
+                    tween.retarget(target, ROW_SHIFT, reduced, now);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn drop_step(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        let (top, height) = drag.rows[drag.from];
+        let (over_top, over_height) = drag.rows[drag.over];
+        let slot = match drag.over.cmp(&drag.from) {
+            std::cmp::Ordering::Less => over_top,
+            std::cmp::Ordering::Greater => over_top + over_height - height,
+            std::cmp::Ordering::Equal => top,
+        };
+        self.move_step(drag.from, drag.over, cx);
+        self.settle(drag.id, top + drag.dy - slot, cx);
+    }
+
+    fn settle(&mut self, step_id: String, offset: f32, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let mut tween = Tween::at(1.0, now);
+        tween.retarget(0.0, ROW_SHIFT, motion::reduced_motion(cx), now);
+        self.settle = Some((step_id, offset, tween));
+        cx.notify();
+    }
+
+    fn open_menu(
+        &mut self,
+        actions: StepActions,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        self.menu.open(StepMenu { position, actions });
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.begin_close() {
+            popover::reap_popup(cx, |center: &mut Self| &mut center.menu);
+            cx.notify();
+        }
+    }
+
+    fn menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(actions) = self.menu.as_open().map(|menu| menu.actions.clone()) else {
+            return;
+        };
+        self.close_menu(cx);
+        let id = actions.step_id;
+        match action {
+            MenuAction::Edit => self.start_edit(EditTarget::Step(id), window, cx),
+            MenuAction::Open => {
+                if let Some(chat) = actions.thread {
+                    cx.emit(TaskCenterEvent::OpenChat(chat));
+                }
+            }
+            MenuAction::Up => self.move_step(actions.index, actions.index.saturating_sub(1), cx),
+            MenuAction::Down => self.move_step(actions.index, actions.index + 1, cx),
+            MenuAction::Outcome => match actions.outcome {
+                Outcome::Skip => self.set_outcome(&id, Some(StepOutcome::Skipped), cx),
+                Outcome::Reopen => self.set_outcome(&id, None, cx),
+                Outcome::Locked => {}
+            },
+            MenuAction::Remove => self.toggle_remove(&id, cx),
+        }
     }
 
     fn threads(&self, plan: &Rollup, cx: &App) -> Vec<Option<Thread>> {
@@ -1076,6 +1476,7 @@ impl TaskCenter {
             Tag::Edited => ("Edited", theme.warning),
             Tag::New => ("New", theme.accent),
             Tag::Removed => ("Removed", theme.danger),
+            Tag::Moved => ("New order", theme.accent),
         };
         div()
             .flex_none()
@@ -1106,22 +1507,130 @@ impl TaskCenter {
         crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
     }
 
-    fn render_editor(&self, editor: &Editor, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let field = |id: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .px(px(8.0))
-                .py(px(5.0))
-                .rounded(px(8.0))
-                .bg(theme.wash(0.08))
-        };
+    #[allow(clippy::too_many_arguments)]
+    fn edit_card(
+        &self,
+        editor: &Editor,
+        head: AnyElement,
+        indent: f32,
+        pad: (f32, f32),
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = Instant::now();
+        let growing = !editor.grow.settled_at(now);
+        if growing {
+            window.request_animation_frame();
+        }
+        let natural = self
+            .painted
+            .borrow()
+            .get(&Key::Editor)
+            .map(|rect| f32::from(rect.size.height));
+        let height = growing.then(|| {
+            motion::lerp(
+                editor.from,
+                natural.unwrap_or(editor.from),
+                editor.grow.value_at(now),
+            )
+        });
         let body = editor.body.clone();
+        let notes = div()
+            .id("task-center-edit-body")
+            .debug_selector(|| "task-center-edit-body".into())
+            .pt(px(8.0))
+            .text_size(ui_rems(12.5))
+            .text_color(theme.text)
+            .capture_action(cx.listener(move |_, _: &Submit, window, cx| {
+                if body.focus_handle(cx).is_focused(window) {
+                    cx.stop_propagation();
+                    body.update(cx, |input, cx| {
+                        input.replace_text_in_range(None, "\n", window, cx)
+                    });
+                }
+            }))
+            .child(crate::composer::growing_field(
+                editor.body.clone(),
+                18.0,
+                260.0,
+                cx,
+            ));
+        let hint = if cfg!(target_os = "macos") {
+            "⌘↵ save · Esc cancel"
+        } else {
+            "Ctrl+↵ save · Esc cancel"
+        };
+        let footer = div()
+            .mt(px(12.0))
+            .pt(px(9.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_rems(11.5))
+                    .text_color(theme.text_faint)
+                    .child(hint),
+            )
+            .child(
+                widgets::text_action(theme, widgets::ActionTone::Quiet, "Cancel")
+                    .id("task-center-edit-cancel")
+                    .debug_selector(|| "task-center-edit-cancel".into())
+                    .role(gpui::Role::Button)
+                    .min_h(px(24.0))
+                    .rounded_full()
+                    .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.cancel_edit(cx))),
+            )
+            .child(
+                widgets::text_action(theme, widgets::ActionTone::Solid, "Save")
+                    .id("task-center-edit-save")
+                    .debug_selector(|| "task-center-edit-save".into())
+                    .role(gpui::Role::Button)
+                    .min_h(px(24.0))
+                    .rounded_full()
+                    .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.commit_edit(cx))),
+            );
+        let content = div()
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .pl(px(pad.0))
+            .pr(px(12.0))
+            .py(px(pad.1))
+            .child(morph::measure(&self.painted, Key::Editor, Edges::default()))
+            .child(head)
+            .child(
+                div()
+                    .pl(px(indent))
+                    .flex()
+                    .flex_col()
+                    .child(notes)
+                    .child(footer),
+            );
         div()
             .debug_selector(|| "task-center-editor".into())
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .overflow_hidden()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_card)
+            .shadow(vec![gpui::BoxShadow {
+                color: gpui::black().opacity(0.3),
+                offset: gpui::point(px(0.0), px(10.0)),
+                blur_radius: px(28.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .when_some(height, |el, height| el.h(px(height)))
             .on_key_down(cx.listener(|center, event: &KeyDownEvent, _, cx| {
                 let modifiers = &event.keystroke.modifiers;
                 match event.keystroke.key.as_str() {
@@ -1136,57 +1645,7 @@ impl TaskCenter {
                     _ => {}
                 }
             }))
-            .children(editor.title.clone().map(|title| {
-                field("task-center-edit-title")
-                    .text_size(ui_rems(13.0))
-                    .child(title)
-            }))
-            .child(
-                field("task-center-edit-body")
-                    .text_size(ui_rems(12.5))
-                    .capture_action(cx.listener(move |_, _: &Submit, window, cx| {
-                        if body.focus_handle(cx).is_focused(window) {
-                            cx.stop_propagation();
-                            body.update(cx, |input, cx| {
-                                input.replace_text_in_range(None, "\n", window, cx)
-                            });
-                        }
-                    }))
-                    .child(crate::composer::growing_field(
-                        editor.body.clone(),
-                        18.0,
-                        260.0,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(
-                        widgets::text_action(theme, widgets::ActionTone::Quiet, "Cancel")
-                            .id("task-center-edit-cancel")
-                            .debug_selector(|| "task-center-edit-cancel".into())
-                            .role(gpui::Role::Button)
-                            .min_h(px(24.0))
-                            .rounded_full()
-                            .on_click(
-                                cx.listener(|center, _: &ClickEvent, _, cx| center.cancel_edit(cx)),
-                            ),
-                    )
-                    .child(
-                        widgets::text_action(theme, widgets::ActionTone::Filled, "Done")
-                            .id("task-center-edit-done")
-                            .debug_selector(|| "task-center-edit-done".into())
-                            .role(gpui::Role::Button)
-                            .min_h(px(24.0))
-                            .rounded_full()
-                            .on_click(
-                                cx.listener(|center, _: &ClickEvent, _, cx| center.commit_edit(cx)),
-                            ),
-                    ),
-            )
+            .child(content)
             .into_any_element()
     }
 
@@ -1195,7 +1654,7 @@ impl TaskCenter {
         task: &zeron_proto::Task,
         editable: bool,
         theme: &Theme,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !task.plan_doc {
@@ -1210,20 +1669,6 @@ impl TaskCenter {
             .overview
             .clone()
             .unwrap_or_else(|| task.plan.clone());
-        let body = match editor {
-            Some(editor) => self.render_editor(editor, theme, cx),
-            None if text.trim().is_empty() => div()
-                .text_size(ui_rems(12.5))
-                .text_color(theme.text_muted)
-                .child("The lead has not written the overview yet.")
-                .into_any_element(),
-            None => Self::markdown(
-                format!("task-center-overview-{}", task.id),
-                &text,
-                theme,
-                window,
-            ),
-        };
         let edit = (editable && editor.is_none()).then(|| {
             widgets::text_action(theme, widgets::ActionTone::Quiet, "Edit")
                 .id("task-center-edit-overview")
@@ -1236,10 +1681,66 @@ impl TaskCenter {
                     center.start_edit(EditTarget::Overview, window, cx)
                 }))
         });
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                icon(icons::FILE_MARKDOWN)
+                    .size(px(13.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .text_size(ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child("Overview"),
+            )
+            .children(
+                self.draft
+                    .overview
+                    .is_some()
+                    .then(|| Self::tag_pill(Tag::Edited, theme)),
+            )
+            .child(div().flex_1())
+            .children(edit);
+        if let Some(editor) = editor {
+            return Some(
+                div()
+                    .id("task-center-overview")
+                    .debug_selector(|| "task-center-overview".into())
+                    .child(self.edit_card(
+                        editor,
+                        head.into_any_element(),
+                        0.0,
+                        (12.0, 10.0),
+                        theme,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+        }
+        let body = if text.trim().is_empty() {
+            div()
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child("The lead has not written the overview yet.")
+                .into_any_element()
+        } else {
+            Self::markdown(
+                format!("task-center-overview-{}", task.id),
+                &text,
+                theme,
+                window,
+            )
+        };
         Some(
             div()
                 .id("task-center-overview")
                 .debug_selector(|| "task-center-overview".into())
+                .relative()
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
@@ -1248,35 +1749,130 @@ impl TaskCenter {
                 .rounded(px(12.0))
                 .border_1()
                 .border_color(theme.border)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            icon(icons::FILE_MARKDOWN)
-                                .size(px(13.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(
-                            div()
-                                .text_size(ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text_muted)
-                                .child("Overview"),
-                        )
-                        .children(
-                            self.draft
-                                .overview
-                                .is_some()
-                                .then(|| Self::tag_pill(Tag::Edited, theme)),
-                        )
-                        .child(div().flex_1())
-                        .children(edit),
-                )
+                .child(morph::measure(
+                    &self.painted,
+                    Key::Overview,
+                    Edges::default(),
+                ))
+                .child(head)
                 .child(body)
                 .into_any_element(),
         )
+    }
+
+    fn grip(
+        theme: &Theme,
+        step_id: &str,
+        lock: Option<&'static str>,
+        group: SharedString,
+    ) -> gpui::Stateful<gpui::Div> {
+        let dot = || div().size(px(2.5)).rounded_full().bg(theme.text_muted);
+        let column = || {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.5))
+                .child(dot())
+                .child(dot())
+                .child(dot())
+        };
+        let selector = format!("task-center-grip-{step_id}");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .absolute()
+            .left(px(2.0))
+            .top(px(8.0))
+            .w(px(12.0))
+            .h(px(ICON_SLOT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(2.0))
+            .invisible()
+            .group_hover(group, |s| s.visible())
+            .opacity(if lock.is_some() { 0.35 } else { 0.85 })
+            .cursor(if lock.is_some() {
+                CursorStyle::OperationNotAllowed
+            } else {
+                CursorStyle::OpenHand
+            })
+            .child(column())
+            .child(column())
+            .when_some(lock, |el, lock| el.tooltip(widgets::text_tooltip(lock)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_step_card(
+        &self,
+        index: usize,
+        row: &StepRow,
+        thread: Option<&Thread>,
+        editor: &Editor,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let step_id = row.step.id.clone();
+        let head = div()
+            .flex()
+            .items_start()
+            .gap(px(10.0))
+            .child(Self::step_icon(row.status, theme, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(ui_rems(13.0))
+                            .text_color(theme.text)
+                            .child(div().flex_none().child(format!("{}.", index + 1)))
+                            .children(editor.title.clone().map(|title| {
+                                div()
+                                    .id("task-center-edit-title")
+                                    .debug_selector(|| "task-center-edit-title".into())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(title)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.text_muted)
+                            .children(Self::step_subline(row, thread, theme)),
+                    ),
+            );
+        div()
+            .id(SharedString::from(format!("task-center-step-{step_id}")))
+            .debug_selector(move || format!("task-center-step-{step_id}"))
+            .relative()
+            .child(morph::measure(
+                &self.painted,
+                Key::Task(row.step.id.clone()),
+                Edges::default(),
+            ))
+            .child(self.edit_card(
+                editor,
+                head.into_any_element(),
+                ICON_SLOT + 10.0,
+                (ROW_PAD_LEFT, 8.0),
+                theme,
+                window,
+                cx,
+            ))
+            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1287,19 +1883,24 @@ impl TaskCenter {
         row: &StepRow,
         thread: Option<&Thread>,
         tag: Option<Tag>,
+        range: Option<(usize, usize)>,
         editable: bool,
         theme: &Theme,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let step_id = row.step.id.clone();
         let group = SharedString::from(format!("task-center-step-{step_id}"));
         let selected = self.selected == Selection::Step(step_id.clone());
-        let editor = self
+        if let Some(editor) = self
             .editor
             .as_ref()
-            .filter(|editor| editor.target == EditTarget::Step(step_id.clone()));
-        let expanded = editor.is_some() || self.expanded.contains(&step_id);
+            .filter(|editor| editor.target == EditTarget::Step(step_id.clone()))
+        {
+            return self.render_step_card(index, row, thread, editor, theme, window, cx);
+        }
+        let expanded = self.expanded.contains(&step_id);
+        let moved = self.draft.moved.contains(&step_id);
         let registered = tag != Some(Tag::New) && tag != Some(Tag::Removed);
         let retry = registered
             && row.step.outcome.is_none()
@@ -1331,11 +1932,12 @@ impl TaskCenter {
                     .when(struck, |el| el.line_through())
                     .child(format!("{}. {}", index + 1, row.step.title)),
             )
-            .children(tag.map(|tag| Self::tag_pill(tag, theme)));
-        let mut actions: Vec<AnyElement> = Vec::new();
+            .children(tag.map(|tag| Self::tag_pill(tag, theme)))
+            .children(moved.then(|| Self::tag_pill(Tag::Moved, theme)));
+        let mut actions_row: Vec<AnyElement> = Vec::new();
         if skip {
             let id = step_id.clone();
-            actions.push(
+            actions_row.push(
                 Self::hover_action(
                     theme,
                     format!("task-center-skip-{step_id}"),
@@ -1352,7 +1954,7 @@ impl TaskCenter {
         }
         if reopen {
             let id = step_id.clone();
-            actions.push(
+            actions_row.push(
                 Self::hover_action(
                     theme,
                     format!("task-center-reopen-{step_id}"),
@@ -1434,91 +2036,127 @@ impl TaskCenter {
         subline.push(div().flex_none().child("·").into_any_element());
         subline.push(spec_toggle.into_any_element());
         let panel = expanded.then(|| {
-            let body = match editor {
-                Some(editor) => self.render_editor(editor, theme, cx),
-                None => {
-                    let spec = if row.step.notes.trim().is_empty() {
-                        div()
-                            .text_size(ui_rems(12.5))
-                            .text_color(theme.text_muted)
-                            .child("No spec yet.")
-                            .into_any_element()
-                    } else {
-                        Self::markdown(
-                            format!("task-center-spec-body-{step_id}"),
-                            &row.step.notes,
-                            theme,
-                            window,
-                        )
-                    };
-                    let edit = (editable && tag != Some(Tag::Removed)).then(|| {
-                        let id = step_id.clone();
-                        side_button(
-                            "Edit",
-                            format!("task-center-edit-{step_id}"),
-                            widgets::ActionTone::Quiet,
-                        )
-                        .on_click(cx.listener(
-                            move |center, _: &ClickEvent, window, cx| {
-                                center.start_edit(EditTarget::Step(id.clone()), window, cx)
-                            },
-                        ))
-                    });
-                    let remove = removable.then(|| {
-                        let id = step_id.clone();
-                        side_button(
-                            "Remove",
-                            format!("task-center-remove-{step_id}"),
-                            widgets::ActionTone::Quiet,
-                        )
-                        .on_click(cx.listener(
-                            move |center, _: &ClickEvent, _, cx| center.toggle_remove(&id, cx),
-                        ))
-                    });
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(spec)
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(4.0))
-                                .ml(px(-8.0))
-                                .children(edit)
-                                .children(remove),
-                        )
-                        .into_any_element()
-                }
+            let spec = if row.step.notes.trim().is_empty() {
+                div()
+                    .text_size(ui_rems(12.5))
+                    .text_color(theme.text_muted)
+                    .child("No spec yet.")
+                    .into_any_element()
+            } else {
+                Self::markdown(
+                    format!("task-center-spec-body-{step_id}"),
+                    &row.step.notes,
+                    theme,
+                    window,
+                )
             };
+            let edit = (editable && tag != Some(Tag::Removed)).then(|| {
+                let id = step_id.clone();
+                side_button(
+                    "Edit",
+                    format!("task-center-edit-{step_id}"),
+                    widgets::ActionTone::Quiet,
+                )
+                .on_click(cx.listener(
+                    move |center, _: &ClickEvent, window, cx| {
+                        center.start_edit(EditTarget::Step(id.clone()), window, cx)
+                    },
+                ))
+            });
+            let remove = removable.then(|| {
+                let id = step_id.clone();
+                side_button(
+                    "Remove",
+                    format!("task-center-remove-{step_id}"),
+                    widgets::ActionTone::Quiet,
+                )
+                .on_click(
+                    cx.listener(move |center, _: &ClickEvent, _, cx| center.toggle_remove(&id, cx)),
+                )
+            });
             div()
                 .debug_selector({
                     let id = step_id.clone();
                     move || format!("task-center-spec-panel-{id}")
                 })
-                .ml(px(8.0 + ICON_SLOT + 10.0))
+                .ml(px(ROW_PAD_LEFT + ICON_SLOT + 10.0))
                 .mr(px(8.0))
                 .mb(px(6.0))
                 .pl(px(10.0))
                 .border_l_2()
                 .border_color(theme.border)
-                .child(body)
+                .child(
+                    div().flex().flex_col().gap(px(6.0)).child(spec).child(
+                        div()
+                            .flex()
+                            .gap(px(4.0))
+                            .ml(px(-8.0))
+                            .children(edit)
+                            .children(remove),
+                    ),
+                )
         });
         let connector = (!last).then(|| {
             div()
                 .absolute()
-                .left(px(8.0 + ICON_SLOT / 2.0))
+                .left(px(ROW_PAD_LEFT + ICON_SLOT / 2.0))
                 .top(px(8.0 + ICON_SLOT + 4.0))
                 .bottom(px(-8.0))
                 .w(px(1.0))
                 .bg(theme.border)
         });
+        let grip = editable && tag != Some(Tag::Removed);
+        let lock = match row.status {
+            _ if range.is_some() => None,
+            StepStatus::Done | StepStatus::Skipped => Some("Finished steps keep their place"),
+            _ => Some("Running steps keep their place"),
+        };
+        let grip = grip.then(|| {
+            let el = Self::grip(theme, &step_id, lock, group.clone());
+            if lock.is_some() {
+                return el;
+            }
+            let payload = StepDragPayload {
+                task_id: self.task_id.clone(),
+                step_id: step_id.clone(),
+            };
+            el.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|center, event: &MouseDownEvent, _, _| {
+                    center.press = f32::from(event.position.y);
+                }),
+            )
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_drag(payload, |_, _, _, cx| cx.new(|_| StepDragGhost))
+        });
+        let actions = StepActions {
+            step_id: step_id.clone(),
+            index,
+            edit: editable && tag != Some(Tag::Removed),
+            thread: thread.and(row.step.chat_id.clone()),
+            up: editable
+                && range.is_some_and(|(lo, hi)| index >= 1 && (lo..=hi).contains(&(index - 1))),
+            down: editable && range.is_some_and(|(lo, hi)| (lo..=hi).contains(&(index + 1))),
+            outcome: if reopen {
+                Outcome::Reopen
+            } else if skip {
+                Outcome::Skip
+            } else {
+                Outcome::Locked
+            },
+            remove: removable,
+        };
         let select_id = step_id.clone();
         let aria = format!("Step {}: {}", index + 1, row.step.title);
         div()
             .relative()
             .flex()
             .flex_col()
+            .child(morph::measure(
+                &self.painted,
+                Key::Task(step_id.clone()),
+                Edges::default(),
+            ))
             .children(connector)
             .child(
                 div()
@@ -1528,15 +2166,18 @@ impl TaskCenter {
                     .role(gpui::Role::ListItem)
                     .aria_label(aria)
                     .aria_selected(selected)
+                    .relative()
                     .flex()
                     .items_start()
                     .gap(px(10.0))
-                    .px(px(8.0))
+                    .pl(px(ROW_PAD_LEFT))
+                    .pr(px(8.0))
                     .py(px(8.0))
                     .rounded(px(10.0))
                     .cursor_pointer()
                     .when(selected, |el| el.bg(theme.wash(0.08)))
                     .when(!selected, |el| el.hover(|s| s.bg(theme.wash(0.05))))
+                    .children(grip)
                     .child(Self::step_icon(row.status, theme, cx))
                     .child(
                         div()
@@ -1563,9 +2204,17 @@ impl TaskCenter {
                             .flex()
                             .items_center()
                             .gap(px(2.0))
-                            .children(actions)
+                            .children(actions_row)
                             .children(retry_button)
                             .children(restore_button),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |center, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            center.open_menu(actions.clone(), event.position, window, cx);
+                        }),
                     )
                     .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                         center.select(Selection::Step(select_id.clone()), cx)
@@ -1641,7 +2290,8 @@ impl TaskCenter {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .px(px(8.0))
+            .pl(px(ROW_PAD_LEFT))
+            .pr(px(8.0))
             .py(px(8.0))
             .rounded(px(10.0))
             .child(
@@ -1671,7 +2321,6 @@ impl TaskCenter {
         &self,
         task: &zeron_proto::Task,
         plan: &Rollup,
-        fade: Option<f32>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1771,8 +2420,7 @@ impl TaskCenter {
                             .child(sub),
                     ),
             )
-            .children(open)
-            .when_some(fade, |el, fade| el.opacity(fade));
+            .children(open);
         let body = match &self.live {
             Some(live) => div()
                 .flex_1()
@@ -1806,16 +2454,6 @@ impl TaskCenter {
     }
 }
 
-fn zoomed(el: AnyElement, t: f32, dx: f32, dy: f32) -> AnyElement {
-    div()
-        .relative()
-        .left(px(dx * (1.0 - t)))
-        .top(px(dy * (1.0 - t)))
-        .opacity(t)
-        .child(el)
-        .into_any_element()
-}
-
 fn retryable(status: DelegationStatus) -> bool {
     matches!(
         status,
@@ -1828,36 +2466,6 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 }
 
 impl TaskCenter {
-    fn zoom_ghost(&self, frame: ZoomFrame, live: AnyElement) -> AnyElement {
-        let from = Edges {
-            top: Theme::TITLEBAR_HEIGHT,
-            ..Edges::default()
-        };
-        let painted = self.painted.borrow();
-        let to = match (painted.get(&Key::Center), painted.get(&Key::Live)) {
-            (Some(page), Some(slot)) => Edges {
-                top: f32::from(slot.top() - page.top()),
-                right: f32::from(page.right() - slot.right()),
-                bottom: f32::from(page.bottom() - slot.bottom()),
-                left: f32::from(slot.left() - page.left()),
-            },
-            _ => from,
-        };
-        let t = frame.rect();
-        let inset = |from: f32, to: f32| px(motion::lerp(from, to, t));
-        div()
-            .absolute()
-            .top(inset(from.top, to.top))
-            .right(inset(from.right, to.right))
-            .bottom(inset(from.bottom, to.bottom))
-            .left(inset(from.left, to.left))
-            .flex()
-            .overflow_hidden()
-            .when_some(frame.backdrop, |el, backdrop| el.bg(backdrop))
-            .child(live)
-            .into_any_element()
-    }
-
     fn fill_at(&mut self, progress: PlanProgress, reduced: bool, now: Instant) -> (f32, bool) {
         let PlanProgress { done, total } = progress;
         let fraction = if total == 0 {
@@ -1893,6 +2501,174 @@ impl TaskCenter {
     }
 }
 
+impl TaskCenter {
+    #[allow(clippy::too_many_arguments)]
+    fn menu_item(
+        &self,
+        theme: &Theme,
+        id: &'static str,
+        label: &'static str,
+        enabled: bool,
+        danger: bool,
+        action: MenuAction,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = popover::menu_row(theme, false, id)
+            .id(id)
+            .debug_selector(move || id.into())
+            .role(gpui::Role::MenuItem)
+            .aria_label(label)
+            .child(label);
+        if !enabled {
+            return row
+                .bg(gpui::transparent_black())
+                .text_color(theme.text_faint)
+                .cursor_default()
+                .into_any_element();
+        }
+        row.when(danger, |el| el.text_color(theme.danger))
+            .on_click(cx.listener(move |center, _: &ClickEvent, window, cx| {
+                center.menu_action(action, window, cx)
+            }))
+            .into_any_element()
+    }
+
+    fn render_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.menu.get()?;
+        let theme = theme.for_popup();
+        let actions = &menu.actions;
+        let outcome = match actions.outcome {
+            Outcome::Reopen => "Reopen",
+            Outcome::Skip | Outcome::Locked => "Skip",
+        };
+        let card = popover::popover_card(&theme)
+            .w(px(180.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|center, _, _, cx| center.close_menu(cx)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(self.menu_item(
+                &theme,
+                "task-center-menu-edit",
+                "Edit spec",
+                actions.edit,
+                false,
+                MenuAction::Edit,
+                cx,
+            ))
+            .children(actions.thread.is_some().then(|| {
+                self.menu_item(
+                    &theme,
+                    "task-center-menu-open",
+                    "Open thread",
+                    true,
+                    false,
+                    MenuAction::Open,
+                    cx,
+                )
+            }))
+            .child(self.menu_item(
+                &theme,
+                "task-center-menu-up",
+                "Move up",
+                actions.up,
+                false,
+                MenuAction::Up,
+                cx,
+            ))
+            .child(self.menu_item(
+                &theme,
+                "task-center-menu-down",
+                "Move down",
+                actions.down,
+                false,
+                MenuAction::Down,
+                cx,
+            ))
+            .child(popover::menu_separator())
+            .child(self.menu_item(
+                &theme,
+                "task-center-menu-outcome",
+                outcome,
+                !matches!(actions.outcome, Outcome::Locked),
+                false,
+                MenuAction::Outcome,
+                cx,
+            ))
+            .child(self.menu_item(
+                &theme,
+                "task-center-menu-remove",
+                "Remove",
+                actions.remove,
+                true,
+                MenuAction::Remove,
+                cx,
+            ));
+        Some(popover::menu_at(
+            "task-center-step-menu",
+            menu.position,
+            card.into_any_element(),
+            self.menu.closing_since(),
+        ))
+    }
+
+    fn drop_line(&self, theme: &Theme) -> Option<AnyElement> {
+        let drag = self.drag.as_ref().filter(|drag| drag.over != drag.from)?;
+        let (top, height) = drag.rows[drag.over];
+        let y = if drag.over < drag.from {
+            top - 3.0
+        } else {
+            top + height + 1.0
+        };
+        Some(
+            div()
+                .debug_selector(|| "task-center-drop-line".into())
+                .absolute()
+                .left(px(6.0))
+                .right(px(6.0))
+                .top(px(y - drag.origin))
+                .h(px(2.0))
+                .rounded(px(1.0))
+                .bg(theme.accent)
+                .shadow(vec![gpui::BoxShadow {
+                    color: theme.accent.opacity(0.25),
+                    offset: gpui::point(px(0.0), px(0.0)),
+                    blur_radius: px(0.0),
+                    spread_radius: px(3.0),
+                    inset: false,
+                }])
+                .into_any_element(),
+        )
+    }
+
+    fn row_offset(&self, ix: usize, step_id: &str, now: Instant) -> (f32, bool) {
+        if let Some(drag) = &self.drag {
+            if ix == drag.from {
+                return (drag.dy, true);
+            }
+            let shift = drag
+                .shifts
+                .get(&ix)
+                .map_or(0.0, |tween| tween.value_at(now));
+            return (shift * drag.rows[drag.from].1, false);
+        }
+        match &self.settle {
+            Some((id, offset, tween)) if id == step_id => (offset * tween.value_at(now), false),
+            _ => (0.0, false),
+        }
+    }
+
+    fn rows_moving(&self, now: Instant) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|drag| drag.shifts.values().any(|tween| !tween.settled_at(now)))
+            || self
+                .settle
+                .as_ref()
+                .is_some_and(|(_, _, tween)| !tween.settled_at(now))
+    }
+}
+
 impl Render for TaskCenter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1909,128 +2685,115 @@ impl Render for TaskCenter {
         };
         self.draft.retain_live(&plan);
         let editable = task.completed_at.is_none() && plan.lead.is_some();
-        let mut threads = self.threads(&plan, cx);
-        let mut shown: Vec<(StepRow, Option<Tag>)> = plan
-            .steps
-            .iter()
-            .map(|row| {
-                let text = self.shown_step(&row.step);
-                let tag = if self.draft.removed.contains(&row.step.id) {
-                    Some(Tag::Removed)
-                } else {
-                    self.draft
-                        .edited
-                        .contains_key(&row.step.id)
-                        .then_some(Tag::Edited)
-                };
-                let mut step = row.step.clone();
-                step.title = text.title;
-                step.notes = text.notes;
-                (
-                    StepRow {
-                        step,
-                        status: row.status,
-                        indicator: row.indicator,
-                        brand: row.brand,
-                    },
-                    tag,
-                )
-            })
-            .collect();
-        for (id, text) in &self.draft.added {
-            let step = zeron_proto::TaskStep {
-                id: id.clone(),
-                task_id: task.id.clone(),
-                title: text.title.clone(),
-                notes: text.notes.clone(),
-                order_key: String::new(),
-                chat_id: None,
-                outcome: None,
-                created_at: Default::default(),
-                updated_at: Default::default(),
-                deleted: false,
-                turn: None,
-            };
-            shown.push((
-                StepRow {
-                    step,
-                    status: StepStatus::Planned,
-                    indicator: None,
-                    brand: None,
-                },
-                Some(Tag::New),
-            ));
-            threads.push(None);
-        }
+        let shown = self.shown(&task, &plan, cx);
+        let slots = Self::slots(&shown);
         let reduced = motion::reduced_motion(cx);
         let now = Instant::now();
-        let zoom = self.zoom;
-        let slide = |el: AnyElement, ix: usize| match zoom {
-            Some(frame) => zoomed(el, frame.row(ix), -ZOOM_SLIDE, 0.0),
-            None => el,
-        };
+        if self.drag.is_some() && !cx.has_active_drag() {
+            self.drag = None;
+        }
+        if self
+            .settle
+            .as_ref()
+            .is_some_and(|(_, _, tween)| tween.settled_at(now))
+        {
+            self.settle = None;
+        }
         let (fill, filling) = self.fill_at(plan.progress, reduced, now);
-        let ids: Vec<&str> = shown.iter().map(|(row, _)| row.step.id.as_str()).collect();
+        let ids: Vec<&str> = shown.iter().map(|(row, ..)| row.step.id.as_str()).collect();
         let arrivals = self.arrivals_at(&ids, reduced, now);
-        if filling || arrivals.iter().any(|tween| !tween.settled_at(now)) {
+        if filling || arrivals.iter().any(|tween| !tween.settled_at(now)) || self.rows_moving(now) {
             window.request_animation_frame();
         }
         let lead = self.render_lead(&task, &plan, &theme, cx);
         let banner = self.render_banner(&task, &plan, &theme, cx);
         let overview = self.render_overview(&task, editable, &theme, window, cx);
-        let first_step = 1 + usize::from(banner.is_some()) + usize::from(overview.is_some());
         let last = shown.len().saturating_sub(1);
+        let lift_bg = theme.surface_card;
         let steps: Vec<AnyElement> = shown
             .iter()
-            .zip(&threads)
             .zip(&arrivals)
             .enumerate()
-            .map(|(ix, (((row, tag), thread), arrival))| {
+            .map(|(ix, ((row, tag, thread), arrival))| {
                 let step = self.render_step(
                     ix,
                     ix == last && !editable,
                     row,
                     thread.as_ref(),
                     *tag,
+                    move_range(&slots, ix),
                     editable,
                     &theme,
                     window,
                     cx,
                 );
                 let shown = arrival.value_at(now);
-                let slid = zoom.map_or(1.0, |frame| frame.row(first_step + ix));
-                div()
+                let (offset, lifted) = self.row_offset(ix, &row.step.id, now);
+                let el = div()
                     .relative()
-                    .top(px(STEP_RISE * (1.0 - shown)))
-                    .left(px(-ZOOM_SLIDE * (1.0 - slid)))
-                    .opacity(shown * slid)
-                    .child(step)
-                    .into_any_element()
+                    .top(px(STEP_RISE * (1.0 - shown) + offset))
+                    .opacity(shown)
+                    .when(lifted, |el| {
+                        el.rounded(px(10.0))
+                            .bg(lift_bg)
+                            .shadow(vec![gpui::BoxShadow {
+                                color: gpui::black().opacity(0.45),
+                                offset: gpui::point(px(0.0), px(12.0)),
+                                blur_radius: px(30.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }])
+                    })
+                    .child(step);
+                if lifted {
+                    gpui::deferred(el).into_any_element()
+                } else {
+                    el.into_any_element()
+                }
             })
             .collect();
-        let after_steps = first_step + shown.len();
         let list = div()
             .id("task-center-plan")
             .debug_selector(|| "task-center-plan".into())
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .px(px(14.0))
             .py(px(12.0))
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .child(slide(lead, 0))
-            .children(banner.map(|banner| slide(banner, 1)))
-            .children(overview.map(|overview| slide(overview, first_step - 1)))
+            .child(lead)
+            .children(banner)
+            .children(overview)
             .child(
                 div()
+                    .id("task-center-steps")
+                    .relative()
                     .flex()
                     .flex_col()
+                    .child(morph::measure(&self.painted, Key::Steps, Edges::default()))
                     .children(steps)
-                    .when(editable, |el| {
-                        el.child(slide(self.render_add_step(&theme), after_steps))
-                    }),
+                    .children(self.drop_line(&theme))
+                    .when(editable, |el| el.child(self.render_add_step(&theme)))
+                    .on_drag_move::<StepDragPayload>(cx.listener(
+                        |center, event: &DragMoveEvent<StepDragPayload>, _, cx| {
+                            let drag = event.drag(cx);
+                            if drag.task_id != center.task_id {
+                                return;
+                            }
+                            let step_id = drag.step_id.clone();
+                            center.drag_to(&step_id, f32::from(event.event.position.y), cx);
+                        },
+                    ))
+                    .on_drop::<StepDragPayload>(
+                        cx.listener(|center, _: &StepDragPayload, _, cx| center.drop_step(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|center, _, _, cx| center.drop_step(cx)),
+                    ),
             );
         let left = div()
             .flex_1()
@@ -2039,46 +2802,25 @@ impl Render for TaskCenter {
             .flex()
             .flex_col()
             .child(list)
-            .children(
-                editable
-                    .then(|| self.render_edit_bar(&theme, cx))
-                    .flatten()
-                    .map(|bar| slide(bar, after_steps)),
-            );
-        let head = |el: AnyElement| match zoom {
-            Some(frame) => zoomed(el, frame.header(), 0.0, -ZOOM_DROP),
-            None => el,
-        };
-        let live = self.render_live(
-            &task,
-            &plan,
-            zoom.map(|frame| frame.live_header()),
-            &theme,
-            cx,
-        );
-        let slot = div()
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .child(morph::measure(&self.painted, Key::Live, Edges::default()));
-        let (slot, ghost) = match zoom {
-            Some(frame) => (slot, Some(self.zoom_ghost(frame, live))),
-            None => (slot.child(live), None),
-        };
+            .children(editable.then(|| self.render_edit_bar(&theme, cx)).flatten());
+        let live = self.render_live(&task, &plan, &theme, cx);
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|center, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && center.menu.is_open() {
+                    cx.stop_propagation();
+                    center.close_menu(cx);
+                }
+            }))
             .relative()
             .size_full()
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .flex()
             .flex_col()
-            .child(morph::measure(&self.painted, Key::Center, Edges::default()))
-            .child(head(self.render_header(&task, &plan, fill, &theme, cx)))
-            .children(self.render_send_error(&task, &theme, cx).map(head))
+            .child(self.render_header(&task, &plan, fill, &theme, cx))
+            .children(self.render_send_error(&task, &theme, cx))
             .child(
                 div()
                     .flex_1()
@@ -2086,9 +2828,62 @@ impl Render for TaskCenter {
                     .flex()
                     .flex_row()
                     .child(left)
-                    .child(slot),
+                    .child(live),
             )
-            .children(ghost)
+            .children(self.render_menu(&theme, cx))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_planned_step_drops_only_below_the_last_started_one() {
+        use Slot::*;
+        let slots = [
+            Started, Planned, Started, Planned, Removed, Planned, Added, Added,
+        ];
+        assert_eq!(move_range(&slots, 3), Some((3, 5)));
+        assert_eq!(
+            move_range(&slots, 1),
+            Some((2, 5)),
+            "it may drop below the running one"
+        );
+        assert_eq!(
+            move_range(&slots, 6),
+            Some((6, 7)),
+            "a drafted step stays with the drafted"
+        );
+        assert_eq!(move_range(&slots, 0), None);
+        assert_eq!(move_range(&slots, 4), None);
+    }
+
+    #[test]
+    fn a_drag_lands_where_its_middle_crosses_a_row() {
+        let rows = [(0.0, 40.0), (40.0, 40.0), (80.0, 100.0), (180.0, 40.0)];
+        assert_eq!(drop_index(&rows, 3, (1, 3), -80.0), 2);
+        assert_eq!(drop_index(&rows, 3, (1, 3), -150.0), 1);
+        assert_eq!(
+            drop_index(&rows, 3, (1, 3), -300.0),
+            1,
+            "never above the floor"
+        );
+        assert_eq!(drop_index(&rows, 1, (1, 3), 90.0), 2);
+        assert_eq!(drop_index(&rows, 1, (1, 3), 10.0), 1);
+        assert_eq!(drop_index(&rows, 0, (1, 3), 50.0), 1);
+        assert_eq!(
+            drop_index(&rows, 0, (2, 3), 50.0),
+            0,
+            "a short drag stays above the floor"
+        );
+    }
+
+    #[test]
+    fn the_draft_order_comes_first_and_new_rows_follow() {
+        assert_eq!(arrange(&["a", "b", "c"], None), [0, 1, 2]);
+        let order = ["c".to_string(), "a".into(), "gone".into()];
+        assert_eq!(arrange(&["a", "b", "c"], Some(&order)), [2, 0, 1]);
     }
 }

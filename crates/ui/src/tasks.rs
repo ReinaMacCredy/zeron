@@ -30,7 +30,6 @@ mod morph;
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
-pub(crate) use morph::ZoomFrame;
 use morph::{Key, Morph, Painted, Rects};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";

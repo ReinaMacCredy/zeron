@@ -1,27 +1,10 @@
 use super::*;
-use crate::tasks::{Selection, ZoomFrame};
+use crate::tasks::Selection;
 
 const STRIP_HEIGHT: f32 = 30.0;
 pub(super) const STRIP_GAP: f32 = 6.0;
 pub(super) const STRIP_BAND: f32 = STRIP_GAP + STRIP_HEIGHT;
 const STRIP_REVEAL: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TaskZoom {
-    entering: bool,
-    reduced: bool,
-    started: Option<std::time::Instant>,
-}
-
-impl TaskZoom {
-    pub(super) fn new(entering: bool, reduced: bool) -> Self {
-        Self {
-            entering,
-            reduced,
-            started: None,
-        }
-    }
-}
 
 impl Shell {
     pub(super) fn render_mission_strip(
@@ -130,7 +113,7 @@ impl Shell {
     }
 
     fn strip_reveal(&mut self, chat_id: String, shown: bool) -> f32 {
-        let now = self.zoom_now();
+        let now = self.strip_now();
         let target = if shown { 1.0 } else { 0.0 };
         let (seen, tween) = &mut self.task_slide.strip;
         if seen.as_deref() != Some(chat_id.as_str()) {
@@ -150,7 +133,6 @@ impl Shell {
     fn open_mission(&mut self, task_id: String, selection: Selection, cx: &mut Context<Self>) {
         let center = self.task_center_for(task_id.clone(), cx);
         center.update(cx, |center, cx| center.select(selection, cx));
-        self.task_slide.armed = self.route == Route::Chat;
         self.open_task_center(task_id, cx);
     }
 
@@ -173,138 +155,7 @@ impl Shell {
         }
     }
 
-    fn zoom_lands_on_mission(&self, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        state
-            .selected_chat
-            .as_deref()
-            .and_then(|chat| crate::tasks::mission_thread(state, chat, chrono::Utc::now()))
-            .is_some_and(|mission| {
-                Some(mission.task_id.as_str()) == self.task_center_task.as_deref()
-            })
-    }
-
-    fn zoom_now(&self) -> std::time::Instant {
+    fn strip_now(&self) -> std::time::Instant {
         self.render_time.unwrap_or_else(|| self.motion_time())
-    }
-
-    fn zoom_elapsed(&self, started: std::time::Instant) -> f32 {
-        self.zoom_now()
-            .saturating_duration_since(started)
-            .as_secs_f32()
-            * 1000.0
-            / motion::speed_scale()
-    }
-
-    pub(super) fn task_zoom_fade(&mut self) -> f32 {
-        let Some(zoom) = self.task_slide.zoom.filter(|zoom| zoom.reduced) else {
-            return 1.0;
-        };
-        if (self.route == Route::TaskCenter) != zoom.entering {
-            self.task_slide.zoom = None;
-            return 1.0;
-        }
-        let started = zoom.started.unwrap_or_else(|| self.zoom_now());
-        self.task_slide.zoom = Some(TaskZoom {
-            started: Some(started),
-            ..zoom
-        });
-        let total = task_actions::CENTER_FADE.total().as_millis() as f32;
-        let raw = self.zoom_elapsed(started) / total;
-        if raw >= 1.0 {
-            self.task_slide.zoom = None;
-            return 1.0;
-        }
-        self.motion_active.set(true);
-        task_actions::CENTER_FADE.progress(raw)
-    }
-
-    fn task_zoom_frame(&mut self, cx: &App) -> Option<ZoomFrame> {
-        let zoom = self.task_slide.zoom.filter(|zoom| !zoom.reduced)?;
-        if (self.route == Route::TaskCenter) != zoom.entering {
-            self.task_slide.zoom = None;
-            return None;
-        }
-        let center = self.task_center.as_ref().map(|(center, _)| center.clone());
-        let started = match zoom.started {
-            Some(started) => Some(started),
-            None if !zoom.entering && !self.zoom_lands_on_mission(cx) => {
-                self.task_slide.zoom = None;
-                return None;
-            }
-            None if center.is_some_and(|center| center.read(cx).zoom_ready()) => {
-                Some(self.zoom_now())
-            }
-            None => None,
-        };
-        self.task_slide.zoom = Some(TaskZoom { started, ..zoom });
-        let frame = ZoomFrame {
-            entering: zoom.entering,
-            elapsed: started.map_or(0.0, |started| self.zoom_elapsed(started)),
-            backdrop: self
-                .settings
-                .inset_shell
-                .then(|| Theme::of(cx).inset_tones().body),
-        };
-        if frame.settled() {
-            self.task_slide.zoom = None;
-            return None;
-        }
-        self.motion_active.set(true);
-        Some(frame)
-    }
-
-    pub(super) fn render_task_zoom(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let zoom = self.task_slide.zoom?;
-        if zoom.reduced {
-            if self.route != Route::TaskCenter {
-                return None;
-            }
-            let alpha = self.task_zoom_fade();
-            let page = self.render_task_center_page(window, cx);
-            return Some(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .opacity(alpha)
-                    .child(page)
-                    .into_any_element(),
-            );
-        }
-        let frame = self.task_zoom_frame(cx);
-        let center = self.task_center.as_ref().map(|(center, _)| center.clone());
-        if let Some(center) = &center {
-            center.update(cx, |center, _| center.set_zoom(frame));
-        }
-        if frame.is_none() && self.route != Route::TaskCenter {
-            return None;
-        }
-        Some(self.render_task_center_page(window, cx))
-    }
-
-    pub(super) fn render_task_zoom_title_bar(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let zoom = self.task_slide.zoom.filter(|zoom| !zoom.reduced)?;
-        if (self.route == Route::TaskCenter) != zoom.entering {
-            return None;
-        }
-        let alpha = ZoomFrame {
-            entering: zoom.entering,
-            elapsed: zoom
-                .started
-                .map_or(0.0, |started| self.zoom_elapsed(started)),
-            backdrop: None,
-        }
-        .titlebar();
-        let bar = self.render_task_center_title_bar(cx);
-        Some(div().opacity(alpha).child(bar).into_any_element())
     }
 }
