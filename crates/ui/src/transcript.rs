@@ -1284,6 +1284,13 @@ fn block_plain_text(block: &Block) -> String {
     }
 }
 
+fn supervisor_wake_label(events: usize) -> String {
+    format!(
+        "Wake · {events} {}",
+        if events == 1 { "event" } else { "events" }
+    )
+}
+
 fn a11y_clip(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((end, _)) => format!("{}…", &text[..end]),
@@ -4437,10 +4444,7 @@ impl Transcript {
             .child(
                 div()
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(format!(
-                        "Wake · {events} {}",
-                        if events == 1 { "event" } else { "events" }
-                    )),
+                    .child(supervisor_wake_label(events)),
             )
             .when_some(clock, |el, clock| {
                 el.child(
@@ -10285,7 +10289,13 @@ impl Transcript {
         let row_id = row.id.clone();
         let a11y = window
             .is_a11y_active()
-            .then(|| row_a11y(&row.kind))
+            .then(|| {
+                let (label, value) = row_a11y(&row.kind)?;
+                Some(match self.supervisor_wake_events(&row.id, cx) {
+                    Some(events) => (supervisor_wake_label(events).into(), value),
+                    None => (label, value),
+                })
+            })
             .flatten();
         let outer = div()
             .id(row.id.clone())
