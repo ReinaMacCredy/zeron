@@ -1036,9 +1036,7 @@ enum MutateParams {
         #[serde(default)]
         space_id: Option<String>,
         #[serde(default)]
-        harness: Option<HarnessId>,
-        #[serde(default)]
-        model: Option<String>,
+        config: Option<ChatConfig>,
         #[serde(default)]
         orchestrate: bool,
         #[serde(default = "approve_plan_default")]
@@ -2312,8 +2310,7 @@ impl EngineRpc {
                 task_id,
                 chat_id,
                 space_id,
-                harness,
-                model,
+                config,
                 orchestrate,
                 approve_plan,
                 same_agents,
@@ -2322,7 +2319,7 @@ impl EngineRpc {
                     approve_plan,
                     same_agents,
                 });
-                self.start_task(&task_id, &chat_id, space_id, harness, model, lead)
+                self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
             }
             MutateParams::AssignTask {

@@ -129,8 +129,7 @@ impl Shell {
         task_id: &str,
         patch: Option<TaskPatch>,
         space_id: Option<String>,
-        harness: Option<HarnessId>,
-        model: Option<String>,
+        config: Option<ChatConfig>,
         orchestrate: Option<crate::tasks::Orchestrate>,
         cx: &mut Context<Self>,
     ) {
@@ -149,7 +148,7 @@ impl Shell {
         );
         let start = serde_json::json!({
             "op": "startTask", "taskId": task_id, "chatId": chat_id,
-            "spaceId": space_id, "harness": harness, "model": model,
+            "spaceId": space_id, "config": config,
             "orchestrate": orchestrate.is_some(),
             "approvePlan": orchestrate.is_none_or(|o| o.approve_plan),
             "sameAgents": orchestrate.is_some_and(|o| o.same_agents),
@@ -306,16 +305,14 @@ impl Shell {
                 task_id,
                 patch,
                 space_id,
-                harness,
-                model,
+                config,
                 orchestrate,
             } => self.start_task(
                 card,
                 task_id,
                 patch.clone(),
                 space_id.clone(),
-                *harness,
-                model.clone(),
+                config.clone(),
                 *orchestrate,
                 cx,
             ),

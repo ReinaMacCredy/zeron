@@ -1,5 +1,5 @@
 use super::*;
-use zeron_proto::{SandboxLevel, Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
+use zeron_proto::{Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
 
 fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
@@ -115,8 +115,7 @@ impl EngineRpc {
         task_id: &str,
         chat_id: &str,
         space_id: Option<String>,
-        harness: Option<HarnessId>,
-        model: Option<String>,
+        config: Option<ChatConfig>,
         lead: Option<Lead>,
     ) -> Result<(), RpcError> {
         let first = self
@@ -164,21 +163,6 @@ impl EngineRpc {
                 "Start the task on the device that owns its project",
             ));
         }
-        if model.is_some() && harness.is_none() {
-            return Err(refused("A model needs its harness"));
-        }
-        let config = harness.map(|harness| ChatConfig {
-            harness,
-            model,
-            reasoning: None,
-            model_options: Default::default(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: Default::default(),
-            instructions: String::new(),
-            profile_id: None,
-            instance_id: None,
-            disabled_tools: Vec::new(),
-        });
         let space_id = space.map(|space| space.id);
         self.workspace
             .create_chat_from(

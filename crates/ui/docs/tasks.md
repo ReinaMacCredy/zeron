@@ -28,7 +28,7 @@ Under **More options** you find **Mark as done** and **Delete**. Delete does not
 
 ## Start a task with an agent
 
-Under **Hand it to an agent**, pick the agent and model, and choose where it runs in **Run in** or with **Folder…**. Then click **Start** or press Cmd+Enter. The agent and model start out as the ones you last used on New chat.
+Under **Hand it to an agent**, pick the agent and model, and choose where it runs in **Run in** or with **Folder…**. Then click **Start** or press Cmd+Enter. The model picker is the same one the New chat composer shows: effort, fast mode, context and the other model settings, provider instances and profiles. The task's chat runs with exactly what you pick. Picks start out as the ones you last used on New chat, and changing them here leaves New chat as it was.
 
 Zeron creates a chat named after the task, sends the title and notes as the first message, and opens the chat. The card then shows the chat's status and an **Open thread** button.
 
