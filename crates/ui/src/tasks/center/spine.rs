@@ -395,12 +395,14 @@ impl TaskCenter {
         let total = plan.progress.total;
         let approve = (ready && task.completed_at.is_none()).then(|| {
             div()
-                .flex_none()
                 .flex()
                 .items_center()
+                .justify_between()
                 .gap(px(8.0))
                 .child(
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(ui_rems(11.5))
                         .text_color(theme.text_muted)
                         .child(format!(
@@ -431,7 +433,6 @@ impl TaskCenter {
             .gap(px(6.0))
             .min_h(px(20.0))
             .child(self.amount(tokens, live, time, reduced, theme))
-            .children(approve)
             .children((steps > 0).then(|| self.fold_button(steps, now, theme, cx)));
         self.card(selected, theme)
             .id("task-center-lead")
@@ -443,6 +444,7 @@ impl TaskCenter {
             .child(task_line)
             .children(overview)
             .children(reads)
+            .children(approve)
             .child(meta)
             .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.pick(Selection::Lead, cx)))
             .into_any_element()
