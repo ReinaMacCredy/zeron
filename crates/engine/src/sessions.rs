@@ -2428,6 +2428,12 @@ impl SessionsEngine {
         unsent
     }
 
+    /// Stop ends everything the agent runs, so its queued compaction and continueWith go too.
+    pub(crate) fn cancel_agent_compact(&self, chat_id: &str) {
+        self.inner
+            .cancel_agent_compact(chat_id, "the person pressed Stop");
+    }
+
     pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {
         lock(&self.inner.agent_compacts).contains_key(chat_id)
     }
@@ -2454,7 +2460,8 @@ impl SessionsEngine {
             // Its dispatch cancels the request and tells the agent.
             Since::Queued => false,
             Since::Newer => {
-                self.inner.drop_agent_compact(chat_id, request);
+                self.inner
+                    .drop_agent_compact(chat_id, request, "a newer message reached you");
                 tracing::info!(chat = %chat_id, "agent compaction dropped: a newer message reached the chat");
                 false
             }
@@ -3980,13 +3987,18 @@ impl Inner {
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
+        self.cancel_agent_compact(chat_id, "a newer message reached you");
+        lock(&self.compact_owed).remove(chat_id)
+    }
+
+    /// A compaction already running is past cancelling.
+    fn cancel_agent_compact(&self, chat_id: &str, why: &str) {
         let pending = lock(&self.agent_compacts).get(chat_id).cloned();
         if let Some(request) = pending
             && !lock(&self.compacting).contains(chat_id)
         {
-            self.drop_agent_compact(chat_id, &request);
+            self.drop_agent_compact(chat_id, &request, why);
         }
-        lock(&self.compact_owed).remove(chat_id)
     }
 
     fn context_nudge(
@@ -4025,10 +4037,12 @@ impl Inner {
         })
     }
 
-    fn drop_agent_compact(&self, chat_id: &str, request: &AgentCompact) {
+    fn drop_agent_compact(&self, chat_id: &str, request: &AgentCompact, why: &str) {
         self.edit_agent_compacts(|compacts| compacts.remove(chat_id));
         self.set_compact_plan(chat_id, None);
-        let mut note = "Your queued compaction was cancelled: a newer message reached you before it ran. Call compact again if it still fits.".to_string();
+        let mut note = format!(
+            "Your queued compaction was cancelled: {why} before it ran. Call compact again if it still fits."
+        );
         if let Some(text) = &request.continue_with {
             note.push_str(&format!(" Its continueWith was: {text}"));
         }

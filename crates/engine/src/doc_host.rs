@@ -4916,6 +4916,7 @@ impl DocHost {
         }
         handle.queue_paused.store(true, Ordering::Release);
         self.cancel_held_sends(handle);
+        sessions.cancel_agent_compact(&handle.chat_id);
         match sessions.interrupt(&handle.chat_id).await {
             Ok(true) => Ok(true),
             Ok(false) => {

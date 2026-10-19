@@ -767,6 +767,35 @@ async fn a_stopped_auto_continue_keeps_its_caption() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stop_cancels_the_agents_queued_compaction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    let (_release, gate) = tokio::sync::oneshot::channel::<()>();
+    *harness.gate.lock().unwrap() = Some(gate);
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue second run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "second turn starts").await;
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::REQUEST_COMPACT,
+            serde_json::json!({ "chatId": CHAT, "continueWith": "go on" }),
+        )
+        .await
+        .expect("request compact");
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("stop");
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "the turn stops").await;
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .and_then(|s| s.compact_plan),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_running_turn_is_reminded_once_per_step_of_growth() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
