@@ -43,30 +43,45 @@ Click **Assign** or press Cmd+Enter. A task has one chat at a time. The × next 
 
 When a task could not be sent to its chat, the list shows **Not sent**, and the card shows **Not sent:** with the reason and a **Retry** button that sends it to the same chat again.
 
-## Orchestrate a big task
+## Run a big task with Mission Control
 
-For work that needs more than one agent, switch **Hand it to an agent** from **One agent** to **Orchestrate**. A lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back.
+For work that needs more than one agent, switch **Hand it to an agent** from **One agent** to **Mission Control**. A lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back.
 
+- **Plan** picks what the lead writes:
+  - **plan.md** (the default): a plan you can read and edit, with an overview (the goal, the approach, and how the result will be checked) and a spec for each step (what it builds, where, and how to tell it is done). The plan is stored in Zeron with the task, so tasks with **No project** get one too.
+  - **Steps only**: just the steps, as a list of what to do.
 - Pick the lead's agent and model, and where it runs, the same way as for one agent.
 - **Step agents**: **Lead picks per step** lets the lead choose an agent and model for each step. **Same as the lead** runs every step on the lead's agent and model.
-- **Show me the plan before it runs** is on by default: the lead writes the plan and waits for you. Turn it off to let the lead start the steps as soon as the plan is written.
+- **Let me review the plan before it runs** (with **Steps only**: **Show me the plan before it runs**) is on by default: the lead writes the plan and waits for you. Turn it off to let the lead start the steps as soon as the plan is written.
 
-Click **Orchestrate** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's center page.
+Click **Start mission** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's Mission Control page.
 
-## The center page
+## The Mission Control page
 
-An orchestrated task opens its center page instead of the card, from the list, the board, or the Inbox. **Tasks** in the titlebar takes you back.
+A Mission Control task opens its own page instead of the card, from the list, the board, or the Inbox. **Tasks** in the titlebar takes you back.
 
-The header shows the task's status, **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
+The header reads **MISSION CONTROL** above the task's title, and shows the task's status, **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
 
 - The lead, with its model and what it is doing: **Planning**, **Watching** its running steps, **Waiting on you**, or **Done**.
-- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**.
+- With **plan.md**, the **Overview** the lead wrote.
+- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**. Click **spec** under a step to read what the lead wrote for it.
 
 Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
 
 ## Approve the plan
 
-While the lead writes the plan, the page reads **The lead is planning**. Then **Plan ready** shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step, and you can change the plan: hover a step to **Rename** or **Remove** it, or type a new one in **Add a step** and press Enter. Click **Approve and run** when it looks right.
+While the lead writes the plan, the page reads **The lead is planning**. Then **Plan ready** shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first.
+
+## Change the plan
+
+You can change the plan before you approve it and while the steps run, in both **plan.md** and **Steps only**:
+
+- Open a step's **spec** and click **Edit** to change its title and its spec. Press Cmd+Enter or click **Done** to keep the change, or Escape to drop it.
+- With **plan.md**, **Edit** on the **Overview** changes the overview.
+- Type a new step in **Add a step** and press Enter.
+- **Remove** takes out a step that has not started. **Restore** brings it back.
+
+Your changes are tagged **Edited**, **New**, or **Removed**, and stay on this page until you send them: a bar at the bottom reads how many changes are unsent. **Undo** drops them all. **Send to lead** saves them all at once and sends the lead one message that lists what changed, so the lead never works from a half-edited plan. When a step whose thread is already running changed, the lead tells that thread. Leaving the page drops changes you have not sent.
 
 ## While the steps run
 
@@ -78,11 +93,11 @@ When every step is done, the lead checks the whole result, tells you what was bu
 
 If a message to the lead, such as an approval or a retry, does not get through, the page shows **Not sent to the lead:** with the reason. Write to the lead in the composer instead, then click **Dismiss**.
 
-In the list, an orchestrated task has a progress ring in place of its circle, and its line shows the agents on it, steps done out of all steps, and how many are running or need you. On the board, its card has a bar with one segment per step.
+In the list, a Mission Control task has a progress ring in place of its circle, and its line reads **Mission Control** and shows the agents on it, steps done out of all steps, and how many are running or need you. On the board, its card has a bar with one segment per step.
 
 ## Tasks from agents
 
-Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A lead uses the same tool to write its plan and mark steps done or skipped, and runs each step on a new chat with `create_thread`. See [Agent tools](zeron://docs/agent-tools).
+Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit them, mark them done, and assign them to a chat on this device. An agent's new task lands in that agent's project. A Mission Control lead uses the same tool to write its plan, with the overview when you picked **plan.md**, and to mark steps done or skipped, and runs each step on a new chat with `create_thread`. See [Agent tools](zeron://docs/agent-tools).
 
 ## Kanban columns
 
@@ -90,7 +105,7 @@ Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit t
 | --- | --- |
 | **To do** | Tasks with no chat yet |
 | **Working** | Tasks whose agent is working |
-| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. An orchestrated task also lands here while its plan waits for you or a step needs you |
+| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. A Mission Control task also lands here while its plan waits for you or a step needs you |
 | **Done** | Tasks you marked done |
 
 Drag a card to **Done** to finish it, or from **Done** back to **To do** to reopen it. **Working** and **Needs you** follow the chat, so you cannot drop cards there. A card stays in **Needs you** until you mark it done.

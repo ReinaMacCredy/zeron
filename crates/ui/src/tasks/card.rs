@@ -66,6 +66,7 @@ pub enum TaskCardEvent {
 pub struct Orchestrate {
     pub approve_plan: bool,
     pub same_agents: bool,
+    pub plan_doc: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -938,7 +939,7 @@ impl TaskCard {
 
         let starting = self.is_starting(task_id);
         let (start_id, start_label) = match orchestrate {
-            Some(_) => ("task-card-orchestrate", "Orchestrate"),
+            Some(_) => ("task-card-orchestrate", "Start mission"),
             None => ("task-card-start", "Start"),
         };
         let start = widgets::action_button(theme, widgets::ActionTone::Solid)
@@ -984,13 +985,14 @@ impl TaskCard {
         let mode = widgets::segmented(
             theme,
             "task-card-hand-off-mode",
-            &[(false, "One agent"), (true, "Orchestrate")],
+            &[(false, "One agent"), (true, "Mission Control")],
             orchestrate.is_some(),
             move |orchestrated, _, cx| {
                 weak.update(cx, |card, cx| {
                     let pick = orchestrated.then_some(Orchestrate {
                         approve_plan: true,
                         same_agents: false,
+                        plan_doc: true,
                     });
                     card.set_orchestrate(pick, cx)
                 })
@@ -1036,6 +1038,33 @@ impl TaskCard {
                     },
                 )
                 .debug_selector(|| "task-card-step-agents".into());
+                let weak = cx.entity().downgrade();
+                let plan_mode = widgets::segmented(
+                    theme,
+                    "task-card-plan-mode",
+                    &[(true, "plan.md"), (false, "Steps only")],
+                    choice.plan_doc,
+                    move |plan_doc, _, cx| {
+                        weak.update(cx, |card, cx| {
+                            card.set_orchestrate(Some(Orchestrate { plan_doc, ..choice }), cx)
+                        })
+                        .ok();
+                    },
+                )
+                .debug_selector(|| "task-card-plan-mode".into());
+                let (description, review) = if choice.plan_doc {
+                    (
+                        "A lead agent writes a plan you can read and edit, runs each step on its \
+                         own thread, checks the results and reports back here.",
+                        "Let me review the plan before it runs",
+                    )
+                } else {
+                    (
+                        "A lead agent plans the work into steps, runs each step on its own \
+                         thread, checks the results and reports back here.",
+                        "Show me the plan before it runs",
+                    )
+                };
                 let on = choice.approve_plan;
                 let approve = div()
                     .flex()
@@ -1044,7 +1073,7 @@ impl TaskCard {
                     .gap(px(8.0))
                     .text_size(ui_rems(12.5))
                     .text_color(theme.text)
-                    .child("Show me the plan before it runs")
+                    .child(review)
                     .child(
                         widgets::toggle_switch(theme, on, "task-card-approve-plan")
                             .id("task-card-approve-plan")
@@ -1052,7 +1081,7 @@ impl TaskCard {
                             .cursor_pointer()
                             .tab_index(0)
                             .role(gpui::Role::Switch)
-                            .aria_label("Show me the plan before it runs")
+                            .aria_label(review)
                             .aria_toggled(if on {
                                 gpui::Toggled::True
                             } else {
@@ -1075,12 +1104,18 @@ impl TaskCard {
                     .gap(px(8.0))
                     .child(
                         div()
+                            .debug_selector(|| "task-card-mission-description".into())
                             .text_size(ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .child(
-                                "A lead agent plans the work into steps, runs each step on its \
-                                 own thread, checks the results and reports back here.",
-                            ),
+                            .child(description),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(label("Plan"))
+                            .child(plan_mode),
                     )
                     .child(label("Lead"))
                     .child(agents)
@@ -1774,6 +1809,15 @@ mod tests {
                     match event {
                         ApprovePlan(id) => sink.borrow_mut().push(format!("approve {id}")),
                         RetryStep(id) => sink.borrow_mut().push(format!("retry {id}")),
+                        EditPlan { edit, approve, .. } => sink.borrow_mut().push(format!(
+                            "edit {:?} remove {:?} approve {approve}",
+                            edit.steps
+                                .iter()
+                                .map(|step| (step.step_id.as_deref(), step.title.as_str()))
+                                .collect::<Vec<_>>(),
+                            edit.remove_step_ids,
+                        )),
+                        Update { .. } | UpdateStep { .. } => sink.borrow_mut().push("write".into()),
                         _ => {}
                     }
                 },
@@ -1797,12 +1841,44 @@ mod tests {
         }
         assert!(cx.debug_bounds("task-center-add-step").is_some());
         assert!(cx.debug_bounds("task-center-retry-s2").is_none());
-        for selector in ["task-center-retry-s1", "task-center-approve"] {
+        let click = |cx: &mut gpui::VisualTestContext, selector: &str| {
             let at = cx.debug_bounds(selector).unwrap().center();
             cx.simulate_click(at, gpui::Modifiers::none());
             cx.run_until_parked();
+        };
+        let rename_s2 = |cx: &mut gpui::VisualTestContext| {
+            click(cx, "task-center-edit-s2");
+            cx.simulate_input(" now");
+            click(cx, "task-center-edit-done");
+        };
+        assert!(cx.debug_bounds("task-center-edit-s2").is_none());
+        click(cx, "task-center-spec-s2");
+        rename_s2(cx);
+        assert!(cx.debug_bounds("task-center-edit-bar").is_some());
+        assert!(
+            events.borrow().is_empty(),
+            "an unsent edit never leaves the center"
+        );
+        click(cx, "task-center-undo");
+        assert!(cx.debug_bounds("task-center-edit-bar").is_none());
+        for selector in ["task-center-retry-s1", "task-center-approve"] {
+            click(cx, selector);
         }
         assert_eq!(*events.borrow(), ["retry s1", "approve orch"]);
+
+        rename_s2(cx);
+        click(cx, "task-center-send");
+        assert!(cx.debug_bounds("task-center-edit-bar").is_none());
+        click(cx, "task-center-remove-s2");
+        assert!(cx.debug_bounds("task-center-restore-s2").is_some());
+        click(cx, "task-center-approve");
+        assert_eq!(
+            events.borrow()[2..],
+            [
+                r#"edit [(Some("s2"), "s2 now")] remove [] approve false"#,
+                r#"edit [] remove ["s2"] approve true"#,
+            ]
+        );
     }
 
     #[gpui::test]
@@ -1844,6 +1920,9 @@ mod tests {
         let at = right_half(cx, "task-card-step-agents");
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
+        let at = right_half(cx, "task-card-plan-mode");
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
         let at = cx.debug_bounds("task-card-orchestrate").unwrap().center();
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
@@ -1852,6 +1931,7 @@ mod tests {
             [Some(Orchestrate {
                 approve_plan: false,
                 same_agents: true,
+                plan_doc: false,
             })]
         );
     }

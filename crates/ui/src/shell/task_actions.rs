@@ -152,6 +152,7 @@ impl Shell {
             "orchestrate": orchestrate.is_some(),
             "approvePlan": orchestrate.is_none_or(|o| o.approve_plan),
             "sameAgents": orchestrate.is_some_and(|o| o.same_agents),
+            "planDoc": orchestrate.is_some_and(|o| o.plan_doc),
         });
         let (card, task_id) = (card.clone(), task_id.to_string());
         cx.spawn(async move |this, cx| {
@@ -691,22 +692,64 @@ impl Shell {
             TaskCenterEvent::UpdateStep { step_id, patch } => {
                 serde_json::json!({ "op": "updateTaskStep", "stepId": step_id, "patch": patch })
             }
-            TaskCenterEvent::DeleteStep(step_id) => {
-                serde_json::json!({ "op": "deleteTaskStep", "stepId": step_id })
-            }
-            TaskCenterEvent::CreateStep {
+            TaskCenterEvent::EditPlan {
                 task_id,
-                step_id,
-                title,
-            } => serde_json::json!({
-                "op": "createTaskStep", "taskId": task_id, "stepId": step_id,
-                "title": title, "notes": "", "orderKey": null,
-            }),
+                edit,
+                approve,
+            } => return self.edit_task_plan(task_id, edit, *approve, cx),
             TaskCenterEvent::OpenChat(chat_id) => return self.open_chat(chat_id.clone(), cx),
             TaskCenterEvent::Back => return self.back_to_tasks(cx),
             TaskCenterEvent::Selected => return cx.notify(),
         };
         self.mutate_task_row(params, cx);
+    }
+
+    /// One spawn, so the approval never lands before the edits it follows.
+    fn edit_task_plan(
+        &mut self,
+        task_id: &str,
+        edit: &crate::tasks::PlanEdit,
+        approve: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let center = self.task_center.as_ref().map(|(center, _)| center.clone());
+        let Some(engine) = self.task_engine(cx) else {
+            if let Some(center) = center {
+                center.update(cx, |center, cx| center.edit_failed(cx));
+            }
+            return;
+        };
+        let mut params = serde_json::to_value(edit).unwrap_or_default();
+        params["op"] = "editTaskPlan".into();
+        params["taskId"] = task_id.into();
+        let approval =
+            approve.then(|| serde_json::json!({ "op": "approvePlan", "taskId": task_id }));
+        cx.spawn(async move |this, cx| {
+            let edited = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |shell, cx| {
+                if let Some(center) = &center {
+                    center.update(cx, |center, cx| match &edited {
+                        Ok(_) => center.edit_sent(),
+                        Err(_) => center.edit_failed(cx),
+                    });
+                }
+                if let Err(err) = &edited {
+                    shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+            if let (Ok(_), Some(approval)) = (edited, approval)
+                && let Err(err) = engine.client().call(methods::MUTATE, approval).await
+            {
+                this.update(cx, |shell, cx| {
+                    shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     pub(super) fn render_task_center_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {

@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div, prelude::*, px,
-    relative,
+    AnyElement, App, ClickEvent, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, Hsla, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div,
+    prelude::*, px, relative,
 };
 use zeron_proto::{
     ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, StepTurnEnd, TaskPatch,
@@ -13,7 +13,7 @@ use zeron_proto::{
 };
 
 use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
-use crate::composer::{Composer, ComposerInput, ComposerInputEvent};
+use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec, Tween};
 use crate::settings::widgets;
@@ -38,15 +38,32 @@ pub enum TaskCenterEvent {
         step_id: String,
         patch: TaskStepPatch,
     },
-    DeleteStep(String),
-    CreateStep {
+    EditPlan {
         task_id: String,
-        step_id: String,
-        title: String,
+        edit: PlanEdit,
+        approve: bool,
     },
     OpenChat(String),
     Selected,
     Back,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEdit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    pub steps: Vec<PlanStepEdit>,
+    pub remove_step_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStepEdit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    pub title: String,
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +78,85 @@ pub struct LiveThread {
     pub composer: Entity<Composer>,
 }
 
-struct Rename {
-    step_id: String,
-    input: Entity<ComposerInput>,
-    _subscription: Subscription,
+#[derive(Debug, Clone, PartialEq)]
+struct StepText {
+    title: String,
+    notes: String,
+}
+
+/// Edits the person has not sent: never written to the registry until Send.
+#[derive(Default)]
+struct Draft {
+    overview: Option<String>,
+    edited: HashMap<String, StepText>,
+    added: Vec<(String, StepText)>,
+    removed: Vec<String>,
+}
+
+impl Draft {
+    fn count(&self) -> usize {
+        usize::from(self.overview.is_some())
+            + self.edited.len()
+            + self.added.len()
+            + self.removed.len()
+    }
+
+    fn retain_live(&mut self, plan: &Rollup) {
+        let row = |id: &str| plan.steps.iter().find(|row| row.step.id == id);
+        self.edited.retain(|id, _| row(id).is_some());
+        self.removed
+            .retain(|id| row(id).is_some_and(|row| row.status == StepStatus::Planned));
+    }
+
+    fn edit(&self, plan: &Rollup) -> PlanEdit {
+        let mut steps: Vec<PlanStepEdit> = plan
+            .steps
+            .iter()
+            .filter_map(|row| {
+                let text = self.edited.get(&row.step.id)?;
+                Some(PlanStepEdit {
+                    step_id: Some(row.step.id.clone()),
+                    title: text.title.clone(),
+                    notes: text.notes.clone(),
+                })
+            })
+            .collect();
+        steps.extend(self.added.iter().map(|(_, text)| PlanStepEdit {
+            step_id: None,
+            title: text.title.clone(),
+            notes: text.notes.clone(),
+        }));
+        PlanEdit {
+            overview: self.overview.clone(),
+            steps,
+            remove_step_ids: plan
+                .steps
+                .iter()
+                .filter(|row| self.removed.contains(&row.step.id))
+                .map(|row| row.step.id.clone())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    Edited,
+    New,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditTarget {
+    Overview,
+    Step(String),
+}
+
+struct Editor {
+    target: EditTarget,
+    title: Option<Entity<ComposerInput>>,
+    body: Entity<ComposerInput>,
+    _subscriptions: Vec<Subscription>,
 }
 
 struct Thread {
@@ -88,7 +180,10 @@ pub struct TaskCenter {
     state: Entity<AppState>,
     task_id: String,
     selected: Selection,
-    rename: Option<Rename>,
+    draft: Draft,
+    sent: Option<Draft>,
+    expanded: HashSet<String>,
+    editor: Option<Editor>,
     add: Entity<ComposerInput>,
     live: Option<LiveThread>,
     fill: Option<Tween>,
@@ -122,7 +217,10 @@ impl TaskCenter {
             state,
             task_id,
             selected: Selection::Lead,
-            rename: None,
+            draft: Draft::default(),
+            sent: None,
+            expanded: HashSet::new(),
+            editor: None,
             add,
             live: None,
             fill: None,
@@ -177,62 +275,220 @@ impl TaskCenter {
             return;
         }
         self.add.update(cx, |input, cx| input.set_text("", cx));
-        cx.emit(TaskCenterEvent::CreateStep {
-            task_id: self.task_id.clone(),
-            step_id: uuid::Uuid::new_v4().to_string(),
-            title,
-        });
-    }
-
-    fn start_rename(
-        &mut self,
-        step_id: String,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = cx.new(|cx| {
-            let mut input = ComposerInput::new("Step title", cx)
-                .with_single_line()
-                .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
-            input.set_text(title, cx);
-            input
-        });
-        let subscription = cx.subscribe(&input, |center, _, event: &ComposerInputEvent, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                center.finish_rename(cx);
-            }
-        });
-        window.focus(&input.focus_handle(cx), cx);
-        self.rename = Some(Rename {
-            step_id,
-            input,
-            _subscription: subscription,
-        });
+        self.draft.added.push((
+            uuid::Uuid::new_v4().to_string(),
+            StepText {
+                title,
+                notes: String::new(),
+            },
+        ));
         cx.notify();
     }
 
-    fn finish_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(rename) = self.rename.take() else {
+    fn task_and_plan(&self, cx: &App) -> Option<(zeron_proto::Task, Rollup)> {
+        let state = self.state.read(cx);
+        state
+            .tasks
+            .iter()
+            .find(|task| task.id == self.task_id && !task.deleted)
+            .map(|task| (task.clone(), rollup(state, task, Utc::now())))
+    }
+
+    fn shown_step(&self, step: &zeron_proto::TaskStep) -> StepText {
+        self.draft
+            .edited
+            .get(&step.id)
+            .cloned()
+            .unwrap_or_else(|| StepText {
+                title: step.title.clone(),
+                notes: step.notes.clone(),
+            })
+    }
+
+    fn shown_text(&self, target: &EditTarget, cx: &App) -> Option<StepText> {
+        let (task, plan) = self.task_and_plan(cx)?;
+        match target {
+            EditTarget::Overview => Some(StepText {
+                title: String::new(),
+                notes: self.draft.overview.clone().unwrap_or(task.plan),
+            }),
+            EditTarget::Step(id) => self
+                .draft
+                .added
+                .iter()
+                .find(|(added, _)| added == id)
+                .map(|(_, text)| text.clone())
+                .or_else(|| {
+                    plan.steps
+                        .iter()
+                        .find(|row| &row.step.id == id)
+                        .map(|row| self.shown_step(&row.step))
+                }),
+        }
+    }
+
+    fn start_edit(&mut self, target: EditTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let Some(text) = self.shown_text(&target, cx) else {
             return;
         };
-        let title = rename.input.read(cx).text().trim().to_string();
-        let unchanged = self
-            .state
-            .read(cx)
-            .task_steps
+        let title = matches!(target, EditTarget::Step(_)).then(|| {
+            cx.new(|cx| {
+                let mut input = ComposerInput::new("Step title", cx)
+                    .with_single_line()
+                    .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
+                input.set_text(text.title.clone(), cx);
+                input
+            })
+        });
+        let placeholder = match target {
+            EditTarget::Overview => "The goal, the approach, and how the result will be checked",
+            EditTarget::Step(_) => "What this step builds, where, and how to tell it is done",
+        };
+        let body = cx.new(|cx| {
+            let mut input =
+                ComposerInput::new(placeholder, cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
+            input.set_text(text.notes, cx);
+            input
+        });
+        let subscriptions: Vec<Subscription> = title
             .iter()
-            .any(|step| step.id == rename.step_id && step.title == title);
-        if !title.is_empty() && !unchanged {
-            cx.emit(TaskCenterEvent::UpdateStep {
-                step_id: rename.step_id,
-                patch: TaskStepPatch {
-                    title: Some(title),
-                    ..Default::default()
-                },
-            });
+            .map(|title| {
+                cx.subscribe(title, |center, _, event: &ComposerInputEvent, cx| {
+                    if matches!(event, ComposerInputEvent::Submitted) {
+                        center.commit_edit(cx);
+                    }
+                })
+            })
+            .collect();
+        let focus = title.as_ref().unwrap_or(&body).focus_handle(cx);
+        window.focus(&focus, cx);
+        if let EditTarget::Step(id) = &target {
+            self.expanded.insert(id.clone());
+        }
+        self.editor = Some(Editor {
+            target,
+            title,
+            body,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        let notes = editor.body.read(cx).text().to_string();
+        let title = editor
+            .title
+            .map(|input| input.read(cx).text().trim().to_string())
+            .filter(|title| !title.is_empty());
+        let saved = self.task_and_plan(cx);
+        match editor.target {
+            EditTarget::Overview => {
+                let unchanged = saved.is_some_and(|(task, _)| task.plan == notes);
+                self.draft.overview = (!unchanged).then_some(notes);
+            }
+            EditTarget::Step(id) => {
+                if let Some((_, text)) = self.draft.added.iter_mut().find(|(added, _)| *added == id)
+                {
+                    text.title = title.unwrap_or(std::mem::take(&mut text.title));
+                    text.notes = notes;
+                } else if let Some(step) = saved.and_then(|(_, plan)| {
+                    plan.steps
+                        .into_iter()
+                        .find(|row| row.step.id == id)
+                        .map(|row| row.step)
+                }) {
+                    let text = StepText {
+                        title: title.unwrap_or_else(|| self.shown_step(&step).title),
+                        notes,
+                    };
+                    if text.title == step.title && text.notes == step.notes {
+                        self.draft.edited.remove(&id);
+                    } else {
+                        self.draft.edited.insert(id, text);
+                    }
+                }
+            }
         }
         cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.editor = None;
+        cx.notify();
+    }
+
+    fn toggle_remove(&mut self, step_id: &str, cx: &mut Context<Self>) {
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.target == EditTarget::Step(step_id.to_string()))
+        {
+            self.editor = None;
+        }
+        let added = self.draft.added.len();
+        self.draft.added.retain(|(id, _)| id != step_id);
+        if self.draft.added.len() == added {
+            if let Some(ix) = self.draft.removed.iter().position(|id| id == step_id) {
+                self.draft.removed.remove(ix);
+            } else {
+                self.draft.edited.remove(step_id);
+                self.draft.removed.push(step_id.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_spec(&mut self, step_id: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(step_id) {
+            self.expanded.insert(step_id.to_string());
+        }
+        cx.notify();
+    }
+
+    fn undo_edits(&mut self, cx: &mut Context<Self>) {
+        self.draft = Draft::default();
+        self.editor = None;
+        cx.notify();
+    }
+
+    fn send_edits(&mut self, approve: bool, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let Some((_, plan)) = self.task_and_plan(cx) else {
+            return;
+        };
+        self.draft.retain_live(&plan);
+        if self.draft.count() == 0 {
+            if approve {
+                cx.emit(TaskCenterEvent::ApprovePlan(self.task_id.clone()));
+            }
+            return;
+        }
+        let edit = self.draft.edit(&plan);
+        self.sent = Some(std::mem::take(&mut self.draft));
+        cx.emit(TaskCenterEvent::EditPlan {
+            task_id: self.task_id.clone(),
+            edit,
+            approve,
+        });
+        cx.notify();
+    }
+
+    /// The edits come back as unsent, so a refused send loses nothing the person wrote.
+    pub fn edit_failed(&mut self, cx: &mut Context<Self>) {
+        if let Some(sent) = self.sent.take()
+            && self.draft.count() == 0
+        {
+            self.draft = sent;
+        }
+        cx.notify();
+    }
+
+    pub fn edit_sent(&mut self) {
+        self.sent = None;
     }
 
     fn set_outcome(&mut self, step_id: &str, outcome: Option<StepOutcome>, cx: &mut Context<Self>) {
@@ -373,6 +629,23 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .gap(px(10.0))
+            .child(
+                div()
+                    .debug_selector(|| "task-center-kicker".into())
+                    .mb(px(-6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(ui_rems(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(
+                        icon(icons::LUCIDE_CIRCLE_DOT)
+                            .size(px(11.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child("MISSION CONTROL"),
+            )
             .child(
                 div()
                     .flex()
@@ -598,7 +871,6 @@ impl TaskCenter {
             );
         }
         let total = plan.progress.total;
-        let task_id = task.id.clone();
         Some(
             banner
                 .child(
@@ -625,9 +897,11 @@ impl TaskCenter {
                         .role(gpui::Role::Button)
                         .flex_none()
                         .rounded_full()
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            cx.emit(TaskCenterEvent::ApprovePlan(task_id.clone()))
-                        })),
+                        .on_click(
+                            cx.listener(|center, _: &ClickEvent, _, cx| {
+                                center.send_edits(true, cx)
+                            }),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -784,6 +1058,214 @@ impl TaskCenter {
             .child(label)
     }
 
+    fn tag_pill(tag: Tag, theme: &Theme) -> AnyElement {
+        let (label, tone): (&str, Hsla) = match tag {
+            Tag::Edited => ("Edited", theme.warning),
+            Tag::New => ("New", theme.accent),
+            Tag::Removed => ("Removed", theme.danger),
+        };
+        div()
+            .flex_none()
+            .px(px(6.0))
+            .rounded_full()
+            .bg(tone.opacity(0.15))
+            .text_size(ui_rems(11.0))
+            .text_color(tone)
+            .child(label)
+            .into_any_element()
+    }
+
+    fn markdown(key: String, text: &str, theme: &Theme, window: &Window) -> AnyElement {
+        let tree = crate::markdown::parse_full(text);
+        let options = crate::markdown::render::RenderOptions {
+            tasks: None,
+            media: None,
+            row_key: key.into(),
+            veil: None,
+            cache: None,
+            now: Instant::now(),
+            copy: None,
+            link: None,
+            workspace_root: None,
+            code: None,
+            tables: None,
+        };
+        crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
+    }
+
+    fn render_editor(&self, editor: &Editor, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let field = |id: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(8.0))
+                .bg(theme.wash(0.08))
+        };
+        let body = editor.body.clone();
+        div()
+            .debug_selector(|| "task-center-editor".into())
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .on_key_down(cx.listener(|center, event: &KeyDownEvent, _, cx| {
+                let modifiers = &event.keystroke.modifiers;
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        cx.stop_propagation();
+                        center.cancel_edit(cx);
+                    }
+                    "enter" if modifiers.platform || modifiers.control => {
+                        cx.stop_propagation();
+                        center.commit_edit(cx);
+                    }
+                    _ => {}
+                }
+            }))
+            .children(editor.title.clone().map(|title| {
+                field("task-center-edit-title")
+                    .text_size(ui_rems(13.0))
+                    .child(title)
+            }))
+            .child(
+                field("task-center-edit-body")
+                    .text_size(ui_rems(12.5))
+                    .capture_action(cx.listener(move |_, _: &Submit, window, cx| {
+                        if body.focus_handle(cx).is_focused(window) {
+                            cx.stop_propagation();
+                            body.update(cx, |input, cx| {
+                                input.replace_text_in_range(None, "\n", window, cx)
+                            });
+                        }
+                    }))
+                    .child(crate::composer::growing_field(
+                        editor.body.clone(),
+                        18.0,
+                        260.0,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        widgets::text_action(theme, widgets::ActionTone::Quiet, "Cancel")
+                            .id("task-center-edit-cancel")
+                            .debug_selector(|| "task-center-edit-cancel".into())
+                            .role(gpui::Role::Button)
+                            .min_h(px(24.0))
+                            .rounded_full()
+                            .on_click(
+                                cx.listener(|center, _: &ClickEvent, _, cx| center.cancel_edit(cx)),
+                            ),
+                    )
+                    .child(
+                        widgets::text_action(theme, widgets::ActionTone::Filled, "Done")
+                            .id("task-center-edit-done")
+                            .debug_selector(|| "task-center-edit-done".into())
+                            .role(gpui::Role::Button)
+                            .min_h(px(24.0))
+                            .rounded_full()
+                            .on_click(
+                                cx.listener(|center, _: &ClickEvent, _, cx| center.commit_edit(cx)),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_overview(
+        &self,
+        task: &zeron_proto::Task,
+        editable: bool,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !task.plan_doc {
+            return None;
+        }
+        let editor = self
+            .editor
+            .as_ref()
+            .filter(|editor| editor.target == EditTarget::Overview);
+        let text = self
+            .draft
+            .overview
+            .clone()
+            .unwrap_or_else(|| task.plan.clone());
+        let body = match editor {
+            Some(editor) => self.render_editor(editor, theme, cx),
+            None if text.trim().is_empty() => div()
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child("The lead has not written the overview yet.")
+                .into_any_element(),
+            None => Self::markdown(
+                format!("task-center-overview-{}", task.id),
+                &text,
+                theme,
+                window,
+            ),
+        };
+        let edit = (editable && editor.is_none()).then(|| {
+            widgets::text_action(theme, widgets::ActionTone::Quiet, "Edit")
+                .id("task-center-edit-overview")
+                .debug_selector(|| "task-center-edit-overview".into())
+                .role(gpui::Role::Button)
+                .aria_label("Edit the overview")
+                .min_h(px(22.0))
+                .rounded_full()
+                .on_click(cx.listener(|center, _: &ClickEvent, window, cx| {
+                    center.start_edit(EditTarget::Overview, window, cx)
+                }))
+        });
+        Some(
+            div()
+                .id("task-center-overview")
+                .debug_selector(|| "task-center-overview".into())
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(12.0))
+                .py(px(10.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            icon(icons::FILE_MARKDOWN)
+                                .size(px(13.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_rems(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text_muted)
+                                .child("Overview"),
+                        )
+                        .children(
+                            self.draft
+                                .overview
+                                .is_some()
+                                .then(|| Self::tag_pill(Tag::Edited, theme)),
+                        )
+                        .child(div().flex_1())
+                        .children(edit),
+                )
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_step(
         &self,
@@ -791,92 +1273,53 @@ impl TaskCenter {
         last: bool,
         row: &StepRow,
         thread: Option<&Thread>,
+        tag: Option<Tag>,
         editable: bool,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let step_id = row.step.id.clone();
         let group = SharedString::from(format!("task-center-step-{step_id}"));
         let selected = self.selected == Selection::Step(step_id.clone());
-        let renaming = self
-            .rename
+        let editor = self
+            .editor
             .as_ref()
-            .filter(|rename| rename.step_id == step_id)
-            .map(|rename| rename.input.clone());
-        let retry = row.step.outcome.is_none()
+            .filter(|editor| editor.target == EditTarget::Step(step_id.clone()));
+        let expanded = editor.is_some() || self.expanded.contains(&step_id);
+        let registered = tag != Some(Tag::New) && tag != Some(Tag::Removed);
+        let retry = registered
+            && row.step.outcome.is_none()
             && matches!(Self::step_state(row, thread), StepState::Failed(..));
-        let skip = row.step.outcome.is_none()
+        let skip = registered
+            && row.step.outcome.is_none()
             && matches!(
                 row.status,
                 StepStatus::Planned | StepStatus::NeedsYou | StepStatus::Failed
             );
-        let reopen = row.step.outcome.is_some();
-        let remove = editable && thread.is_none();
-        let title_color = if row.status == StepStatus::Skipped {
-            theme.text_muted
-        } else {
-            theme.text
-        };
-        let title: AnyElement = match renaming {
-            Some(input) => div()
-                .debug_selector(|| "task-center-rename".into())
-                .px(px(6.0))
-                .py(px(2.0))
-                .rounded(px(6.0))
-                .bg(theme.wash(0.08))
-                .text_size(ui_rems(13.0))
-                .on_key_down(cx.listener(|center, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        center.rename = None;
-                        cx.notify();
-                    }
-                }))
-                .child(input)
-                .into_any_element(),
-            None => div()
-                .truncate()
-                .text_size(ui_rems(13.0))
-                .text_color(title_color)
-                .when(row.status == StepStatus::Skipped, |el| el.line_through())
-                .child(format!("{}. {}", index + 1, row.step.title))
-                .into_any_element(),
-        };
+        let reopen = registered && row.step.outcome.is_some();
+        let removable = editable
+            && (tag == Some(Tag::New)
+                || (tag != Some(Tag::Removed)
+                    && row.status == StepStatus::Planned
+                    && thread.is_none()));
+        let struck = row.status == StepStatus::Skipped || tag == Some(Tag::Removed);
+        let title_color = if struck { theme.text_muted } else { theme.text };
+        let title = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_rems(13.0))
+                    .text_color(title_color)
+                    .when(struck, |el| el.line_through())
+                    .child(format!("{}. {}", index + 1, row.step.title)),
+            )
+            .children(tag.map(|tag| Self::tag_pill(tag, theme)));
         let mut actions: Vec<AnyElement> = Vec::new();
-        if editable {
-            let (id, title) = (step_id.clone(), row.step.title.clone());
-            actions.push(
-                Self::hover_action(
-                    theme,
-                    format!("task-center-rename-{step_id}"),
-                    "Rename",
-                    index + 1,
-                    group.clone(),
-                )
-                .on_click(cx.listener(move |center, _: &ClickEvent, window, cx| {
-                    cx.stop_propagation();
-                    center.start_rename(id.clone(), title.clone(), window, cx);
-                }))
-                .into_any_element(),
-            );
-        }
-        if remove {
-            let id = step_id.clone();
-            actions.push(
-                Self::hover_action(
-                    theme,
-                    format!("task-center-remove-{step_id}"),
-                    "Remove",
-                    index + 1,
-                    group.clone(),
-                )
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(TaskCenterEvent::DeleteStep(id.clone()));
-                }))
-                .into_any_element(),
-            );
-        }
         if skip {
             let id = step_id.clone();
             actions.push(
@@ -911,21 +1354,142 @@ impl TaskCenter {
                 .into_any_element(),
             );
         }
-        let retry_button = retry.then(|| {
-            let id = step_id.clone();
-            let selector = format!("task-center-retry-{step_id}");
-            widgets::text_action(theme, widgets::ActionTone::Filled, "Retry")
+        let side_button = |label: &'static str, selector: String, tone: widgets::ActionTone| {
+            widgets::text_action(theme, tone, label)
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
                 .role(gpui::Role::Button)
-                .aria_label(format!("Retry step {}", index + 1))
+                .aria_label(format!("{label} step {}", index + 1))
                 .flex_none()
                 .min_h(px(24.0))
                 .rounded_full()
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(TaskCenterEvent::RetryStep(id.clone()));
-                }))
+        };
+        let retry_button = retry.then(|| {
+            let id = step_id.clone();
+            side_button(
+                "Retry",
+                format!("task-center-retry-{step_id}"),
+                widgets::ActionTone::Filled,
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(TaskCenterEvent::RetryStep(id.clone()));
+            }))
+        });
+        let restore_button = (tag == Some(Tag::Removed)).then(|| {
+            let id = step_id.clone();
+            side_button(
+                "Restore",
+                format!("task-center-restore-{step_id}"),
+                widgets::ActionTone::Quiet,
+            )
+            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                center.toggle_remove(&id, cx);
+            }))
+        });
+        let toggle_id = step_id.clone();
+        let spec_toggle = div()
+            .id(SharedString::from(format!("task-center-spec-{step_id}")))
+            .debug_selector({
+                let id = step_id.clone();
+                move || format!("task-center-spec-{id}")
+            })
+            .role(gpui::Role::Button)
+            .aria_expanded(expanded)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme.text))
+            .child("spec")
+            .child(
+                icon(if expanded {
+                    icons::LUCIDE_CHEVRON_DOWN
+                } else {
+                    icons::LUCIDE_CHEVRON_RIGHT
+                })
+                .size(px(11.0))
+                .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                center.toggle_spec(&toggle_id, cx);
+            }));
+        let mut subline = Self::step_subline(row, thread, theme);
+        subline.push(div().flex_none().child("·").into_any_element());
+        subline.push(spec_toggle.into_any_element());
+        let panel = expanded.then(|| {
+            let body = match editor {
+                Some(editor) => self.render_editor(editor, theme, cx),
+                None => {
+                    let spec = if row.step.notes.trim().is_empty() {
+                        div()
+                            .text_size(ui_rems(12.5))
+                            .text_color(theme.text_muted)
+                            .child("No spec yet.")
+                            .into_any_element()
+                    } else {
+                        Self::markdown(
+                            format!("task-center-spec-body-{step_id}"),
+                            &row.step.notes,
+                            theme,
+                            window,
+                        )
+                    };
+                    let edit = (editable && tag != Some(Tag::Removed)).then(|| {
+                        let id = step_id.clone();
+                        side_button(
+                            "Edit",
+                            format!("task-center-edit-{step_id}"),
+                            widgets::ActionTone::Quiet,
+                        )
+                        .on_click(cx.listener(
+                            move |center, _: &ClickEvent, window, cx| {
+                                center.start_edit(EditTarget::Step(id.clone()), window, cx)
+                            },
+                        ))
+                    });
+                    let remove = removable.then(|| {
+                        let id = step_id.clone();
+                        side_button(
+                            "Remove",
+                            format!("task-center-remove-{step_id}"),
+                            widgets::ActionTone::Quiet,
+                        )
+                        .on_click(cx.listener(
+                            move |center, _: &ClickEvent, _, cx| center.toggle_remove(&id, cx),
+                        ))
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(spec)
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(4.0))
+                                .ml(px(-8.0))
+                                .children(edit)
+                                .children(remove),
+                        )
+                        .into_any_element()
+                }
+            };
+            div()
+                .debug_selector({
+                    let id = step_id.clone();
+                    move || format!("task-center-spec-panel-{id}")
+                })
+                .ml(px(8.0 + ICON_SLOT + 10.0))
+                .mr(px(8.0))
+                .mb(px(6.0))
+                .pl(px(10.0))
+                .border_l_2()
+                .border_color(theme.border)
+                .child(body)
         });
         let connector = (!last).then(|| {
             div()
@@ -937,57 +1501,124 @@ impl TaskCenter {
                 .bg(theme.border)
         });
         let select_id = step_id.clone();
+        let aria = format!("Step {}: {}", index + 1, row.step.title);
         div()
-            .id(SharedString::from(format!("task-center-step-{step_id}")))
-            .debug_selector(move || format!("task-center-step-{step_id}"))
-            .group(group)
-            .role(gpui::Role::ListItem)
-            .aria_label(format!("Step {}: {}", index + 1, row.step.title))
-            .aria_selected(selected)
             .relative()
             .flex()
-            .items_start()
-            .gap(px(10.0))
-            .px(px(8.0))
-            .py(px(8.0))
-            .rounded(px(10.0))
-            .cursor_pointer()
-            .when(selected, |el| el.bg(theme.wash(0.08)))
-            .when(!selected, |el| el.hover(|s| s.bg(theme.wash(0.05))))
+            .flex_col()
             .children(connector)
-            .child(Self::step_icon(row.status, theme, cx))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .id(SharedString::from(format!("task-center-step-{step_id}")))
+                    .debug_selector(move || format!("task-center-step-{step_id}"))
+                    .group(group)
+                    .role(gpui::Role::ListItem)
+                    .aria_label(aria)
+                    .aria_selected(selected)
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(title)
+                    .items_start()
+                    .gap(px(10.0))
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(theme.wash(0.08)))
+                    .when(!selected, |el| el.hover(|s| s.bg(theme.wash(0.05))))
+                    .child(Self::step_icon(row.status, theme, cx))
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(title)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .text_size(ui_rems(11.5))
+                                    .text_color(theme.text_muted)
+                                    .children(subline),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
                             .items_center()
-                            .gap(px(5.0))
-                            .text_size(ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .children(Self::step_subline(row, thread, theme)),
-                    ),
+                            .gap(px(2.0))
+                            .children(actions)
+                            .children(retry_button)
+                            .children(restore_button),
+                    )
+                    .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                        center.select(Selection::Step(select_id.clone()), cx)
+                    })),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .children(actions)
-                    .children(retry_button),
-            )
-            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                center.select(Selection::Step(select_id.clone()), cx)
-            }))
+            .children(panel)
             .into_any_element()
+    }
+
+    fn render_edit_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.draft.count();
+        if count == 0 {
+            return None;
+        }
+        Some(
+            div()
+                .id("task-center-edit-bar")
+                .debug_selector(|| "task-center-edit-bar".into())
+                .flex_none()
+                .mx(px(14.0))
+                .mb(px(12.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(12.0))
+                .bg(theme.wash(0.08))
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(ui_rems(12.5))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text)
+                        .child(format!(
+                            "{count} unsent {}",
+                            plural(count, "change", "changes")
+                        )),
+                )
+                .child(
+                    widgets::text_action(theme, widgets::ActionTone::Quiet, "Undo")
+                        .id("task-center-undo")
+                        .debug_selector(|| "task-center-undo".into())
+                        .role(gpui::Role::Button)
+                        .min_h(px(26.0))
+                        .rounded_full()
+                        .on_click(
+                            cx.listener(|center, _: &ClickEvent, _, cx| center.undo_edits(cx)),
+                        ),
+                )
+                .child(
+                    widgets::text_action(theme, widgets::ActionTone::Solid, "Send to lead")
+                        .id("task-center-send")
+                        .debug_selector(|| "task-center-send".into())
+                        .role(gpui::Role::Button)
+                        .min_h(px(26.0))
+                        .rounded_full()
+                        .on_click(cx.listener(|center, _: &ClickEvent, _, cx| {
+                            center.send_edits(false, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_add_step(&self, theme: &Theme) -> AnyElement {
@@ -1191,21 +1822,21 @@ impl TaskCenter {
     }
 
     /// Steps on screen when the page first draws are already there; only later ones rise in.
-    fn arrivals_at(&mut self, steps: &[StepRow], reduced: bool, now: Instant) -> Vec<Tween> {
+    fn arrivals_at(&mut self, ids: &[&str], reduced: bool, now: Instant) -> Vec<Tween> {
         let first = self.arrivals.is_none();
         let previous = self.arrivals.take().unwrap_or_default();
-        let arrivals: HashMap<String, Tween> = steps
+        let arrivals: HashMap<String, Tween> = ids
             .iter()
-            .map(|row| {
-                let tween = previous.get(&row.step.id).copied().unwrap_or_else(|| {
+            .map(|id| {
+                let tween = previous.get(*id).copied().unwrap_or_else(|| {
                     let mut tween = Tween::at(if first { 1.0 } else { 0.0 }, now);
                     tween.retarget(1.0, STEP_IN, reduced, now);
                     tween
                 });
-                (row.step.id.clone(), tween)
+                (id.to_string(), tween)
             })
             .collect();
-        let tweens = steps.iter().map(|row| arrivals[&row.step.id]).collect();
+        let tweens = ids.iter().map(|id| arrivals[*id]).collect();
         self.arrivals = Some(arrivals);
         tweens
     }
@@ -1225,30 +1856,85 @@ impl Render for TaskCenter {
         let Some((task, plan)) = found else {
             return self.render_missing(&theme, cx);
         };
-        let threads = self.threads(&plan, cx);
+        self.draft.retain_live(&plan);
+        let editable = task.completed_at.is_none() && plan.lead.is_some();
+        let mut threads = self.threads(&plan, cx);
+        let mut shown: Vec<(StepRow, Option<Tag>)> = plan
+            .steps
+            .iter()
+            .map(|row| {
+                let text = self.shown_step(&row.step);
+                let tag = if self.draft.removed.contains(&row.step.id) {
+                    Some(Tag::Removed)
+                } else {
+                    self.draft
+                        .edited
+                        .contains_key(&row.step.id)
+                        .then_some(Tag::Edited)
+                };
+                let mut step = row.step.clone();
+                step.title = text.title;
+                step.notes = text.notes;
+                (
+                    StepRow {
+                        step,
+                        status: row.status,
+                        indicator: row.indicator,
+                        brand: row.brand,
+                    },
+                    tag,
+                )
+            })
+            .collect();
+        for (id, text) in &self.draft.added {
+            let step = zeron_proto::TaskStep {
+                id: id.clone(),
+                task_id: task.id.clone(),
+                title: text.title.clone(),
+                notes: text.notes.clone(),
+                order_key: String::new(),
+                chat_id: None,
+                outcome: None,
+                created_at: Default::default(),
+                updated_at: Default::default(),
+                deleted: false,
+                turn: None,
+            };
+            shown.push((
+                StepRow {
+                    step,
+                    status: StepStatus::Planned,
+                    indicator: None,
+                    brand: None,
+                },
+                Some(Tag::New),
+            ));
+            threads.push(None);
+        }
         let reduced = motion::reduced_motion(cx);
         let now = Instant::now();
         let (fill, filling) = self.fill_at(plan.progress, reduced, now);
-        let arrivals = self.arrivals_at(&plan.steps, reduced, now);
+        let ids: Vec<&str> = shown.iter().map(|(row, _)| row.step.id.as_str()).collect();
+        let arrivals = self.arrivals_at(&ids, reduced, now);
         if filling || arrivals.iter().any(|tween| !tween.settled_at(now)) {
             window.request_animation_frame();
         }
-        let editable = task.plan_pending && task.completed_at.is_none();
-        let last = plan.steps.len().saturating_sub(1);
-        let steps: Vec<AnyElement> = plan
-            .steps
+        let last = shown.len().saturating_sub(1);
+        let steps: Vec<AnyElement> = shown
             .iter()
             .zip(&threads)
             .zip(&arrivals)
             .enumerate()
-            .map(|(ix, ((row, thread), arrival))| {
+            .map(|(ix, (((row, tag), thread), arrival))| {
                 let step = self.render_step(
                     ix,
                     ix == last && !editable,
                     row,
                     thread.as_ref(),
+                    *tag,
                     editable,
                     &theme,
+                    window,
                     cx,
                 );
                 let shown = arrival.value_at(now);
@@ -1260,12 +1946,11 @@ impl Render for TaskCenter {
                     .into_any_element()
             })
             .collect();
-        let left = div()
+        let list = div()
             .id("task-center-plan")
             .debug_selector(|| "task-center-plan".into())
             .flex_1()
-            .min_w(px(280.0))
-            .h_full()
+            .min_h_0()
             .overflow_y_scroll()
             .px(px(14.0))
             .py(px(12.0))
@@ -1274,6 +1959,7 @@ impl Render for TaskCenter {
             .gap(px(10.0))
             .child(self.render_lead(&task, &plan, &theme, cx))
             .children(self.render_banner(&task, &plan, &theme, cx))
+            .children(self.render_overview(&task, editable, &theme, window, cx))
             .child(
                 div()
                     .flex()
@@ -1281,6 +1967,14 @@ impl Render for TaskCenter {
                     .children(steps)
                     .when(editable, |el| el.child(self.render_add_step(&theme))),
             );
+        let left = div()
+            .flex_1()
+            .min_w(px(280.0))
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(list)
+            .children(editable.then(|| self.render_edit_bar(&theme, cx)).flatten());
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())

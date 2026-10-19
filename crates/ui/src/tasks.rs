@@ -28,7 +28,7 @@ mod logic;
 mod morph;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
-pub use center::{LiveThread, TaskCenter, TaskCenterEvent};
+pub use center::{LiveThread, PlanEdit, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 
@@ -593,6 +593,19 @@ impl TasksPage {
     }
 
     fn plan_meta(row: &Row, theme: &Theme, fragments: &mut Vec<AnyElement>) {
+        fragments.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    icon(icons::LUCIDE_CIRCLE_DOT)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Mission Control")
+                .into_any_element(),
+        );
         let marks = row.marks();
         if !marks.is_empty() {
             fragments.push(Self::marks(&marks, theme));
