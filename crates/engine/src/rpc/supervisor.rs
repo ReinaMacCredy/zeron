@@ -241,7 +241,7 @@ impl EngineRpc {
                     reason: &reason,
                 };
                 let message_id = self
-                    .edit_task_plan(&task.id, None, vec![edit], &[], Some(rebrief))
+                    .edit_task_plan(&task.id, None, vec![edit], &[], &[], Some(rebrief))
                     .await?
                     .ok_or_else(|| refused("That step already has this title and spec"))?;
                 self.doc_host

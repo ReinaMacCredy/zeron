@@ -56,6 +56,76 @@ pub(super) struct PlanEdit {
     pub notes: String,
 }
 
+const REORDER_REFUSED: &str =
+    "Only steps that have not started can move, and only below the last started step";
+
+fn reorder_keys(
+    steps: &[(&TaskStep, bool)],
+    order: &[String],
+    mut nonce: impl FnMut() -> String,
+) -> Result<Vec<(String, String)>, &'static str> {
+    let listed: Vec<(&TaskStep, bool)> = order
+        .iter()
+        .filter_map(|id| steps.iter().find(|(step, _)| &step.id == id).copied())
+        .collect();
+    let unique: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
+    if listed.len() != steps.len() || unique.len() != steps.len() {
+        return Err("The new order must list every remaining step once");
+    }
+    let key = |step: &TaskStep| (step.order_key.is_empty(), step.order_key.clone());
+    let fixed = listed
+        .iter()
+        .rposition(|(_, started)| *started)
+        .map_or(0, |last| last + 1);
+    if listed[..fixed]
+        .windows(2)
+        .any(|pair| key(pair[0].0) >= key(pair[1].0))
+    {
+        return Err(REORDER_REFUSED);
+    }
+    let floor = fixed.checked_sub(1).map(|ix| key(listed[ix].0));
+    let tail = &listed[fixed..];
+    let eligible = |ix: usize| floor.as_ref().is_none_or(|floor| key(tail[ix].0) > *floor);
+    let mut best: Vec<(usize, Option<usize>)> = Vec::with_capacity(tail.len());
+    for ix in 0..tail.len() {
+        let run = (0..ix)
+            .filter(|&before| eligible(before) && key(tail[before].0) < key(tail[ix].0))
+            .max_by_key(|&before| best[before].0)
+            .map_or((0, None), |before| (best[before].0, Some(before)));
+        best.push(if eligible(ix) {
+            (run.0 + 1, run.1)
+        } else {
+            (0, None)
+        });
+    }
+    let mut kept = vec![false; tail.len()];
+    let mut at = (0..tail.len())
+        .filter(|&ix| best[ix].0 > 0)
+        .max_by_key(|&ix| best[ix].0);
+    while let Some(ix) = at {
+        kept[ix] = true;
+        at = best[ix].1;
+    }
+    let mut lower = fixed
+        .checked_sub(1)
+        .map(|ix| listed[ix].0.order_key.clone());
+    let mut moves = Vec::new();
+    for (ix, (step, _)) in tail.iter().enumerate() {
+        if kept[ix] {
+            lower = Some(step.order_key.clone());
+            continue;
+        }
+        let upper = (ix + 1..tail.len())
+            .find(|&next| kept[next])
+            .map(|next| tail[next].0.order_key.as_str());
+        let key = zeron_proto::pin_order_key_between(lower.as_deref(), upper, &nonce())
+            .map_err(|_| "This plan's steps cannot be reordered")?;
+        moves.push((step.id.clone(), key.clone()));
+        lower = Some(key);
+    }
+    Ok(moves)
+}
+
 pub(super) struct Rebrief<'a> {
     pub supervisor: &'a str,
     pub reason: &'a str,
@@ -555,15 +625,17 @@ impl EngineRpc {
         overview: Option<String>,
         steps: Vec<PlanEdit>,
         remove_step_ids: &[String],
+        order: &[String],
         rebrief: Option<Rebrief<'_>>,
     ) -> Result<Option<String>, RpcError> {
         if rebrief.is_some()
             && (overview.is_some()
                 || !remove_step_ids.is_empty()
+                || !order.is_empty()
                 || steps.iter().any(|edit| edit.step_id.is_none()))
         {
             return Err(refused(
-                "A re-brief changes an existing step's title and spec only: the overview, new steps and removals are the person's",
+                "A re-brief changes an existing step's title and spec only: the overview, new steps, removals and the order are the person's",
             ));
         }
         let task = self.task_or_refuse(task_id)?;
@@ -608,6 +680,17 @@ impl EngineRpc {
                 }
             }
         }
+        let mut moves = Vec::new();
+        if !order.is_empty() {
+            let mut remaining = Vec::new();
+            for step in current
+                .iter()
+                .filter(|step| !remove_step_ids.contains(&step.id))
+            {
+                remaining.push((step, !self.unstarted(step)?));
+            }
+            moves = reorder_keys(&remaining, order, crate::new_id).map_err(refused)?;
+        }
         let mut changes = Vec::new();
         if let Some(overview) = overview.filter(|overview| *overview != task.plan) {
             let patch = TaskPatch {
@@ -616,6 +699,37 @@ impl EngineRpc {
             };
             self.update_task(task_id, &patch)?;
             changes.push("The overview changed.".to_string());
+        }
+        if !moves.is_empty() {
+            for (id, key) in &moves {
+                let patch = TaskStepPatch {
+                    order_key: Some(key.clone()),
+                    ..Default::default()
+                };
+                self.update_task_step(id, &patch, None)?;
+            }
+            let title = |id: &str| {
+                steps
+                    .iter()
+                    .find(|edit| edit.step_id.as_deref() == Some(id))
+                    .map(|edit| edit.title.trim().to_string())
+                    .or_else(|| find(id).ok().map(|step| step.title.clone()))
+                    .unwrap_or_default()
+            };
+            let listed: Vec<String> = order
+                .iter()
+                .enumerate()
+                .map(
+                    |(ix, id)| match moves.iter().any(|(moved, _)| moved == id) {
+                        true => format!("{}. \"{}\" (moved, taskStepId {id})", ix + 1, title(id)),
+                        false => format!("{}. \"{}\"", ix + 1, title(id)),
+                    },
+                )
+                .collect();
+            changes.push(format!(
+                "The steps are in a new order: {}.",
+                listed.join(", ")
+            ));
         }
         for edit in steps {
             let title = edit.title.trim().to_string();
@@ -712,5 +826,105 @@ impl EngineRpc {
             })
             .map(|_| message_id)
             .map_err(failed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(id: &str, key: &str) -> TaskStep {
+        TaskStep {
+            id: id.into(),
+            task_id: "t".into(),
+            title: id.into(),
+            notes: String::new(),
+            order_key: key.into(),
+            chat_id: None,
+            outcome: None,
+            created_at: Default::default(),
+            updated_at: Default::default(),
+            deleted: false,
+            turn: None,
+        }
+    }
+
+    fn reorder(plan: &[(&str, bool)], order: &[&str]) -> Result<Vec<String>, &'static str> {
+        let rows: Vec<TaskStep> = plan
+            .iter()
+            .enumerate()
+            .map(|(ix, (id, _))| step(id, &format!("{}8", ix + 1)))
+            .collect();
+        let steps: Vec<(&TaskStep, bool)> = rows
+            .iter()
+            .zip(plan)
+            .map(|(row, (_, started))| (row, *started))
+            .collect();
+        let order: Vec<String> = order.iter().map(|id| id.to_string()).collect();
+        let mut n = 0;
+        let moves = reorder_keys(&steps, &order, || {
+            n += 1;
+            format!("n{n}")
+        })?;
+        let mut keyed: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                let key = moves
+                    .iter()
+                    .find(|(id, _)| *id == row.id)
+                    .map_or(row.order_key.clone(), |(_, key)| key.clone());
+                (key, row.id.clone())
+            })
+            .collect();
+        keyed.sort();
+        assert_eq!(
+            keyed.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(),
+            order,
+            "the new keys sort into the new order"
+        );
+        Ok(moves.into_iter().map(|(id, _)| id).collect())
+    }
+
+    #[test]
+    fn only_the_moved_step_gets_a_new_key() {
+        let plan = [
+            ("a", true),
+            ("b", true),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+        ];
+        assert_eq!(
+            reorder(&plan, &["a", "b", "e", "c", "d"]),
+            Ok(vec!["e".into()])
+        );
+        assert_eq!(
+            reorder(&plan, &["a", "b", "d", "e", "c"]),
+            Ok(vec!["c".into()])
+        );
+        assert_eq!(reorder(&plan, &["a", "b", "c", "d", "e"]), Ok(vec![]));
+    }
+
+    #[test]
+    fn an_unstarted_step_above_a_running_one_may_drop_below_it() {
+        let plan = [("a", false), ("b", true), ("c", false)];
+        assert_eq!(reorder(&plan, &["b", "a", "c"]), Ok(vec!["a".into()]));
+        assert_eq!(reorder(&plan, &["b", "c", "a"]), Ok(vec!["a".into()]));
+    }
+
+    #[test]
+    fn started_steps_keep_their_place() {
+        let plan = [("a", true), ("b", true), ("c", false)];
+        assert_eq!(reorder(&plan, &["b", "a", "c"]), Err(REORDER_REFUSED));
+        assert_eq!(reorder(&plan, &["a", "c", "b"]), Err(REORDER_REFUSED));
+        assert_eq!(reorder(&plan, &["c", "a", "b"]), Err(REORDER_REFUSED));
+    }
+
+    #[test]
+    fn the_order_lists_every_step_once() {
+        let plan = [("a", false), ("b", false)];
+        assert!(reorder(&plan, &["a"]).is_err());
+        assert!(reorder(&plan, &["a", "a"]).is_err());
+        assert!(reorder(&plan, &["a", "x"]).is_err());
     }
 }
