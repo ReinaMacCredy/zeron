@@ -636,6 +636,8 @@ pub struct ChatDocHandle {
     /// by the user), with the run configuration each was sent with: the row
     /// carries only its text and images.
     held_sends: Mutex<HashMap<String, zeron_proto::RunRequest>>,
+    /// Handback rows wait out a settle window so children finishing close together join one row.
+    held_handbacks: Mutex<HashMap<String, std::time::Instant>>,
     /// The latest Stop command that has acted. A prompt sent before it that
     /// only executes now (a loaded host, a slow agent) was cancelled by it:
     /// running it would start the stopped work again in a fresh runtime.
@@ -865,6 +867,18 @@ impl ChatDocHandle {
             .count();
         steered.push(id.to_string());
         Ok(slot)
+    }
+
+    fn hold_handback(&self, row_id: &str) {
+        let until = std::time::Instant::now() + delegation::handback_settle();
+        lock(&self.held_handbacks).insert(row_id.to_string(), until);
+    }
+
+    fn handback_held(&self, row_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut held = lock(&self.held_handbacks);
+        held.retain(|_, until| *until > now);
+        held.contains_key(row_id)
     }
 
     fn publish_queue(&self) {
@@ -1809,6 +1823,7 @@ impl DocHost {
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             held_sends: Mutex::new(HashMap::new()),
+            held_handbacks: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
@@ -3724,6 +3739,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         })?;
         handle.publish_queue();
@@ -3747,19 +3763,18 @@ impl DocHost {
         from_chat_id: Option<&str>,
         text: &str,
     ) -> Result<String, EngineError> {
-        let (handle, id) = self.push_thread_row(chat_id, from_chat_id, text)?;
-        match self.steer_queued_now(chat_id, &id).await {
-            Ok(true) => {}
-            Ok(false) | Err(_) => self.drain_queue(&handle).await,
-        }
+        let (handle, id) = self.push_thread_row(chat_id, from_chat_id, text, Vec::new())?;
+        self.send_thread_row(&handle, &id).await;
         Ok(id)
     }
 
+    /// A row carrying `task_steps` is a step handback, held for its settle window.
     fn push_thread_row(
         &self,
         chat_id: &str,
         from_chat_id: Option<&str>,
         text: &str,
+        task_steps: Vec<String>,
     ) -> Result<(Arc<ChatDocHandle>, String), EngineError> {
         if from_chat_id == Some(chat_id) {
             return Err(EngineError::Other("a thread cannot message itself".into()));
@@ -3782,6 +3797,9 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let id = new_id();
+        if !task_steps.is_empty() {
+            handle.hold_handback(&id);
+        }
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
@@ -3794,12 +3812,20 @@ impl DocHost {
             from_chat_id: from_chat_id.map(str::to_owned),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            task_steps,
             input_request: None,
         })?;
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
         Ok((handle, id))
+    }
+
+    async fn send_thread_row(&self, handle: &Arc<ChatDocHandle>, id: &str) {
+        match self.steer_queued_now(&handle.chat_id, id).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => self.drain_queue(handle).await,
+        }
     }
 
     pub fn last_user_entry(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
@@ -3896,6 +3922,7 @@ impl DocHost {
             from_chat_id: Some(chat_id.to_string()),
             computer_generation: Some(handle.doc.computer_generation()),
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         })?;
         drop(drain);
@@ -4745,6 +4772,9 @@ impl DocHost {
                 Some(QueueDeliveryGate::ReviewRequired { .. }) => return,
                 None => {}
             }
+            if handle.handback_held(&head.id) {
+                return;
+            }
             // In flight, not just Working: an agent parked on a question owns
             // the turn too, and the composer queues on the same reading. Taking
             // `AwaitingInput` for idle would send the follow-up as a fresh turn
@@ -4979,7 +5009,8 @@ impl DocHost {
                 item.issued_at.min(now_ms()),
                 Some(from),
             )?;
-            if item.input_request.is_none() && from != chat_id {
+            // A step handback names every step thread it reports on; one sender line would hide the rest.
+            if item.input_request.is_none() && item.task_steps.is_empty() && from != chat_id {
                 let title = self
                     .workspace()
                     .and_then(|ws| ws.chat(from).ok().flatten())
@@ -6423,6 +6454,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
@@ -6594,6 +6626,7 @@ impl DocHost {
             delivery_gate: None,
             computer_generation,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         })?;
         handle.publish_queue();

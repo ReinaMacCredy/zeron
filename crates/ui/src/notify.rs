@@ -31,6 +31,9 @@ const DISABLE_ENV: &str = "ZERON_DISABLE_NOTIFICATIONS";
 /// with a real chat.
 pub(crate) const AGENT_UPDATES_TARGET: &str = "__zeron_agent_updates__";
 
+/// Reserved notification target routed to the Supervisor page.
+pub(crate) const SUPERVISOR_TARGET: &str = "__zeron_supervisor__";
+
 /// Post a desktop banner, optionally linked to `chat_id`'s session. Call from the main thread
 /// (the macOS native path talks to AppKit); slow paths (spawning a CLI) hop to
 /// a background thread. Silently a no-op when disabled or no notifier is

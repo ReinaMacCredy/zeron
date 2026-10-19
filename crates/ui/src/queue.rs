@@ -629,13 +629,25 @@ impl Composer {
             .filter(|from| from.as_str() != chat_id)
             .map(|from| {
                 let state = self.state.read(cx);
-                let title = state
-                    .chats
+                let senders = crate::transcript::step_handback_threads(&item.text);
+                let senders = if senders.len() > 1 {
+                    senders
+                } else {
+                    vec![from.clone()]
+                };
+                let titles: Vec<String> = senders
                     .iter()
-                    .find(|chat| &chat.id == from)
-                    .and_then(|chat| chat.title.clone())
-                    .unwrap_or_else(|| from.clone());
-                SharedString::from(format!("from {} · held for turn end", one_line(&title)))
+                    .map(|from| {
+                        let title = state
+                            .chats
+                            .iter()
+                            .find(|chat| &chat.id == from)
+                            .and_then(|chat| chat.title.clone())
+                            .unwrap_or_else(|| from.clone());
+                        one_line(&title).to_string()
+                    })
+                    .collect();
+                SharedString::from(format!("from {} · held for turn end", titles.join(", ")))
             });
 
         let drag_chat = chat_id.to_string();

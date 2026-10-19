@@ -1165,7 +1165,7 @@ async fn a_finished_child_wakes_its_idle_owner_once_and_task_status_acknowledges
         .expect("delegate");
     let child = view.task_id.clone();
     let wake = format!(
-        "Delegated task {child} reached a terminal state. Use task_status with taskId {child} to read the result."
+        "Delegated task {child} (\"count the tests\") completed.\n\n<agent-response>\nnoted\n</agent-response>\n\nUse task_status with taskId {child} to read the result."
     );
     wait_for(
         || {
@@ -1187,7 +1187,7 @@ async fn a_finished_child_wakes_its_idle_owner_once_and_task_status_acknowledges
         .iter()
         .filter(|p| **p == wake)
         .count();
-    assert_eq!(wakes, 1, "one wake, sent as the bare pointer text");
+    assert_eq!(wakes, 1, "one wake, carrying the child's reply");
 
     let read = rig
         .core
@@ -1559,7 +1559,8 @@ async fn an_agent_started_review_names_its_findings_on_the_wake() {
     wait_for(|| idle(&rig.core, "lead"), "the wake turn").await;
     let named = reminders(&rig);
     assert!(named[0].starts_with(&format!(
-        "Delegated task {review} reached a terminal state."
+        "Delegated task {review} (\"review the diff\") completed.\n\n<agent-response>\n{}\n</agent-response>",
+        REVIEW_REPLY.trim()
     )));
     assert!(named[0].contains("to resolve: F1, F2, F3."));
     queue_human_run(&rig.core, "lead", "c1", "m1");
@@ -1822,7 +1823,11 @@ async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|steer| steer.contains(&format!("Delegated task {child} reached")))
+                .any(|steer| {
+                    steer.contains(&format!(
+                        "Delegated task {child} (\"probe the cache\") completed.\n\n<agent-response>\nok\n</agent-response>"
+                    ))
+                })
         },
         "the wake steered into the live turn",
     )
@@ -1876,18 +1881,59 @@ async fn children_finishing_while_the_wake_waits_share_one_wake() {
         .collect();
     assert_eq!(wakes.len(), 1);
     assert_eq!(wakes[0].delegated_tasks, children);
-    assert!(wakes[0].text.starts_with("Delegated tasks "));
+    for (child, task) in children.iter().zip(["first", "second"]) {
+        assert!(
+            wakes[0].text.contains(&format!(
+                "Delegated task {child} (\"{task}\") completed.\n\n<agent-response>\nok\n</agent-response>"
+            )),
+            "{}",
+            wakes[0].text
+        );
+    }
+    assert!(
+        wakes[0]
+            .text
+            .ends_with("Use task_status with each taskId to read the results.")
+    );
     release.notify_one();
-    wait_for(
-        || {
-            children.iter().all(|child| {
-                delegation(&core, child).delivery
-                    == Some(zeron_proto::DelegationDelivery::Delivered)
-            })
-        },
-        "the shared wake delivered",
-    )
-    .await;
+    let delivered = |children: &[String]| {
+        children.iter().all(|child| {
+            delegation(&core, child).delivery == Some(zeron_proto::DelegationDelivery::Delivered)
+        })
+    };
+    wait_for(|| delivered(&children), "the shared wake delivered").await;
+    wait_for(|| idle(core, "lead"), "the owner's wake turn").await;
+
+    let mut pair = Vec::new();
+    for task in ["third", "fourth"] {
+        pair.push(
+            core.doc_host
+                .delegate_task(delegate(task), Default::default())
+                .await
+                .unwrap()
+                .task_id,
+        );
+    }
+    wait_for(|| delivered(&pair), "the idle owner's wake").await;
+    wait_for(|| idle(core, "lead"), "the idle owner's wake turn").await;
+    let naming_third: Vec<String> = entries(&core, "lead")
+        .into_iter()
+        .filter(|entry| entry.role == MessageRole::User)
+        .filter_map(|entry| match entry.parts.first() {
+            Some(zeron_doc::MessagePart::Text { text, .. }) => Some(text.clone()),
+            _ => None,
+        })
+        .filter(|text| text.contains(&pair[0]))
+        .collect();
+    assert_eq!(
+        naming_third.len(),
+        1,
+        "children finishing close together wake an idle owner once: {naming_third:?}"
+    );
+    assert!(naming_third[0].contains(&format!(
+        "Delegated task {} (\"fourth\") completed.",
+        pair[1]
+    )));
     core.shutdown().await;
 }
 
@@ -2371,8 +2417,7 @@ impl Harness for AskingHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
-        let asks =
-            request.prompt.contains("please ask") && !request.prompt.contains("waiting for input");
+        let asks = request.prompt.starts_with("please ask");
         let holds = request.prompt.contains("please hold");
         let approval = self.approval;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
@@ -2650,7 +2695,7 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
     )
     .await;
     wait_for(
-        || !prompts_with(&rig, "reached a terminal state").is_empty(),
+        || !prompts_with(&rig, "(\"please ask before downloading\") completed.").is_empty(),
         "the completion wake",
     )
     .await;
@@ -2747,20 +2792,20 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         "the first step's thread to finish its turn",
     )
     .await;
+    let handback = format!(
+        "Step \"Build the API\" (taskStepId {}) finished a turn on its thread {first}.\n\n<agent-response>\nnoted\n</agent-response>\n\nRead it with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", or tell the thread what is still missing with send_message_to_thread.",
+        steps[0].id
+    );
     wait_for(
-        || {
-            !prompts_with(
-                &rig,
-                &format!(
-                    "Step \"Build the API\" (taskStepId {}) finished a turn on its thread {first}.",
-                    steps[0].id
-                ),
-            )
-            .is_empty()
-        },
+        || !prompts_with(&rig, &handback).is_empty(),
         "the lead's step message",
     )
     .await;
+    assert_eq!(
+        prompts_with(&rig, &handback),
+        [handback.clone()],
+        "one handback carrying the step's reply, without peer framing"
+    );
     let second = started(run(&steps[1], "task-lead").await);
     let err = refused(run(&steps[1], "task-lead").await);
     assert!(err.contains("still running"), "{err}");
@@ -3167,4 +3212,277 @@ async fn a_wake_into_a_supervisor_the_person_stopped_waits_for_their_next_messag
     })
     .await;
     rig.core.shutdown().await;
+}
+
+struct GatedHarness {
+    prompts: Arc<Mutex<Vec<String>>>,
+    gates: std::collections::HashMap<&'static str, tokio::sync::watch::Receiver<bool>>,
+}
+
+#[async_trait]
+impl Harness for GatedHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Gated"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let prompt = request.prompt.clone();
+        self.prompts.lock().unwrap().push(prompt.clone());
+        let step = prompt
+            .lines()
+            .last()
+            .and_then(|line| line.strip_prefix("do: "))
+            .map(str::to_string);
+        let (gate, reply) = match step.as_deref() {
+            Some("late") => (self.gates.get("late").cloned(), "z".repeat(4_010)),
+            Some(title) => (self.gates.get(title).cloned(), format!("{title} is done")),
+            None if prompt == "human prompt" => {
+                (self.gates.get("lead").cloned(), "lead done".into())
+            }
+            None => (None, "noted".into()),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        tokio::spawn(async move {
+            let _controls = controls;
+            let _ = tx
+                .send(Ok(AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "gated-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-gated".into(),
+                    assistant_message_id: "a-gated".into(),
+                }))
+                .await;
+            if let Some(mut gate) = gate {
+                let _ = gate.wait_for(|open| *open).await;
+            }
+            let _ = tx.send(Ok(AgentEvent::TextDelta { text: reply })).await;
+            let _ = tx
+                .send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-gated".into()),
+                }))
+                .await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn step_handbacks_fold_into_one_lead_message() {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let (lead, lead_rx) = tokio::sync::watch::channel(false);
+    let (second, second_rx) = tokio::sync::watch::channel(false);
+    let (steps_gate, steps_rx) = tokio::sync::watch::channel(false);
+    let (late, late_rx) = tokio::sync::watch::channel(false);
+    let rig = rig_on(Arc::new(GatedHarness {
+        prompts: prompts.clone(),
+        gates: [
+            ("lead", lead_rx),
+            ("second", second_rx),
+            ("alpha", steps_rx.clone()),
+            ("beta", steps_rx),
+            ("late", late_rx),
+        ]
+        .into_iter()
+        .collect(),
+    }));
+    let rig = Rig { prompts, ..rig };
+    let core = &rig.core;
+    let rpc = core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Shop backend" }))
+        .await
+        .unwrap();
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "task-lead",
+        "spaceId": "space-tt", "orchestrate": true,
+    }))
+    .await
+    .unwrap();
+    mutate(serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "steps": [
+            { "title": "first" }, { "title": "second" },
+            { "title": "alpha" }, { "title": "beta" }, { "title": "late" },
+        ],
+    }))
+    .await
+    .unwrap();
+    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+        .await
+        .unwrap();
+    wait_for(
+        || !prompts_with(&rig, "The plan is approved. Run it.").is_empty(),
+        "the lead's approval message",
+    )
+    .await;
+    wait_for(|| idle(core, "task-lead"), "the lead's approval turn").await;
+
+    let steps = core.workspace.task_steps_of("t1");
+    let run = |step: &zeron_proto::TaskStep| {
+        let reply = call(
+            zeron_rpc::methods::CREATE_THREAD,
+            serde_json::json!({
+                "fromChatId": "task-lead", "prompt": format!("do: {}", step.title), "taskStepId": step.id,
+            }),
+        );
+        let title = step.title.clone();
+        async move {
+            let Ok(zeron_rpc::RpcReply::Value(value)) = reply.await else {
+                panic!("a step thread for {title}");
+            };
+            value["chatId"].as_str().unwrap().to_string()
+        }
+    };
+    let step_rows = || {
+        core.doc_host
+            .open("task-lead")
+            .unwrap()
+            .doc()
+            .read_queue()
+            .unwrap()
+            .into_iter()
+            .filter(|row| !row.task_steps.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let handbacks = |rig: &Rig| prompts_with(rig, "(taskStepId ");
+
+    let first = run(&steps[0]).await;
+    let second_thread = run(&steps[1]).await;
+    wait_for(
+        || {
+            step_rows()
+                .first()
+                .is_some_and(|row| row.task_steps.len() == 1)
+        },
+        "the first step's handback held in the idle lead's queue",
+    )
+    .await;
+    second.send(true).unwrap();
+    wait_for(|| !handbacks(&rig).is_empty(), "the idle lead's handback").await;
+    wait_for(|| idle(core, "task-lead"), "the lead's handback turn").await;
+    let early = handbacks(&rig);
+    assert_eq!(
+        early.len(),
+        1,
+        "steps settling apart reach an idle lead once: {early:?}"
+    );
+    for (step, thread) in steps.iter().zip([&first, &second_thread]) {
+        assert!(
+            early[0].contains(&format!(
+                "Step \"{}\" (taskStepId {}) finished a turn on its thread {thread}.\n\n<agent-response>\n{} is done\n</agent-response>",
+                step.title, step.id, step.title
+            )),
+            "{}",
+            early[0]
+        );
+    }
+
+    queue_human_run(core, "task-lead", "cmd-1", "msg-1");
+    wait_for(|| working(core, "task-lead"), "the lead's held turn").await;
+    let mut threads = Vec::new();
+    for step in &steps[2..] {
+        threads.push(run(step).await);
+    }
+    steps_gate.send(true).unwrap();
+    wait_for(
+        || {
+            step_rows()
+                .first()
+                .is_some_and(|row| row.task_steps.len() == 2)
+        },
+        "alpha and beta in one queued handback",
+    )
+    .await;
+    let row = step_rows().remove(0);
+    let mut both = row.task_steps.clone();
+    both.sort();
+    let mut expected = vec![steps[2].id.clone(), steps[3].id.clone()];
+    expected.sort();
+    assert_eq!(both, expected);
+
+    late.send(true).unwrap();
+    wait_for(
+        || {
+            step_rows()
+                .first()
+                .is_some_and(|row| row.task_steps.len() == 3)
+        },
+        "the late step joining the queued handback",
+    )
+    .await;
+    let joined = step_rows();
+    assert_eq!(joined.len(), 1, "one handback row for the lead");
+    assert_eq!(joined[0].id, row.id, "the late step joined the queued row");
+
+    lead.send(true).unwrap();
+    wait_for(
+        || !prompts_with(&rig, &format!("(taskStepId {})", steps[4].id)).is_empty(),
+        "the folded handback's turn",
+    )
+    .await;
+    wait_for(|| idle(core, "task-lead"), "the lead's handback turn").await;
+    let all = handbacks(&rig);
+    assert_eq!(all.len(), 2, "one lead message per fold: {all:?}");
+    let message = &all[1];
+    for (step, thread) in steps[2..].iter().zip(&threads).take(2) {
+        assert!(
+            message.contains(&format!(
+                "Step \"{}\" (taskStepId {}) finished a turn on its thread {thread}.\n\n<agent-response>\n{} is done\n</agent-response>",
+                step.title, step.id, step.title
+            )),
+            "{message}"
+        );
+    }
+    assert!(
+        message.contains(&format!(
+            "Step \"late\" (taskStepId {}) finished a turn on its thread {}.\n\n<agent-response>\n{}\n[truncated 10 chars; use read_thread for the full response]\n</agent-response>",
+            steps[4].id,
+            threads[2],
+            "z".repeat(4_000)
+        )),
+        "{message}"
+    );
+    assert!(message.ends_with(
+        "Read them with read_thread, then mark each step done or skipped with the tasks tool, action \"step\", or tell its thread what is still missing with send_message_to_thread."
+    ));
+    let woken: Vec<_> = entries(core, "task-lead")
+        .into_iter()
+        .filter(|entry| entry.id == row.id)
+        .collect();
+    assert_eq!(woken.len(), 1);
+    assert!(
+        threads.contains(woken[0].from_chat_id.as_ref().unwrap()),
+        "the handback reads as a message from a step thread"
+    );
+    core.shutdown().await;
 }

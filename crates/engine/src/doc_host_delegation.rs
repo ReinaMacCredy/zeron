@@ -14,7 +14,7 @@ pub const DELEGATION_GUIDANCE: &str = "## Zeron delegation
 The `zeron` MCP server runs child agents on any installed harness and model. Treat these distinctly:
 
 - A delegated task is child work owned by this chat. Call `orchestrator_capabilities` for the harnesses and models available, from the same catalog as the composer; a native subagent tool's model list is not the full list. When it lists agent profiles, pick the one whose `whenToUse` fits the task and pass its id as `profile`. Prefer native subagent tools for same-harness work only when they support the chosen model. Use `delegate_task` with that harness and model when native tools cannot, including for same-harness work, for a different harness, or when the user asks for a Zeron child task. Keep each returned `taskId` and use `task_status` or `task_cancel` with it. Its `childThreadId` is backing storage for the child; do not replace delegation with `create_thread`.
-- An async child's completion wakes this chat with a message naming its taskId, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers, then read the result with `task_status`. Use mode `wait` only when this turn needs the result before it can continue.
+- An async child's completion wakes this chat with a message naming its taskId and quoting its final reply, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use `task_status` when you need the full result. Use mode `wait` only when this turn needs the result before it can continue.
 - A child that blocks on a question or a tool approval wakes this chat the same way, as does any thread this chat watches with `watch_threads`. Answer with `respond_to_input` when the answer follows from the task or an earlier decision (a tool approval needs this chat at Full access); anything irreversible or that only the person can decide goes to them with `ask_user`.
 - `create_thread` opens an ordinary top-level chat. Use it only when the user asks for separate/new threads or conversations, never merely because they said \"subagent\" or asked for parallel delegated work. The exception is a task's lead: it runs each step with `create_thread` and that step's `taskStepId`, as its brief says.
 
@@ -145,16 +145,78 @@ pub(super) fn clip(text: &str, max: usize) -> String {
     clipped
 }
 
-pub(super) fn wake_text(task_ids: &[String]) -> String {
-    match task_ids {
-        [one] => format!(
-            "Delegated task {one} reached a terminal state. Use task_status with taskId {one} to read the result."
-        ),
-        many => format!(
-            "Delegated tasks {} reached terminal states. Use task_status with each taskId to read the results.",
-            many.join(", ")
-        ),
+const HANDBACK_REPLY_CHARS: usize = 4_000;
+
+pub(super) fn handback_settle() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("ZERON_HANDBACK_SETTLE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(500),
+    )
+}
+
+pub(super) fn agent_response(reply: &str, full_with: &str) -> Option<String> {
+    let reply = reply.trim();
+    if reply.is_empty() {
+        return None;
     }
+    let total = reply.chars().count();
+    let body = if total > HANDBACK_REPLY_CHARS {
+        let kept: String = reply.chars().take(HANDBACK_REPLY_CHARS).collect();
+        format!(
+            "{kept}\n[truncated {} chars; use {full_with} for the full response]",
+            total - HANDBACK_REPLY_CHARS
+        )
+    } else {
+        reply.to_string()
+    };
+    Some(format!("<agent-response>\n{body}\n</agent-response>"))
+}
+
+pub(super) fn handback_text(
+    children: impl IntoIterator<Item = (String, Option<String>)>,
+    next: String,
+) -> String {
+    let mut sections = Vec::new();
+    for (status, reply) in children {
+        sections.push(status);
+        sections.extend(reply);
+    }
+    sections.push(next);
+    sections.join("\n\n")
+}
+
+struct TaskHandback {
+    id: String,
+    title: String,
+    status: Option<DelegationStatus>,
+    result: String,
+}
+
+fn wake_text(tasks: &[TaskHandback]) -> String {
+    let next = match tasks {
+        [one] => format!("Use task_status with taskId {} to read the result.", one.id),
+        _ => "Use task_status with each taskId to read the results.".to_string(),
+    };
+    let children = tasks.iter().map(|task| {
+        let outcome = match task.status {
+            Some(DelegationStatus::Completed) => "completed",
+            Some(DelegationStatus::Failed) => "failed",
+            Some(DelegationStatus::Cancelled) => "was cancelled",
+            Some(DelegationStatus::Interrupted) => "was interrupted",
+            Some(DelegationStatus::Running) | None => "ended",
+        };
+        (
+            format!(
+                "Delegated task {} (\"{}\") {outcome}.",
+                task.id,
+                clip(&zeron_proto::view::single_line(&task.title), TITLE_CHARS)
+            ),
+            agent_response(&task.result, "task_status"),
+        )
+    });
+    handback_text(children, next)
 }
 
 pub(super) const WAKE_QUESTION_CHARS: usize = 1_500;
@@ -680,6 +742,32 @@ impl DocHost {
             .unwrap_or_default()
     }
 
+    fn task_wake_text(&self, task_ids: &[String]) -> String {
+        let chats = self
+            .workspace()
+            .and_then(|workspace| workspace.read_chats().ok())
+            .unwrap_or_default();
+        let tasks: Vec<TaskHandback> = task_ids
+            .iter()
+            .map(|id| {
+                let child = chats.iter().find(|chat| &chat.id == id);
+                let delegation = child.and_then(|chat| chat.delegation.as_ref());
+                TaskHandback {
+                    id: id.clone(),
+                    title: child
+                        .and_then(|chat| chat.title.clone())
+                        .unwrap_or_else(|| "Untitled".into()),
+                    status: delegation.map(|d| d.status),
+                    result: child
+                        .zip(delegation)
+                        .map(|(child, d)| self.result_of(child, d))
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        wake_text(&tasks)
+    }
+
     fn review_findings(
         &self,
         child: &Chat,
@@ -990,7 +1078,7 @@ impl DocHost {
                 .cloned()
                 .collect();
             if !rest.is_empty() {
-                let text = wake_text(&rest);
+                let text = self.task_wake_text(&rest);
                 handle.doc.insert_queued(
                     index,
                     &QueuedMessage {
@@ -1094,7 +1182,7 @@ impl DocHost {
                 }
                 let mut row = row.clone();
                 row.delegated_tasks.push(task_id.to_string());
-                row.text = wake_text(&row.delegated_tasks);
+                row.text = self.task_wake_text(&row.delegated_tasks);
                 handle.doc.take_queued(&row.id)?;
                 handle.doc.insert_queued(index, &row)?;
                 handle.publish_queue();
@@ -1107,17 +1195,25 @@ impl DocHost {
                 delegated_tasks: vec![task_id.to_string()],
                 ..QueuedMessage::new(
                     new_id(),
-                    wake_text(&[task_id.to_string()]),
+                    self.task_wake_text(&[task_id.to_string()]),
                     self.inner.config.device_id.clone(),
                 )
             };
             let slot = handle.steer_slot(&row.id)?;
+            handle.hold_handback(&row.id);
             handle.doc.insert_queued(slot, &row)?;
             handle.publish_queue();
             self.save_snapshot(&handle);
             row.id
         };
-        self.deliver_wake(&handle, &row_id).await
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(handback_settle()).await;
+            if let Err(err) = host.deliver_wake(&handle, &row_id).await {
+                tracing::warn!(chat = %handle.chat_id, error = %err, "delivering a wake failed");
+            }
+        });
+        Ok(())
     }
 
     async fn deliver_wake(
@@ -1641,14 +1737,35 @@ mod tests {
     }
 
     #[test]
-    fn the_wake_names_every_task_it_reports() {
+    fn the_wake_names_every_task_it_reports_with_its_clipped_result() {
+        let task = |id: &str, status, result: &str| TaskHandback {
+            id: id.into(),
+            title: format!("Title {id}"),
+            status,
+            result: result.into(),
+        };
         assert_eq!(
-            wake_text(&["a".into()]),
-            "Delegated task a reached a terminal state. Use task_status with taskId a to read the result."
+            wake_text(&[task("a", Some(DelegationStatus::Completed), " done \n")]),
+            "Delegated task a (\"Title a\") completed.\n\n<agent-response>\ndone\n</agent-response>\n\nUse task_status with taskId a to read the result."
         );
+        let long = format!("{}tail", "界".repeat(HANDBACK_REPLY_CHARS));
         assert_eq!(
-            wake_text(&["a".into(), "b".into()]),
-            "Delegated tasks a, b reached terminal states. Use task_status with each taskId to read the results."
+            wake_text(&[
+                task("a", Some(DelegationStatus::Failed), &long),
+                task("b", Some(DelegationStatus::Cancelled), ""),
+                task("c", Some(DelegationStatus::Interrupted), "half"),
+            ]),
+            format!(
+                "Delegated task a (\"Title a\") failed.\n\n<agent-response>\n{}\n[truncated 4 chars; use task_status for the full response]\n</agent-response>\n\nDelegated task b (\"Title b\") was cancelled.\n\nDelegated task c (\"Title c\") was interrupted.\n\n<agent-response>\nhalf\n</agent-response>\n\nUse task_status with each taskId to read the results.",
+                "界".repeat(HANDBACK_REPLY_CHARS)
+            )
+        );
+        let mut untitled = task("d", Some(DelegationStatus::Completed), "");
+        untitled.title = "Review the diff.\n\nFocus on auth".into();
+        assert_eq!(
+            wake_text(&[untitled]),
+            "Delegated task d (\"Review the diff. Focus on auth\") completed.\n\nUse task_status with taskId d to read the result.",
+            "a title taken from a multi-line task stays on the status line"
         );
     }
 }

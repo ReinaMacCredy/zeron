@@ -10,8 +10,9 @@ A notification fires when a chat you started changes state, or when Zeron loses 
 | The agent asks you something | Chat title, "Waiting on your input" |
 | A run fails | Chat title, "Run failed" |
 | The connection drops | "Connection unavailable" |
+| The Supervisor needs your decision while you are away | "Supervisor needs you", the decision's title |
 
-On macOS, click a chat's banner to open that chat. Windows shows no banners yet; the sounds still play there.
+On macOS, click a chat's banner to open that chat, and the Supervisor's banner to open the [Supervisor](zeron://docs/supervisor) page. Windows shows no banners yet; the sounds still play there.
 
 Only chats you opened yourself notify you. Side chats, delegated child threads, and the voice session stay quiet, and their status still shows in the sidebar.
 
@@ -19,7 +20,7 @@ Only chats you opened yourself notify you. Side chats, delegated child threads, 
 
 - **Desktop notifications** turns banners on or off.
 - **Agent updates** shows a banner when monitored agent CLIs have updates. Clicking it opens [Settings > Providers](zeron://settings/providers).
-- **Only when in the background** skips the banner while any Zeron window is focused. The sound still plays, so you hear it while you look at another chat.
+- **Only when in the background** skips the banner while any Zeron window is focused. The sound still plays, so you hear it while you look at another chat. The Supervisor's banner ignores this switch: it shows only after you have been away from Zeron for 3 minutes.
 
 The two rows under **Desktop notifications** are dimmed and inactive while banners are off.
 

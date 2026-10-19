@@ -57,6 +57,8 @@ pub struct QueuedMessage {
     pub computer_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegated_tasks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_steps: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_request: Option<String>,
 }
@@ -109,6 +111,7 @@ impl QueuedMessage {
             delivery_gate: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         }
     }
@@ -379,6 +382,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(&item.delegated_tasks)?),
         )?;
     }
+    if !item.task_steps.is_empty() {
+        map.insert(
+            "taskSteps",
+            crate::schema::loro_value_from_json(&serde_json::to_value(&item.task_steps)?),
+        )?;
+    }
     if let Some(request_id) = &item.input_request {
         map.insert("inputRequest", request_id.as_str())?;
     }
@@ -427,6 +436,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .get("delegatedTasks")
             .and_then(|tasks| serde_json::from_value(tasks.clone()).ok())
             .unwrap_or_default(),
+        task_steps: v
+            .get("taskSteps")
+            .and_then(|steps| serde_json::from_value(steps.clone()).ok())
+            .unwrap_or_default(),
         input_request: v
             .get("inputRequest")
             .and_then(|r| r.as_str())
@@ -468,6 +481,7 @@ mod tests {
             delivery_gate: None,
             computer_generation: None,
             delegated_tasks: Vec::new(),
+            task_steps: Vec::new(),
             input_request: None,
         }
     }

@@ -389,12 +389,14 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
                 window.activate_window();
                 if target == notify::AGENT_UPDATES_TARGET {
                     shell.open_settings(shell::SettingsSection::Harnesses, cx);
+                } else if target == notify::SUPERVISOR_TARGET {
+                    shell.open_supervisor(cx);
                 } else {
                     shell.open_chat(target, cx);
                 }
             });
         }
-        None if target != notify::AGENT_UPDATES_TARGET => {
+        None if target != notify::AGENT_UPDATES_TARGET && target != notify::SUPERVISOR_TARGET => {
             state.update(cx, |state, cx| state.select_chat(Some(target), cx))
         }
         None => {}

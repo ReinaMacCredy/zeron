@@ -2816,9 +2816,9 @@ pub struct Shell {
     active_chat: String,
     /// Last selected session survives opening the blank Appshot destination.
     last_appshot_chat: Option<String>,
-    /// Automatic Appshot affinity (Synara): the session last interacted with
-    /// and the session the previous snap went to, each with its moment.
-    appshot_last_interaction: Option<(String, std::time::Instant)>,
+    /// The session last interacted with and its moment (Appshot affinity and
+    /// Supervisor presence), and the session the previous snap went to.
+    last_interaction: Option<(String, std::time::Instant)>,
     appshot_last_target: Option<(String, std::time::Instant)>,
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
@@ -3482,7 +3482,7 @@ impl Shell {
             layout_key: String::new(),
             active_chat: String::new(),
             last_appshot_chat: None,
-            appshot_last_interaction: None,
+            last_interaction: None,
             appshot_last_target: None,
             sidebar_prev_order: Vec::new(),
             sidebar_resort: std::collections::HashMap::new(),
@@ -3563,7 +3563,7 @@ impl Shell {
                 let state = self.state.read(cx);
                 crate::appshots::resolve_automatic_target(
                     std::time::Instant::now(),
-                    self.appshot_last_interaction
+                    self.last_interaction
                         .as_ref()
                         .map(|(chat, at)| (chat.as_str(), *at)),
                     self.appshot_last_target
@@ -3605,17 +3605,17 @@ impl Shell {
         cx.notify();
     }
 
-    /// Any keystroke or click while a session is selected refreshes the
-    /// Automatic destination's affinity, as Synara's coordinator does from
-    /// `pointerdown`/`keydown`.
-    fn note_appshot_interaction(&mut self, cx: &mut Context<Self>) {
+    /// Any keystroke or click refreshes the Automatic destination's affinity,
+    /// as Synara's coordinator does from `pointerdown`/`keydown`, and marks
+    /// the person present for Supervisor routing.
+    fn note_interaction(&mut self, cx: &mut Context<Self>) {
         let selected = self
             .state
             .read(cx)
             .selected_chat
             .clone()
             .unwrap_or_default();
-        self.appshot_last_interaction = Some((selected, std::time::Instant::now()));
+        self.last_interaction = Some((selected, std::time::Instant::now()));
     }
 
     pub fn show_appshot_error(
@@ -3890,6 +3890,7 @@ impl Shell {
                 }
             }
         }
+        self.route_supervisor_needs(cx);
         // Agent release discoveries finish independently (bounded provider
         // concurrency), so debounce the transition and deliver one aggregate
         // banner. Versioned releases deduplicate by version. Versionless
@@ -4061,7 +4062,7 @@ impl Shell {
             self.record_nav_focus(focus_entry, cx);
         }
         if selected != self.active_chat {
-            self.appshot_last_interaction = Some((selected.clone(), std::time::Instant::now()));
+            self.last_interaction = Some((selected.clone(), std::time::Instant::now()));
         }
         if selected != self.active_chat {
             self.suspend_file_images(cx);
@@ -14107,7 +14108,7 @@ impl Shell {
                 .read(cx)
                 .supervisor
                 .as_ref()
-                .map(crate::supervisor::needs_you_count),
+                .map(|snapshot| snapshot.needs_you_count()),
             _ => None,
         }
         .filter(|count| *count > 0);
@@ -15251,7 +15252,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.note_appshot_interaction(cx);
+        self.note_interaction(cx);
         self.sidebar_peek_key_down(event, window, cx);
         if event.keystroke.key == "escape" && self.voice.read(cx).stage_open {
             self.set_voice_stage_open(false, cx);
@@ -19187,7 +19188,7 @@ impl Render for Shell {
                 cx.listener(|this, _, _, cx| this.step_history(SwipeDir::Forward, cx)),
             )
             .capture_key_down(cx.listener(Self::on_key_down_capture))
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.note_appshot_interaction(cx)))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.note_interaction(cx)))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))

@@ -1,6 +1,6 @@
 use zeron_proto::{Delegation, SessionStatus, StepTurn, StepTurnEnd, TaskStep, TaskStepPatch};
 
-use super::delegation::failure;
+use super::delegation::{agent_response, failure, handback_settle, handback_text};
 use super::*;
 use crate::registry::DelegationSettings;
 
@@ -33,16 +33,60 @@ fn turn_end(
     })
 }
 
-fn step_wake_text(step: &TaskStep, thread: &str, ended: StepTurnEnd) -> String {
-    let (title, id) = (&step.title, &step.id);
-    match ended {
-        StepTurnEnd::Failed => format!(
-            "Step \"{title}\" (taskStepId {id}) failed on its thread {thread}. Read it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with create_thread and taskStepId {id}, or mark it skipped with the tasks tool."
+struct StepHandback {
+    id: String,
+    title: String,
+    thread: String,
+    ended: StepTurnEnd,
+    reply: Option<String>,
+}
+
+fn step_wake_text(steps: &[StepHandback]) -> String {
+    let next = match steps {
+        [one] if one.ended == StepTurnEnd::Failed => format!(
+            "Read it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with create_thread and taskStepId {}, or mark it skipped with the tasks tool.",
+            one.id
         ),
-        _ => format!(
-            "Step \"{title}\" (taskStepId {id}) finished a turn on its thread {thread}. Read it with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", or tell the thread what is still missing with send_message_to_thread."
-        ),
-    }
+        [_] => "Read it with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", or tell the thread what is still missing with send_message_to_thread.".to_string(),
+        many => {
+            let mut next = "Read them with read_thread, then mark each step done or skipped with the tasks tool, action \"step\", or tell its thread what is still missing with send_message_to_thread.".to_string();
+            if many.iter().any(|step| step.ended == StepTurnEnd::Failed) {
+                next.push_str(" A failed step can also run again with create_thread and its taskStepId.");
+            }
+            next
+        }
+    };
+    let children = steps.iter().map(|step| {
+        let what = match step.ended {
+            StepTurnEnd::Failed => "failed",
+            _ => "finished a turn",
+        };
+        (
+            format!(
+                "Step \"{}\" (taskStepId {}) {what} on its thread {}.",
+                zeron_proto::view::single_line(&step.title),
+                step.id,
+                step.thread
+            ),
+            step.reply
+                .as_deref()
+                .and_then(|reply| agent_response(reply, "read_thread")),
+        )
+    });
+    handback_text(children, next)
+}
+
+fn step_lead_to_wake(workspace: &WorkspaceHost, step: &TaskStep) -> Option<String> {
+    let lead = workspace
+        .task(&step.task_id)
+        .filter(|task| task.completed_at.is_none())
+        .and_then(|task| task.chat_id)?;
+    workspace
+        .chat(&lead)
+        .ok()
+        .flatten()
+        .is_some_and(|chat| !chat.archived)
+        .then_some(lead)
 }
 
 impl DocHost {
@@ -222,38 +266,90 @@ impl DocHost {
                 }
             }
         }
+        let mut leads: Vec<(String, Vec<String>)> = Vec::new();
         for (step, thread, ended) in wakes {
             self.supervisor_step_ended(&step, &thread, ended);
-            self.wake_step_lead(workspace, &step, &thread, ended).await;
+            let Some(lead) = step_lead_to_wake(workspace, &step) else {
+                continue;
+            };
+            match leads.iter_mut().find(|(id, _)| *id == lead) {
+                Some((_, steps)) => steps.push(step.id),
+                None => leads.push((lead, vec![step.id])),
+            }
+        }
+        for (lead, steps) in leads {
+            if let Err(err) = self.offer_step_wake(workspace, &lead, steps).await {
+                tracing::warn!(chat = %lead, error = %err, "waking a step's lead failed");
+            }
         }
     }
 
-    async fn wake_step_lead(
+    fn step_wake(
         &self,
         workspace: &WorkspaceHost,
-        step: &TaskStep,
-        thread: &str,
-        ended: StepTurnEnd,
-    ) {
-        let Some(lead) = workspace
-            .task(&step.task_id)
-            .filter(|task| task.completed_at.is_none())
-            .and_then(|task| task.chat_id)
-        else {
-            return;
-        };
-        if workspace
-            .chat(&lead)
-            .ok()
-            .flatten()
-            .is_none_or(|chat| chat.archived)
+        step_ids: &[String],
+    ) -> Option<(String, String)> {
+        let steps: Vec<StepHandback> = step_ids
+            .iter()
+            .filter_map(|id| {
+                let step = workspace.task_step(id)?;
+                let thread = step.chat_id?;
+                Some(StepHandback {
+                    reply: self.last_reply(&thread),
+                    ended: step.turn.map_or(StepTurnEnd::Completed, |turn| turn.ended),
+                    id: step.id,
+                    title: step.title,
+                    thread,
+                })
+            })
+            .collect();
+        let first = steps.first()?.thread.clone();
+        Some((step_wake_text(&steps), first))
+    }
+
+    async fn offer_step_wake(
+        &self,
+        workspace: &WorkspaceHost,
+        lead: &str,
+        step_ids: Vec<String>,
+    ) -> Result<(), EngineError> {
+        let handle = self.open(lead)?;
         {
-            return;
+            let _drain = handle.drain_lock.lock().await;
+            let waiting = handle
+                .doc
+                .read_queue()?
+                .into_iter()
+                .enumerate()
+                .find(|(_, row)| !row.task_steps.is_empty() && row.delivery_gate.is_none());
+            if let Some((index, mut row)) = waiting {
+                for id in &step_ids {
+                    if !row.task_steps.contains(id) {
+                        row.task_steps.push(id.clone());
+                    }
+                }
+                // wait_threads takes rows without the drain lock, so the row may be gone.
+                if let Some((text, _)) = self.step_wake(workspace, &row.task_steps)
+                    && handle.doc.take_queued(&row.id)?.is_some()
+                {
+                    row.text = text;
+                    handle.doc.insert_queued(index, &row)?;
+                    handle.publish_queue();
+                    self.save_snapshot(&handle);
+                    return Ok(());
+                }
+            }
         }
-        let text = step_wake_text(step, thread, ended);
-        if let Err(err) = self.queue_thread_message(&lead, Some(thread), &text).await {
-            tracing::warn!(chat = %lead, step = %step.id, error = %err, "waking a step's lead failed");
-        }
+        let Some((text, from)) = self.step_wake(workspace, &step_ids) else {
+            return Ok(());
+        };
+        let (handle, row_id) = self.push_thread_row(lead, Some(&from), &text, step_ids)?;
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(handback_settle()).await;
+            host.send_thread_row(&handle, &row_id).await;
+        });
+        Ok(())
     }
 
     /// Runs after `recover_stale`: a step thread nothing revives lost its turn with the previous engine.

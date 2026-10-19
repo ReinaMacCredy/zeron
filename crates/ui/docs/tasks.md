@@ -107,7 +107,7 @@ Your changes are tagged **Edited**, **New**, or **Removed**, and stay on this pa
 
 Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > General caps how many steps one lead runs at once.
 
-A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
+A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way and quotes the chat's last reply; steps that finish together, or while that message still waits for the lead, share one message. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
 
 When every step is done, the lead checks the whole result, tells you what was built, and marks the task done.
 
