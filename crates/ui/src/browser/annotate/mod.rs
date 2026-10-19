@@ -431,6 +431,7 @@ mod host {
             ));
             let picked = native.automation_eval(&start_script(crate::theme::Theme::of(cx)), false);
             native.focus_page();
+            self.annotation_document = native.document();
             let was_paused = self.control.paused;
             self.take_over(cx);
             self.annotation = AnnotationState::begin(was_paused);

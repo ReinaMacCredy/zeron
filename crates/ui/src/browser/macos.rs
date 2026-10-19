@@ -206,6 +206,7 @@ pub(super) enum NativeEvent {
 
 struct ObserverState {
     navigation_epoch: Cell<u64>,
+    documents: Cell<u64>,
     tx: Sender,
     pending: Cell<bool>,
     error: RefCell<Option<String>>,
@@ -252,7 +253,9 @@ define_class!(
         }
         #[unsafe(method(webView:didCommitNavigation:))]
         fn commit(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>) {
-            self.ivars().requested_url.borrow_mut().take(); self.changed();
+            self.ivars().requested_url.borrow_mut().take();
+            self.ivars().documents.set(self.ivars().documents.get().wrapping_add(1));
+            self.changed();
         }
         #[unsafe(method(webView:didFinishNavigation:))]
         fn finish(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>) {
@@ -283,6 +286,7 @@ impl Observer {
     fn new(tx: Sender, mtm: MainThreadMarker) -> Retained<Self> {
         let object = mtm.alloc().set_ivars(ObserverState {
             navigation_epoch: Cell::new(0),
+            documents: Cell::new(0),
             tx,
             pending: Cell::new(false),
             error: RefCell::new(None),
@@ -972,6 +976,10 @@ impl NativePage {
 }
 
 impl NativePage {
+    // pushState, replaceState and hash changes move the URL but keep the document.
+    pub(super) fn document(&self) -> u64 {
+        self.0.borrow().observer.ivars().documents.get()
+    }
     pub(super) fn automation_snapshot(&self) {
         let host = self.0.borrow();
         host.automation_snapshot_epoch

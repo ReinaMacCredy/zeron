@@ -130,6 +130,8 @@ pub struct BrowserSurface {
     annotation: annotate::AnnotationState,
     #[cfg(target_os = "macos")]
     annotation_task: Option<gpui::Task<()>>,
+    #[cfg(target_os = "macos")]
+    annotation_document: u64,
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     context: BrowserContext,
     address: Entity<ComposerInput>,
@@ -221,6 +223,8 @@ impl BrowserSurface {
             annotation: Default::default(),
             #[cfg(target_os = "macos")]
             annotation_task: None,
+            #[cfg(target_os = "macos")]
+            annotation_document: 0,
             #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             context,
             address,
@@ -638,7 +642,9 @@ impl BrowserSurface {
                     native.discover_favicon(url.clone());
                 }
                 #[cfg(target_os = "macos")]
-                if navigated {
+                if native.document() != self.annotation_document
+                    || (!self.page.loading && page.loading)
+                {
                     self.cancel_annotation(cx);
                 }
                 if page != self.page {
