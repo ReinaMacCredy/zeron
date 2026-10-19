@@ -74,7 +74,6 @@ pub(super) fn refuse_supervisor(from: Option<&str>, refusal: &str) -> Result<(),
 }
 
 impl EngineRpc {
-    /// Ok(true) when the Supervisor calls and its Authority allows it; Ok(false) for any other caller.
     pub(super) fn supervisor_gate(
         &self,
         from: Option<&str>,

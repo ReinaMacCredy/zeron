@@ -359,7 +359,6 @@ impl DocHost {
         }
     }
 
-    /// `step` names the step a re-brief edits; otherwise the target thread names the mission.
     pub(crate) fn intervention_basis(
         &self,
         kind: InterventionKind,
@@ -684,7 +683,6 @@ impl DocHost {
             .unwrap_or_default()
     }
 
-    /// Reads the transcripts of the watched missions' threads; runs only when a hook marked them stale.
     fn projections(
         &self,
         store: &SupervisorStore,
@@ -776,8 +774,12 @@ impl DocHost {
                 None,
             ));
         }
-        projections.inputs.sort_by(|a, b| b.at.cmp(&a.at));
-        projections.questions.sort_by(|a, b| b.at.cmp(&a.at));
+        projections
+            .inputs
+            .sort_by_key(|input| std::cmp::Reverse(input.at));
+        projections
+            .questions
+            .sort_by_key(|question| std::cmp::Reverse(question.at));
         for record in &interventions {
             let task = record
                 .row

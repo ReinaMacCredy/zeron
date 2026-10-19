@@ -783,7 +783,7 @@ fn respond_badge(call: &ToolCall) -> Option<serde_json::Value> {
             (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
         })
         .collect();
-    (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+    (!kept.is_empty()).then_some(serde_json::Value::Object(kept))
 }
 
 /// A `Skill` call keeps the skill's name and file for its chip; its `args`

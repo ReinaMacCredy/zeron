@@ -811,7 +811,6 @@ fn person_answerable(questions: &[UserInputQuestion]) -> bool {
     !questions.iter().any(|q| q.kind.is_some())
 }
 
-/// Unresolved, non-consent inputs in a transcript: `(requestId, questions, asked at)`.
 pub(crate) fn open_inputs(
     entries: &[SessionMessageEntry],
 ) -> Vec<(String, Vec<UserInputQuestion>, i64)> {
@@ -927,18 +926,17 @@ pub(crate) fn lead_questions(
         .collect()
 }
 
-/// `plan` is the mission's current steps in order; `target` the target thread's transcript when it leads.
 pub(crate) fn chips(
     record: &InterventionRecord,
     plan: &[TaskStep],
-    target: Option<&[SessionMessageEntry]>,
+    lead_target: Option<&[SessionMessageEntry]>,
 ) -> Vec<InterventionChip> {
     let mut chips = Vec::new();
     let Some(message_id) = record.row.message_id.as_deref() else {
         return chips;
     };
     chips.push(InterventionChip::Sent);
-    if let Some(entries) = target
+    if let Some(entries) = lead_target
         && let Some(at) = entries.iter().position(|entry| entry.id == message_id)
         && entries[at..]
             .iter()
