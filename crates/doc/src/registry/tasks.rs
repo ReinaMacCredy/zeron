@@ -44,6 +44,8 @@ struct RawTask {
     resources: Vec<String>,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    context: Vec<String>,
 }
 
 pub(super) fn at(ms: i64) -> DateTime<Utc> {
@@ -71,6 +73,7 @@ impl From<RawTask> for Task {
             plan_doc: raw.plan_doc,
             resources: raw.resources,
             images: raw.images,
+            context: raw.context,
         }
     }
 }
@@ -105,6 +108,21 @@ pub fn check_images(images: &[String]) -> Result<(), DocError> {
         .any(|path| path.trim().is_empty() || path.chars().any(char::is_control))
     {
         return Err(invalid("An image is a single-line file path"));
+    }
+    Ok(())
+}
+
+pub const TASK_CONTEXT_MAX: usize = 5;
+
+pub fn check_context(context: &[String]) -> Result<(), DocError> {
+    if context.len() > TASK_CONTEXT_MAX {
+        return Err(invalid("A mission reads up to 5 chats"));
+    }
+    if context
+        .iter()
+        .any(|id| !valid_row_id(id) || context.iter().filter(|other| *other == id).count() > 1)
+    {
+        return Err(invalid("Context chats are distinct chat ids"));
     }
     Ok(())
 }
@@ -147,6 +165,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("planDoc", json!(task.plan_doc)),
         ("resources", json!(task.resources)),
         ("images", json!(task.images)),
+        ("context", json!(task.context)),
     ])
 }
 
@@ -211,6 +230,7 @@ impl RegistryDoc {
         let title = checked_title(&task.title)?;
         check_notes(&task.notes)?;
         check_images(&task.images)?;
+        check_context(&task.context)?;
         check_due_on(task.due_on.as_deref())?;
         if self.overlay_row(KIND_TASKS, &task.id).is_some() {
             return Ok(false);
@@ -317,6 +337,10 @@ impl RegistryDoc {
         if let Some(images) = &patch.images {
             check_images(images)?;
             set.insert("images".into(), json!(images));
+        }
+        if let Some(context) = &patch.context {
+            check_context(context)?;
+            set.insert("context".into(), json!(context));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();

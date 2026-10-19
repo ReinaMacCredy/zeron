@@ -376,6 +376,89 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     );
 }
 
+#[tokio::test]
+async fn a_mission_lead_reads_its_context_chats_first_and_the_list_locks_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Recording(prompts.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    for (id, path) in [("home", "/tmp/home"), ("astra", "/tmp/astra")] {
+        core.workspace
+            .create_space(id, "dev-a", path, None, false)
+            .unwrap();
+    }
+    for (id, space, title, device) in [
+        ("review", Some("home"), "Deep Dive Code Review", "dev-a"),
+        ("notes", Some("astra"), "Release notes", "dev-a"),
+        ("far", None, "Windows build check", "dev-b"),
+    ] {
+        core.workspace
+            .create_chat_from(id, space, Some(device), None, None, None)
+            .unwrap();
+        core.workspace.rename_chat(id, title).unwrap();
+    }
+    let rpc = core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { rpc.handle(methods::MUTATE, params).await }
+    };
+    let six: Vec<String> = (1..=6).map(|n| format!("c{n}")).collect();
+    assert!(
+        mutate(json!({ "op": "createTask", "taskId": "t0", "title": "Too many", "context": six }))
+            .await
+            .is_err()
+    );
+    assert!(
+        mutate(json!({ "op": "createTask", "taskId": "t0", "title": "Far", "context": ["far"] }))
+            .await
+            .is_err(),
+        "read_thread only reaches chats on this device"
+    );
+    mutate(json!({
+        "op": "createTask", "taskId": "t1", "title": "Fix the auth flow", "spaceId": "home",
+        "context": ["review"],
+    }))
+    .await
+    .unwrap();
+    mutate(json!({
+        "op": "updateTask", "taskId": "t1", "patch": { "context": ["review", "notes"] },
+    }))
+    .await
+    .unwrap();
+    mutate(json!({ "op": "startTask", "taskId": "t1", "chatId": "lead-1", "orchestrate": true }))
+        .await
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the lead's turn").await;
+    let first = prompts.lock().unwrap()[0].clone();
+    assert!(
+        first.starts_with(
+            "Fix the auth flow\n\nBefore you plan, read these chats with read_thread. They are context only: do not message them or answer their questions.\n- \"Deep Dive Code Review\" (threadId review)\n- \"Release notes\" (threadId notes, project astra)\n\nYou lead this task (task id t1)."
+        ),
+        "{first}"
+    );
+    assert!(
+        first.ends_with(
+            "\n8. When a step needs one of the chats you read, name it with its threadId in that step's prompt."
+        ),
+        "{first}"
+    );
+    assert!(
+        mutate(json!({
+            "op": "updateTask", "taskId": "t1", "patch": { "context": ["review"] },
+        }))
+        .await
+        .is_err(),
+        "the list locks once the mission starts"
+    );
+    assert_eq!(
+        core.workspace.task("t1").unwrap().context,
+        ["review", "notes"]
+    );
+}
+
 async fn supervisor_snapshot(
     rpc: &Arc<zeron_engine::EngineRpc>,
     ready: impl Fn(&zeron_proto::supervisor::SupervisorSnapshot) -> bool,

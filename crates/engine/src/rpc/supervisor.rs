@@ -291,6 +291,7 @@ impl EngineRpc {
                     None,
                     None,
                     Vec::new(),
+                    Vec::new(),
                 )?;
                 let lead_brief = tasks::Lead {
                     approve_plan: true,

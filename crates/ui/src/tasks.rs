@@ -24,6 +24,8 @@ use crate::typography::ui_rems;
 
 mod card;
 mod center;
+#[cfg(test)]
+mod image_paths_tests;
 mod images;
 
 use crate::attachments::StagedAttachment;
@@ -1926,8 +1928,11 @@ impl Render for TasksPage {
                     page.close_row_menu(cx);
                 } else if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
                     cx.stop_propagation();
-                    page.card
-                        .update(cx, |card, cx| card.close(Some(window), cx));
+                    page.card.update(cx, |card, cx| {
+                        if !card.dismiss_popups(cx) {
+                            card.close(Some(window), cx)
+                        }
+                    });
                 }
             }))
             .child(

@@ -24,28 +24,30 @@ Click a task to open its card beside the list. Edits save on their own. You can 
 - a due date: **No date**, **Today**, or **Tomorrow**
 - the project, or **No project**
 
-Under **More options** you find **Mark as done** and **Delete**. Delete does not ask first. Press Escape or click the close button to close the card.
+The **⋯** button next to the close button holds **Mark as done** and **Delete**. Delete does not ask first. Press Escape or click the close button to close the card.
+
+Under **Hand it to**, three tabs pick who does the task: **New chat**, **Thread** or **Mission Control**. Each tab shows only its own settings and its own button, and Cmd+Enter presses that button.
 
 ## Start a task with an agent
 
-Under **Hand it to an agent**, pick the agent and model, and choose where it runs in **Run in** or with **Folder…**. Then click **Start** or press Cmd+Enter. The model picker is the same one the New chat composer shows: effort, fast mode, context and the other model settings, provider instances and profiles. The task's chat runs with exactly what you pick. Picks start out as the ones you last used on New chat, and changing them here leaves New chat as it was.
+On the **New chat** tab, pick the agent and model. The line under it reads **in** and the project the chat runs in; click it to pick another, or click **Folder…** to run in any folder. Then click **Start** or press Cmd+Enter. The model picker is the same one the New chat composer shows: effort, fast mode, context and the other model settings, provider instances and profiles. The task's chat runs with exactly what you pick. Picks start out as the ones you last used on New chat, and changing them here leaves New chat as it was.
 
 Zeron creates a chat named after the task, sends the title and notes as the first message, and opens the chat. The card then shows the chat's status and an **Open thread** button.
 
 ## Assign a task to a thread
 
-To give a task to a chat you already have, type **@** and part of its name in **or assign to a thread** under **Hand it to an agent**. Pick the chat from the list, or press Enter for the first match. Then choose:
+To give a task to a chat you already have, open the **Thread** tab and type **@** and part of the chat's name. The matches float over the card; pick one, or press Enter for the first match. The picked chat shows with its status, and its × lets you pick another. Then click:
 
-- **Send the task**: the title and notes go to that chat as a message. If the chat is working, the message steers its current turn.
+- **Send task**, or press Cmd+Enter: the title and notes go to that chat as a message. If the chat is working, the message steers its current turn.
 - **Link only**: nothing is sent. The task just follows that chat's status.
 
-Click **Assign** or press Cmd+Enter. A task has one chat at a time. The × next to the chat's status unassigns it, so you can start or assign the task again.
+A task has one chat at a time. Once it has one, the card shows the chat with **Open thread** and **Unassign**, so you can start or assign the task again.
 
 When a task could not be sent to its chat, the list shows **Not sent**, and the card shows **Not sent:** with the reason and a **Retry** button that sends it to the same chat again.
 
 ## Run a big task with Mission Control
 
-For work that needs more than one agent, switch **Hand it to an agent** from **One agent** to **Mission Control**, then click **Start mission**. A lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back, and the [Supervisor](zeron://docs/supervisor) can watch the mission from above. A Mission Control task opens its own page instead of the card, and in the list it has a progress ring in place of its circle. See [Mission Control](zeron://docs/mission-control).
+For work that needs more than one agent, open the **Mission Control** tab, then click **Start mission**. Its **Reads** row lists chats the lead reads before it plans. A lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back, and the [Supervisor](zeron://docs/supervisor) can watch the mission from above. A Mission Control task opens its own page instead of the card, and in the list it has a progress ring in place of its circle. See [Mission Control](zeron://docs/mission-control).
 
 ## Images
 

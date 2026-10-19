@@ -3003,15 +3003,17 @@ impl SessionsEngine {
         (!history.is_empty()).then(|| provider_switch_context(&history))
     }
 
+    pub fn reads_threads(&self, config: Option<&zeron_proto::ChatConfig>) -> bool {
+        !self.inner.tool_disabled(config, "read_thread")
+    }
+
     pub fn handoff_pointer(
         &self,
         source: &zeron_proto::Chat,
         title: &str,
         config: Option<&zeron_proto::ChatConfig>,
     ) -> Option<String> {
-        if lock(&self.inner.tool_server_port).is_none()
-            || self.inner.tool_disabled(config, "read_thread")
-        {
+        if lock(&self.inner.tool_server_port).is_none() || !self.reads_threads(config) {
             return None;
         }
         let mut packet = format!(
@@ -3868,9 +3870,7 @@ impl Inner {
         let chat_disabled = config.map_or(&[][..], |c| &c.disabled_tools);
         self.registry
             .tool_settings()
-            .for_chat(chat_disabled)
-            .disabled(&[])
-            .contains(tool)
+            .chat_tool_off(chat_disabled, tool)
     }
 
     fn findings_reminder(&self, chat_id: &str) -> Option<String> {
