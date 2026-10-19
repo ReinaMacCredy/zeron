@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
-use crate::adapter_install::{OK_MARKER, adapters_root, install_lock};
+use crate::adapter_install::{OK_MARKER, adapters_root};
 
 /// a pinned archive: where to fetch it and which file inside runs the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,7 @@ pub struct ArchivePin {
 /// multi-hundred-megabyte archives outlast any whole-request deadline on a
 /// slow link, so only a stalled stream counts as a failure.
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const MIN_BYTES_PER_STALL_WINDOW: u64 = 64 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
@@ -263,7 +264,8 @@ where
     if let Some(entry) = installed() {
         return Ok(entry);
     }
-    let _guard = install_lock().lock().await;
+    let lock = destination_lock(source.name, source.version);
+    let _guard = lock.lock().await;
     if let Some(entry) = installed() {
         return Ok(entry);
     }
@@ -314,6 +316,21 @@ where
     })
 }
 
+/// Archive installs of different agents run side by side; a stalled one blocks only its own retry.
+fn destination_lock(name: &str, version: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::LazyLock<
+        std::sync::Mutex<
+            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry((name.to_owned(), version.to_owned()))
+        .or_default()
+        .clone()
+}
+
 async fn download_and_extract(
     source: &Source<'_>,
     dir: &Path,
@@ -357,6 +374,7 @@ async fn download(
     };
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        .read_timeout(STALL_TIMEOUT)
         .build()
         .map_err(|e| failed(e.to_string()))?;
     let response = client
@@ -377,6 +395,7 @@ async fn download(
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
+    let mut window = (tokio::time::Instant::now(), 0_u64);
     let mut sha512 = source.sha512.map(|_| Sha512::new());
     let mut sha256 = source.sha256.map(|_| Sha256::new());
     loop {
@@ -391,6 +410,17 @@ async fn download(
         match chunk {
             Some(Ok(bytes)) => {
                 received = received.saturating_add(bytes.len() as u64);
+                window.1 = window.1.saturating_add(bytes.len() as u64);
+                if window.0.elapsed() >= STALL_TIMEOUT {
+                    if window.1 < MIN_BYTES_PER_STALL_WINDOW {
+                        return Err(failed(format!(
+                            "under {} KiB in {}s — check your network",
+                            MIN_BYTES_PER_STALL_WINDOW / 1024,
+                            STALL_TIMEOUT.as_secs()
+                        )));
+                    }
+                    window = (tokio::time::Instant::now(), 0);
+                }
                 if received > MAX_ARCHIVE_BYTES {
                     return Err(failed(format!(
                         "archive exceeded the {} MiB limit",
