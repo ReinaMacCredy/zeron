@@ -11447,7 +11447,17 @@ impl Shell {
         let lead_chevron = lead
             .as_ref()
             .filter(|_| !preview && search_query.is_none())
-            .map(|fold| self.lead_chevron(&row_id, &id, fold, corner_hovered, theme, cx));
+            .map(|fold| {
+                self.lead_chevron(
+                    &row_id,
+                    &id,
+                    fold,
+                    corner_hovered,
+                    Theme::SPACE_SM,
+                    theme,
+                    cx,
+                )
+            });
         let lead_rollup = lead
             .as_ref()
             .and_then(|fold| lead_rollup_label(fold, theme));
@@ -11883,7 +11893,9 @@ impl Shell {
                 8.0
             }))
             .px(px(Theme::SPACE_SM))
-            .when(nested, |el| el.pl(px(Theme::SPACE_SM + SIDEBAR_NESTED_INDENT)))
+            .when(nested || lead.is_some(), |el| {
+                el.pl(px(Theme::SPACE_SM + SIDEBAR_NESTED_INDENT))
+            })
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
@@ -12172,12 +12184,14 @@ impl Shell {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lead_chevron(
         &self,
         row_id: &str,
         lead_id: &str,
         fold: &spaces::LeadFold,
         hovered: bool,
+        inset: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -12194,10 +12208,10 @@ impl Shell {
                 move || selector.clone()
             })
             .absolute()
-            .left(px(-2.0))
+            .left(px(inset - 2.0))
             .top_0()
             .bottom_0()
-            .w(px(12.0))
+            .w(px(SIDEBAR_NESTED_INDENT))
             .flex()
             .items_center()
             .justify_center()
@@ -12305,7 +12319,7 @@ impl Shell {
         let lead_chevron = lead
             .as_ref()
             .filter(|_| !preview)
-            .map(|fold| self.lead_chevron(&row_id, &id, fold, hovered, theme, cx));
+            .map(|fold| self.lead_chevron(&row_id, &id, fold, hovered, 10.0, theme, cx));
         let lead_rollup = || {
             lead.as_ref()
                 .and_then(|fold| lead_rollup_label(fold, theme))
@@ -12545,7 +12559,9 @@ impl Shell {
                 .items_center()
                 .gap(px(10.0))
                 .px(px(10.0))
-                .when(nested, |el| el.pl(px(10.0 + SIDEBAR_NESTED_INDENT)))
+                .when(nested || lead.is_some(), |el| {
+                    el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
+                })
                 .rounded(px(8.0))
                 .bg(bg)
                 .children(lead_chevron)
@@ -12825,7 +12841,9 @@ impl Shell {
                     .size_full()
                     .rounded(px(8.0))
                     .px(px(10.0))
-                    .when(nested, |el| el.pl(px(10.0 + SIDEBAR_NESTED_INDENT)))
+                    .when(nested || lead.is_some(), |el| {
+                        el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
+                    })
                     .py(px(8.0))
                     .flex()
                     .flex_col()
