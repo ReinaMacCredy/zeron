@@ -202,7 +202,7 @@ fn wake_text(tasks: &[TaskHandback]) -> String {
             format!(
                 "Delegated task {} (\"{}\") {outcome}.",
                 task.id,
-                clip(&task.title, TITLE_CHARS)
+                clip(&zeron_proto::view::single_line(&task.title), TITLE_CHARS)
             ),
             agent_response(&task.result, "task_status"),
         )
@@ -1742,6 +1742,13 @@ mod tests {
                 "Delegated task a (\"Title a\") failed.\n\n<agent-response>\n{}\n[truncated 4 chars; use task_status for the full response]\n</agent-response>\n\nDelegated task b (\"Title b\") was cancelled.\n\nDelegated task c (\"Title c\") was interrupted.\n\n<agent-response>\nhalf\n</agent-response>\n\nUse task_status with each taskId to read the results.",
                 "界".repeat(HANDBACK_REPLY_CHARS)
             )
+        );
+        let mut untitled = task("d", Some(DelegationStatus::Completed), "");
+        untitled.title = "Review the diff.\n\nFocus on auth".into();
+        assert_eq!(
+            wake_text(&[untitled]),
+            "Delegated task d (\"Review the diff. Focus on auth\") completed.\n\nUse task_status with taskId d to read the result.",
+            "a title taken from a multi-line task stays on the status line"
         );
     }
 }

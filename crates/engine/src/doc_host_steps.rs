@@ -64,7 +64,9 @@ fn step_wake_text(steps: &[StepHandback]) -> String {
         (
             format!(
                 "Step \"{}\" (taskStepId {}) {what} on its thread {}.",
-                step.title, step.id, step.thread
+                zeron_proto::view::single_line(&step.title),
+                step.id,
+                step.thread
             ),
             step.reply
                 .as_deref()
