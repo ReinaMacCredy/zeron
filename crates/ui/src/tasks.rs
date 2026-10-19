@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Edges, Entity, EventEmitter, FocusHandle, Focusable,
-    Hsla, IntoElement, KeyDownEvent, Pixels, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
 use zeron_proto::{
     ChatIndicator, PlanProgress, StepStatus, TaskMode, TaskPatch, TaskStatus, plan_progress,
@@ -16,6 +16,7 @@ use zeron_proto::{
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
 use crate::motion;
+use crate::popover;
 use crate::settings::{self, TasksView, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -172,7 +173,13 @@ pub struct TasksPage {
     morph: Option<Morph>,
     painted: Painted,
     body: Rc<Cell<Option<Bounds<Pixels>>>>,
+    menu: popover::Popup<RowMenu>,
     _subscriptions: Vec<Subscription>,
+}
+
+struct RowMenu {
+    task_id: String,
+    position: Point<Pixels>,
 }
 
 type MorphRow<'a> = (&'a Row, Option<Bounds<Pixels>>, Option<Bounds<Pixels>>);
@@ -223,6 +230,7 @@ impl TasksPage {
             morph: None,
             painted: Painted::default(),
             body: Rc::default(),
+            menu: popover::Popup::default(),
             _subscriptions: vec![
                 add_events,
                 state_changes,
@@ -311,6 +319,75 @@ impl TasksPage {
                 cx,
             )
         });
+    }
+
+    fn open_row_menu(
+        &mut self,
+        task_id: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus.focus(window, cx);
+        self.menu.open(RowMenu { task_id, position });
+        cx.notify();
+    }
+
+    fn row_menu_listener(
+        task_id: String,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |page, event: &MouseDownEvent, window, cx| {
+            cx.stop_propagation();
+            window.prevent_default();
+            page.open_row_menu(task_id.clone(), event.position, window, cx);
+        })
+    }
+
+    fn close_row_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.begin_close() {
+            popover::reap_popup(cx, |page: &mut Self| &mut page.menu);
+            cx.notify();
+        }
+    }
+
+    fn edit_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self.menu.as_open().map(|menu| menu.task_id.clone()) else {
+            return;
+        };
+        self.close_row_menu(cx);
+        self.card.update(cx, |card, cx| {
+            card.open(task_id, None, CardFocus::Title, Some(window), cx)
+        });
+    }
+
+    fn render_row_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.menu.get()?;
+        let theme = theme.for_popup();
+        let card = popover::popover_card(&theme)
+            .w(px(160.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_row_menu(cx)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                popover::menu_row(&theme, false, "task-row-menu-edit")
+                    .id("task-row-menu-edit")
+                    .debug_selector(|| "task-row-menu-edit".into())
+                    .role(gpui::Role::MenuItem)
+                    .aria_label("Edit")
+                    .on_click(
+                        cx.listener(|page, _: &ClickEvent, window, cx| page.edit_row(window, cx)),
+                    )
+                    .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                    .child("Edit"),
+            );
+        Some(popover::menu_at(
+            "task-row-menu",
+            menu.position,
+            card.into_any_element(),
+            self.menu.closing_since(),
+        ))
     }
 
     fn update(&mut self, task_id: &str, patch: TaskPatch, cx: &mut Context<Self>) {
@@ -648,6 +725,7 @@ impl TasksPage {
         let hover = theme.glass_hover();
         let accent = theme.accent;
         let open_id = task_id.clone();
+        let menu_id = task_id.clone();
         let orchestrated = row.orchestrated();
         let drop_before = task_id.clone();
         let drag = TaskDrag {
@@ -671,6 +749,7 @@ impl TasksPage {
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
                 page.open_row(&open_id, orchestrated, window, cx)
             }))
+            .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .when(!done, |el| {
                 el.on_drag(drag, |drag, _, _, cx| {
                     cx.stop_propagation();
@@ -898,6 +977,7 @@ impl TasksPage {
             status: row.status,
         };
         let open_id = task_id.clone();
+        let menu_id = task_id.clone();
         let orchestrated = row.orchestrated();
         Self::card_visual(row, selected, theme)
             .id(SharedString::from(format!("task-card-{task_id}")))
@@ -913,6 +993,7 @@ impl TasksPage {
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
                 page.open_row(&open_id, orchestrated, window, cx)
             }))
+            .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .on_drag(drag, |drag, _, _, cx| {
                 cx.stop_propagation();
                 let title = drag.title.clone();
@@ -1586,7 +1667,10 @@ impl Render for TasksPage {
             .flex()
             .flex_row()
             .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
+                if event.keystroke.key == "escape" && page.menu.is_open() {
+                    cx.stop_propagation();
+                    page.close_row_menu(cx);
+                } else if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
                     cx.stop_propagation();
                     page.card
                         .update(cx, |card, cx| card.close(Some(window), cx));
@@ -1630,5 +1714,6 @@ impl Render for TasksPage {
                             .child(self.card.clone()),
                     )
             }))
+            .children(self.render_row_menu(&theme, cx))
     }
 }
