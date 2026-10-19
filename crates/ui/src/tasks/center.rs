@@ -1446,6 +1446,54 @@ impl TaskCenter {
             .into_any_element()
     }
 
+    fn render_reads(
+        &self,
+        task: &zeron_proto::Task,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if task.context.is_empty() {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let home = linked_chat(&state.chats, task)
+            .and_then(|chat| chat.space_id.as_deref())
+            .or(task.space_id.as_deref());
+        let now = Utc::now();
+        let chips: Vec<_> = task
+            .context
+            .iter()
+            .filter_map(|chat_id| super::card::context_chip(state, chat_id, home, theme, now))
+            .collect();
+        Some(
+            div()
+                .id("task-center-reads")
+                .debug_selector(|| "task-center-reads".into())
+                .flex()
+                .items_start()
+                .gap(px(10.0))
+                .px(px(10.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .pt(px(4.0))
+                        .text_size(ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child("Reads"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(5.0))
+                        .children(chips),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_banner(
         &self,
         task: &zeron_proto::Task,
@@ -3047,6 +3095,7 @@ impl Render for TaskCenter {
             window.request_animation_frame();
         }
         let lead = self.render_lead(&task, &plan, &theme, cx);
+        let reads = self.render_reads(&task, &theme, cx);
         let banner = self.render_banner(&task, &plan, &theme, cx);
         let overview = self.render_overview(&task, editable, &theme, window, cx);
         let last = shown.len().saturating_sub(1);
@@ -3106,6 +3155,7 @@ impl Render for TaskCenter {
             .flex_col()
             .gap(px(10.0))
             .child(lead)
+            .children(reads)
             .children(banner)
             .children(overview)
             .child(
