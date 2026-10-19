@@ -34,6 +34,8 @@ use crate::typography::ui_rems;
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
 const PROFILE_ID: &str = "slp-supervisor";
+const NO_AGENT: &str =
+    "no agent is installed and turned on. Turn one on in Settings > Providers, then try again.";
 const ROLE: &str = "Talks direction with you, watches every mission for drift and cross-scope \
                     problems, and steps in through each Lead within the authority you set.";
 const HEARTBEATS: [(u32, &str); 3] = [(0, "Off"), (30, "30 min"), (60, "60 min")];
@@ -1046,6 +1048,21 @@ impl SupervisorPage {
             return;
         }
         let Some(config) = self.start_config(cx) else {
+            let pickers = self.pickers.read(cx);
+            let failure = if pickers.no_agents_available() {
+                Some(NO_AGENT.to_owned())
+            } else {
+                pickers.harnesses_error().map(str::to_owned)
+            };
+            match failure {
+                Some(reason) => {
+                    self.ensure = Ensure::Failed(reason);
+                    cx.notify();
+                }
+                None => self
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.ensure_harnesses(false, cx)),
+            }
             return;
         };
         self.ensure = Ensure::Running;
@@ -1079,6 +1096,8 @@ impl SupervisorPage {
     fn retry_ensure(&mut self, cx: &mut Context<Self>) {
         self.ensure = Ensure::Wanted;
         self.load_profiles(cx);
+        self.pickers
+            .update(cx, |pickers, cx| pickers.ensure_harnesses(true, cx));
         self.try_ensure(cx);
     }
 
@@ -3247,5 +3266,93 @@ mod tests {
             next_effect_check(&[stale, fresh.clone(), answered, unsent], now),
             Some(fresh.at + chrono::Duration::minutes(10))
         );
+    }
+
+    #[gpui::test]
+    fn a_fresh_install_starts_the_supervisor_from_the_harness_catalog_or_says_why_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use zeron_engine::registry::HarnessDescriptor;
+        use zeron_proto::HarnessId;
+
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        for (installed, listed) in [(true, true), (false, true), (true, false)] {
+            let listed = Arc::new(AtomicBool::new(listed));
+            let ensured = Arc::new(Mutex::new(Vec::new()));
+            let rpc = ScriptedRpc::new({
+                let listed = listed.clone();
+                let ensured = ensured.clone();
+                move |method, params| {
+                    let listed = listed.load(Ordering::SeqCst);
+                    let ensured = ensured.clone();
+                    async move {
+                        match method.as_str() {
+                            methods::LIST_AGENT_PROFILES => {
+                                zeron_rpc::RpcReply::value(&serde_json::json!({ "profiles": [] }))
+                            }
+                            methods::LIST_HARNESSES if listed => {
+                                zeron_rpc::RpcReply::value(&[HarnessDescriptor {
+                                    id: HarnessId::ClaudeCode,
+                                    name: "Claude Code".into(),
+                                    supports_steering: false,
+                                    steering_mode: zeron_proto::SteeringMode::StepBoundary,
+                                    reasoning_levels: Vec::new(),
+                                    installed,
+                                    can_install: false,
+                                    enabled: Some(true),
+                                }])
+                            }
+                            methods::ENSURE_SUPERVISOR => {
+                                ensured.lock().unwrap().push(params["config"].clone());
+                                zeron_rpc::RpcReply::value(
+                                    &serde_json::json!({ "chatId": "supervisor-1" }),
+                                )
+                            }
+                            other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                        }
+                    }
+                }
+            });
+            let page = cx.update(|cx| {
+                let state = fixture::state(cx, Some(rpc.client()));
+                state.update(cx, |state, _| {
+                    state.supervisor = Some(SupervisorSnapshot::default())
+                });
+                cx.new(|cx| SupervisorPage::new(state, cx))
+            });
+            let settled = |cx: &mut gpui::TestAppContext| {
+                page.read_with(cx, |page, _| {
+                    page.ensured.is_some() || matches!(page.ensure, Ensure::Failed(_))
+                })
+            };
+            page.update(cx, |page, cx| page.entered(cx));
+            rpc.settle(cx, &runtime, settled);
+            if !listed.load(Ordering::SeqCst) {
+                assert!(page.read_with(cx, |page, _| matches!(page.ensure, Ensure::Failed(_))));
+                listed.store(true, Ordering::SeqCst);
+                page.update(cx, |page, cx| page.retry_ensure(cx));
+                rpc.settle(cx, &runtime, settled);
+            }
+            let configs = ensured.lock().unwrap().clone();
+            if installed {
+                assert_eq!(
+                    page.read_with(cx, |page, _| page.ensured.clone())
+                        .as_deref(),
+                    Some("supervisor-1")
+                );
+                let config: ChatConfig = serde_json::from_value(configs[0].clone()).unwrap();
+                assert_eq!(config.harness, HarnessId::ClaudeCode);
+                assert_eq!(config.permission_mode, PermissionMode::Full);
+            } else {
+                assert!(configs.is_empty());
+                let ensure = page.read_with(cx, |page, _| page.ensure.clone());
+                assert!(matches!(ensure, Ensure::Failed(_)), "{ensure:?}");
+            }
+        }
     }
 }
