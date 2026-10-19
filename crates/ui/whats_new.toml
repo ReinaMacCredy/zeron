@@ -44,6 +44,11 @@ title = "Docs and release notes inside the app"
 description = "The ? on the rail opens recent releases, the full changelog, keybindings, and Docs articles for every feature."
 
 [[entry.features]]
+id = "plan-steps-edit"
+title = "Plan steps you can drag and edit"
+description = "Drag unstarted steps into a new order, right-click a step for its actions, and edit it in place."
+
+[[entry.features]]
 id = "fold-mission-threads"
 title = "Fold a mission's threads in the sidebar"
 description = "Collapse a lead's step threads under its row; it still shows what is running and what needs you."
