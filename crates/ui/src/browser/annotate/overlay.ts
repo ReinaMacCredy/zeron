@@ -98,7 +98,7 @@ interface SelectedElement {
   element: Element;
   outline: HTMLDivElement;
   label: HTMLDivElement;
-  baselineStyles: Map<string, string>;
+  baselineStyle?: string | null;
 }
 
 interface AnnotationSession {
@@ -506,13 +506,14 @@ function startAnnotation(resolve: (result: string) => void): void {
     document.documentElement.setAttribute(TOOL_ATTRIBUTE, tool);
   };
 
+  const restoreStyle = (target: SelectedElement): void => {
+    if (target.baselineStyle === undefined) return;
+    if (target.baselineStyle === null) target.element.removeAttribute("style");
+    else target.element.setAttribute("style", target.baselineStyle);
+  };
+
   const removeSelected = (target: SelectedElement): void => {
-    if (target.element instanceof HTMLElement || target.element instanceof SVGElement) {
-      for (const [property, baseline] of target.baselineStyles) {
-        if (baseline) target.element.style.setProperty(property, baseline);
-        else target.element.style.removeProperty(property);
-      }
-    }
+    restoreStyle(target);
     selected.delete(target.element);
     target.element.removeAttribute(ELEMENT_ATTRIBUTE);
     target.outline.remove();
@@ -530,7 +531,6 @@ function startAnnotation(resolve: (result: string) => void): void {
       element,
       outline: createBox(PRIMARY, PRIMARY_FILL),
       label: createLabel(),
-      baselineStyles: new Map(),
     };
     selected.set(element, target);
     root.append(target.outline, target.label);
@@ -558,8 +558,8 @@ function startAnnotation(resolve: (result: string) => void): void {
     for (const target of selected.values()) {
       if (!(target.element instanceof HTMLElement || target.element instanceof SVGElement))
         continue;
-      if (!target.baselineStyles.has(property)) {
-        target.baselineStyles.set(property, target.element.style.getPropertyValue(property));
+      if (target.baselineStyle === undefined) {
+        target.baselineStyle = target.element.getAttribute("style");
       }
       const key = `${target.id}:${property}`;
       const previousValue =
@@ -1035,6 +1035,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   };
 
   const onPointerMove = (event: PointerEvent): void => {
+    if (!event.isTrusted) return;
     if (isAnnotationNode(event.target as Element)) {
       clearHoverOutline();
       return;
@@ -1103,7 +1104,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   };
 
   const onPointerUp = (event: PointerEvent): void => {
-    if (!dragStart) return;
+    if (!event.isTrusted || !dragStart) return;
     event.preventDefault();
     event.stopPropagation();
     if (tool === "marquee") {
@@ -1149,12 +1150,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   const restoreStyles = (): void => {
     for (const target of selected.values()) {
       target.element.removeAttribute(ELEMENT_ATTRIBUTE);
-      if (!(target.element instanceof HTMLElement || target.element instanceof SVGElement))
-        continue;
-      for (const [property, baseline] of target.baselineStyles) {
-        if (baseline) target.element.style.setProperty(property, baseline);
-        else target.element.style.removeProperty(property);
-      }
+      restoreStyle(target);
     }
   };
 
@@ -1167,6 +1163,8 @@ function startAnnotation(resolve: (result: string) => void): void {
     window.removeEventListener("pointerup", onPointerUp, true);
     window.removeEventListener("pointerout", onPointerOut, true);
     window.removeEventListener("click", onClick, true);
+    window.removeEventListener("dblclick", onClick, true);
+    window.removeEventListener("contextmenu", onClick, true);
     window.removeEventListener("blur", onWindowBlur);
     window.removeEventListener("keydown", onKeyDown, true);
     window.removeEventListener("scroll", repaint, true);
@@ -1189,7 +1187,8 @@ function startAnnotation(resolve: (result: string) => void): void {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      teardown();
+      // Rust is already capturing; the pencil cancels that, Escape would only drop the overlay.
+      if (!pendingCapture) teardown();
       return;
     }
     if (isSubmitKey(event)) {
@@ -1198,11 +1197,14 @@ function startAnnotation(resolve: (result: string) => void): void {
       submitAnnotation();
       return;
     }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === "v") tool = "select";
     else if (event.key === "r") tool = "marquee";
     else if (event.key === "d") tool = "draw";
     else if (event.key === "e") tool = "erase";
     else return;
+    event.preventDefault();
+    event.stopPropagation();
     refreshToolButtons();
   };
 
@@ -1259,6 +1261,8 @@ function startAnnotation(resolve: (result: string) => void): void {
   window.addEventListener("pointerup", onPointerUp, { capture: true, passive: false });
   window.addEventListener("pointerout", onPointerOut, { capture: true, passive: true });
   window.addEventListener("click", onClick, { capture: true, passive: false });
+  window.addEventListener("dblclick", onClick, { capture: true, passive: false });
+  window.addEventListener("contextmenu", onClick, { capture: true, passive: false });
   window.addEventListener("blur", onWindowBlur);
   window.addEventListener("keydown", onKeyDown, { capture: true });
   window.addEventListener("scroll", repaint, { capture: true, passive: true });
