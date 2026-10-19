@@ -29,6 +29,7 @@ pub(crate) const FADE: MotionSpec = MotionSpec::new(280, motion::EASE);
 pub(crate) const FOLD: MotionSpec = MotionSpec::new(280, EASE);
 pub(crate) const CHEVRON: MotionSpec = MotionSpec::new(220, EASE);
 const SPIN: Duration = Duration::from_millis(900);
+const REMOVE_AFTER: Duration = Duration::from_millis(30);
 const SHINE: Duration = Duration::from_millis(1100);
 const MUTED_OPACITY: f32 = 0.6;
 const CORNER: f32 = 8.0;
@@ -222,9 +223,15 @@ impl TreeMotion {
             }
         }
         let listed: HashSet<&str> = nodes.iter().map(|node| node.id).collect();
-        self.nodes.retain(|id, node| {
-            listed.contains(id.as_str()) && node.leave.is_none_or(|leave| !leave.settled_at(now))
-        });
+        let linger = REMOVE_AFTER.mul_f32(motion::speed_scale());
+        let gone = now.checked_sub(linger).is_some_and(|then| {
+            self.nodes
+                .values()
+                .filter_map(|node| node.leave)
+                .all(|leave| leave.settled_at(then))
+        }) || reduced;
+        self.nodes
+            .retain(|id, node| listed.contains(id.as_str()) && (node.leave.is_none() || !gone));
         self.built = true;
     }
 
@@ -780,6 +787,16 @@ mod tests {
             tree.frame("a", mid).opacity,
             1.0,
             "the upper node waits 60 ms"
+        );
+        let first_gone = now + Duration::from_millis(300);
+        tree.sync(
+            &[node("lead", true), node("a", false), node("b", false)],
+            false,
+            first_gone,
+        );
+        assert!(
+            tree.shown("b"),
+            "a leaver stays until the last one has gone"
         );
         let done = now + Duration::from_millis(400);
         tree.sync(
