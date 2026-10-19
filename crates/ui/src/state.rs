@@ -829,6 +829,7 @@ pub struct AppState {
     /// judge by the empty pre-sync lists.
     pub chats_synced: bool,
     pub spaces_synced: bool,
+    pub tasks_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
     model_announcements: Vec<(String, String)>,
@@ -1052,6 +1053,7 @@ impl AppState {
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            tasks_synced: false,
             pending_deep_link: None,
             deep_link_notice: None,
             model_announcements: Vec::new(),
@@ -1404,10 +1406,11 @@ impl AppState {
     }
 
     pub fn apply_tasks(&mut self, tasks: Vec<zeron_proto::Task>) -> bool {
-        if self.tasks == tasks {
+        if self.tasks_synced && self.tasks == tasks {
             return false;
         }
         self.tasks = tasks;
+        self.tasks_synced = true;
         true
     }
 
@@ -2889,6 +2892,7 @@ impl AppState {
         self.selected_chat = None;
         self.auto_selected = false;
         self.chats_synced = false;
+        self.tasks_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
         self.transcript_baselines.clear();
