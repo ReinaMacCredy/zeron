@@ -435,14 +435,25 @@ mod host {
             self.take_over(cx);
             self.annotation = AnnotationState::begin(was_paused);
             self.annotation_task = Some(cx.spawn(async move |this, cx| {
-                let picked = picked
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .and_then(|value| serde_json::from_value::<Option<Picked>>(value).ok())
-                    .flatten();
-                let Some(mut picked) = picked else {
-                    let _ = this.update(cx, |this, cx| this.end_annotation(cx));
+                let picked = match picked.await {
+                    Err(_) | Ok(Ok(serde_json::Value::Null)) => None,
+                    Ok(result) => Some(
+                        result
+                            .ok()
+                            .and_then(|value| serde_json::from_value::<Picked>(value).ok()),
+                    ),
+                };
+                let unreadable = matches!(picked, Some(None));
+                let Some(Some(mut picked)) = picked else {
+                    let _ = this.update(cx, |this, cx| {
+                        this.end_annotation(cx);
+                        if unreadable {
+                            cx.emit(BrowserEvent::Annotation(AnnotationCapture {
+                                appshot: None,
+                                draft: String::new(),
+                            }));
+                        }
+                    });
                     return;
                 };
                 let rect = picked.crop_rect;

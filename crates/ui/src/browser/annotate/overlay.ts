@@ -74,6 +74,10 @@ interface StyleChange {
   value: string;
 }
 
+// A cut emoji or a page title like "\uD800" leaves a lone surrogate, which serde_json refuses.
+const wellFormed = (_key: string, value: unknown): unknown =>
+  typeof value === "string" ? value.toWellFormed() : value;
+
 const isSubmitKey = (event: KeyboardEvent): boolean =>
   event.key === "Enter" && !event.shiftKey && !event.isComposing;
 
@@ -381,7 +385,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   const settle = (value: unknown): void => {
     if (settled) return;
     settled = true;
-    resolve(JSON.stringify(value));
+    resolve(JSON.stringify(value, wellFormed));
   };
   const host = document.createElement("div");
   host.setAttribute(OVERLAY_ATTRIBUTE, "");
