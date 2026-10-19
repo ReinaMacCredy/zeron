@@ -592,6 +592,26 @@ fn the_footer_terminal_button_toggles_the_drawer(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui::test]
+fn the_task_center_terminal_opens_the_panes_chat_not_the_selection(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            let center =
+                cx.new(|cx| crate::tasks::TaskCenter::new(shell.state.clone(), "task".into(), cx));
+            shell.route = Route::TaskCenter;
+            shell.open_task_center_pane(&center, "other".into(), cx);
+            shell.open_task_center_terminal(cx);
+        })
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
+        assert!(shell.panels.get("other").terminal_open);
+        assert!(!shell.panels.get("parent").terminal_open);
+    });
+}
+
 fn swipe(cx: &mut VisualTestContext, at: Point<Pixels>, travel: f32) {
     for (phase, dx) in [
         (gpui::TouchPhase::Started, 0.),

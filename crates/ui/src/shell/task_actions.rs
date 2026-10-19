@@ -602,7 +602,7 @@ impl Shell {
         }
     }
 
-    fn open_task_center_pane(
+    pub(super) fn open_task_center_pane(
         &mut self,
         center: &Entity<TaskCenter>,
         chat_id: String,
@@ -617,11 +617,16 @@ impl Shell {
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
         self.state
             .update(cx, |s, cx| s.watch_subagent_doc(chat_id.clone(), cx));
-        let composer = cx.new(|cx| Composer::for_chat(self.state.clone(), chat_id.clone(), cx));
+        let composer = cx.new(|cx| {
+            let mut composer = Composer::for_chat(self.state.clone(), chat_id.clone(), cx);
+            composer.set_full_chat(cx);
+            composer
+        });
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
-            move |this: &mut Shell, _, event: &ComposerEvent, cx| {
-                this.on_pane_composer_event(&transcript, event, cx)
+            let chat_id = chat_id.clone();
+            move |this: &mut Shell, composer, event: &ComposerEvent, cx| {
+                this.on_task_center_composer_event(&chat_id, &composer, &transcript, event, cx)
             }
         });
         center.update(cx, |center, cx| {
@@ -641,6 +646,76 @@ impl Shell {
             _events: events,
             _composer_events: composer_events,
         });
+    }
+
+    fn on_task_center_composer_event(
+        &mut self,
+        chat_id: &str,
+        composer: &Entity<Composer>,
+        transcript: &Entity<Transcript>,
+        event: &ComposerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::WorkspaceCommand;
+        match event {
+            ComposerEvent::OpenSidechat {
+                source_chat_id,
+                prompt,
+                staged,
+            } => {
+                self.open_chat(source_chat_id.clone(), cx);
+                self.open_sidechat(source_chat_id.clone(), prompt.clone(), staged.clone(), cx);
+            }
+            ComposerEvent::WorkspaceCommand(command) => match command {
+                WorkspaceCommand::Stop => {
+                    composer.update(cx, |composer, cx| composer.interrupt_selected(cx))
+                }
+                WorkspaceCommand::Model => {
+                    let composer = composer.clone();
+                    self.defer_in_active_window(cx, move |_, window, cx| {
+                        composer.update(cx, |composer, cx| composer.open_model_menu(window, cx))
+                    });
+                }
+                WorkspaceCommand::New | WorkspaceCommand::Resume | WorkspaceCommand::Settings => {
+                    self.pending_workspace_command = Some(*command);
+                    cx.notify();
+                }
+                WorkspaceCommand::Terminal
+                | WorkspaceCommand::Diff
+                | WorkspaceCommand::Files
+                | WorkspaceCommand::Rename => {
+                    self.open_chat(chat_id.to_string(), cx);
+                    self.pending_workspace_command = Some(*command);
+                }
+            },
+            ComposerEvent::OpenChat(target) => self.open_chat(target.clone(), cx),
+            ComposerEvent::OpenChanges => {
+                self.open_chat(chat_id.to_string(), cx);
+                self.defer_in_active_window(cx, |shell, window, cx| {
+                    shell.focus_changes(window, cx)
+                });
+            }
+            _ => self.on_pane_composer_event(transcript, event, cx),
+        }
+    }
+
+    pub(super) fn open_task_center_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self
+            .task_center_pane
+            .as_ref()
+            .map(|pane| pane.chat_id.clone())
+        else {
+            return;
+        };
+        self.panels
+            .update(&chat_id, |panels| panels.terminal_open = true);
+        if self.active_chat == chat_id {
+            self.terminal_tween = None;
+            self.terminal_tween_task = None;
+            let panel = self.terminal_panel(cx);
+            panel.update(cx, |panel, cx| panel.set_open(true, cx));
+        }
+        self.open_chat(chat_id, cx);
     }
 
     pub(super) fn render_task_center_page(
@@ -669,6 +744,11 @@ impl Shell {
             if let Some(chat_id) = target {
                 self.open_task_center_pane(&center, chat_id, cx);
             }
+        }
+        if let Some(pane) = &self.task_center_pane {
+            let open = self.panels.get(&pane.chat_id).terminal_open;
+            let pickers = pane.composer.read(cx).pickers().clone();
+            pickers.update(cx, |pickers, cx| pickers.set_terminal_open(Some(open), cx));
         }
         div()
             .flex_1()

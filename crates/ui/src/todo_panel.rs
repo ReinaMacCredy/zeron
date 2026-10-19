@@ -35,7 +35,7 @@ pub(crate) const FOCUS_WINDOW: usize = 3;
 /// The checklist the agent most recently wrote, or `None` when there is none
 /// (or the latest write cleared it with an empty list).
 ///
-/// `entries` is the selected chat's own transcript; subagent traffic lives in
+/// `entries` is the chat's own transcript; subagent traffic lives in
 /// separate docs and never reaches it. ACP plans reuse one tool id for every
 /// update, so "latest part" — not "first part with this id" — is the contract.
 pub(crate) fn latest_todo(entries: &[SessionMessageEntry]) -> Option<Vec<TodoItem>> {
@@ -283,14 +283,13 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let live = self.run_live(cx);
-        let (chat_id, items) = {
+        let chat_id = self.bound_chat_id(cx)?;
+        let items = {
             let state = self.state.read(cx);
-            let chat_id = state.selected_chat.clone()?;
-            let items = self
-                .todo_cache
-                .latest(&chat_id, state.transcript_revision, &state.transcript)?
-                .to_vec();
-            (chat_id, items)
+            let transcript = self.bound_transcript(state);
+            self.todo_cache
+                .latest(&chat_id, state.transcript_revision, transcript)?
+                .to_vec()
         };
         let summary = TodoSummary::of(&items);
         let settled = summary.finished() && !live;
