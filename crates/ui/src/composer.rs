@@ -8228,7 +8228,7 @@ impl Composer {
                 }
             }
             None => self.show_error(
-                "Couldn't capture the annotated area. Your comment was added without a screenshot.",
+                "Couldn't capture the annotated area.",
                 cx,
             ),
         }

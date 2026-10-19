@@ -104,7 +104,6 @@ interface AnnotationSession {
 
 interface AnnotationDemo {
   select: (element: Element) => void;
-  comment: (text: string) => void;
   fontSize: (px: number) => void;
   submit: () => void;
 }
@@ -442,12 +441,11 @@ function startAnnotation(resolve: (result: string) => void): void {
     '<svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h12M7 3v4M13 8v4M9 13v4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   composerRow.appendChild(adjust);
 
-  const comment = document.createElement("textarea");
-  comment.placeholder = "Describe the change…";
-  comment.rows = 1;
-  comment.className =
-    "min-h-8 max-h-24 min-w-0 flex-1 resize-none overflow-y-hidden border-0 border-b border-b-transparent bg-transparent px-0 py-1.5 font-sans text-sm leading-5 text-foreground outline-none ring-0 placeholder:text-muted-foreground focus:border-b-primary focus:outline-none focus:ring-0";
-  composerRow.appendChild(comment);
+  // The comment is typed in the chat: page script can rewrite a focused field in its document.
+  const hint = document.createElement("span");
+  hint.textContent = "Attach, then describe the change in the chat";
+  hint.className = "min-w-0 flex-1 self-center font-sans text-xs text-muted-foreground";
+  composerRow.appendChild(hint);
 
   const dragHandle = document.createElement("button");
   dragHandle.type = "button";
@@ -478,20 +476,9 @@ function startAnnotation(resolve: (result: string) => void): void {
   let activeStroke: { target: StrokeTarget; path: SVGPathElement } | null = null;
   let pendingCapture = false;
   let editorExpanded = false;
-  let editorWasShown = false;
   let editorPosition: { left: number; top: number } | null = null;
   let editorDrag: { pointerId: number; offsetX: number; offsetY: number } | null = null;
   let editorLayoutFrame: number | null = null;
-
-  const resizeComment = (): void => {
-    const maxHeight = 96;
-    comment.style.height = "auto";
-    const nextHeight = Math.min(comment.scrollHeight, maxHeight);
-    comment.style.height = `${nextHeight}px`;
-    comment.style.overflowY = comment.scrollHeight > maxHeight ? "auto" : "hidden";
-    queueEditorLayout();
-  };
-  comment.addEventListener("input", resizeComment);
 
   const updateStatus = (): void => {
     const hasTargets = selected.size > 0 || regions.length > 0 || strokes.length > 0;
@@ -501,10 +488,6 @@ function startAnnotation(resolve: (result: string) => void): void {
     adjust.disabled = !hasTargets;
     stylePanel.style.display = editorExpanded && selected.size > 0 ? "grid" : "none";
     queueEditorLayout();
-    if (hasTargets && !editorWasShown) {
-      editorWasShown = true;
-      window.setTimeout(() => comment.focus({ preventScroll: true }), 0);
-    }
   };
 
   const refreshToolButtons = (): void => {
@@ -1205,6 +1188,12 @@ function startAnnotation(resolve: (result: string) => void): void {
       teardown();
       return;
     }
+    if (isSubmitKey(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      submitAnnotation();
+      return;
+    }
     if (event.key === "v") tool = "select";
     else if (event.key === "r") tool = "marquee";
     else if (event.key === "d") tool = "draw";
@@ -1219,7 +1208,6 @@ function startAnnotation(resolve: (result: string) => void): void {
     pendingCapture = true;
     submit.disabled = true;
     submit.textContent = "Capturing…";
-    const submittedComment = comment.value.trim();
     const submittedRegions = [...regions];
     const submittedStrokes = [...strokes];
     const submittedStyleChanges = Array.from(styleChanges.values(), (change) => ({ ...change }));
@@ -1236,7 +1224,6 @@ function startAnnotation(resolve: (result: string) => void): void {
       id: nextId("annotation"),
       pageUrl: location.href,
       pageTitle: document.title?.trim() || null,
-      comment: submittedComment,
       elements,
       regions: submittedRegions,
       strokes: submittedStrokes,
@@ -1261,13 +1248,7 @@ function startAnnotation(resolve: (result: string) => void): void {
   submit.addEventListener("click", (event) => {
     if (event.isTrusted) submitAnnotation();
   });
-  root.addEventListener("keydown", (event) => {
-    const submits = event.isTrusted && event.target === comment && isSubmitKey(event);
-    event.stopImmediatePropagation();
-    if (!submits) return;
-    event.preventDefault();
-    submitAnnotation();
-  });
+  root.addEventListener("keydown", (event) => event.stopImmediatePropagation());
 
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
   window.addEventListener("pointerdown", onPointerDown, { capture: true, passive: false });
@@ -1285,10 +1266,6 @@ function startAnnotation(resolve: (result: string) => void): void {
     teardown,
     demo: {
       select: addSelected,
-      comment: (text) => {
-        comment.value = text;
-        resizeComment();
-      },
       fontSize: (px) => {
         if (!editorExpanded) adjust.click();
         fontSize.value = String(px);
