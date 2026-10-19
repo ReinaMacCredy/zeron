@@ -21,6 +21,7 @@ pub mod projectless;
 pub mod provider_instance;
 pub mod sidebar_pins;
 pub mod source_control;
+pub mod supervisor;
 pub mod tools;
 pub mod ui_driver;
 pub mod usage;

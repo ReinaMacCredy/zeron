@@ -409,9 +409,14 @@ impl Chat {
     }
 
     /// A session the user sees in chat lists: neither a delegated child nor a
-    /// hidden voice orchestrator.
+    /// hidden system chat.
     pub fn is_top_level(&self) -> bool {
-        self.delegated_by().is_none() && !crate::voice::is_orchestrator_chat(&self.id)
+        self.delegated_by().is_none() && !self.is_system()
+    }
+
+    pub fn is_system(&self) -> bool {
+        crate::voice::is_orchestrator_chat(&self.id)
+            || crate::supervisor::is_supervisor_chat(&self.id)
     }
 
     /// True when this chat syncs over the chat2 dumb relay.
@@ -426,9 +431,7 @@ impl Chat {
     }
 
     pub fn is_person_opened(&self) -> bool {
-        self.created_by_chat_id.is_none()
-            && self.delegation.is_none()
-            && !crate::voice::is_orchestrator_chat(&self.id)
+        self.created_by_chat_id.is_none() && self.delegation.is_none() && !self.is_system()
     }
 }
 
