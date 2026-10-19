@@ -187,6 +187,7 @@ fn delivery_label(delivery: &WakeDelivery) -> String {
         WakeDelivery::Started => "Started a turn".into(),
         WakeDelivery::Steered => "Steered its turn".into(),
         WakeDelivery::HeldForTurnEnd => "Held for turn end".into(),
+        WakeDelivery::HeldByStop => "Held by your Stop".into(),
         WakeDelivery::Failed { error } => format!("Failed: {error}"),
         WakeDelivery::Dropped => "Dropped".into(),
     }
@@ -212,6 +213,10 @@ fn state_line(snapshot: Option<&SupervisorSnapshot>) -> String {
         SupervisorState::Off => return "Off".into(),
         SupervisorState::Asleep => "Asleep",
         SupervisorState::Awake => "Awake",
+        SupervisorState::Stopped => {
+            let n = snapshot.waiting;
+            return format!("Stopped · {n} {} waiting", plural(n, "wake", "wakes"));
+        }
     };
     match snapshot.wakes.iter().find(|wake| wake.woke()) {
         Some(wake) => format!("{word} · woke {} for {}", clock(wake.at), wake_reason(wake)),

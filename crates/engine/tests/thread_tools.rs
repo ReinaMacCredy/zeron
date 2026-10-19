@@ -3012,6 +3012,205 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     assert_eq!(asked, [first_wake.id.clone(), second_wake.id.clone()]);
     let row = rig.core.workspace.chat(&supervisor).unwrap().unwrap();
     assert!(!row.is_top_level(), "the Supervisor has no sidebar row");
+
+    use zeron_proto::supervisor::{InterventionChip, InterventionKind, InterventionTrigger};
+    let settings = |message: bool| {
+        call(
+            zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+            serde_json::json!({
+                "messageThreads": message, "rebrief": true, "pauseSteps": true,
+                "startMissions": false, "heartbeatMinutes": 0,
+            }),
+        )
+    };
+    let send = |to: String| {
+        call(
+            zeron_rpc::methods::SEND_THREAD_MESSAGE,
+            serde_json::json!({ "chatId": to, "fromChatId": supervisor, "text": "Check the error codes" }),
+        )
+    };
+    let step_thread = rig
+        .core
+        .workspace
+        .task_step(&steps[0].id)
+        .unwrap()
+        .chat_id
+        .unwrap();
+    settings(false).await.unwrap();
+    let err = refused(send(step_thread.clone()).await);
+    assert!(
+        err.contains("Messaging leads and step threads is off"),
+        "{err}"
+    );
+    settings(true).await.unwrap();
+    let sent = |reply: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>| match reply {
+        Ok(zeron_rpc::RpcReply::Value(value)) => value["id"].as_str().unwrap().to_string(),
+        Ok(_) => panic!("a message id"),
+        Err(err) => panic!("{err}"),
+    };
+    let to_step = sent(send(step_thread).await);
+    let completed = InterventionChip::StepCompletedTurn { steps: vec![1] };
+    let snapshot = supervisor_until(&rpc, |s| {
+        s.interventions
+            .first()
+            .is_some_and(|row| row.chips.contains(&completed))
+    })
+    .await;
+    let [row] = snapshot.interventions.as_slice() else {
+        panic!("one intervention: {:?}", snapshot.interventions);
+    };
+    assert_eq!(row.kind, InterventionKind::Send);
+    assert_eq!(row.task_id.as_deref(), Some("t1"));
+    assert_eq!(row.step_ids, [steps[0].id.clone()]);
+    assert_eq!(row.message_id.as_deref(), Some(to_step.as_str()));
+    assert_eq!(row.text, "Check the error codes");
+    assert_eq!(
+        row.trigger,
+        Some(InterventionTrigger::Wake {
+            wake_id: second_wake.id.clone()
+        })
+    );
+    assert_eq!(row.chips, [InterventionChip::Sent, completed.clone()]);
+
+    let to_lead = sent(send("task-lead".into()).await);
+    let snapshot = supervisor_until(&rpc, |s| {
+        s.interventions
+            .first()
+            .is_some_and(|row| row.chips.contains(&InterventionChip::LeadRanTurn))
+    })
+    .await;
+    assert_eq!(
+        snapshot.interventions[0].message_id.as_deref(),
+        Some(to_lead.as_str())
+    );
+    assert_eq!(snapshot.interventions[0].step_ids.len(), 2);
+
+    let err = refused(
+        mutate(serde_json::json!({
+            "op": "updateTask", "taskId": "t1", "patch": { "notes": "Use the cheaper gateway" },
+            "fromChatId": supervisor,
+        }))
+        .await,
+    );
+    assert!(err.contains("the Supervisor cannot change them"), "{err}");
+    assert_eq!(rig.core.workspace.task("t1").unwrap().notes, "");
+    let err = refused(
+        call(
+            zeron_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": "task-lead", "command": { "kind": "interrupt" }, "fromChatId": supervisor,
+            }),
+        )
+        .await,
+    );
+    assert!(err.contains("supervisor pause"), "{err}");
+    rig.core.shutdown().await;
+}
+
+async fn supervisor_until(
+    rpc: &zeron_engine::EngineRpc,
+    ready: impl Fn(&zeron_proto::supervisor::SupervisorSnapshot) -> bool,
+) -> zeron_proto::supervisor::SupervisorSnapshot {
+    let zeron_rpc::RpcReply::Stream(mut watch) = zeron_rpc::RpcService::handle(
+        rpc,
+        zeron_rpc::methods::WATCH_SUPERVISOR,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap() else {
+        panic!("a snapshot stream");
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, watch.next())
+            .await
+            .expect("timed out waiting for the Supervisor snapshot")
+            .unwrap();
+        let snapshot = serde_json::from_value(item).unwrap();
+        if ready(&snapshot) {
+            return snapshot;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_wake_into_a_supervisor_the_person_stopped_waits_for_their_next_message() {
+    let rig = rig(Duration::from_millis(400));
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let zeron_rpc::RpcReply::Value(ensured) = call(
+        zeron_rpc::methods::ENSURE_SUPERVISOR,
+        serde_json::json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+    )
+    .await
+    .unwrap() else {
+        panic!("a chat id");
+    };
+    let supervisor = ensured["chatId"].as_str().unwrap().to_string();
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Shop backend" }))
+        .await
+        .unwrap();
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "task-lead",
+        "spaceId": "space-tt", "orchestrate": true,
+    }))
+    .await
+    .unwrap();
+    wait_for(
+        || !prompts_with(&rig, "You lead this task (task id t1)").is_empty(),
+        "the lead's brief",
+    )
+    .await;
+
+    queue_human_run(&rig.core, &supervisor, "cmd-h1", "msg-h1");
+    wait_for(|| working(&rig.core, &supervisor), "the person's turn").await;
+    queue_interrupt(&rig.core, &supervisor);
+    wait_for(|| !working(&rig.core, &supervisor), "the person's Stop").await;
+    mutate(serde_json::json!({
+        "op": "escalateTask", "taskId": "t1", "fromChatId": "task-lead",
+        "title": "Use the mock gateway?", "why": "decision", "options": ["Yes", "No"],
+    }))
+    .await
+    .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| {
+        s.state == zeron_proto::supervisor::SupervisorState::Stopped && s.waiting == 1
+    })
+    .await;
+    assert_eq!(
+        snapshot.wakes[0].delivery,
+        zeron_proto::supervisor::WakeDelivery::HeldByStop
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        prompts_with(&rig, "Supervisor wake").is_empty(),
+        "a Stop holds the wake"
+    );
+    assert_eq!(queue_len(&rig.core, &supervisor), 1);
+
+    queue_human_run(&rig.core, &supervisor, "cmd-h2", "msg-h2");
+    wait_for(
+        || !prompts_with(&rig, "Supervisor wake").is_empty(),
+        "the wake after the person's next message",
+    )
+    .await;
+    let prompts = rig.prompts.lock().unwrap().clone();
+    let human = prompts
+        .iter()
+        .rposition(|prompt| prompt == "human prompt")
+        .unwrap();
+    let wake = prompts
+        .iter()
+        .position(|prompt| prompt.contains("Supervisor wake"))
+        .unwrap();
+    assert!(human < wake, "the person's message runs first: {prompts:?}");
+    supervisor_until(&rpc, |s| {
+        s.state != zeron_proto::supervisor::SupervisorState::Stopped
+    })
+    .await;
     rig.core.shutdown().await;
 }
 

@@ -728,7 +728,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// Keeps: command / path / pattern / url / query / todo items / server+tool names,
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
-/// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
+/// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input
+/// (but a `respond_to_input` call keeps the thread and request it answered, never the answer).
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
     match call {
@@ -748,14 +749,41 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
             server: server.clone(),
             tool: tool.clone(),
-            input: spawn_badge(call).or_else(|| computer_badge(call)),
+            input: spawn_badge(call)
+                .or_else(|| computer_badge(call))
+                .or_else(|| respond_badge(call)),
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
-            input: spawn_badge(call).or_else(|| skill_badge(call)),
+            input: spawn_badge(call)
+                .or_else(|| skill_badge(call))
+                .or_else(|| respond_badge(call)),
         },
         other => other.clone(),
     }
+}
+
+/// The Supervisor's projection tells a lead's ruling on a step's question by these two ids.
+fn respond_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    let input = match call {
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } if server == "zeron" && tool == "respond_to_input" => input.as_ref()?,
+        ToolCall::Unknown { name, input } if name.ends_with("respond_to_input") => {
+            input.as_ref()?
+        }
+        _ => return None,
+    };
+    let kept: serde_json::Map<String, serde_json::Value> = ["threadId", "requestId"]
+        .iter()
+        .filter_map(|key| {
+            let value = input.get(key)?.as_str()?.trim();
+            (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+        })
+        .collect();
+    (!kept.is_empty()).then_some(serde_json::Value::Object(kept))
 }
 
 /// A `Skill` call keeps the skill's name and file for its chip; its `args`
@@ -1161,6 +1189,37 @@ mod tests {
         );
         assert_eq!(clean.subagent_model(), Some("haiku"));
         assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    #[test]
+    fn sanitize_keeps_which_question_a_respond_to_input_answered_but_not_the_answer() {
+        let call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "respond_to_input".into(),
+            input: Some(serde_json::json!({
+                "threadId": "step-1", "requestId": "r-1",
+                "answers": [{ "questionId": "q1", "labels": ["my private reason"] }],
+            })),
+        };
+        let clean = sanitize_tool_call(&call);
+        assert_eq!(
+            clean,
+            ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "respond_to_input".into(),
+                input: Some(serde_json::json!({ "threadId": "step-1", "requestId": "r-1" })),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+        let foreign = ToolCall::Mcp {
+            server: "other".into(),
+            tool: "respond_to_input".into(),
+            input: Some(serde_json::json!({ "threadId": "step-1" })),
+        };
+        assert!(matches!(
+            sanitize_tool_call(&foreign),
+            ToolCall::Mcp { input: None, .. }
+        ));
     }
 
     /// An ordinary tool's input still goes, even when it happens to carry a

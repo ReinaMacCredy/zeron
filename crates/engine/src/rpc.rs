@@ -332,6 +332,8 @@ struct QueueCommandParams {
     /// durably queued — never as a gate in front of it.
     #[serde(default)]
     transfers: Vec<crate::uploads::AttachmentTransfer>,
+    #[serde(default)]
+    from_chat_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1027,9 +1029,15 @@ enum MutateParams {
     UpdateTask {
         task_id: String,
         patch: zeron_proto::TaskPatch,
+        #[serde(default)]
+        from_chat_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    DeleteTask { task_id: String },
+    DeleteTask {
+        task_id: String,
+        #[serde(default)]
+        from_chat_id: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     StartTask {
         task_id: String,
@@ -1108,6 +1116,19 @@ enum MutateParams {
     },
     #[serde(rename_all = "camelCase")]
     SetMissionSupervised { task_id: String, supervised: bool },
+    #[serde(rename_all = "camelCase")]
+    EscalateTask {
+        task_id: String,
+        #[serde(default)]
+        from_chat_id: Option<String>,
+        title: String,
+        why: zeron_proto::supervisor::ItemWhy,
+        #[serde(default)]
+        detail: String,
+        options: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResolveSupervisorItem { item_id: String, choice: String },
 }
 
 fn approve_plan_default() -> bool {
@@ -2325,12 +2346,29 @@ impl EngineRpc {
                 due_on,
                 order_key,
             } => self.create_task(task_id, title, notes, space_id, due_on, order_key),
-            MutateParams::UpdateTask { task_id, patch } => self.update_task(&task_id, &patch),
-            MutateParams::DeleteTask { task_id } => self
-                .workspace
-                .delete_task(&task_id)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::UpdateTask {
+                task_id,
+                patch,
+                from_chat_id,
+            } => {
+                if patch.title.is_some() || patch.notes.is_some() || patch.chat_id.is_some() {
+                    supervisor::refuse_supervisor(
+                        from_chat_id.as_deref(),
+                        supervisor::GOAL_OR_SPEND,
+                    )?;
+                }
+                self.update_task(&task_id, &patch)
+            }
+            MutateParams::DeleteTask {
+                task_id,
+                from_chat_id,
+            } => {
+                supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
+                self.workspace
+                    .delete_task(&task_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::StartTask {
                 task_id,
                 chat_id,
@@ -2348,6 +2386,7 @@ impl EngineRpc {
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
+                    .map(drop)
             }
             MutateParams::AssignTask {
                 task_id,
@@ -2359,6 +2398,7 @@ impl EngineRpc {
                 same_agents,
                 plan_doc,
             } => {
+                supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
@@ -2399,14 +2439,34 @@ impl EngineRpc {
                 overview,
                 steps,
                 remove_step_ids,
-            } => {
-                self.edit_task_plan(&task_id, overview, steps, &remove_step_ids)
-                    .await
-            }
+            } => self
+                .edit_task_plan(&task_id, overview, steps, &remove_step_ids, None)
+                .await
+                .map(drop),
             MutateParams::SetMissionSupervised {
                 task_id,
                 supervised,
             } => self.set_mission_supervised(&task_id, supervised),
+            MutateParams::EscalateTask {
+                task_id,
+                from_chat_id,
+                title,
+                why,
+                detail,
+                options,
+            } => self
+                .escalate_task(
+                    &task_id,
+                    from_chat_id.as_deref(),
+                    title,
+                    why,
+                    detail,
+                    options,
+                )
+                .map(drop),
+            MutateParams::ResolveSupervisorItem { item_id, choice } => {
+                self.resolve_supervisor_item(&item_id, &choice).await
+            }
         }
     }
 }
@@ -3455,6 +3515,7 @@ impl RpcService for EngineRpc {
             }
             methods::CREATE_THREAD => {
                 let p: CreateThreadParams = parse_params(params)?;
+                self.supervisor_gate(Some(&p.from_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 let chat_id = self
                     .doc_host
                     .create_step_thread(
@@ -3477,11 +3538,25 @@ impl RpcService for EngineRpc {
             }
             methods::SEND_THREAD_MESSAGE => {
                 let p: SendThreadMessageParams = parse_params(params)?;
+                let basis = self
+                    .supervisor_gate(Some(&p.from_chat_id), |s| s.message_threads, supervisor::MESSAGE_OFF)?
+                    .then(|| {
+                        self.doc_host.intervention_basis(
+                            zeron_proto::supervisor::InterventionKind::Send,
+                            &p.from_chat_id,
+                            Some(&p.chat_id),
+                            None,
+                        )
+                    });
                 let id = self
                     .doc_host
                     .queue_thread_message(&p.chat_id, Some(&p.from_chat_id), &p.text)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(basis) = basis {
+                    self.doc_host
+                        .record_intervention(basis, Some(id.clone()), None, &p.text);
+                }
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::SET_THREAD_WATCHES => {
@@ -3494,6 +3569,7 @@ impl RpcService for EngineRpc {
             }
             methods::DELEGATE_TASK => {
                 let p: crate::doc_host::DelegateTaskParams = parse_params(params)?;
+                self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 let view = self
                     .doc_host
                     .delegate_task(p, self.registry.delegation_settings())
@@ -3605,10 +3681,46 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
+                let respond = match &p.command {
+                    SessionCommandPayload::Interrupt {} => {
+                        supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
+                        None
+                    }
+                    SessionCommandPayload::RespondInput {
+                        request_id,
+                        answers,
+                    } => match p.from_chat_id.as_deref() {
+                        Some(from)
+                            if self.supervisor_gate(Some(from), |s| s.message_threads, supervisor::MESSAGE_OFF)? =>
+                        {
+                            let text: Vec<String> = answers
+                                .iter()
+                                .map(|answer| format!("{}: {}", answer.question_id, answer.labels.join(", ")))
+                                .collect();
+                            let basis = self.doc_host.intervention_basis(
+                                zeron_proto::supervisor::InterventionKind::Respond,
+                                from,
+                                Some(&p.chat_id),
+                                None,
+                            );
+                            Some((basis, request_id.clone(), text.join("; ")))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 let command_id = self
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some((basis, request_id, text)) = respond {
+                    self.doc_host.record_intervention(
+                        basis,
+                        Some(command_id.clone()),
+                        Some(request_id),
+                        &text,
+                    );
+                }
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
             methods::TAKE_PROJECT_ACTION_SETUP => {
@@ -4087,7 +4199,8 @@ impl RpcService for EngineRpc {
             methods::ENSURE_SUPERVISOR
             | methods::WATCH_SUPERVISOR
             | methods::GET_SUPERVISOR_SETTINGS
-            | methods::SET_SUPERVISOR_SETTINGS => self.supervisor_rpc(method, params).await,
+            | methods::SET_SUPERVISOR_SETTINGS
+            | methods::SUPERVISOR_ACT => self.supervisor_rpc(method, params).await,
             methods::WATCH_TASKS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
             }
@@ -4260,6 +4373,25 @@ impl RpcService for EngineRpc {
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
+                if let MutateParams::EscalateTask {
+                    task_id,
+                    from_chat_id,
+                    title,
+                    why,
+                    detail,
+                    options,
+                } = p
+                {
+                    let item_id = self.escalate_task(
+                        &task_id,
+                        from_chat_id.as_deref(),
+                        title,
+                        why,
+                        detail,
+                        options,
+                    )?;
+                    return RpcReply::value(&serde_json::json!({ "ok": true, "itemId": item_id }));
+                }
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
                 let planned = match &p {
                     MutateParams::PlanSteps { task_id, .. } => Some(task_id.clone()),
