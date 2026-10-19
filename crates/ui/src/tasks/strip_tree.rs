@@ -6,11 +6,10 @@ use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, Hsla, IntoElement, Render, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
-use zeron_proto::{ChatIndicator, StepStatus};
 
 use super::center::TaskCenter;
 use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, TreeMotion};
-use super::{PlanPhase, Selection, chat_brand, linked_chat, rollup, step_chat};
+use super::{Selection, chat_brand, linked_chat, rollup, step_chat};
 use crate::icons::{self, icon};
 use crate::motion::{self, Tween};
 use crate::state::AppState;
@@ -122,19 +121,7 @@ impl StripTree {
                 .or(chat.delegation.as_ref().map(|d| d.started_at))
         };
         let lead = linked_chat(&state.chats, task);
-        let (status, word) = if task.completed_at.is_some() {
-            (Status::Done, "Done")
-        } else {
-            match plan.lead {
-                None => (Status::Queued, "Not started"),
-                Some(ChatIndicator::Working) => (Status::Running, "Working"),
-                Some(ChatIndicator::AwaitingInput) => (Status::Waiting, "Needs you"),
-                Some(ChatIndicator::Errored) => (Status::Failed, "Failed"),
-                _ if plan.phase(task) == PlanPhase::PlanReady => (Status::Waiting, "Needs you"),
-                _ if plan.count(StepStatus::Working) > 0 => (Status::Running, "Working"),
-                _ => (Status::Waiting, "Waiting"),
-            }
-        };
+        let (status, word) = tree::lead_status(task, &plan);
         let mut rows = vec![Row {
             id: LEAD.into(),
             parent: None,

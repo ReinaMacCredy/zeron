@@ -27,6 +27,7 @@ pub(crate) const LEAVE_Y: f32 = 4.0;
 pub(crate) const STATUS: MotionSpec = MotionSpec::new(240, motion::EASE);
 pub(crate) const FADE: MotionSpec = MotionSpec::new(280, motion::EASE);
 pub(crate) const FOLD: MotionSpec = MotionSpec::new(280, EASE);
+pub(crate) const POP: MotionSpec = MotionSpec::new(200, EASE);
 pub(crate) const CHEVRON: MotionSpec = MotionSpec::new(220, EASE);
 const SPIN: Duration = Duration::from_millis(900);
 const REMOVE_AFTER: Duration = Duration::from_millis(30);
@@ -96,6 +97,25 @@ impl Status {
 
     fn opacity(self) -> f32 {
         if self.muted() { MUTED_OPACITY } else { 1.0 }
+    }
+}
+
+pub(crate) fn lead_status(
+    task: &zeron_proto::Task,
+    plan: &super::Rollup,
+) -> (Status, &'static str) {
+    if task.completed_at.is_some() {
+        return (Status::Done, "Done");
+    }
+    match plan.lead {
+        None => (Status::Queued, "Not started"),
+        _ if plan.phase(task) == super::PlanPhase::Planning => (Status::Running, "Planning"),
+        Some(ChatIndicator::Working) => (Status::Running, "Working"),
+        Some(ChatIndicator::AwaitingInput) => (Status::Waiting, "Needs you"),
+        Some(ChatIndicator::Errored) => (Status::Failed, "Failed"),
+        _ if plan.phase(task) == super::PlanPhase::PlanReady => (Status::Waiting, "Needs you"),
+        _ if plan.count(StepStatus::Working) > 0 => (Status::Running, "Working"),
+        _ => (Status::Waiting, "Waiting"),
     }
 }
 
@@ -353,16 +373,18 @@ pub(crate) struct Dot {
 }
 
 fn link_points((ax, top): (f32, f32), (cx, cy): (f32, f32)) -> Vec<(f32, f32)> {
-    if cx - ax < 2.0 {
+    let dx = cx - ax;
+    if dx.abs() < 2.0 {
         return vec![(ax, top), (ax, cy)];
     }
-    let r = CORNER.min((cx - ax) / 2.0).min((cy - top) / 2.0).max(0.0);
+    let r = CORNER.min(dx.abs() / 2.0).min((cy - top) / 2.0).max(0.0);
+    let turn = ax + dx.signum() * r;
     let mut points = vec![(ax, top), (ax, cy - r)];
     for i in 1..=6 {
         let t = i as f32 / 6.0;
         let u = 1.0 - t;
         points.push((
-            u * u * ax + 2.0 * u * t * ax + t * t * (ax + r),
+            u * u * ax + 2.0 * u * t * ax + t * t * turn,
             u * u * (cy - r) + 2.0 * u * t * cy + t * t * cy,
         ));
     }
@@ -576,8 +598,6 @@ pub(crate) fn shimmer_text(
     }
 }
 
-// The reference's dollar amounts read as token counts; the Mission Control page build shows them.
-#[allow(dead_code)]
 pub(crate) mod amount {
     use super::*;
 
@@ -844,6 +864,12 @@ mod tests {
                 .map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1))
                 .sum()
         };
+        let left = link_points((100.0, 0.0), (60.0, 40.0));
+        assert_eq!(left.last(), Some(&(60.0, 40.0)));
+        assert!(
+            left.iter().all(|(x, _)| *x <= 100.0),
+            "a branch to the left turns left"
+        );
         let half = drawn(&points, 0.5);
         assert!((length(&half) - length(&points) / 2.0).abs() < 0.01);
         assert_eq!(drawn(&points, 1.0).last(), Some(&(22.0, 43.0)));
