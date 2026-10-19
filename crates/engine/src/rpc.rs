@@ -1941,6 +1941,7 @@ impl EngineRpc {
             .get("loginId")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let instance_id = params.get("instanceId").cloned();
         if method == methods::START_AGENT_LOGIN
             && let Some(object) = params.as_object_mut()
         {
@@ -1978,7 +1979,8 @@ impl EngineRpc {
                         ))
                     }
                 {
-                    self.cancel_remote_login(target, &start.login_id).await;
+                    self.cancel_remote_login(target, &start.login_id, instance_id)
+                        .await;
                     return Err(RpcError::Failed(error.to_string()));
                 }
                 reply
@@ -2004,7 +2006,8 @@ impl EngineRpc {
                                 ))
                             }
                         {
-                            self.cancel_remote_login(target, &login_id).await;
+                            self.cancel_remote_login(target, &login_id, instance_id)
+                                .await;
                             return RpcReply::value(&AgentLoginPoll {
                                 status: AgentLoginStatus::Error,
                                 message: Some(error.to_string()),
@@ -2030,8 +2033,16 @@ impl EngineRpc {
         }
     }
 
-    async fn cancel_remote_login(&self, target: &str, login_id: &str) {
-        let params = serde_json::json!({ "loginId": login_id, "targetDeviceId": target });
+    async fn cancel_remote_login(
+        &self,
+        target: &str,
+        login_id: &str,
+        instance_id: Option<serde_json::Value>,
+    ) {
+        let mut params = serde_json::json!({ "loginId": login_id, "targetDeviceId": target });
+        if let Some(instance_id) = instance_id {
+            params["instanceId"] = instance_id;
+        }
         if let Err(error) = self
             .forward(target, methods::CANCEL_AGENT_LOGIN, params)
             .await
