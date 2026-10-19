@@ -7112,6 +7112,7 @@ pub struct Composer {
     side_chat: bool,
     pr_chat: bool,
     btw: bool,
+    full_chat: bool,
     pr_context: Option<String>,
     pr_chips: Vec<(crate::pull_request_detail::ContextChip, SharedString)>,
     pr_chip_remove: Option<PrChipRemove>,
@@ -7603,6 +7604,7 @@ impl Composer {
             side_chat: false,
             pr_chat: false,
             btw: false,
+            full_chat: false,
             pr_context: None,
             pr_chips: Vec::new(),
             pr_chip_remove: None,
@@ -7759,7 +7761,7 @@ impl Composer {
 
     fn active_prediction(&self, cx: &App) -> Option<SharedString> {
         if self.side_chat
-            || self.chat_override.is_some()
+            || (self.chat_override.is_some() && !self.full_chat)
             || self.wizard.is_some()
             || self.editing_queued.is_some()
             || self.mention.token.is_some()
@@ -8030,6 +8032,28 @@ impl Composer {
     pub(crate) fn set_side_chat(&mut self, cx: &mut Context<Self>) {
         self.side_chat = true;
         cx.notify();
+    }
+
+    pub(crate) fn set_full_chat(&mut self, cx: &mut Context<Self>) {
+        self.full_chat = true;
+        cx.notify();
+    }
+
+    pub(crate) fn bound_transcript<'a>(&self, state: &'a AppState) -> &'a [SessionMessageEntry] {
+        match self.chat_override.as_deref() {
+            Some(chat_id) => state.sub_transcript(chat_id),
+            None => &state.transcript,
+        }
+    }
+
+    // AppState keeps the queue for the selected chat only.
+    pub(crate) fn reads_selection(&self, cx: &App) -> bool {
+        match self.chat_override.as_deref() {
+            None => true,
+            Some(chat_id) => {
+                self.full_chat && self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
+            }
+        }
     }
 
     pub(crate) fn set_btw(&mut self, cx: &mut Context<Self>) {
@@ -10534,7 +10558,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         self.sidechat_tab_bounds.set(None);
-        if self.chat_override.is_some() || self.side_chat || self.pr_chat {
+        if (self.chat_override.is_some() && !self.full_chat) || self.side_chat || self.pr_chat {
             return None;
         }
         let chat = self.bound_chat_row(cx)?;
@@ -10883,12 +10907,8 @@ impl Composer {
         let (pending, edited_row_exists) = {
             let s = self.state.read(cx);
             (
-                // `state.transcript` and `state.queue` belong to the SELECTED
-                // chat; a bound composer would otherwise answer the source
-                // chat's question from the sidechat's input.
-                self.chat_override
-                    .is_none()
-                    .then(|| pending_input_request(&s.transcript))
+                (self.chat_override.is_none() || self.full_chat)
+                    .then(|| pending_input_request(self.bound_transcript(s)))
                     .flatten(),
                 editing_id
                     .as_ref()
@@ -11084,8 +11104,8 @@ impl Composer {
                     // assistant entry took over). Never on run death: the
                     // question stays answerable until answered — the engine
                     // delivers a dead run's answer as a resumed turn.
-                    let transcript = self.state.read(cx).transcript.clone();
-                    let released = input_request_resolved(&transcript, &wizard.request_id)
+                    let transcript = self.bound_transcript(self.state.read(cx));
+                    let released = input_request_resolved(transcript, &wizard.request_id)
                         || (!transcript.is_empty()
                             && !self.answered_requests.contains(&wizard.request_id));
                     if released {
@@ -11179,12 +11199,10 @@ impl Composer {
             return false;
         };
         let state = self.state.read(cx);
-        let entries = if self.chat_override.is_some() {
-            state.sub_transcript(&chat_id)
-        } else {
-            &state.transcript
-        };
-        crate::transcript::resume_offer(entries, state.indicator_for(&chat_id, chrono::Utc::now()))
+        crate::transcript::resume_offer(
+            self.bound_transcript(state),
+            state.indicator_for(&chat_id, chrono::Utc::now()),
+        )
     }
 
     fn execute_workspace_command(
@@ -11207,7 +11225,7 @@ impl Composer {
     fn navigate_history(&mut self, delta: isize, cx: &mut Context<Self>) {
         let target = if self.wizard.is_some()
             || self.editing_queued.is_some()
-            || self.chat_override.is_some()
+            || (self.chat_override.is_some() && !self.full_chat)
             || self.input.read(cx).read_only
         {
             None
@@ -11220,7 +11238,7 @@ impl Composer {
             }
         };
         let prompts = target
-            .map(|_| sent_prompts(&self.state.read(cx).transcript))
+            .map(|_| sent_prompts(self.bound_transcript(self.state.read(cx))))
             .unwrap_or_default();
         match target.and_then(|ix| prompts.get(ix).map(|prompt| (ix, prompt.clone()))) {
             Some((ix, prompt)) => {
@@ -12592,9 +12610,9 @@ impl Composer {
             // un-hide the panel instead of leaving the question unanswerable.
             cx.background_executor().timer(Duration::from_secs(2)).await;
             this.update(cx, |composer, cx| {
-                let transcript = composer.state.read(cx).transcript.clone();
-                let still_pending = pending_input_request(&transcript)
-                    .is_some_and(|(pending_id, _)| pending_id == request_id);
+                let still_pending =
+                    pending_input_request(composer.bound_transcript(composer.state.read(cx)))
+                        .is_some_and(|(pending_id, _)| pending_id == request_id);
                 if still_pending && composer.answered_requests.remove(&request_id) {
                     cx.notify();
                 }
@@ -14017,7 +14035,7 @@ impl Render for Composer {
         let (card, corner) = self.render_corner(window, cx);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
-        let has_queue = !self.state.read(cx).queue.is_empty();
+        let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
         let todo = self.render_todo_panel(has_queue, window, cx);
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
@@ -19148,6 +19166,81 @@ mod tests {
                 // A chat-navigation notify must not re-key it to the selection.
                 composer.on_state_changed(cx);
                 assert_eq!(composer.current_key, "side");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_full_chat_composer_recalls_and_answers_its_own_chat(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let state = handle
+            .read_with(cx, |composer, _| composer.state.clone())
+            .unwrap();
+        let window = cx.add_window(|_, cx| {
+            let mut composer = Composer::for_chat(state.clone(), "step".into(), cx);
+            composer.set_full_chat(cx);
+            composer
+        });
+        let entry = |id: &str, role: MessageRole, part: MessagePart| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![part],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(zeron_doc::MessageStatus::Streaming),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        let prompt = |chat: &str| {
+            entry(
+                &format!("{chat}-prompt"),
+                MessageRole::User,
+                MessagePart::Text {
+                    id: format!("{chat}-text"),
+                    text: format!("{chat} prompt"),
+                },
+            )
+        };
+        let asking = |chat: &str| {
+            entry(
+                &format!("{chat}-ask"),
+                MessageRole::Assistant,
+                MessagePart::Input {
+                    id: format!("in-{chat}"),
+                    request_id: format!("{chat}-request"),
+                    questions: vec![question("q", &["a"], false)],
+                    resolved: false,
+                    answers: None,
+                },
+            )
+        };
+        window
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![chat_row("lead", None), chat_row("step", None)];
+                    state.selected_chat = Some("lead".into());
+                    state.transcript = vec![prompt("lead")];
+                    state.set_subagent_snapshot("step".into(), vec![prompt("step")]);
+                });
+                composer.on_state_changed(cx);
+                composer.navigate_history(-1, cx);
+                assert_eq!(composer.input.read(cx).text(), "step prompt");
+                composer.navigate_history(1, cx);
+
+                composer.state.update(cx, |state, _| {
+                    state.transcript = vec![prompt("lead"), asking("lead")];
+                    state
+                        .set_subagent_snapshot("step".into(), vec![prompt("step"), asking("step")]);
+                });
+                composer.on_state_changed(cx);
+                assert_eq!(
+                    composer.wizard.as_ref().map(|w| w.request_id.as_str()),
+                    Some("step-request"),
+                    "the question card is the bound chat's, never the selection's"
+                );
             })
             .unwrap();
     }

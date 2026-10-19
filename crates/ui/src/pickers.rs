@@ -1677,13 +1677,23 @@ impl Pickers {
 
     fn chat_session_stats(&self, cx: &App) -> Option<zeron_proto::SessionStats> {
         let state = self.state.read(cx);
-        state.selected_chat.as_deref().filter(|_| !self.detached)?;
+        if self.detached {
+            return None;
+        }
+        if self.chat_override.is_none() {
+            state.selected_chat.as_deref()?;
+        }
         state.session_stats_for(self.chat_override.as_deref())
     }
 
     fn chat_context_usage(&self, cx: &App) -> Option<zeron_proto::ContextUsage> {
         let state = self.state.read(cx);
-        state.selected_chat.as_deref().filter(|_| !self.detached)?;
+        if self.detached {
+            return None;
+        }
+        if self.chat_override.is_none() {
+            state.selected_chat.as_deref()?;
+        }
         state.context_usage_for(self.chat_override.as_deref())
     }
 
