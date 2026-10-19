@@ -1622,6 +1622,7 @@ pub struct UiSettings {
     pub sidebar_show_project_filter: bool,
     /// The Archived accordion below the active session list.
     pub sidebar_show_archived: bool,
+    pub sidebar_collapsed_leads: Vec<String>,
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
@@ -1860,6 +1861,7 @@ impl Default for UiSettings {
             sidebar_show_pull_request: true,
             sidebar_show_project_filter: true,
             sidebar_show_archived: true,
+            sidebar_collapsed_leads: Vec::new(),
             github_star_banner_dismissed: false,
             whats_new_seen_version: None,
             last_space_id: None,
@@ -2566,6 +2568,7 @@ impl UiSettings {
             sidebar_show_pull_request,
             sidebar_show_project_filter,
             sidebar_show_archived,
+            sidebar_collapsed_leads,
             github_star_banner_dismissed,
             whats_new_seen_version,
             last_space_id,
@@ -4031,6 +4034,7 @@ mod tests {
             sidebar_show_pull_request: false,
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
+            sidebar_collapsed_leads: vec!["lead-1".into()],
             github_star_banner_dismissed: true,
             whats_new_seen_version: Some("0.2.112".into()),
             last_space_id: Some("space-1".into()),

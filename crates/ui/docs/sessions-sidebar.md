@@ -17,7 +17,11 @@ An idle session shows how long ago it was active instead. **Done** and **Input**
 
 Hover a row to get its quick buttons: **Pin chat** and **Archive session**. Hover longer and a card shows the session's project, device, branch, agent and model, and any pull request.
 
-Right-click a row for the full menu: **Rename**, **Pin** or **Unpin**, **Archive**, **Copy** (the path, a Zeron conversation link, or the agent's session ID), and **Delete…**, which removes the session for good after you confirm.
+Right-click a row for the full menu: **Rename**, **Pin** or **Unpin**, **Archive**, **Copy** (the path, a Zeron conversation link, or the agent's session ID), and **Delete…**, which removes the session for good after you confirm. A mission lead's row also has **Collapse step threads** or **Expand step threads**.
+
+## Step threads
+
+A [Mission Control](zeron://docs/tasks) lead shows its step threads indented under its row. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold them away. A collapsed lead keeps the chevron showing and sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. When a step needs you, an attention dot appears on the lead. Opening a step, from Mission Control or a link, unfolds its lead again. Zeron remembers which leads you collapsed.
 
 ## Renaming
 
