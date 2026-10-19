@@ -2627,12 +2627,11 @@ impl SessionsEngine {
         self.inner
             .edit_agent_compacts(|compacts| compacts.remove(chat_id));
         self.inner.set_compact_plan(chat_id, None);
-        if let Some(text) = &request.continue_with {
-            lock(&self.inner.compact_owed).insert(
-                chat_id.to_string(),
-                format!("{reason} {}", unsent_note(text)),
-            );
-        }
+        let note = match &request.continue_with {
+            Some(text) => format!("{reason} {}", unsent_note(text)),
+            None => reason.clone(),
+        };
+        lock(&self.inner.compact_owed).insert(chat_id.to_string(), note);
         AgentCompactRun::Declined(reason)
     }
 
