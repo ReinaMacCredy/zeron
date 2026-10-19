@@ -1671,6 +1671,13 @@ impl TaskCenter {
                 wrapper.into_any_element()
             });
         }
+        if self
+            .pop
+            .as_ref()
+            .is_some_and(|pop| !rows.iter().any(|row| row.status == pop.kind))
+        {
+            self.pop = None;
+        }
         let bar = self.render_steps_bar(&rows, branch, any_running, reduced, now, theme, cx);
         div()
             .flex()
