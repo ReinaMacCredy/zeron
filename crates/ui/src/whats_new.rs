@@ -16,6 +16,18 @@ const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../assets/whats_new/kanban.jpg"),
     ),
     ("usage.jpg", include_bytes!("../assets/whats_new/usage.jpg")),
+    (
+        "mission-control.jpg",
+        include_bytes!("../assets/whats_new/mission-control.jpg"),
+    ),
+    (
+        "supervisor.jpg",
+        include_bytes!("../assets/whats_new/supervisor.jpg"),
+    ),
+    (
+        "add-provider.jpg",
+        include_bytes!("../assets/whats_new/add-provider.jpg"),
+    ),
 ];
 
 #[derive(Debug, Deserialize)]

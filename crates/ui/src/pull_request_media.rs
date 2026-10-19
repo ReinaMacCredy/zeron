@@ -653,6 +653,7 @@ mod tests {
                 workspace_root: None,
                 code: None,
                 tables: None,
+                math: Default::default(),
             };
             div().size_full().p(px(24.0)).child(render_description(
                 &parse_description(&self.description),

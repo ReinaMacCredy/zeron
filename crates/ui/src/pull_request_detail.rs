@@ -1486,6 +1486,7 @@ fn rich_text(
     key: String,
     url: &str,
     theme: &Theme,
+    math: crate::markdown::math::MathStyle,
     window: &mut Window,
     owner: gpui::WeakEntity<PullRequestDetailPage>,
 ) -> AnyElement {
@@ -1505,6 +1506,7 @@ fn rich_text(
         workspace_root: None,
         code: None,
         tables: None,
+        math,
         copy: Some(crate::markdown::render::CopyUi {
             handler: Rc::new(|_, code, _, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()))
@@ -2229,6 +2231,7 @@ impl Render for PullRequestDetailPage {
                                         format!("{}description", self.selection_prefix),
                                         &self.url,
                                         &theme,
+                                        crate::settings::math_style(cx),
                                         window,
                                         cx.weak_entity(),
                                     ))
@@ -2499,6 +2502,7 @@ impl Render for PullRequestDetailPage {
                                                         ),
                                                         &self.url,
                                                         &theme,
+                                                        crate::settings::math_style(cx),
                                                         window,
                                                         cx.weak_entity(),
                                                     ))

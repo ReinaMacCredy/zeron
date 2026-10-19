@@ -2,6 +2,58 @@
 # must be listed in whats_new.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.114"
+date = "Oct 20"
+hero = "mission-control.jpg"
+
+[[entry.features]]
+id = "mission-control"
+title = "Mission Control runs a task as a plan"
+description = "A lead agent breaks a task into steps and runs each one on its own thread. Approve the plan, edit steps, and follow every step from the mission strip."
+image = "mission-control.jpg"
+details = "Press Shift+Tab in the composer to start a mission, or make a running chat its lead. The Missions widget on Home tracks them all."
+
+[[entry.features]]
+id = "supervisor"
+title = "A Supervisor that watches your missions"
+description = "It wakes when a step fails, a lead asks, or two missions want the same port, and brings you only what needs you."
+image = "supervisor.jpg"
+details = "Answer from one feed, see what each nudge changed, and set what it may do on its own behind the gear."
+
+[[entry.features]]
+id = "add-provider"
+title = "Add any provider, or an agent from the ACP registry"
+description = "Run several accounts of one agent side by side, or add Amp, Auggie and other ACP agents in a few clicks."
+image = "add-provider.jpg"
+details = "Each instance signs in to its own home and gets its own tab in the model picker."
+
+[[entry.features]]
+id = "topic-compaction"
+title = "Compaction that knows when a new task starts"
+description = "A classifier reads each message and compacts first when you change topic. Use your agent's model, or TypeSafe's Jev classifier for about a second and a fraction of a cent."
+details = "Agents can compact themselves, and a switch keeps missions out."
+
+[[entry.features]]
+id = "child-report-back"
+title = "Child agents report back with their answer"
+description = "When a delegated thread or a step finishes, the wake quotes its reply, and steps that finish together arrive as one message."
+
+[[entry.features]]
+id = "in-app-docs"
+title = "Docs and release notes inside the app"
+description = "The ? on the rail opens recent releases, the full changelog, keybindings, and Docs articles for every feature."
+
+[[entry.features]]
+id = "smaller-things-0-2-114"
+title = "Smaller things"
+description = "Pastes over 5,000 characters become a Pasted text chip you can preview, skill chips open their SKILL.md, and you can annotate a browser page for your agent."
+
+[[entry.features]]
+id = "upstream-0-2-114"
+title = "From upstream Zeron"
+description = "LaTeX math in messages with a choice of math fonts, sidebar sections you can reorder by dragging their header, OpenCode question forms, and model defaults for Cursor Plus accounts."
+
+[[entry]]
 version = "0.2.113"
 date = "Oct 17"
 hero = "inbox.jpg"

@@ -6,7 +6,6 @@
 //! - [`mend`] auto-closes hanging inline markers in the streaming *display*
 //!   parse only; the canonical tree settles honestly on completion.
 
-mod math;
 pub mod mend;
 pub mod parser;
 
