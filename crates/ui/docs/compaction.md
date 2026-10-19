@@ -78,7 +78,6 @@ Only a message you type yourself, before a new turn starts. These are never clas
 - messages from another thread
 - handbacks from delegated tasks and from a mission's steps
 - your answers to an agent's question, and wakes when another thread asks something
-- the Supervisor's wakes
 - the agent's own next-message note, which is checked as described above
 - the first message after the agent compacted itself
 
