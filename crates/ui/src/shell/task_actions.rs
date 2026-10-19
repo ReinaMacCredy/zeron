@@ -833,7 +833,8 @@ impl Shell {
                 .subagent_tabs
                 .values()
                 .any(|tab| tab.doc_id == pane.chat_id)
-            || self.split_chat_id() == Some(pane.chat_id.as_str());
+            || self.split_chat_id() == Some(pane.chat_id.as_str())
+            || self.supervisor.holds(&pane.chat_id);
         if !held {
             self.state
                 .update(cx, |state, _| state.unwatch_subagent_doc(&pane.chat_id));

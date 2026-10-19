@@ -45,6 +45,7 @@ impl Shell {
     fn run_docs_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
             Action::Tasks => self.open_tasks(cx),
+            Action::Supervisor => self.open_supervisor(cx),
             Action::Inbox => self.open_inbox(cx),
             Action::Usage => self.open_usage(cx),
             Action::PullRequests => self.open_pull_requests(cx),

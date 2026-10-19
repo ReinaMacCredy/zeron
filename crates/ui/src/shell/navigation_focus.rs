@@ -97,6 +97,7 @@ impl Shell {
                 | Route::Inbox
                 | Route::Tasks
                 | Route::TaskCenter
+                | Route::Supervisor
                 | Route::Docs
         ) {
             (self.unfocused.clone(), self.unfocused.clone())

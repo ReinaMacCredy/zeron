@@ -87,6 +87,7 @@ pub mod settings;
 pub mod shell;
 pub mod sound;
 pub mod state;
+mod supervisor;
 pub(crate) mod surface_chrome;
 mod swipe;
 pub mod syntax_cache;
