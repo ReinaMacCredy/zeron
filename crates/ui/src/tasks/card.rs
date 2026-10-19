@@ -7,7 +7,7 @@ use gpui::{
     Focusable, IntoElement, KeyDownEvent, PathPromptOptions, Render, Subscription, Task, Window,
     div, prelude::*, px,
 };
-use zeron_proto::{ChatIndicator, HarnessId, TaskPatch, TaskStatus};
+use zeron_proto::{ChatConfig, ChatIndicator, TaskPatch, TaskStatus};
 
 use super::logic::{self, DuePick};
 use super::{Row, SAVE_DEBOUNCE, START_PENDING, linked_chat, patched, row_for};
@@ -44,8 +44,7 @@ pub enum TaskCardEvent {
         task_id: String,
         patch: Option<TaskPatch>,
         space_id: Option<String>,
-        harness: Option<HarnessId>,
-        model: Option<String>,
+        config: Option<ChatConfig>,
         orchestrate: Option<Orchestrate>,
     },
     CreateSpace {
@@ -508,14 +507,13 @@ impl TaskCard {
             .as_ref()
             .and_then(|open| open.run_in.clone())
             .flatten();
-        let (harness, model) = self.agent.read(cx).task_harness_model();
+        let config = self.agent.read(cx).resolved(cx).chat_config();
         let orchestrate = self.open.as_ref().and_then(|open| open.orchestrate);
         cx.emit(TaskCardEvent::Start {
             task_id,
             patch,
             space_id,
-            harness,
-            model,
+            config,
             orchestrate,
         });
         cx.notify();

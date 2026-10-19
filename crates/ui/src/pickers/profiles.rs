@@ -442,18 +442,23 @@ impl Pickers {
             if let Some(model) = &pick.model {
                 self.config.model = Some(model.clone());
                 self.config.reasoning = None;
+                self.config.model_options = None;
                 let label = self.profile_model_label(pick.harness, model);
-                self.defaults
-                    .remember_model(pick.harness, model.clone(), label);
+                if !self.detached {
+                    self.defaults
+                        .remember_model(pick.harness, model.clone(), label);
+                }
             }
             if let Some(level) = pick.reasoning {
                 self.config.reasoning = Some(level);
-                let model = pick
-                    .model
-                    .clone()
-                    .or_else(|| self.effective_model_id(cx).map(str::to_owned));
-                self.defaults
-                    .remember_reasoning(pick.harness, model.as_deref(), level);
+                if !self.detached {
+                    let model = pick
+                        .model
+                        .clone()
+                        .or_else(|| self.effective_model_id(cx).map(str::to_owned));
+                    self.defaults
+                        .remember_reasoning(pick.harness, model.as_deref(), level);
+                }
             }
             if let Some(mode) = pick.permission_mode {
                 self.config.permission_mode = mode;
@@ -461,7 +466,11 @@ impl Pickers {
             self.config.instructions = pick.instructions.clone();
             self.config.disabled_tools = pick.disabled_tools.clone();
             self.config.profile_id = Some(pick.profile_id.clone());
-            if !pick.model_options.is_empty()
+            if self.detached {
+                if !pick.model_options.is_empty() {
+                    self.config.model_options = Some(pick.model_options);
+                }
+            } else if !pick.model_options.is_empty()
                 && let Some(model) = pick
                     .model
                     .clone()

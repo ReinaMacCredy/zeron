@@ -110,8 +110,14 @@ async fn a_started_task_opens_a_linked_chat_whose_first_turn_is_the_task() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].title, "Fix the login bug");
 
-    let start =
-        json!({ "op": "startTask", "taskId": "t1", "chatId": "chat-t1", "spaceId": "space-1" });
+    let start = json!({
+        "op": "startTask", "taskId": "t1", "chatId": "chat-t1", "spaceId": "space-1",
+        "config": {
+            "harness": "mock", "model": "rec-model", "reasoning": "low",
+            "modelOptions": { "fastMode": "on" }, "sandbox": "workspace-write",
+            "permissionMode": "auto",
+        },
+    });
     mutate(start.clone()).await.unwrap();
     wait_for(
         || !prompts.lock().unwrap().is_empty(),
@@ -132,6 +138,13 @@ async fn a_started_task_opens_a_linked_chat_whose_first_turn_is_the_task() {
     let chat = core.workspace.chat("chat-t1").unwrap().unwrap();
     assert_eq!(chat.title.as_deref(), Some("Fix the login bug"));
     assert_eq!(chat.space_id.as_deref(), Some("space-1"));
+    let config = chat
+        .config
+        .expect("the started chat carries the picked config");
+    assert_eq!(config.model.as_deref(), Some("rec-model"));
+    assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
+    assert_eq!(config.model_options["fastMode"], "on");
+    assert_eq!(config.permission_mode, zeron_proto::PermissionMode::Auto);
 
     mutate(start).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
