@@ -35,14 +35,14 @@ Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > Ge
 
 ## Start a mission
 
-Above the composer, **New task**, **Mission Control** and **Running agents** are tabs. Click **Mission Control**, or press Shift+Tab in the composer, to start a [Mission Control task](zeron://docs/tasks) instead of a chat. On a list line, Shift+Tab still moves the line out a level. The composer's border takes the accent color, the placeholder asks you to describe the mission, and two choices replace the paperclip:
+Above the composer, **New task**, **Mission Control** and **Running agents** are tabs. Click **Mission Control**, or press Shift+Tab in the composer, to start a [Mission Control task](zeron://docs/mission-control) instead of a chat. On a list line, Shift+Tab still moves the line out a level. The composer's border takes the accent color, the placeholder asks you to describe the mission, and two choices replace the paperclip:
 
 - **plan.md** or **Steps only** picks what the lead writes. **plan.md** is the default.
 - **Review plan first**, on by default, makes the lead wait for your approval before it runs any step.
 
 Type the mission and click **Start mission**, or press the send key. The first line becomes the task's title and the rest its notes. Zeron creates the task in the project you picked, starts its lead with the agent, model, effort and permissions shown in the composer, and opens the task's Mission Control page. Press Shift+Tab again (**⇧Tab: back to New task** under the composer) or click **New task** to go back to a chat.
 
-You can also turn an open chat into a mission from its own composer. See [Tasks](zeron://docs/tasks).
+You can also turn an open chat into a mission from its own composer. See [Mission Control](zeron://docs/mission-control).
 
 ## Drafts
 

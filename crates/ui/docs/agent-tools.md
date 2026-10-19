@@ -23,7 +23,7 @@ The tools come in six groups, the same ones you see in Settings > Tools:
 - A child agent, or a profile an agent applies, never gets a higher permission mode than the chat that started it.
 - A question from an agent waits up to 25 minutes for your answer.
 - An agent can keep up to 8 chats it started open at once. The chats a task's lead starts for its steps do not count; **Delegated tasks per chat** in Settings > General caps how many steps run at once instead.
-- Only a [Mission Control task](zeron://docs/tasks)'s lead writes its plan and runs its steps, and while the plan waits for your approval, the lead cannot start a step.
+- Only a [Mission Control task](zeron://docs/mission-control)'s lead writes its plan and runs its steps, and while the plan waits for your approval, the lead cannot start a step.
 
 ## Turn tools off
 

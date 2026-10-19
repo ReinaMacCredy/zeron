@@ -99,7 +99,7 @@ What leaves your Mac for each check: your last four messages, each with the agen
 
 ## In Mission Control
 
-**In Mission Control** decides whether a mission's lead and step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a mission thread after its mission is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Tasks](zeron://docs/tasks) for missions.
+**In Mission Control** decides whether a mission's lead and step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a mission thread after its mission is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Mission Control](zeron://docs/mission-control) for missions.
 
 ## What you see in the transcript
 
