@@ -1490,6 +1490,18 @@ async fn resolving_findings_checks_the_owner_the_review_the_ids_and_the_notes() 
         ])
     );
     assert!(view["next"].as_str().unwrap().contains("resolve_findings"));
+    resolve(
+        "lead",
+        &review,
+        serde_json::json!([{ "id": "F3", "outcome": "skipped", "note": "x".repeat(2_500) }]),
+    )
+    .await
+    .unwrap();
+    let note = delegation(&rig.core, &review).finding_outcomes["F3"]
+        .note
+        .clone()
+        .unwrap();
+    assert_eq!(note.chars().count(), 2_000);
     let plain_view = serde_json::to_value(
         rig.core
             .doc_host

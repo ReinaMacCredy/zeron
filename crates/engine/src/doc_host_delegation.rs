@@ -146,6 +146,7 @@ pub(super) fn clip(text: &str, max: usize) -> String {
 }
 
 const HANDBACK_REPLY_CHARS: usize = 4_000;
+const FINDING_NOTE_CHARS: usize = 2_000;
 
 pub(super) fn handback_settle() -> std::time::Duration {
     std::time::Duration::from_millis(
@@ -826,7 +827,7 @@ impl DocHost {
                 text.map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
             };
-            let note = trimmed(resolution.note);
+            let note = trimmed(resolution.note).map(|note| clip(&note, FINDING_NOTE_CHARS));
             if resolution.outcome != FindingOutcomeKind::Fixed && note.is_none() {
                 return Err(failure(
                     "note_required",

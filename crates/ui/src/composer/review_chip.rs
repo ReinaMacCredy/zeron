@@ -2090,6 +2090,7 @@ impl Composer {
                             div()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
+                                .line_clamp(3)
                                 .child(reason)
                         }))
                         .child(
