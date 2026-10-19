@@ -121,19 +121,46 @@ impl DelegationCard {
             )
             .child(control)
     }
+
+    fn mission_row(theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        use crate::settings::ChatMission;
+        let control = widgets::segmented(
+            theme,
+            "chat-mission",
+            &[
+                (ChatMission::Lead, "This chat leads"),
+                (ChatMission::NewMission, "New mission reads this chat"),
+            ],
+            crate::settings::current(cx).chat_mission,
+            |choice, _, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |s| {
+                    s.chat_mission = choice
+                });
+                cx.refresh_windows();
+            },
+        )
+        .debug_selector(|| "chat-mission".into());
+        Self::row(
+            theme,
+            true,
+            "In a chat, Mission Control",
+            "Start mission in an open chat makes it the lead, or starts a new lead that reads it.",
+            control.into_any_element(),
+        )
+    }
 }
 
 impl Render for DelegationCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let card = widgets::section_card(&theme);
+        let card = widgets::section_card(&theme).child(Self::mission_row(&theme, cx));
         let Some(settings) = self.settings.ready().copied() else {
             let note = match &self.settings {
                 Loadable::Error(error) => error.clone(),
                 _ => "Loading…".to_string(),
             };
             return card.child(
-                widgets::card_row(&theme, true).child(
+                widgets::card_row(&theme, false).child(
                     div()
                         .text_color(theme.text_muted)
                         .child(SharedString::from(note)),
@@ -163,7 +190,7 @@ impl Render for DelegationCard {
         );
         card.child(Self::row(
             &theme,
-            true,
+            false,
             "Delegation depth",
             "How many levels of delegated tasks an agent may nest.",
             depth,

@@ -251,7 +251,9 @@ impl Shell {
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenSubagent { .. }
                         | ComposerEvent::OpenChat(_)
-                        | ComposerEvent::OpenChanges => {}
+                        | ComposerEvent::OpenChanges
+                        | ComposerEvent::StartMission(_)
+                        | ComposerEvent::OpenTaskCenter(_) => {}
                         ComposerEvent::UnsentChanged => cx.notify(),
                         ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenComputerSetup { missing } => {
