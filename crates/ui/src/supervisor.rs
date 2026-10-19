@@ -1,10 +1,14 @@
+mod feed;
+
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, Hsla, IntoElement, Render,
-    SharedString, Subscription, Task, Window, div, prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Hsla, IntoElement,
+    Render, SharedString, Subscription, Task, Window, canvas, div, prelude::*, px, relative,
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
@@ -16,34 +20,51 @@ use zeron_proto::supervisor::{
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
-    SessionStatus, TaskStatus, UserInputAnswer, UserInputQuestion,
+    StepStatus, TaskStatus, UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
 use crate::composer::Composer;
 use crate::home::MissionRow;
 use crate::icons::{self, icon};
+use crate::motion::{self, CubicBezier, MotionSpec, Tween};
 use crate::pickers::Pickers;
-use crate::popover::Loadable;
+use crate::popover::{self, Loadable, Popup};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::tasks::{Rollup, TaskCenter, chat_brand, linked_chat, rollup, step_chat};
 use crate::theme::Theme;
 use crate::transcript::Transcript;
 use crate::typography::ui_rems;
+use feed::{Entry, Feed, Filter, Kind, Memory, Row};
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
 const PROFILE_ID: &str = "slp-supervisor";
 const NO_AGENT: &str =
     "no agent is installed and turned on. Turn one on in Settings > Providers, then try again.";
-const ROLE: &str = "Talks direction with you, watches every mission for drift and cross-scope \
-                    problems, and steps in through each Lead within the authority you set.";
 const HEARTBEATS: [(u32, &str); 3] = [(0, "Off"), (30, "30 min"), (60, "60 min")];
 const DRAWER_WIDTH: f32 = 380.0;
 const MESSAGE_CHARS: usize = 600;
 const TITLE_CHARS: usize = 120;
 const RECENTLY_ACTIVE: Duration = Duration::from_secs(180);
 const NO_EFFECT_AFTER_MINUTES: i64 = 10;
+const EARLIER_ROWS: usize = 50;
+const CONVERSATION_HEIGHT: f32 = 320.0;
+const EASE_PAGE: CubicBezier = CubicBezier::new(0.2, 0.9, 0.3, 1.0);
+const ENTER: MotionSpec = MotionSpec::new(340, EASE_PAGE);
+const ENTER_STAGGER_MS: u64 = 45;
+const FILL: MotionSpec = MotionSpec::new(1000, EASE_PAGE);
+const ROW_FOLD: MotionSpec = MotionSpec::new(260, EASE_PAGE);
+const ARRIVE: MotionSpec = MotionSpec::new(500, EASE_PAGE);
+const GLOW: MotionSpec = MotionSpec::new(1600, motion::EASE_OUT).with_delay(150);
+const FOLD: MotionSpec = MotionSpec::new(300, EASE_PAGE);
+const MISSION_FOLD: MotionSpec = MotionSpec::new(280, EASE_PAGE);
+const CHEVRON_TURN: MotionSpec = MotionSpec::new(220, EASE_PAGE);
+const DRAWER_SLIDE: MotionSpec = MotionSpec::new(300, EASE_PAGE);
+const CHIP_FADE: MotionSpec = MotionSpec::new(300, motion::EASE);
+const COUNT_TICK: MotionSpec = MotionSpec::new(350, EASE_PAGE);
+const DOT_FLASH: MotionSpec = MotionSpec::new(900, motion::EASE_OUT);
+pub(crate) const BADGE_POP: MotionSpec = MotionSpec::new(400, motion::LINEAR);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NeedsYouRoute {
@@ -113,6 +134,16 @@ pub(crate) fn fresh_needs_you(
     };
     *seen = Some(rows.iter().map(row_key).collect());
     fresh
+}
+
+pub(crate) fn badge_scale(t: f32) -> f32 {
+    let rise = 0.4;
+    let peak = if t < rise {
+        motion::EASE_OUT.eval(t / rise)
+    } else {
+        1.0 - motion::EASE_OUT.eval((t - rise) / (1.0 - rise))
+    };
+    1.0 + 0.35 * peak
 }
 
 fn no_effect_since(at: DateTime<Utc>) -> DateTime<Utc> {
@@ -469,28 +500,62 @@ fn wake_reason(wake: &SupervisorWake) -> String {
     }
 }
 
-fn state_line(snapshot: Option<&SupervisorSnapshot>) -> String {
-    let Some(snapshot) = snapshot.filter(|s| s.chat_id.is_some()) else {
-        return "Off".into();
-    };
-    let word = match snapshot.state {
-        SupervisorState::Off => return "Off".into(),
-        SupervisorState::Stopped => {
-            return match snapshot.waiting {
-                0 => "Stopped · send a message to resume".into(),
-                n => format!(
-                    "Stopped · {n} {} waiting · send a message to resume",
-                    plural(n, "wake", "wakes")
-                ),
-            };
-        }
-        SupervisorState::Asleep => "Asleep",
-        SupervisorState::Awake => "Awake",
-    };
-    match snapshot.wakes.iter().find(|wake| wake.woke()) {
-        Some(wake) => format!("{word} · woke {} for {}", clock(wake.at), wake_reason(wake)),
-        None => format!("{word} · no wakes yet"),
+fn live_state(snapshot: Option<&SupervisorSnapshot>) -> SupervisorState {
+    snapshot
+        .filter(|snapshot| snapshot.chat_id.is_some())
+        .map_or(SupervisorState::Off, |snapshot| snapshot.state)
+}
+
+fn status_line(snapshot: Option<&SupervisorSnapshot>, watched: usize) -> String {
+    let watching = format!(
+        "watching {watched} {}",
+        plural(watched, "mission", "missions")
+    );
+    match (live_state(snapshot), snapshot.map_or(0, |s| s.waiting)) {
+        (SupervisorState::Off, _) => "Off".into(),
+        (SupervisorState::Stopped, 0) => "Stopped · send a message to resume".into(),
+        (SupervisorState::Stopped, n) => format!(
+            "Stopped · {n} {} waiting · send a message to resume",
+            plural(n, "wake", "wakes")
+        ),
+        (SupervisorState::Asleep, _) => format!("Asleep · {watching}"),
+        (SupervisorState::Awake, _) => format!("Awake · {watching}"),
     }
+}
+
+fn last_wake_line(snapshot: Option<&SupervisorSnapshot>) -> String {
+    match snapshot.and_then(|snapshot| snapshot.wakes.iter().find(|wake| wake.woke())) {
+        Some(wake) => format!("Last woke {} for {}", clock(wake.at), wake_reason(wake)),
+        None => "No wakes yet".into(),
+    }
+}
+
+fn last_message(entries: &[SessionMessageEntry], wakes: &[SupervisorWake]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        if let Some(wake) = wakes.iter().find(|wake| wake.id == entry.id) {
+            let labels: Vec<&str> = wake.events.iter().map(|e| e.label.as_str()).collect();
+            return Some(match labels.as_slice() {
+                [] => "Woke".to_owned(),
+                labels => format!("Woke: {}", labels.join("; ")),
+            });
+        }
+        let text = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.trim()),
+                _ => None,
+            })
+            .find(|text| !text.is_empty())?;
+        let who = match entry.role {
+            MessageRole::User => "You",
+            _ => "Supervisor",
+        };
+        Some(format!(
+            "{who}: {}",
+            clip_to(&crate::transcript::single_line(text), TITLE_CHARS)
+        ))
+    })
 }
 
 fn resource_label(state: ResourceState) -> &'static str {
@@ -596,6 +661,18 @@ fn profile_config(profile: &AgentProfile) -> ChatConfig {
 struct Mission {
     row: MissionRow,
     watch: Watch,
+    current: String,
+}
+
+impl Mission {
+    fn fraction(&self) -> f32 {
+        let PlanProgress { done, total } = self.row.progress;
+        if total == 0 {
+            0.0
+        } else {
+            (done as f32 / total as f32).min(1.0)
+        }
+    }
 }
 
 fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
@@ -606,10 +683,8 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
     crate::home::mission_rows(state, now)
         .into_iter()
         .map(|row| {
-            let host = state
-                .tasks
-                .iter()
-                .find(|task| task.id == row.task_id)
+            let task = state.tasks.iter().find(|task| task.id == row.task_id);
+            let host = task
                 .and_then(|task| linked_chat(&state.chats, task))
                 .map(|chat| chat.device_id.as_str());
             let watch = watch_of(
@@ -618,7 +693,26 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
                 state.local_device_id.as_deref(),
                 unwatched,
             );
-            Mission { row, watch }
+            let current = task
+                .map(|task| rollup(state, task, now))
+                .and_then(|plan| {
+                    let step = plan
+                        .steps
+                        .iter()
+                        .find(|step| !matches!(step.status, StepStatus::Done | StepStatus::Skipped))
+                        .or(plan.steps.last())?;
+                    Some(format!(
+                        "{} · {}",
+                        plan.step_label(&step.step.id)?,
+                        step.step.title
+                    ))
+                })
+                .unwrap_or_else(|| row.label.clone());
+            Mission {
+                row,
+                watch,
+                current,
+            }
         })
         .collect()
 }
@@ -633,6 +727,87 @@ fn model_label(chat: &Chat, cx: &App) -> Option<String> {
     ))
 }
 
+struct Fold {
+    tween: Tween,
+    height: Rc<Cell<f32>>,
+}
+
+impl Fold {
+    fn at(open: bool, now: Instant) -> Self {
+        Self {
+            tween: Tween::at(if open { 1.0 } else { 0.0 }, now),
+            height: Rc::new(Cell::new(0.0)),
+        }
+    }
+
+    fn set(&mut self, open: bool, spec: MotionSpec, reduced: bool, now: Instant) {
+        let to = if open { 1.0 } else { 0.0 };
+        if self.tween.target() != to {
+            self.tween.retarget(to, spec, reduced, now);
+        }
+    }
+
+    fn value(&self, now: Instant) -> f32 {
+        self.tween.value_at(now)
+    }
+
+    fn moving(&self, now: Instant) -> bool {
+        !self.tween.settled_at(now)
+    }
+
+    fn gone(&self, now: Instant) -> bool {
+        !self.moving(now) && self.tween.target() == 0.0
+    }
+}
+
+fn run(from: f32, to: f32, spec: MotionSpec, reduced: bool, now: Instant) -> Tween {
+    let mut tween = Tween::at(from, now);
+    tween.retarget(to, spec, reduced, now);
+    tween
+}
+
+struct Arrival {
+    slide: Tween,
+    glow: Tween,
+}
+
+struct RowMotion {
+    fold: Fold,
+    group: u8,
+    row: Row,
+    arrival: Option<Arrival>,
+}
+
+struct Tick {
+    value: usize,
+    tween: Tween,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tone {
+    Plain,
+    Ok,
+    Warn,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Face {
+    label: String,
+    tone: Tone,
+}
+
+struct ChipFade {
+    face: Face,
+    from: Option<Face>,
+    tween: Tween,
+}
+
+struct MissionMotion {
+    fold: Fold,
+    chevron: Tween,
+    fill: Tween,
+}
+
 pub struct SupervisorPage {
     state: Entity<AppState>,
     pickers: Entity<Pickers>,
@@ -643,11 +818,30 @@ pub struct SupervisorPage {
     ensured: Option<String>,
     expanded: HashSet<String>,
     drawer: Option<Owner>,
-    wakes_open: bool,
-    pane_open: bool,
+    drawer_open: bool,
+    drawer_slide: Tween,
     pane: Option<Pane>,
     replies: HashMap<String, Reply>,
     picks: HashMap<String, HashMap<String, Vec<String>>>,
+    filter: Filter,
+    memory: Memory,
+    rows: HashMap<String, RowMotion>,
+    arrivals: HashSet<String>,
+    calm: Fold,
+    ticks: HashMap<Kind, Tick>,
+    chips: HashMap<String, ChipFade>,
+    missions: HashMap<String, MissionMotion>,
+    earlier_open: bool,
+    earlier: Fold,
+    earlier_chevron: Tween,
+    conversation_open: bool,
+    conversation: Tween,
+    gear: Popup<()>,
+    gear_focus: FocusHandle,
+    entered_at: Option<Instant>,
+    fresh: bool,
+    flash: Tween,
+    last_wake: Option<Option<String>>,
     profiles_task: Option<Task<()>>,
     settings_task: Option<Task<()>>,
     ensure_task: Option<Task<()>>,
@@ -667,6 +861,7 @@ impl SupervisorPage {
                 page.load_profiles(cx)
             }),
         ];
+        let now = Instant::now();
         let mut page = Self {
             state,
             pickers,
@@ -677,11 +872,30 @@ impl SupervisorPage {
             ensured: None,
             expanded: HashSet::new(),
             drawer: None,
-            wakes_open: false,
-            pane_open: true,
+            drawer_open: false,
+            drawer_slide: Tween::at(0.0, now),
             pane: None,
             replies: HashMap::new(),
             picks: HashMap::new(),
+            filter: Filter::All,
+            memory: Memory::default(),
+            rows: HashMap::new(),
+            arrivals: HashSet::new(),
+            calm: Fold::at(false, now),
+            ticks: HashMap::new(),
+            chips: HashMap::new(),
+            missions: HashMap::new(),
+            earlier_open: false,
+            earlier: Fold::at(false, now),
+            earlier_chevron: Tween::at(0.0, now),
+            conversation_open: false,
+            conversation: Tween::at(0.0, now),
+            gear: Popup::default(),
+            gear_focus: cx.focus_handle(),
+            entered_at: None,
+            fresh: true,
+            flash: Tween::at(1.0, now),
+            last_wake: None,
             profiles_task: None,
             settings_task: None,
             ensure_task: None,
@@ -690,6 +904,7 @@ impl SupervisorPage {
         };
         page.load_profiles(cx);
         page.load_settings(cx);
+        page.on_state(cx);
         page
     }
 
@@ -698,6 +913,13 @@ impl SupervisorPage {
         if self.ensure != Ensure::Running {
             self.ensure = Ensure::Wanted;
         }
+        self.entered_at = (!motion::reduced_motion(cx)).then(Instant::now);
+        self.fresh = true;
+        self.rows.clear();
+        self.arrivals.clear();
+        self.ticks.clear();
+        self.chips.clear();
+        self.missions.clear();
         self.load_settings(cx);
         self.try_ensure(cx);
         self.request_check(cx);
@@ -725,6 +947,9 @@ impl SupervisorPage {
             self.ensure = Ensure::Idle;
         }
         self.drawer = None;
+        self.drawer_open = false;
+        self.drawer_slide = Tween::at(0.0, Instant::now());
+        self.gear = Popup::default();
         self.pane = None;
         cx.notify();
     }
@@ -759,6 +984,33 @@ impl SupervisorPage {
         if known {
             self.ensured = None;
         }
+        let choices: HashMap<String, String> = self
+            .replies
+            .iter()
+            .filter_map(|(key, reply)| match reply {
+                Reply::Sent(choice) if !choice.is_empty() => Some((key.clone(), choice.clone())),
+                _ => None,
+            })
+            .collect();
+        let (arrived, wake) = {
+            let snapshot = self.state.read(cx).supervisor.as_ref();
+            (
+                self.memory.observe(snapshot, &choices, Utc::now()),
+                snapshot.map(|snapshot| snapshot.wakes.first().map(|wake| wake.id.clone())),
+            )
+        };
+        let woke = matches!((&self.last_wake, &wake), (Some(seen), Some(now)) if seen != now && now.is_some());
+        if wake.is_some() {
+            self.last_wake = wake;
+        }
+        if woke || !arrived.is_empty() {
+            let reduced = motion::reduced_motion(cx);
+            self.flash = run(0.0, 1.0, DOT_FLASH, reduced, Instant::now());
+        }
+        if !arrived.is_empty() {
+            self.filter = Filter::All;
+            self.arrivals.extend(arrived);
+        }
         let open: HashSet<String> = self
             .state
             .read(cx)
@@ -780,7 +1032,15 @@ impl SupervisorPage {
             .read(cx)
             .supervisor
             .as_ref()
-            .and_then(|snapshot| next_effect_check(&snapshot.interventions, now));
+            .and_then(|snapshot| {
+                [
+                    next_effect_check(&snapshot.interventions, now),
+                    feed::next_expiry(&snapshot.interventions, now),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+            });
         self.effect_task = next.map(|at| {
             let wait = (at - now).to_std().unwrap_or_default() + Duration::from_secs(1);
             cx.spawn(async move |page, cx| {
@@ -1122,13 +1382,88 @@ impl SupervisorPage {
     fn open_drawer(&mut self, owner: Owner, cx: &mut Context<Self>) {
         let thread = self.owner_thread(&owner, cx);
         self.drawer = Some(owner);
+        self.drawer_open = true;
+        self.drawer_slide.retarget(
+            1.0,
+            DRAWER_SLIDE,
+            motion::reduced_motion(cx),
+            Instant::now(),
+        );
         cx.emit(SupervisorEvent::WatchDoc(thread));
         cx.notify();
     }
 
     fn close_drawer(&mut self, cx: &mut Context<Self>) {
-        self.drawer = None;
-        cx.emit(SupervisorEvent::WatchDoc(None));
+        self.drawer_open = false;
+        let reduced = motion::reduced_motion(cx);
+        self.drawer_slide
+            .retarget(0.0, DRAWER_SLIDE, reduced, Instant::now());
+        let wait = if reduced {
+            Duration::ZERO
+        } else {
+            DRAWER_SLIDE.total().mul_f32(motion::speed_scale())
+        };
+        cx.spawn(async move |page, cx| {
+            cx.background_executor().timer(wait).await;
+            page.update(cx, |page, cx| {
+                if !page.drawer_open && page.drawer.take().is_some() {
+                    cx.emit(SupervisorEvent::WatchDoc(None));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_gear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.gear.open(());
+        window.focus(&self.gear_focus, cx);
+        self.load_settings(cx);
+        cx.notify();
+    }
+
+    fn close_gear(&mut self, cx: &mut Context<Self>) {
+        if self.gear.begin_close() {
+            popover::reap_popup(cx, |page: &mut Self| &mut page.gear);
+            cx.notify();
+        }
+    }
+
+    fn pick_filter(&mut self, chip: Option<Kind>, cx: &mut Context<Self>) {
+        self.filter = self.filter.pick(chip);
+        cx.notify();
+    }
+
+    fn toggle_earlier(&mut self, cx: &mut Context<Self>) {
+        self.earlier_open = !self.earlier_open;
+        let (reduced, now) = (motion::reduced_motion(cx), Instant::now());
+        self.earlier.set(self.earlier_open, FOLD, reduced, now);
+        self.earlier_chevron.retarget(
+            if self.earlier_open { 1.0 } else { 0.0 },
+            CHEVRON_TURN,
+            reduced,
+            now,
+        );
+        cx.notify();
+    }
+
+    fn toggle_conversation(&mut self, cx: &mut Context<Self>) {
+        self.conversation_open = !self.conversation_open;
+        self.conversation.retarget(
+            if self.conversation_open { 1.0 } else { 0.0 },
+            FOLD,
+            motion::reduced_motion(cx),
+            Instant::now(),
+        );
+        cx.notify();
+    }
+
+    fn toggle_mission(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(task_id) {
+            self.expanded.insert(task_id.to_owned());
+        }
         cx.notify();
     }
 
@@ -1141,12 +1476,177 @@ impl SupervisorPage {
             .map(|profile| profile.name.clone())
     }
 
-    fn render_dot(&self, live: bool, theme: &Theme) -> AnyElement {
-        let tone = if live {
-            crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
+    fn sync_motion(&mut self, feed: &Feed, missions: &[Mission], now: Instant, reduced: bool) {
+        let fresh = std::mem::take(&mut self.fresh);
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut any_shown = false;
+        for (group, row, shown) in feed.rows(self.filter) {
+            let shown = shown && !matches!(self.replies.get(&row.key), Some(Reply::Sent(_)));
+            any_shown |= shown;
+            seen.insert(row.key.clone());
+            if let Some(motion) = self.rows.get_mut(&row.key) {
+                motion.group = group;
+                motion.row = row.clone();
+                motion.fold.set(shown, ROW_FOLD, reduced, now);
+                if motion
+                    .arrival
+                    .as_ref()
+                    .is_some_and(|a| a.slide.settled_at(now) && a.glow.settled_at(now))
+                {
+                    motion.arrival = None;
+                }
+                continue;
+            }
+            let arriving = !fresh && !reduced && self.arrivals.contains(&row.key);
+            let mut fold = Fold::at(fresh && shown, now);
+            fold.set(shown, ROW_FOLD, reduced, now);
+            self.rows.insert(
+                row.key.clone(),
+                RowMotion {
+                    fold,
+                    group,
+                    row: row.clone(),
+                    arrival: arriving.then(|| Arrival {
+                        slide: run(0.0, 1.0, ARRIVE, reduced, now),
+                        glow: run(0.0, 1.0, GLOW, reduced, now),
+                    }),
+                },
+            );
+        }
+        self.arrivals.clear();
+        self.rows.retain(|key, motion| {
+            if seen.contains(key) {
+                return true;
+            }
+            motion.fold.set(false, ROW_FOLD, reduced, now);
+            !motion.fold.gone(now)
+        });
+        if fresh {
+            self.calm.tween = Tween::at(if any_shown { 0.0 } else { 1.0 }, now);
         } else {
-            theme.text_faint
+            self.calm.set(!any_shown, FOLD, reduced, now);
+        }
+        for kind in Kind::chips() {
+            let count = feed.count(kind);
+            match self.ticks.get_mut(&kind) {
+                Some(tick) if tick.value != count => {
+                    tick.value = count;
+                    tick.tween = run(0.0, 1.0, COUNT_TICK, reduced, now);
+                }
+                Some(_) => {}
+                None => {
+                    self.ticks.insert(
+                        kind,
+                        Tick {
+                            value: count,
+                            tween: Tween::at(1.0, now),
+                        },
+                    );
+                }
+            }
+        }
+        let utc = Utc::now();
+        for row in &feed.open {
+            let Entry::Intervention(intervention) = &row.entry else {
+                continue;
+            };
+            let Some(face) = chip_face(intervention, utc) else {
+                self.chips.remove(&row.key);
+                continue;
+            };
+            match self.chips.get_mut(&row.key) {
+                Some(fade) if fade.face != face => {
+                    fade.from = Some(std::mem::replace(&mut fade.face, face));
+                    fade.tween = run(0.0, 1.0, CHIP_FADE, reduced, now);
+                }
+                Some(_) => {}
+                None => {
+                    self.chips.insert(
+                        row.key.clone(),
+                        ChipFade {
+                            face,
+                            from: None,
+                            tween: Tween::at(1.0, now),
+                        },
+                    );
+                }
+            }
+        }
+        let rows = &self.rows;
+        self.chips.retain(|key, _| rows.contains_key(key));
+        for mission in missions {
+            let id = &mission.row.task_id;
+            let (open, fill) = (self.expanded.contains(id), mission.fraction());
+            let turn = if open { 1.0 } else { 0.0 };
+            match self.missions.get_mut(id) {
+                Some(motion) => {
+                    if motion.fill.target() != fill {
+                        motion.fill.retarget(fill, FILL, reduced, now);
+                    }
+                    motion.fold.set(open, MISSION_FOLD, reduced, now);
+                    if motion.chevron.target() != turn {
+                        motion.chevron.retarget(turn, CHEVRON_TURN, reduced, now);
+                    }
+                }
+                None => {
+                    self.missions.insert(
+                        id.clone(),
+                        MissionMotion {
+                            fold: Fold::at(open, now),
+                            chevron: Tween::at(turn, now),
+                            fill: run(0.0, fill, FILL, reduced, now),
+                        },
+                    );
+                }
+            }
+        }
+        self.missions
+            .retain(|id, _| missions.iter().any(|mission| &mission.row.task_id == id));
+    }
+
+    fn enter_progress(&self, block: u64, now: Instant) -> f32 {
+        let Some(at) = self.entered_at else {
+            return 1.0;
         };
+        let spec = ENTER.with_delay(block * ENTER_STAGGER_MS);
+        let total = spec.total().mul_f32(motion::speed_scale()).as_secs_f32();
+        if total <= 0.0 {
+            return 1.0;
+        }
+        spec.progress(now.saturating_duration_since(at).as_secs_f32() / total)
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        let settled = |tween: &Tween| tween.settled_at(now);
+        self.rows.values().any(|motion| {
+            motion.fold.moving(now)
+                || motion
+                    .arrival
+                    .as_ref()
+                    .is_some_and(|a| !settled(&a.slide) || !settled(&a.glow))
+        }) || self.calm.moving(now)
+            || self.ticks.values().any(|tick| !settled(&tick.tween))
+            || self.chips.values().any(|fade| !settled(&fade.tween))
+            || self.missions.values().any(|motion| {
+                motion.fold.moving(now) || !settled(&motion.chevron) || !settled(&motion.fill)
+            })
+            || self.earlier.moving(now)
+            || !settled(&self.earlier_chevron)
+            || !settled(&self.conversation)
+            || !settled(&self.drawer_slide)
+            || !settled(&self.flash)
+            || (0..3).any(|block| self.enter_progress(block, now) < 1.0)
+    }
+
+    fn render_dot(&self, state: SupervisorState, theme: &Theme, now: Instant) -> AnyElement {
+        let amber = needs_tone(theme);
+        let base = match state {
+            SupervisorState::Awake => ok_tone(theme),
+            SupervisorState::Stopped => amber,
+            _ => theme.text_faint,
+        };
+        let flash = (!self.flash.settled_at(now)).then(|| self.flash.value_at(now));
+        let live = state == SupervisorState::Awake;
         div()
             .debug_selector(move || {
                 if live {
@@ -1158,17 +1658,34 @@ impl SupervisorPage {
             .flex_none()
             .size(px(7.0))
             .child(
-                gpui::canvas(
+                canvas(
                     |_, _, _| {},
                     move |bounds, _, window, cx| {
-                        let quad = gpui::fill(bounds, tone).corner_radii(bounds.size.width / 2.0);
-                        match live
-                            .then(|| crate::motion::breathing(0.35, 1.0, cx))
-                            .flatten()
-                        {
-                            Some(animation) => window.paint_animated_quad(quad, animation),
-                            None => window.paint_quad(quad),
-                        }
+                        let round = |bounds: gpui::Bounds<gpui::Pixels>| bounds.size.width / 2.0;
+                        let Some(t) = flash else {
+                            let quad = gpui::fill(bounds, base).corner_radii(round(bounds));
+                            match live.then(|| motion::breathing(0.35, 1.0, cx)).flatten() {
+                                Some(animation) => window.paint_animated_quad(quad, animation),
+                                None => window.paint_quad(quad),
+                            }
+                            return;
+                        };
+                        let spread = px(12.0 * t);
+                        let ring = gpui::Bounds::new(
+                            gpui::point(bounds.origin.x - spread, bounds.origin.y - spread),
+                            gpui::size(
+                                bounds.size.width + spread * 2.0,
+                                bounds.size.height + spread * 2.0,
+                            ),
+                        );
+                        window.paint_quad(
+                            gpui::fill(ring, amber.opacity(0.9 * (1.0 - t)))
+                                .corner_radii(round(ring)),
+                        );
+                        window.paint_quad(
+                            gpui::fill(bounds, motion::mix(amber, base, t))
+                                .corner_radii(round(bounds)),
+                        );
                     },
                 )
                 .size_full(),
@@ -1176,112 +1693,252 @@ impl SupervisorPage {
             .into_any_element()
     }
 
-    fn render_header(&self, watched: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (model, working, line) = {
-            let state = self.state.read(cx);
-            let chat = self
-                .chat_id(cx)
-                .and_then(|id| state.chats.iter().find(|chat| chat.id == id));
-            let working = chat
-                .and_then(|chat| state.session_for(&chat.id))
-                .is_some_and(|session| session.status == SessionStatus::Working);
+    fn render_header(
+        &self,
+        feed: &Feed,
+        watched: usize,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (state, line, last) = {
+            let snapshot = self.state.read(cx).supervisor.as_ref();
             (
-                chat.and_then(|chat| model_label(chat, cx)),
-                working,
-                state_line(state.supervisor.as_ref()),
+                live_state(snapshot),
+                status_line(snapshot, watched),
+                last_wake_line(snapshot),
             )
         };
-        let watching = match model {
-            Some(model) => format!(
-                "Watching {watched} {} · {model}",
-                plural(watched, "mission", "missions")
-            ),
-            None => format!(
-                "Watching {watched} {}",
-                plural(watched, "mission", "missions")
-            ),
-        };
-        let toggle = widgets::text_action(
-            theme,
-            widgets::ActionTone::Quiet,
-            if self.pane_open {
-                "Hide conversation"
+        let stopped = state == SupervisorState::Stopped;
+        let amber = needs_tone(theme);
+        let pill = div()
+            .id("supervisor-status")
+            .debug_selector(|| "supervisor-status".into())
+            .role(gpui::Role::Status)
+            .aria_label(line.clone())
+            .tooltip(widgets::text_tooltip(last))
+            .ml_auto()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .pl(px(8.0))
+            .pr(px(10.0))
+            .py(px(3.0))
+            .rounded_full()
+            .border_1()
+            .border_color(if stopped {
+                amber.opacity(0.45)
             } else {
-                "Show conversation"
-            },
-        )
-        .id("supervisor-pane-toggle")
-        .debug_selector(|| "supervisor-pane-toggle".into())
-        .role(gpui::Role::Button)
-        .aria_label(if self.pane_open {
-            "Hide conversation"
-        } else {
-            "Show conversation"
-        })
-        .flex_none()
-        .rounded_full()
-        .on_click(cx.listener(|page, _: &ClickEvent, _, cx| {
-            page.pane_open = !page.pane_open;
-            cx.notify();
-        }));
+                theme.border
+            })
+            .text_size(ui_rems(11.5))
+            .text_color(if stopped { amber } else { theme.text_muted })
+            .child(self.render_dot(state, theme, now))
+            .child(
+                div()
+                    .debug_selector(|| "supervisor-state".into())
+                    .child(line),
+            );
+        let open = self.gear.get().is_some();
+        let gear = div()
+            .id("supervisor-gear")
+            .debug_selector(|| "supervisor-gear".into())
+            .role(gpui::Role::Button)
+            .aria_label("Authority and wake log")
+            .aria_expanded(self.gear.is_open())
+            .tooltip(widgets::text_tooltip("Authority and wake log"))
+            .relative()
+            .flex_none()
+            .size(px(26.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .when(open, |el| el.bg(theme.wash(0.08)))
+            .hover(|s| s.bg(theme.wash(0.08)))
+            .child(
+                icon(icons::LUCIDE_SETTINGS)
+                    .size(px(15.0))
+                    .text_color(if open { theme.text } else { theme.text_muted }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|page, _, _, _| page.gear.note_trigger_press()),
+            )
+            .on_click(cx.listener(|page, event: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                let was_open = if matches!(event, ClickEvent::Keyboard(_)) {
+                    page.gear.is_open()
+                } else {
+                    page.gear.take_press_was_open()
+                };
+                if was_open {
+                    page.close_gear(cx);
+                } else {
+                    page.open_gear(window, cx);
+                }
+            }))
+            .when(open, |el| {
+                el.child(popover::anchored_menu_below_end(
+                    "supervisor-gear-menu",
+                    self.render_gear_menu(theme, cx),
+                    self.gear.closing_since(),
+                ))
+            });
+        let mut chips = vec![self.render_count_chip(None, 0, now, theme, cx)];
+        for kind in Kind::chips() {
+            chips.push(self.render_count_chip(Some(kind), feed.count(kind), now, theme, cx));
+        }
         div()
             .id("supervisor-header")
             .debug_selector(|| "supervisor-header".into())
-            .px(px(8.0))
             .flex()
             .flex_col()
-            .gap(px(6.0))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(10.0))
                     .child(
                         icon(icons::LUCIDE_SHIELD)
-                            .size(px(18.0))
+                            .size(px(16.0))
                             .text_color(theme.text),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(ui_rems(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .flex_none()
+                            .text_size(ui_rems(16.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text)
                             .child("Supervisor"),
                     )
-                    .child(toggle),
+                    .child(pill)
+                    .child(gear),
             )
             .child(
                 div()
-                    .text_size(ui_rems(13.0))
-                    .line_height(ui_rems(19.0))
-                    .text_color(theme.text_muted)
-                    .child(ROLE),
-            )
-            .child(
-                div()
-                    .debug_selector(|| "supervisor-live".into())
+                    .id("supervisor-chips")
+                    .mt(px(14.0))
                     .flex()
-                    .items_center()
                     .flex_wrap()
-                    .gap(px(8.0))
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(self.render_dot(working, theme))
-                    .child(
-                        div()
-                            .debug_selector(|| "supervisor-watching".into())
-                            .text_color(theme.text)
-                            .child(watching),
-                    )
-                    .child(div().text_color(theme.text_faint).child("·"))
-                    .child(
-                        div()
-                            .debug_selector(|| "supervisor-state".into())
-                            .child(line),
-                    ),
+                    .gap(px(6.0))
+                    .children(chips),
             )
+            .into_any_element()
+    }
+
+    fn render_count_chip(
+        &self,
+        kind: Option<Kind>,
+        count: usize,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = match kind {
+            None => self.filter == Filter::All,
+            Some(kind) => self.filter == Filter::Only(kind),
+        };
+        let hot = kind == Some(Kind::Needs) && count > 0;
+        let amber = needs_tone(theme);
+        let label = kind.map_or("All", Kind::chip);
+        let key = format!("supervisor-chip-{}", label.to_lowercase().replace(' ', "-"));
+        let selector = key.clone();
+        let tick = kind
+            .and_then(|kind| self.ticks.get(&kind))
+            .map_or(1.0, |tick| tick.tween.value_at(now));
+        div()
+            .id(SharedString::from(key))
+            .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label(match kind {
+                None => "All".to_owned(),
+                Some(_) => format!("{label}, {count}"),
+            })
+            .aria_selected(selected)
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .px(px(10.0))
+            .py(px(5.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(match (hot, selected) {
+                (true, _) => amber.opacity(0.55),
+                (false, true) => theme.border_strong,
+                (false, false) => theme.border,
+            })
+            .when(selected, |el| {
+                el.bg(if hot {
+                    amber.opacity(0.12)
+                } else {
+                    theme.wash(0.08)
+                })
+            })
+            .cursor_pointer()
+            .text_size(ui_rems(11.5))
+            .text_color(if selected {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .hover(|s| s.text_color(theme.text))
+            .child(label)
+            .when(kind.is_some(), |el| {
+                el.child(
+                    div()
+                        .h(ui_rems(14.0))
+                        .line_height(ui_rems(14.0))
+                        .overflow_hidden()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(
+                            div()
+                                .relative()
+                                .top(ui_rems(14.0 * (1.0 - tick)))
+                                .child(count.to_string()),
+                        ),
+                )
+            })
+            .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| page.pick_filter(kind, cx)))
+            .into_any_element()
+    }
+
+    fn render_gear_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let popup = theme.for_popup();
+        let wakes: Vec<SupervisorWake> = self
+            .state
+            .read(cx)
+            .supervisor
+            .as_ref()
+            .map(|snapshot| snapshot.wakes.clone())
+            .unwrap_or_default();
+        popover::popover_card(&popup)
+            .id("supervisor-gear-card")
+            .debug_selector(|| "supervisor-gear-menu".into())
+            .track_focus(&self.gear_focus)
+            .role(gpui::Role::Dialog)
+            .aria_label("Authority and wake log")
+            .w(px(340.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_gear(cx)))
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    page.close_gear(cx);
+                }
+            }))
+            .child(popover::menu_heading(&popup, "Authority"))
+            .child(self.render_authority(&popup, cx))
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(
+                &popup,
+                &format!("Wake log · {}", wakes.len()),
+            ))
+            .child(render_wake_log(&wakes, &popup))
             .into_any_element()
     }
 
@@ -1306,366 +1963,25 @@ impl SupervisorPage {
             })
     }
 
-    fn render_owner(
-        &self,
-        task_id: &str,
-        step_id: Option<String>,
-        role: String,
-        scope: String,
-        chat: Option<&Chat>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (mark, tint) = chat.map(chat_brand).unwrap_or((icons::BOT, None));
-        let model = chat.and_then(|chat| model_label(chat, cx));
-        let profile = chat.and_then(|chat| self.profile_name(chat));
-        let key = format!("{task_id}-{}", step_id.as_deref().unwrap_or("lead"));
-        let owner = Owner {
-            task_id: task_id.to_owned(),
-            step_id,
-        };
-        let brief_key = format!("supervisor-brief-{key}");
-        let brief_label = format!("Brief for {role}");
-        let chip = |label: String| {
-            div()
-                .flex_none()
-                .px(px(7.0))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-                .text_size(ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .child(label)
-        };
-        div()
-            .debug_selector({
-                let key = key.clone();
-                move || format!("supervisor-owner-{key}")
-            })
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .pl(px(34.0))
-            .pr(px(12.0))
-            .py(px(5.0))
-            .text_size(ui_rems(12.5))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(96.0))
-                    .truncate()
-                    .text_color(theme.text_muted)
-                    .child(role),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.text)
-                    .child(scope),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .when(chat.is_some(), |el| {
-                        el.child(
-                            icon(mark)
-                                .size(px(12.0))
-                                .text_color(tint.unwrap_or(theme.text_muted)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(match (chat, model) {
-                                (_, Some(model)) => model,
-                                (Some(_), None) => "Default model".into(),
-                                (None, None) => "No thread yet".into(),
-                            }),
-                    ),
-            )
-            .children(profile.map(chip))
-            .child(
-                div()
-                    .id(SharedString::from(brief_key.clone()))
-                    .debug_selector(move || brief_key.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(brief_label)
-                    .flex_none()
-                    .cursor_pointer()
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.accent)
-                    .hover(|s| s.opacity(0.8))
-                    .child("Brief")
-                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        page.open_drawer(owner.clone(), cx);
-                    })),
-            )
-            .into_any_element()
-    }
-
-    fn render_owners(&self, task_id: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (lead, steps) = {
-            let state = self.state.read(cx);
-            let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
-                return div().into_any_element();
-            };
-            let plan = rollup(state, task, Utc::now());
-            let lead = linked_chat(&state.chats, task).cloned();
-            let steps: Vec<(String, String, String, Option<Chat>)> = plan
-                .steps
-                .iter()
-                .map(|row| {
-                    (
-                        row.step.id.clone(),
-                        plan.step_label(&row.step.id).unwrap_or_default(),
-                        row.step.title.clone(),
-                        step_chat(&state.chats, &row.step).cloned(),
-                    )
-                })
-                .collect();
-            (lead, steps)
-        };
-        let lead_scope = lead
-            .as_ref()
-            .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
-            .unwrap_or_else(|| "Not started".into());
-        let mut rows = vec![self.render_owner(
-            task_id,
-            None,
-            "Lead".into(),
-            lead_scope,
-            lead.as_ref(),
-            theme,
-            cx,
-        )];
-        for (step_id, label, title, chat) in &steps {
-            rows.push(self.render_owner(
-                task_id,
-                Some(step_id.clone()),
-                label.clone(),
-                title.clone(),
-                chat.as_ref(),
-                theme,
-                cx,
-            ));
-        }
-        let open_id = task_id.to_owned();
-        let open_key = format!("supervisor-open-center-{task_id}");
-        div()
-            .border_t_1()
-            .border_color(widgets::row_divider(theme))
-            .py(px(4.0))
-            .flex()
-            .flex_col()
-            .children(rows)
-            .child(
-                div().pl(px(34.0)).py(px(5.0)).child(
-                    div()
-                        .id(SharedString::from(open_key.clone()))
-                        .debug_selector(move || open_key.clone())
-                        .role(gpui::Role::Button)
-                        .aria_label("Open Mission Control")
-                        .cursor_pointer()
-                        .text_size(ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .hover(|s| s.text_color(theme.text))
-                        .child("Open Mission Control ›")
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            cx.emit(SupervisorEvent::OpenTaskCenter(open_id.clone()))
-                        })),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_mission(
-        &self,
-        mission: Mission,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let row = mission.row;
-        let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
-        let (arc, text) = match row.status {
-            TaskStatus::NeedsYou => {
-                let needs = tone(ChatIndicator::AwaitingInput);
-                (needs, needs)
-            }
-            TaskStatus::Working => (tone(ChatIndicator::Completed), tone(ChatIndicator::Working)),
-            _ => (tone(ChatIndicator::Completed), theme.text_faint),
-        };
-        let PlanProgress { done, total } = row.progress;
-        let percent = (done * 100).checked_div(total).unwrap_or(0).min(100) as u8;
-        let expanded = self.expanded.contains(&row.task_id);
-        let task_id = row.task_id.clone();
-        let watch = match &mission.watch {
-            Watch::Elsewhere(device) => {
-                let name = self
-                    .state
-                    .read(cx)
-                    .device_name(device)
-                    .unwrap_or("another device")
-                    .to_owned();
-                div()
-                    .flex_none()
-                    .text_size(ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .child(format!("on {name}, not watched"))
-                    .into_any_element()
-            }
-            watch => {
-                let on = *watch == Watch::Watched;
-                let id = task_id.clone();
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(ui_rems(11.5))
-                    .text_color(theme.text_muted)
-                    .child(if on { "Watched" } else { "Not watched" })
-                    .child(
-                        Self::render_switch(
-                            theme,
-                            format!("supervisor-watch-{task_id}"),
-                            format!("Watch {}", row.title).into(),
-                            on,
-                        )
-                        .on_click(cx.listener(
-                            move |page, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                page.set_supervised(id.clone(), !on, cx);
-                            },
-                        )),
-                    )
-                    .into_any_element()
-            }
-        };
-        let header_key = format!("supervisor-mission-{task_id}");
-        let toggle_id = task_id.clone();
-        div()
-            .rounded(px(12.0))
-            .bg(widgets::block_fill(theme))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id(SharedString::from(header_key.clone()))
-                    .debug_selector(move || header_key.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(row.title.clone())
-                    .aria_expanded(expanded)
-                    .flex()
-                    .items_center()
-                    .gap(px(9.0))
-                    .px(px(12.0))
-                    .py(px(9.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.wash(0.04)))
-                    .child(div().flex_none().child(crate::loaders::upload_progress_arc(
-                        percent,
-                        14.0,
-                        theme.text_faint.opacity(0.6),
-                        arc,
-                    )))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(ui_rems(13.0))
-                            .text_color(theme.text)
-                            .child(row.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(ui_rems(12.0))
-                            .text_color(text)
-                            .child(row.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(format!("{done}/{total}")),
-                    )
-                    .child(watch)
-                    .child(
-                        icon(if expanded {
-                            icons::LUCIDE_CHEVRON_DOWN
-                        } else {
-                            icons::LUCIDE_CHEVRON_RIGHT
-                        })
-                        .size(px(13.0))
-                        .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                        if !page.expanded.remove(&toggle_id) {
-                            page.expanded.insert(toggle_id.clone());
-                        }
-                        cx.notify();
-                    })),
-            )
-            .when(expanded, |el| {
-                el.child(self.render_owners(&row.task_id, theme, cx))
-            })
-            .into_any_element()
-    }
-
-    fn render_missions(
-        &self,
-        missions: Vec<Mission>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let count = missions.len();
-        let body: Vec<AnyElement> = if missions.is_empty() {
-            vec![
-                div()
-                    .px(px(8.0))
-                    .text_size(ui_rems(12.5))
-                    .text_color(theme.text_muted)
-                    .child("No missions running. Start one from Tasks or the composer.")
-                    .into_any_element(),
-            ]
-        } else {
-            missions
-                .into_iter()
-                .map(|mission| self.render_mission(mission, theme, cx))
-                .collect()
-        };
-        div()
-            .id("supervisor-missions")
-            .debug_selector(|| "supervisor-missions".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(widgets::section_label(theme, format!("Missions · {count}")))
-            .children(body)
-            .into_any_element()
-    }
-
     fn render_authority(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let label = widgets::section_label(theme, "Authority");
+        let row = || {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .px(px(8.0))
+                .py(px(5.0))
+                .text_size(ui_rems(12.0))
+                .text_color(theme.text)
+        };
         let settings = match &self.settings {
             Loadable::Ready(settings) => *settings,
             Loadable::Error(error) => {
                 return div()
                     .id("supervisor-authority")
                     .debug_selector(|| "supervisor-authority".into())
-                    .flex()
-                    .flex_col()
-                    .child(label)
+                    .px(px(4.0))
                     .child(widgets::error_strip(
                         theme,
                         format!("Could not read the Supervisor's authority: {error}"),
@@ -1673,35 +1989,12 @@ impl SupervisorPage {
                     .into_any_element();
             }
             _ => {
-                return div()
+                return row()
                     .id("supervisor-authority")
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(label)
-                    .child(
-                        div()
-                            .px(px(8.0))
-                            .text_size(ui_rems(12.5))
-                            .text_color(theme.text_muted)
-                            .child("Loading…"),
-                    )
+                    .text_color(theme.text_muted)
+                    .child("Loading…")
                     .into_any_element();
             }
-        };
-        let row = |first: bool| {
-            div()
-                .mx(px(14.0))
-                .py(px(10.0))
-                .when(!first, |el| {
-                    el.border_t_1().border_color(widgets::row_divider(theme))
-                })
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(12.0))
-                .text_size(ui_rems(12.5))
-                .text_color(theme.text)
         };
         type Set = fn(SupervisorSettings, bool) -> SupervisorSettings;
         let mut toggles: Vec<(&'static str, &'static str, bool, Set)> = vec![
@@ -1741,42 +2034,38 @@ impl SupervisorPage {
                 ..s
             },
         ));
-        let mut card = div()
-            .rounded(px(12.0))
-            .bg(widgets::block_fill(theme))
+        let mut list = div()
+            .id("supervisor-authority")
+            .debug_selector(|| "supervisor-authority".into())
             .flex()
             .flex_col();
-        for (ix, (key, text, on, set)) in toggles.into_iter().enumerate() {
-            card = card.child(row(ix == 0).child(text).child(
+        for (key, text, on, set) in toggles {
+            list = list.child(row().child(text).child(
                 Self::render_switch(theme, key.into(), text.into(), on).on_click(cx.listener(
                     move |page, _: &ClickEvent, _, cx| page.save_settings(set(settings, !on), cx),
                 )),
             ));
         }
         let weak = cx.entity().downgrade();
-        card = card
-            .child(
-                row(false)
-                    .debug_selector(|| "supervisor-auth-goal".into())
-                    .child("Change a mission's goal or spend")
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.0))
-                            .text_size(ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(
-                                icon(icons::LUCIDE_SHIELD)
-                                    .size(px(11.0))
-                                    .text_color(theme.text_faint),
-                            )
-                            .child("always asks you"),
-                    ),
-            )
-            .child(
-                row(false).child("Check in on its own").child(
+        list.child(
+            row()
+                .debug_selector(|| "supervisor-auth-goal".into())
+                .child("Change a mission's goal or spend")
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(ui_rems(11.0))
+                        .text_color(theme.text_faint)
+                        .child("always asks you"),
+                ),
+        )
+        .child(
+            row()
+                .flex_col()
+                .items_start()
+                .gap(px(6.0))
+                .child("Check in on its own")
+                .child(
                     widgets::segmented(
                         theme,
                         "supervisor-auth-heartbeat",
@@ -1797,35 +2086,21 @@ impl SupervisorPage {
                     )
                     .debug_selector(|| "supervisor-auth-heartbeat".into()),
                 ),
-            );
-        div()
-            .id("supervisor-authority")
-            .debug_selector(|| "supervisor-authority".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(label)
-            .child(card)
-            .children(
-                self.settings_error
-                    .clone()
-                    .map(|error| widgets::error_strip(theme, error)),
-            )
-            .into_any_element()
+        )
+        .children(
+            self.settings_error
+                .clone()
+                .map(|error| div().px(px(4.0)).child(widgets::error_strip(theme, error))),
+        )
+        .into_any_element()
+    }
+
+    fn answering(&self, key: &str) -> bool {
+        matches!(self.replies.get(key), Some(Reply::Sending | Reply::Sent(_)))
     }
 
     fn render_reply(&self, key: &str, buttons: gpui::Div, theme: &Theme) -> AnyElement {
-        let note = |text: String| {
-            div()
-                .text_size(ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .child(text)
-                .into_any_element()
-        };
         match self.replies.get(key) {
-            Some(Reply::Sent(choice)) if choice.is_empty() => note("Answered".into()),
-            Some(Reply::Sent(choice)) => note(format!("Answered: {choice}")),
-            Some(Reply::Sending) => note("Sending…".into()),
             Some(Reply::Failed(error)) => div()
                 .flex()
                 .flex_col()
@@ -1835,13 +2110,15 @@ impl SupervisorPage {
                     format!("Could not send the answer: {error}"),
                 ))
                 .into_any_element(),
-            None => buttons.into_any_element(),
+            _ => settle_while(self.answering(key), buttons),
         }
     }
 
     fn render_item_card(
         &self,
         item: &SupervisorItem,
+        arrival: Option<&Arrival>,
+        now: Instant,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1897,53 +2174,48 @@ impl SupervisorPage {
                 cx.emit(SupervisorEvent::Discuss(quote.clone()))
             })),
         );
-        needs_card(theme, sel)
+        let body = card_body()
+            .child(card_title(theme, item.title.clone(), true))
             .child(
-                div()
-                    .text_size(ui_rems(13.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(item.title.clone()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.text_muted)
+                card_meta(theme)
                     .child(meta)
                     .child(tone_chip(
                         theme,
                         why_label(item.why),
                         Some(needs_tone(theme)),
-                    )),
+                    ))
+                    .child(clock(item.at)),
             )
             .when(!item.detail.trim().is_empty(), |el| {
-                el.child(
-                    div()
-                        .mt(px(2.0))
-                        .pl(px(10.0))
-                        .border_l_2()
-                        .border_color(theme.border)
-                        .text_size(ui_rems(12.5))
-                        .line_height(ui_rems(18.0))
-                        .text_color(theme.text_muted)
-                        .child(clip(item.detail.trim())),
-                )
+                el.child(evidence(theme, clip(item.detail.trim())))
             })
             .child(
                 div()
                     .mt(px(4.0))
                     .child(self.render_reply(&key, buttons, theme)),
+            );
+        arrive(
+            card(
+                theme,
+                &key,
+                sel,
+                item.title.clone(),
+                gpui::Role::Group,
+                true,
             )
-            .into_any_element()
+            .child(kind_tag(theme, Some(Kind::Needs)))
+            .child(body),
+            arrival,
+            theme,
+            now,
+        )
     }
 
     fn render_input_card(
         &self,
         input: &NeedsYouInput,
+        arrival: Option<&Arrival>,
+        now: Instant,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2017,25 +2289,9 @@ impl SupervisorPage {
                     )
                     .when(
                         input.questions.len() > 1 || !question.header.trim().is_empty(),
-                        |el| {
-                            el.child(
-                                div()
-                                    .pl(px(10.0))
-                                    .border_l_2()
-                                    .border_color(theme.border)
-                                    .text_size(ui_rems(12.5))
-                                    .line_height(ui_rems(18.0))
-                                    .text_color(theme.text_muted)
-                                    .child(clip(question.question.trim())),
-                            )
-                        },
+                        |el| el.child(evidence(theme, clip(question.question.trim()))),
                     )
-                    .when(
-                        self.replies
-                            .get(&key)
-                            .is_none_or(|reply| matches!(reply, Reply::Failed(_))),
-                        |el| el.child(options),
-                    ),
+                    .child(settle_while(self.answering(&key), options)),
             );
         }
         let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
@@ -2083,28 +2339,18 @@ impl SupervisorPage {
                 cx.emit(SupervisorEvent::Discuss(quote.clone()))
             })),
         );
-        needs_card(theme, sel)
+        let title = row_title(&row);
+        let body = card_body()
+            .child(card_title(theme, title.clone(), true))
             .child(
-                div()
-                    .text_size(ui_rems(13.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(row_title(&row)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.text_muted)
+                card_meta(theme)
                     .child(format!("Asked by {who}"))
                     .child(tone_chip(
                         theme,
                         if approval { "Approval" } else { "Question" },
                         Some(needs_tone(theme)),
-                    )),
+                    ))
+                    .child(clock(input.at)),
             )
             .child(questions)
             .when(!answerable, |el| {
@@ -2123,511 +2369,865 @@ impl SupervisorPage {
                 div()
                     .mt(px(4.0))
                     .child(self.render_reply(&key, buttons, theme)),
-            )
-            .into_any_element()
+            );
+        arrive(
+            card(theme, &key, sel, title, gpui::Role::Group, true)
+                .child(kind_tag(theme, Some(Kind::Needs)))
+                .child(body),
+            arrival,
+            theme,
+            now,
+        )
     }
 
-    fn render_needs_you(
+    fn render_question_card(
         &self,
-        rows: &[NeedsYouRow],
+        key: &str,
+        question: &LeadQuestion,
+        done: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let body: Vec<AnyElement> = if rows.is_empty() {
-            vec![empty_line(theme, "Nothing waits on you.")]
-        } else {
-            rows.iter()
-                .map(|row| match row {
-                    NeedsYouRow::Item(item) => self.render_item_card(item, theme, cx),
-                    NeedsYouRow::Input(input) => self.render_input_card(input, theme, cx),
-                })
-                .collect()
-        };
-        div()
-            .id("supervisor-needs-you")
-            .debug_selector(|| "supervisor-needs-you".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(widgets::section_label(
-                theme,
-                format!("Needs you · {}", rows.len()),
-            ))
-            .children(body)
-            .into_any_element()
-    }
-
-    fn render_questions(
-        &self,
-        questions: &[LeadQuestion],
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let now = Utc::now();
-        let body = if questions.is_empty() {
-            empty_line(theme, "No step has asked its lead anything yet.")
-        } else {
+        let place = {
             let state = self.state.read(cx);
-            let rows: Vec<(LeadQuestion, String)> = questions
-                .iter()
-                .map(|question| {
-                    let step = step_name(state, &question.task_id, &question.step_id, now)
-                        .unwrap_or_else(|| "A step".into());
-                    let place = match mission_title(state, Some(&question.task_id)) {
-                        Some(mission) => format!("{step} · {mission}"),
-                        None => step,
-                    };
-                    (question.clone(), place)
-                })
-                .collect();
-            div()
-                .rounded(px(12.0))
-                .bg(widgets::block_fill(theme))
-                .flex()
-                .flex_col()
-                .children(rows.into_iter().enumerate().map(|(ix, (question, place))| {
-                    let (label, detail) = question_state(&question.state);
-                    let tone = match question.state {
-                        QuestionState::Open => Some(needs_tone(theme)),
-                        QuestionState::Settled { .. } => Some(ok_tone(theme)),
-                        QuestionState::Dropped => None,
-                    };
-                    let sel = format!(
-                        "supervisor-question-{}",
-                        question.request_id.replace(':', "-")
-                    );
-                    let text = question_text(&question.questions);
-                    let chat_id = question.chat_id.clone();
-                    div()
-                        .id(SharedString::from(sel.clone()))
-                        .debug_selector(move || sel.clone())
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("{label}: {text}"))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.wash(0.04)))
-                        .mx(px(6.0))
-                        .px(px(8.0))
-                        .py(px(9.0))
-                        .when(ix > 0, |el| {
-                            el.border_t_1().border_color(widgets::row_divider(theme))
-                        })
-                        .flex()
-                        .items_start()
-                        .gap(px(10.0))
-                        .child(div().mt(px(1.0)).child(tone_chip(theme, label, tone)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(3.0))
-                                .child(
-                                    div()
-                                        .text_size(ui_rems(12.5))
-                                        .line_height(ui_rems(18.0))
-                                        .text_color(theme.text)
-                                        .child(clip(&text)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(ui_rems(11.5))
-                                        .text_color(theme.text_muted)
-                                        .child(match detail {
-                                            Some(detail) => format!("{place} · {detail}"),
-                                            None => place,
-                                        }),
-                                ),
-                        )
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            cx.emit(SupervisorEvent::OpenChat(chat_id.clone()))
-                        }))
-                }))
-                .into_any_element()
-        };
-        div()
-            .id("supervisor-questions")
-            .debug_selector(|| "supervisor-questions".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(widgets::section_label(
-                theme,
-                format!("Open questions to the Lead · {}", questions.len()),
-            ))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_interventions(
-        &self,
-        rows: &[SupervisorIntervention],
-        wakes: &[SupervisorWake],
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let now = Utc::now();
-        let body = if rows.is_empty() {
-            empty_line(theme, "The Supervisor has not acted yet.")
-        } else {
-            let state = self.state.read(cx);
-            div()
-                .rounded(px(12.0))
-                .bg(widgets::block_fill(theme))
-                .flex()
-                .flex_col()
-                .children(rows.iter().enumerate().map(|(ix, row)| {
-                    let target = row
-                        .target
-                        .as_deref()
-                        .map(|target| thread_name(state, target, now))
-                        .or_else(|| mission_title(state, row.task_id.as_deref()));
-                    let mut chips: Vec<gpui::Div> = row
-                        .chips
-                        .iter()
-                        .map(|chip| {
-                            let tone = (*chip != InterventionChip::Sent).then(|| ok_tone(theme));
-                            tone_chip(theme, chip_label(chip), tone)
-                        })
-                        .collect();
-                    if no_effect_yet(row, now) {
-                        chips.push(tone_chip(theme, "No effect yet", Some(needs_tone(theme))));
-                    }
-                    let id = row.id.clone();
-                    div()
-                        .debug_selector(move || format!("supervisor-intervention-{id}"))
-                        .mx(px(14.0))
-                        .py(px(10.0))
-                        .when(ix > 0, |el| {
-                            el.border_t_1().border_color(widgets::row_divider(theme))
-                        })
-                        .flex()
-                        .flex_col()
-                        .gap(px(5.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(ui_rems(12.5))
-                                .child(
-                                    div()
-                                        .font_family(theme.font_mono.clone())
-                                        .text_size(ui_rems(11.5))
-                                        .text_color(theme.text_muted)
-                                        .child(clock(row.at)),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(theme.text)
-                                        .child(intervention_kind_label(row.kind)),
-                                )
-                                .children(target.map(|target| {
-                                    div()
-                                        .text_color(theme.text_muted)
-                                        .child(format!("→ {target}"))
-                                })),
-                        )
-                        .when(!row.text.trim().is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .pl(px(10.0))
-                                    .border_l_2()
-                                    .border_color(theme.border)
-                                    .text_size(ui_rems(12.5))
-                                    .line_height(ui_rems(18.0))
-                                    .text_color(theme.text)
-                                    .child(clip(row.text.trim())),
-                            )
-                        })
-                        .children(row.trigger.as_ref().map(|trigger| {
-                            div()
-                                .text_size(ui_rems(11.5))
-                                .text_color(theme.text_muted)
-                                .child(trigger_label(trigger, wakes))
-                        }))
-                        .when(!chips.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .children(chips),
-                            )
-                        })
-                }))
-                .into_any_element()
-        };
-        div()
-            .id("supervisor-interventions")
-            .debug_selector(|| "supervisor-interventions".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(widgets::section_label(
-                theme,
-                format!("Interventions · {}", rows.len()),
-            ))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_resources(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.state.read(cx);
-        let resources: Vec<SharedResource> = state
-            .supervisor
-            .as_ref()
-            .map(|snapshot| snapshot.resources.clone())
-            .unwrap_or_default();
-        let title = |id: &str| {
-            state
-                .tasks
-                .iter()
-                .find(|task| task.id == id)
-                .map_or_else(|| format!("task {id}"), |task| task.title.clone())
-        };
-        let names = |ids: &[String]| {
-            ids.iter()
-                .map(|id| title(id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let body = if resources.is_empty() {
-            div()
-                .px(px(8.0))
-                .text_size(ui_rems(12.5))
-                .text_color(theme.text_muted)
-                .child("No mission declares a port, CPU slot or path. A lead declares them with its plan.")
-                .into_any_element()
-        } else {
-            div()
-                .rounded(px(12.0))
-                .bg(widgets::block_fill(theme))
-                .flex()
-                .flex_col()
-                .children(resources.iter().enumerate().map(|(ix, resource)| {
-                    let tone = match resource.state {
-                        ResourceState::Contended => theme.danger,
-                        ResourceState::Clear => {
-                            crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
-                        }
-                        _ => theme.text_muted,
-                    };
-                    let held = match resource.holders.as_slice() {
-                        [] => "held by none".to_string(),
-                        holders => format!("held by {}", names(holders)),
-                    };
-                    let key = resource.key.clone();
-                    div()
-                        .debug_selector(move || format!("supervisor-resource-{key}"))
-                        .mx(px(14.0))
-                        .py(px(9.0))
-                        .when(ix > 0, |el| {
-                            el.border_t_1().border_color(widgets::row_divider(theme))
-                        })
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(ui_rems(12.5))
-                                .child(
-                                    div()
-                                        .font_family(theme.font_mono.clone())
-                                        .text_color(theme.text)
-                                        .child(resource.key.clone()),
-                                )
-                                .child(
-                                    div().text_color(tone).child(resource_label(resource.state)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child(format!(
-                                    "Declared by {} · {held}",
-                                    names(&resource.declared_by)
-                                )),
-                        )
-                        .children(verified_line(resource, &title).map(|line| {
-                            div()
-                                .text_size(ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child(line)
-                        }))
-                }))
-                .into_any_element()
-        };
-        div()
-            .id("supervisor-resources")
-            .debug_selector(|| "supervisor-resources".into())
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(widgets::section_label(
-                theme,
-                format!("Shared resources · {}", resources.len()),
-            ))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_wake_log(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let wakes: Vec<SupervisorWake> = self
-            .state
-            .read(cx)
-            .supervisor
-            .as_ref()
-            .map(|snapshot| snapshot.wakes.clone())
-            .unwrap_or_default();
-        let open = self.wakes_open;
-        let header = div()
-            .id("supervisor-wake-log-toggle")
-            .debug_selector(|| "supervisor-wake-log-toggle".into())
-            .role(gpui::Role::Button)
-            .aria_label("Wake log")
-            .aria_expanded(open)
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .child(widgets::section_label(
-                theme,
-                format!("Wake log · {}", wakes.len()),
-            ))
-            .child(
-                icon(if open {
-                    icons::LUCIDE_CHEVRON_DOWN
-                } else {
-                    icons::LUCIDE_CHEVRON_RIGHT
-                })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-            )
-            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| {
-                page.wakes_open = !page.wakes_open;
-                cx.notify();
-            }));
-        let body = open.then(|| {
-            if wakes.is_empty() {
-                return div()
-                    .px(px(8.0))
-                    .text_size(ui_rems(12.5))
-                    .text_color(theme.text_muted)
-                    .child("No wakes yet. Events from watched missions wake it here.")
-                    .into_any_element();
+            let step = step_name(state, &question.task_id, &question.step_id, Utc::now())
+                .unwrap_or_else(|| "A step".into());
+            match mission_title(state, Some(&question.task_id)) {
+                Some(mission) => format!("{step} → Lead · {mission}"),
+                None => format!("{step} → Lead"),
             }
-            div()
-                .rounded(px(12.0))
-                .bg(widgets::block_fill(theme))
-                .flex()
-                .flex_col()
-                .children(wakes.iter().enumerate().map(|(ix, wake)| {
-                    let failed = matches!(
-                        wake.delivery,
-                        WakeDelivery::Failed { .. } | WakeDelivery::Dropped
-                    );
-                    let events = wake
-                        .events
-                        .iter()
-                        .map(|event| (event.label.clone(), false))
-                        .chain(
-                            wake.dropped
-                                .iter()
-                                .map(|event| (format!("Dropped: {}", event.label), true)),
-                        );
+        };
+        let (label, detail) = question_state(&question.state);
+        let text = question_text(&question.questions);
+        let meta = match (done, detail) {
+            (false, _) | (true, None) => format!("{place} · {}", clock(question.at)),
+            (true, Some(detail)) => {
+                let join = if matches!(question.state, QuestionState::Dropped) {
+                    ": "
+                } else {
+                    " "
+                };
+                format!("{place} · {label}{join}{detail} · {}", clock(question.at))
+            }
+        };
+        let sel = format!(
+            "{}supervisor-question-{}",
+            if done { "earlier-" } else { "" },
+            question.request_id.replace(':', "-")
+        );
+        let chat_id = question.chat_id.clone();
+        card(
+            theme,
+            &done_key(key, done),
+            sel,
+            format!("{label}: {text}"),
+            gpui::Role::Button,
+            false,
+        )
+        .cursor_pointer()
+        .hover(|s| s.border_color(theme.border_strong))
+        .when(done, |el| el.opacity(0.55))
+        .child(kind_tag(theme, (!done).then_some(Kind::Question)))
+        .child(
+            card_body()
+                .child(card_title(theme, clip(&text), false))
+                .child(card_meta(theme).child(meta)),
+        )
+        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            cx.emit(SupervisorEvent::OpenChat(chat_id.clone()))
+        }))
+        .into_any_element()
+    }
+
+    fn render_intervention_card(
+        &self,
+        key: &str,
+        row: &SupervisorIntervention,
+        done: bool,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let utc = Utc::now();
+        let (target, trigger) = {
+            let state = self.state.read(cx);
+            let wakes = state
+                .supervisor
+                .as_ref()
+                .map_or(&[][..], |snapshot| snapshot.wakes.as_slice());
+            (
+                row.target
+                    .as_deref()
+                    .map(|target| thread_name(state, target, utc))
+                    .or_else(|| mission_title(state, row.task_id.as_deref())),
+                row.trigger
+                    .as_ref()
+                    .map(|trigger| trigger_label(trigger, wakes)),
+            )
+        };
+        let kind = intervention_kind_label(row.kind);
+        let title = if row.text.trim().is_empty() {
+            kind.to_owned()
+        } else {
+            clip(row.text.trim())
+        };
+        let mut meta = vec![match target {
+            Some(target) => format!("{kind} → {target}"),
+            None => kind.to_owned(),
+        }];
+        meta.extend(trigger);
+        if done {
+            meta.extend(row.chips.iter().map(chip_label));
+        }
+        meta.push(clock(row.at));
+        let face = (!done).then(|| chip_face(row, utc)).flatten();
+        let label = match &face {
+            Some(face) => format!("{title} · {}", face.label),
+            None => title.clone(),
+        };
+        let id = row.id.clone();
+        card(
+            theme,
+            &done_key(key, done),
+            format!(
+                "{}supervisor-intervention-{id}",
+                if done { "earlier-" } else { "" }
+            ),
+            label,
+            gpui::Role::Group,
+            false,
+        )
+        .when(done, |el| el.opacity(0.55))
+        .child(kind_tag(theme, (!done).then_some(Kind::Intervention)))
+        .child(
+            card_body()
+                .child(card_title(theme, title, false))
+                .child(card_meta(theme).child(meta.join(" · "))),
+        )
+        .children(face.map(|face| self.render_chip(key, &face, now, theme)))
+        .into_any_element()
+    }
+
+    fn render_chip(&self, key: &str, face: &Face, now: Instant, theme: &Theme) -> AnyElement {
+        let fade = self.chips.get(key);
+        let t = fade.map_or(1.0, |fade| fade.tween.value_at(now));
+        let from = fade.and_then(|fade| fade.from.as_ref()).filter(|_| t < 1.0);
+        let tone = |face: &Face| match face.tone {
+            Tone::Plain => None,
+            Tone::Ok => Some(ok_tone(theme)),
+            Tone::Warn => Some(needs_tone(theme)),
+        };
+        let text = |face: &Face| tone(face).unwrap_or(theme.text_muted);
+        let border = |face: &Face| tone(face).map_or(theme.border, |tone| tone.opacity(0.45));
+        let (text_color, border_color) = match from {
+            Some(old) => (
+                motion::mix(text(old), text(face), t),
+                motion::mix(border(old), border(face), t),
+            ),
+            None => (text(face), border(face)),
+        };
+        let selector = format!("supervisor-chip-face-{key}");
+        div()
+            .debug_selector(move || selector.clone())
+            .relative()
+            .flex_none()
+            .mt(px(1.0))
+            .px(px(7.0))
+            .rounded_full()
+            .border_1()
+            .border_color(border_color)
+            .text_size(ui_rems(10.5))
+            .text_color(text_color)
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .opacity(if from.is_some() { t } else { 1.0 })
+                    .child(face.label.clone()),
+            )
+            .children(from.map(|old| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(7.0))
+                    .opacity(1.0 - t)
+                    .child(old.label.clone())
+            }))
+            .into_any_element()
+    }
+
+    fn render_resource_card(
+        &self,
+        key: &str,
+        resource: &SharedResource,
+        done: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (declared, held, verified, listed) = {
+            let state = self.state.read(cx);
+            let listed = state.supervisor.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .resources
+                    .iter()
+                    .any(|declared| declared.key == resource.key)
+            });
+            let title = |id: &str| {
+                state
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .map_or_else(|| format!("task {id}"), |task| task.title.clone())
+            };
+            let names = |ids: &[String]| {
+                ids.iter()
+                    .map(|id| title(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            (
+                names(&resource.declared_by),
+                match resource.holders.as_slice() {
+                    [] => "held by none".to_string(),
+                    holders => format!("held by {}", names(holders)),
+                },
+                verified_line(resource, &title),
+                listed,
+            )
+        };
+        let tone = match resource.state {
+            _ if !listed => theme.text_muted,
+            ResourceState::Contended => theme.danger,
+            ResourceState::Clear => ok_tone(theme),
+            _ if feed::resource_open(resource.state) => needs_tone(theme),
+            _ => theme.text_muted,
+        };
+        let state = if listed {
+            resource_label(resource.state)
+        } else {
+            "No longer shared by watched missions"
+        };
+        let name = resource.key.clone();
+        card(
+            theme,
+            &done_key(key, done),
+            format!(
+                "{}supervisor-resource-{name}",
+                if done { "earlier-" } else { "" }
+            ),
+            format!("{name} · {state}"),
+            gpui::Role::Group,
+            false,
+        )
+        .when(done, |el| el.opacity(0.55))
+        .child(kind_tag(theme, (!done).then_some(Kind::Resource)))
+        .child(
+            card_body()
+                .child(
                     div()
-                        .debug_selector({
-                            let id = wake.id.clone();
-                            move || format!("supervisor-wake-{id}")
-                        })
-                        .mx(px(14.0))
-                        .py(px(9.0))
-                        .when(ix > 0, |el| {
-                            el.border_t_1().border_color(widgets::row_divider(theme))
-                        })
                         .flex()
-                        .flex_col()
-                        .gap(px(3.0))
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .text_size(ui_rems(13.0))
+                        .line_height(ui_rems(19.0))
+                        .text_color(theme.text)
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(ui_rems(12.5))
-                                .child(
-                                    div()
-                                        .font_family(theme.font_mono.clone())
-                                        .text_size(ui_rems(11.5))
-                                        .text_color(theme.text_muted)
-                                        .child(clock(wake.at)),
-                                )
-                                .child(div().text_color(theme.text).child(format!(
-                                    "{} {}",
-                                    wake.events.len(),
-                                    plural(wake.events.len(), "event", "events")
-                                )))
-                                .child(
-                                    div()
-                                        .text_color(if failed {
-                                            theme.danger
-                                        } else {
-                                            theme.text_muted
-                                        })
-                                        .child(delivery_label(&wake.delivery)),
-                                ),
+                                .font_family(theme.font_mono.clone())
+                                .child(resource.key.clone()),
                         )
-                        .children(events.map(|(label, dropped)| {
-                            div()
-                                .pl(px(10.0))
-                                .border_l_2()
-                                .border_color(theme.border)
-                                .text_size(ui_rems(12.0))
-                                .text_color(if dropped {
-                                    theme.text_faint
-                                } else {
-                                    theme.text_muted
-                                })
-                                .child(label)
-                        }))
-                }))
-                .into_any_element()
+                        .child(div().text_color(theme.text_faint).child("·"))
+                        .child(div().text_color(tone).child(state)),
+                )
+                .child(card_meta(theme).child(format!("Declared by {declared} · {held}")))
+                .children(verified.map(|line| card_meta(theme).child(line))),
+        )
+        .into_any_element()
+    }
+
+    fn render_answered_card(
+        &self,
+        answered: &feed::Answered,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = row_key(&answered.row);
+        let (task_id, _) = row_origin(&answered.row);
+        let mission = mission_title(self.state.read(cx), task_id);
+        let mut meta = vec![match &answered.choice {
+            Some(choice) => format!("Answered: {choice}"),
+            None => "Answered".to_owned(),
+        }];
+        meta.extend(mission);
+        meta.push(clock(answered.at));
+        let title = row_title(&answered.row);
+        card(
+            theme,
+            &done_key(&key, true),
+            format!("earlier-supervisor-needs-{}", key.replace(':', "-")),
+            title.clone(),
+            gpui::Role::Group,
+            false,
+        )
+        .opacity(0.55)
+        .child(kind_tag(theme, None))
+        .child(
+            card_body()
+                .child(card_title(theme, title, false))
+                .child(card_meta(theme).child(meta.join(" · "))),
+        )
+        .into_any_element()
+    }
+
+    fn render_row(
+        &self,
+        row: &Row,
+        done: bool,
+        arrival: Option<&Arrival>,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match &row.entry {
+            Entry::Needs(NeedsYouRow::Item(item)) => {
+                self.render_item_card(item, arrival, now, theme, cx)
+            }
+            Entry::Needs(NeedsYouRow::Input(input)) => {
+                self.render_input_card(input, arrival, now, theme, cx)
+            }
+            Entry::Question(question) => {
+                self.render_question_card(&row.key, question, done, theme, cx)
+            }
+            Entry::Intervention(intervention) => {
+                self.render_intervention_card(&row.key, intervention, done, now, theme, cx)
+            }
+            Entry::Resource(resource) => {
+                self.render_resource_card(&row.key, resource, done, theme, cx)
+            }
+            Entry::Answered(answered) => self.render_answered_card(answered, theme, cx),
+        }
+    }
+
+    fn render_feed(
+        &self,
+        feed: &Feed,
+        calm: String,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rows: Vec<&RowMotion> = self
+            .rows
+            .values()
+            .filter(|motion| !motion.fold.gone(now))
+            .collect();
+        rows.sort_by(|a, b| {
+            (a.group, std::cmp::Reverse(a.row.at), &a.row.key).cmp(&(
+                b.group,
+                std::cmp::Reverse(b.row.at),
+                &b.row.key,
+            ))
+        });
+        let cards: Vec<AnyElement> = rows
+            .into_iter()
+            .map(|motion| {
+                let card =
+                    self.render_row(&motion.row, false, motion.arrival.as_ref(), now, theme, cx);
+                folded(
+                    format!("supervisor-fold-{}", motion.row.key),
+                    &motion.fold,
+                    now,
+                    div().pb(px(6.0)).child(card),
+                )
+            })
+            .collect();
+        let calm = (!self.calm.gone(now)).then(|| {
+            folded(
+                "supervisor-calm-fold".into(),
+                &self.calm,
+                now,
+                render_calm(theme, calm),
+            )
         });
         div()
-            .id("supervisor-wake-log")
-            .debug_selector(|| "supervisor-wake-log".into())
+            .id("supervisor-feed")
+            .debug_selector(|| "supervisor-feed".into())
+            .mt(px(12.0))
             .flex()
             .flex_col()
+            .children(cards)
+            .children(calm)
+            .children(self.render_earlier(&feed.earlier, now, theme, cx))
+            .into_any_element()
+    }
+
+    fn render_earlier(
+        &self,
+        rows: &[Row],
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if rows.is_empty() {
+            return None;
+        }
+        let header = div()
+            .id("supervisor-earlier-toggle")
+            .debug_selector(|| "supervisor-earlier-toggle".into())
+            .role(gpui::Role::Button)
+            .aria_label(format!("Earlier, {}", rows.len()))
+            .aria_expanded(self.earlier_open)
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .mt(px(4.0))
+            .mx(px(2.0))
+            .py(px(2.0))
+            .cursor_pointer()
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_faint)
+            .hover(|s| s.text_color(theme.text_muted))
+            .child(chevron(theme, self.earlier_chevron.value_at(now) * 90.0))
+            .child(format!("Earlier · {}", rows.len()))
+            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_earlier(cx)));
+        let body = (!self.earlier.gone(now)).then(|| {
+            let hidden = rows.len().saturating_sub(EARLIER_ROWS);
+            let list = div()
+                .id("supervisor-earlier")
+                .debug_selector(|| "supervisor-earlier".into())
+                .pt(px(6.0))
+                .flex()
+                .flex_col()
+                .children(rows.iter().take(EARLIER_ROWS).map(|row| {
+                    div()
+                        .pb(px(6.0))
+                        .child(self.render_row(row, true, None, now, theme, cx))
+                }))
+                .when(hidden > 0, |el| {
+                    el.child(
+                        div()
+                            .px(px(2.0))
+                            .pb(px(6.0))
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.text_faint)
+                            .child(format!(
+                                "{hidden} older {} not shown",
+                                plural(hidden, "row", "rows")
+                            )),
+                    )
+                });
+            folded("supervisor-earlier-fold".into(), &self.earlier, now, list)
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(header)
+                .children(body)
+                .into_any_element(),
+        )
+    }
+
+    fn render_owner(
+        &self,
+        owner: Owner,
+        role: String,
+        scope: String,
+        chat: Option<&Chat>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (mark, tint) = chat.map(chat_brand).unwrap_or((icons::BOT, None));
+        let model = chat.and_then(|chat| model_label(chat, cx));
+        let profile = chat.and_then(|chat| self.profile_name(chat));
+        let key = format!(
+            "{}-{}",
+            owner.task_id,
+            owner.step_id.as_deref().unwrap_or("lead")
+        );
+        let group = SharedString::from(format!("supervisor-owner-{key}"));
+        let brief_key = format!("supervisor-brief-{key}");
+        let brief_label = format!("Brief for {role}");
+        div()
+            .debug_selector({
+                let group = group.clone();
+                move || group.to_string()
+            })
+            .group(group.clone())
+            .flex()
+            .items_center()
             .gap(px(8.0))
+            .pl(px(37.0))
+            .pr(px(12.0))
+            .py(px(5.0))
+            .text_size(ui_rems(12.0))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(62.0))
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .child(role),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if chat.is_some() {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .child(scope),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .when(chat.is_some(), |el| {
+                        el.child(
+                            icon(mark)
+                                .size(px(12.0))
+                                .text_color(tint.unwrap_or(theme.text_muted)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(match (chat, model) {
+                                (_, Some(model)) => model,
+                                (Some(_), None) => "Default model".into(),
+                                (None, None) => "not started".into(),
+                            }),
+                    ),
+            )
+            .children(profile.map(|name| tone_chip(theme, name, None)))
+            .child(
+                div()
+                    .id(SharedString::from(brief_key.clone()))
+                    .debug_selector(move || brief_key.clone())
+                    .role(gpui::Role::Button)
+                    .aria_label(brief_label)
+                    .flex_none()
+                    .w(px(46.0))
+                    .text_right()
+                    .cursor_pointer()
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.accent)
+                    .opacity(0.0)
+                    .group_hover(group, |s| s.opacity(1.0))
+                    .child("Brief ›")
+                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        page.open_drawer(owner.clone(), cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_owners(
+        &self,
+        mission: &Mission,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let task_id = mission.row.task_id.as_str();
+        let (lead, steps) = {
+            let state = self.state.read(cx);
+            let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
+                return div().into_any_element();
+            };
+            let plan = rollup(state, task, Utc::now());
+            let lead = linked_chat(&state.chats, task).cloned();
+            let steps: Vec<(String, String, String, Option<Chat>)> = plan
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(ix, row)| {
+                    (
+                        row.step.id.clone(),
+                        format!("Step {}", ix + 1),
+                        row.step.title.clone(),
+                        step_chat(&state.chats, &row.step).cloned(),
+                    )
+                })
+                .collect();
+            (lead, steps)
+        };
+        let lead_scope = lead
+            .as_ref()
+            .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
+            .unwrap_or_else(|| "Not started".into());
+        let owner = |step_id: Option<String>| Owner {
+            task_id: task_id.to_owned(),
+            step_id,
+        };
+        let mut rows = vec![self.render_owner(
+            owner(None),
+            "Lead".into(),
+            lead_scope,
+            lead.as_ref(),
+            theme,
+            cx,
+        )];
+        for (step_id, label, title, chat) in &steps {
+            rows.push(self.render_owner(
+                owner(Some(step_id.clone())),
+                label.clone(),
+                title.clone(),
+                chat.as_ref(),
+                theme,
+                cx,
+            ));
+        }
+        let open_id = task_id.to_owned();
+        let open_key = format!("supervisor-open-center-{task_id}");
+        let footer = |el: gpui::Div| {
+            el.flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .pl(px(37.0))
+                .pr(px(12.0))
+                .py(px(7.0))
+                .border_t_1()
+                .border_color(widgets::row_divider(theme))
+                .text_size(ui_rems(11.5))
+                .text_color(theme.text_muted)
+        };
+        let watch = match &mission.watch {
+            Watch::Elsewhere(device) => {
+                let name = self
+                    .state
+                    .read(cx)
+                    .device_name(device)
+                    .unwrap_or("another device")
+                    .to_owned();
+                footer(div()).child(format!("on {name}, not watched"))
+            }
+            watch => {
+                let on = *watch == Watch::Watched;
+                let id = task_id.to_owned();
+                footer(div())
+                    .child(if on {
+                        "Watched by the Supervisor"
+                    } else {
+                        "Not watched"
+                    })
+                    .child(
+                        Self::render_switch(
+                            theme,
+                            format!("supervisor-watch-{task_id}"),
+                            format!("Watch {}", mission.row.title).into(),
+                            on,
+                        )
+                        .on_click(cx.listener(
+                            move |page, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                page.set_supervised(id.clone(), !on, cx);
+                            },
+                        )),
+                    )
+            }
+        };
+        div()
+            .border_t_1()
+            .border_color(widgets::row_divider(theme))
+            .pt(px(3.0))
+            .flex()
+            .flex_col()
+            .children(rows)
+            .child(
+                div().pl(px(37.0)).pt(px(3.0)).pb(px(6.0)).child(
+                    div()
+                        .id(SharedString::from(open_key.clone()))
+                        .debug_selector(move || open_key.clone())
+                        .role(gpui::Role::Button)
+                        .aria_label("Open Mission Control")
+                        .cursor_pointer()
+                        .text_size(ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .hover(|s| s.text_color(theme.text))
+                        .child("Open Mission Control ›")
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(SupervisorEvent::OpenTaskCenter(open_id.clone()))
+                        })),
+                ),
+            )
+            .child(watch)
+            .into_any_element()
+    }
+
+    fn render_mission(
+        &self,
+        mission: &Mission,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = &mission.row;
+        let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
+        let arc = match row.status {
+            TaskStatus::NeedsYou => tone(ChatIndicator::AwaitingInput),
+            TaskStatus::Working => tone(ChatIndicator::Working),
+            _ => tone(ChatIndicator::Completed),
+        };
+        let motion = self.missions.get(&row.task_id);
+        let fill = motion.map_or(mission.fraction(), |motion| motion.fill.value_at(now));
+        let turn = motion.map_or(0.0, |motion| motion.chevron.value_at(now));
+        let expanded = self.expanded.contains(&row.task_id);
+        let unwatched = match &mission.watch {
+            Watch::Watched => None,
+            Watch::Unwatched => Some("Not watched".to_owned()),
+            Watch::Elsewhere(device) => Some(format!(
+                "on {}, not watched",
+                self.state
+                    .read(cx)
+                    .device_name(device)
+                    .unwrap_or("another device")
+            )),
+        };
+        let header_key = format!("supervisor-mission-{}", row.task_id);
+        let toggle_id = row.task_id.clone();
+        let header = div()
+            .id(SharedString::from(header_key.clone()))
+            .debug_selector(move || header_key.clone())
+            .role(gpui::Role::Button)
+            .aria_label(row.title.clone())
+            .aria_expanded(expanded)
+            .flex()
+            .items_center()
+            .gap(px(9.0))
+            .px(px(12.0))
+            .py(px(9.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.wash(0.03)))
+            .child(div().flex_none().child(crate::loaders::upload_progress_arc(
+                (fill * 100.0).round() as u8,
+                16.0,
+                theme.text_faint.opacity(0.35),
+                arc,
+            )))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(260.0))
+                    .truncate()
+                    .text_size(ui_rems(13.0))
+                    .text_color(theme.text)
+                    .child(row.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_rems(11.5))
+                    .text_color(theme.text_muted)
+                    .child(mission.current.clone()),
+            )
+            .children(unwatched.map(|label| {
+                div()
+                    .flex_none()
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(label)
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(64.0))
+                    .h(px(3.0))
+                    .rounded(px(2.0))
+                    .bg(theme.wash(0.1))
+                    .overflow_hidden()
+                    .child(div().h_full().w(relative(fill)).bg(arc)),
+            )
+            .child(chevron(theme, turn * 90.0))
+            .on_click(
+                cx.listener(move |page, _: &ClickEvent, _, cx| page.toggle_mission(&toggle_id, cx)),
+            );
+        let body = motion
+            .filter(|motion| !motion.fold.gone(now))
+            .map(|motion| {
+                folded(
+                    format!("supervisor-mission-fold-{}", row.task_id),
+                    &motion.fold,
+                    now,
+                    div()
+                        .opacity(motion.fold.value(now))
+                        .child(self.render_owners(mission, theme, cx)),
+                )
+            });
+        div()
+            .rounded(px(11.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(widgets::block_fill(theme))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
             .child(header)
             .children(body)
             .into_any_element()
     }
 
+    fn render_missions(
+        &self,
+        missions: &[Mission],
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if missions.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .id("supervisor-missions")
+                .debug_selector(|| "supervisor-missions".into())
+                .mt(px(18.0))
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(caps_label(theme, format!("Missions · {}", missions.len())))
+                .children(
+                    missions
+                        .iter()
+                        .map(|mission| self.render_mission(mission, now, theme, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_pane_status(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let body = div()
-            .p(px(16.0))
+            .id("supervisor-pane-status")
+            .debug_selector(|| "supervisor-pane-status".into())
             .flex()
-            .flex_col()
+            .items_center()
             .gap(px(10.0))
+            .py(px(14.0))
             .text_size(ui_rems(12.5))
             .text_color(theme.text_muted);
         match &self.ensure {
             Ensure::Failed(error) => body
-                .child(format!("Could not start the Supervisor: {error}"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(format!("Could not start the Supervisor: {error}")),
+                )
                 .child(
                     widgets::text_action(theme, widgets::ActionTone::Filled, "Try again")
                         .id("supervisor-retry")
                         .debug_selector(|| "supervisor-retry".into())
                         .role(gpui::Role::Button)
                         .aria_label("Try again")
-                        .self_start()
+                        .flex_none()
                         .rounded_full()
                         .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.retry_ensure(cx))),
                 )
@@ -2639,51 +3239,109 @@ impl SupervisorPage {
         }
     }
 
-    fn render_pane(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let body = match &self.pane {
-            Some(pane) => div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(pane.transcript.clone()))
-                .child(div().flex_none().child(pane.composer.clone()))
-                .into_any_element(),
-            None => self.render_pane_status(theme, cx),
-        };
-        div()
-            .id("supervisor-pane")
-            .debug_selector(|| "supervisor-pane".into())
+    fn render_bottom(
+        &self,
+        now: Instant,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let column = div()
             .flex_none()
-            .w(relative(0.42))
-            .min_w(px(340.0))
-            .max_w(px(620.0))
-            .h_full()
-            .pt(px(Theme::TITLEBAR_HEIGHT))
+            .w_full()
+            .max_w(px(820.0))
+            .mx_auto()
+            .px(px(24.0))
             .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(theme.border)
-            .child(body)
+            .flex_col();
+        let Some(pane) = &self.pane else {
+            return column
+                .child(self.render_pane_status(theme, cx))
+                .into_any_element();
+        };
+        let open = self.conversation.value_at(now);
+        let preview = {
+            let state = self.state.read(cx);
+            let wakes = state
+                .supervisor
+                .as_ref()
+                .map_or(&[][..], |snapshot| snapshot.wakes.as_slice());
+            self.chat_id(cx)
+                .and_then(|id| last_message(state.sub_transcript(&id), wakes))
+                .unwrap_or_else(|| "No messages yet.".into())
+        };
+        let height =
+            (f32::from(window.viewport_size().height) * 0.4).clamp(160.0, CONVERSATION_HEIGHT);
+        let bar = div()
+            .id("supervisor-conversation-toggle")
+            .debug_selector(|| "supervisor-conversation-toggle".into())
+            .role(gpui::Role::Button)
+            .aria_label("Conversation")
+            .aria_expanded(self.conversation_open)
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .pt(px(6.0))
+            .pb(px(7.0))
+            .cursor_pointer()
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_muted)
+            .hover(|s| s.text_color(theme.text))
+            .child(chevron(theme, -90.0 + 180.0 * open))
+            .child(div().flex_none().child("Conversation"))
+            .child(
+                div()
+                    .debug_selector(|| "supervisor-conversation-preview".into())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .opacity(1.0 - open)
+                    .child(preview),
+            )
+            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)));
+        column
+            .child(bar)
+            .when(open > 0.0, |el| {
+                el.child(
+                    div()
+                        .id("supervisor-conversation")
+                        .debug_selector(|| "supervisor-conversation".into())
+                        .flex_none()
+                        .w_full()
+                        .h(px(height * open))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(height))
+                                .flex()
+                                .flex_col()
+                                .child(pane.transcript.clone()),
+                        ),
+                )
+            })
+            .child(div().flex_none().child(pane.composer.clone()))
             .into_any_element()
     }
 
     fn render_drawer(
         &self,
         owner: &Owner,
+        now: Instant,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Utc::now();
         let found = {
             let state = self.state.read(cx);
             state
                 .tasks
                 .iter()
                 .find(|task| task.id == owner.task_id && !task.deleted)
-                .map(|task| (task.clone(), rollup(state, task, now)))
+                .map(|task| (task.clone(), rollup(state, task, Utc::now())))
         };
+        let hidden = 1.0 - self.drawer_slide.value_at(now);
         let close = div()
             .id("supervisor-brief-close")
             .debug_selector(|| "supervisor-brief-close".into())
@@ -2705,7 +3363,7 @@ impl SupervisorPage {
             .debug_selector(|| "supervisor-brief".into())
             .absolute()
             .top(px(Theme::TITLEBAR_HEIGHT))
-            .right_0()
+            .right(px(-(DRAWER_WIDTH + 40.0) * hidden))
             .bottom_0()
             .w(px(DRAWER_WIDTH))
             .bg(theme.bg)
@@ -2957,11 +3615,21 @@ impl SupervisorPage {
 }
 
 fn needs_tone(theme: &Theme) -> Hsla {
-    crate::shell::chat_status_tone(ChatIndicator::AwaitingInput, theme).2
+    theme.warning
 }
 
 fn ok_tone(theme: &Theme) -> Hsla {
     crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
+}
+
+fn kind_tone(theme: &Theme, kind: Kind) -> Option<Hsla> {
+    let dark = theme.appearance == crate::theme::Appearance::Dark;
+    match kind {
+        Kind::Needs => Some(needs_tone(theme)),
+        Kind::Question => Some(crate::shell::chat_status_tone(ChatIndicator::Working, theme).2),
+        Kind::Intervention => Some(gpui::rgb(if dark { 0xc084fc } else { 0x9333ea }).into()),
+        Kind::Resource => None,
+    }
 }
 
 fn tone_chip(theme: &Theme, label: impl Into<SharedString>, tone: Option<Hsla>) -> gpui::Div {
@@ -2993,27 +3661,382 @@ fn pill_button(
         .rounded_full()
 }
 
-fn needs_card(theme: &Theme, selector: String) -> gpui::Div {
-    let tone = needs_tone(theme);
+// An answered card keeps its controls, inert, so it folds away without first changing height.
+fn settle_while(answering: bool, controls: gpui::Div) -> AnyElement {
+    if !answering {
+        return controls.into_any_element();
+    }
     div()
-        .debug_selector(move || selector.clone())
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(tone.opacity(0.45))
-        .bg(tone.opacity(0.06))
-        .px(px(14.0))
-        .py(px(12.0))
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
+        .relative()
+        .opacity(0.5)
+        .child(controls)
+        .child(div().absolute().inset_0().occlude())
+        .into_any_element()
 }
 
-fn empty_line(theme: &Theme, text: &'static str) -> AnyElement {
+fn done_key(key: &str, done: bool) -> String {
+    if done {
+        format!("earlier-{key}")
+    } else {
+        key.to_owned()
+    }
+}
+
+fn card(
+    theme: &Theme,
+    key: &str,
+    selector: String,
+    label: String,
+    role: gpui::Role,
+    needs: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let tone = needs_tone(theme);
     div()
-        .px(px(8.0))
-        .text_size(ui_rems(12.5))
+        .id(SharedString::from(format!("supervisor-card-{key}")))
+        .debug_selector(move || selector.clone())
+        .role(role)
+        .aria_label(label)
+        .relative()
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(if needs {
+            tone.opacity(0.4)
+        } else {
+            theme.border
+        })
+        .bg(if needs {
+            tone.opacity(0.05)
+        } else {
+            widgets::block_fill(theme)
+        })
+}
+
+fn kind_tag(theme: &Theme, kind: Option<Kind>) -> gpui::Div {
+    let tone = kind.and_then(|kind| kind_tone(theme, kind));
+    div()
+        .flex_none()
+        .mt(px(1.0))
+        .px(px(7.0))
+        .rounded_full()
+        .text_size(ui_rems(10.5))
+        .line_height(ui_rems(17.0))
+        .bg(tone.map_or(theme.wash(0.08), |tone| tone.opacity(0.18)))
+        .text_color(match (tone, kind) {
+            (Some(tone), _) => tone,
+            (None, Some(_)) => theme.text_muted,
+            (None, None) => theme.text_faint,
+        })
+        .child(kind.map_or("Done", Kind::tag))
+}
+
+fn card_body() -> gpui::Div {
+    div().flex_1().min_w_0().flex().flex_col().gap(px(3.0))
+}
+
+fn card_title(theme: &Theme, text: String, strong: bool) -> gpui::Div {
+    div()
+        .text_size(ui_rems(13.0))
+        .line_height(ui_rems(19.0))
+        .when(strong, |el| el.font_weight(gpui::FontWeight::MEDIUM))
+        .text_color(theme.text)
+        .child(text)
+}
+
+fn card_meta(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(ui_rems(11.5))
+        .text_color(theme.text_muted)
+}
+
+fn evidence(theme: &Theme, text: String) -> gpui::Div {
+    div()
+        .mt(px(3.0))
+        .pl(px(9.0))
+        .border_l_2()
+        .border_color(theme.border)
+        .text_size(ui_rems(11.5))
+        .line_height(ui_rems(17.0))
         .text_color(theme.text_muted)
         .child(text)
+}
+
+fn arrive(
+    card: gpui::Stateful<gpui::Div>,
+    arrival: Option<&Arrival>,
+    theme: &Theme,
+    now: Instant,
+) -> AnyElement {
+    let Some(arrival) = arrival else {
+        return card.into_any_element();
+    };
+    let slide = arrival.slide.value_at(now);
+    let glow = arrival.glow.value_at(now);
+    let tone = needs_tone(theme).opacity(0.5 * (1.0 - glow));
+    card.top(px(-10.0 * (1.0 - slide)))
+        .opacity(slide)
+        .when(glow < 1.0, |el| {
+            el.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let spread = px(8.0 * glow);
+                        let ring = gpui::Bounds::new(
+                            gpui::point(bounds.origin.x - spread, bounds.origin.y - spread),
+                            gpui::size(
+                                bounds.size.width + spread * 2.0,
+                                bounds.size.height + spread * 2.0,
+                            ),
+                        );
+                        window.paint_quad(gpui::quad(
+                            ring,
+                            px(11.0) + spread,
+                            gpui::transparent_black(),
+                            spread,
+                            tone,
+                            gpui::BorderStyle::default(),
+                        ));
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+        })
+        .into_any_element()
+}
+
+fn folded(id: String, fold: &Fold, now: Instant, body: impl IntoElement) -> AnyElement {
+    let probe = fold.height.clone();
+    let inner = div().relative().flex_none().w_full().child(body).child(
+        canvas(
+            move |bounds, _, _| {
+                let height = f32::from(bounds.size.height);
+                if (probe.get() - height).abs() > 0.5 {
+                    probe.set(height);
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0(),
+    );
+    if !fold.moving(now) {
+        return inner.into_any_element();
+    }
+    let value = fold.value(now);
+    div()
+        .id(SharedString::from(id))
+        .relative()
+        .flex_none()
+        .w_full()
+        .overflow_hidden()
+        .h(px(fold.height.get() * value))
+        .opacity(value)
+        .child(inner)
+        .into_any_element()
+}
+
+fn chevron(theme: &Theme, degrees: f32) -> gpui::Svg {
+    icon(icons::LUCIDE_CHEVRON_RIGHT)
+        .size(px(12.0))
+        .text_color(theme.text_faint)
+        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+            degrees.to_radians(),
+        )))
+}
+
+fn caps_label(theme: &Theme, text: String) -> gpui::Div {
+    div()
+        .px(px(2.0))
+        .text_size(ui_rems(10.5))
+        .text_color(theme.text_faint)
+        .child(text.to_uppercase())
+}
+
+fn breathing_dot(size: f32, tone: Hsla) -> AnyElement {
+    div()
+        .flex_none()
+        .size(px(size))
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    let quad = gpui::fill(bounds, tone).corner_radii(bounds.size.width / 2.0);
+                    match motion::breathing(0.35, 1.0, cx) {
+                        Some(animation) => window.paint_animated_quad(quad, animation),
+                        None => window.paint_quad(quad),
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+fn render_calm(theme: &Theme, line: String) -> AnyElement {
+    div()
+        .id("supervisor-calm")
+        .debug_selector(|| "supervisor-calm".into())
+        .role(gpui::Role::Group)
+        .aria_label(format!("All quiet. {line}"))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(7.0))
+        .pt(px(26.0))
+        .pb(px(18.0))
+        .text_size(ui_rems(12.5))
+        .text_color(theme.text_muted)
+        .child(
+            div()
+                .size(px(32.0))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(breathing_dot(9.0, ok_tone(theme))),
+        )
+        .child(div().text_color(theme.text).child("All quiet"))
+        .child(line)
+        .into_any_element()
+}
+
+fn calm_line(
+    snapshot: Option<&SupervisorSnapshot>,
+    feed: &Feed,
+    filter: Filter,
+    watched: usize,
+    missions: usize,
+) -> String {
+    match filter {
+        Filter::Only(kind) if !feed.open.is_empty() => {
+            return format!("Nothing open under {}.", kind.chip());
+        }
+        _ => {}
+    }
+    if snapshot.is_none() {
+        return "Waiting for the engine to report the Supervisor.".into();
+    }
+    if live_state(snapshot) == SupervisorState::Off {
+        return "The Supervisor is off. Anything that needs you lands here once it starts.".into();
+    }
+    match (missions, watched) {
+        (0, _) => "No missions running. Start one from Tasks or the composer.".into(),
+        (_, 0) => "No mission is watched. Turn Watched on for one below.".into(),
+        (_, n) => format!(
+            "Watching {n} {}. Anything that needs you lands here.",
+            plural(n, "mission", "missions")
+        ),
+    }
+}
+
+fn chip_face(row: &SupervisorIntervention, now: DateTime<Utc>) -> Option<Face> {
+    if no_effect_yet(row, now) {
+        return Some(Face {
+            label: "No effect yet".into(),
+            tone: Tone::Warn,
+        });
+    }
+    row.chips.last().map(|chip| Face {
+        label: chip_label(chip),
+        tone: if *chip == InterventionChip::Sent {
+            Tone::Plain
+        } else {
+            Tone::Ok
+        },
+    })
+}
+
+fn render_wake_log(wakes: &[SupervisorWake], theme: &Theme) -> AnyElement {
+    if wakes.is_empty() {
+        return div()
+            .id("supervisor-wake-log")
+            .debug_selector(|| "supervisor-wake-log".into())
+            .px(px(8.0))
+            .pb(px(8.0))
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_faint)
+            .child("No wakes yet. Events from watched missions wake it here.")
+            .into_any_element();
+    }
+    div()
+        .id("supervisor-wake-log")
+        .debug_selector(|| "supervisor-wake-log".into())
+        .max_h(px(220.0))
+        .overflow_y_scroll()
+        .pb(px(6.0))
+        .flex()
+        .flex_col()
+        .children(wakes.iter().map(|wake| {
+            let failed = !wake.woke();
+            let events: Vec<String> = wake
+                .events
+                .iter()
+                .map(|event| event.label.clone())
+                .chain(
+                    wake.dropped
+                        .iter()
+                        .map(|event| format!("Dropped: {}", event.label)),
+                )
+                .collect();
+            let id = wake.id.clone();
+            div()
+                .debug_selector(move || format!("supervisor-wake-{id}"))
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .text_size(ui_rems(11.5))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(36.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_color(theme.text_faint)
+                        .child(clock(wake.at)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_color(theme.text_muted)
+                                .child(if events.is_empty() {
+                                    "No events".to_owned()
+                                } else {
+                                    clip_to(&events.join("; "), TITLE_CHARS)
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_color(if failed {
+                                    theme.danger
+                                } else {
+                                    theme.text_faint
+                                })
+                                .child(format!(
+                                    "{} {} · {}",
+                                    wake.events.len(),
+                                    plural(wake.events.len(), "event", "events"),
+                                    delivery_label(&wake.delivery)
+                                )),
+                        ),
+                )
+        }))
         .into_any_element()
 }
 
@@ -3027,22 +4050,36 @@ fn step_labels(plan: &Rollup) -> Vec<(String, String)> {
 impl Render for SupervisorPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let missions = missions(self.state.read(cx), Utc::now());
+        let (now, utc) = (Instant::now(), Utc::now());
+        let reduced = motion::reduced_motion(cx);
+        let missions = missions(self.state.read(cx), utc);
         let watches: Vec<Watch> = missions.iter().map(|m| m.watch.clone()).collect();
-        let snapshot = self.state.read(cx).supervisor.clone().unwrap_or_default();
+        let watched = watched_count(&watches);
+        let (feed, calm) = {
+            let snapshot = self.state.read(cx).supervisor.as_ref();
+            let feed = snapshot
+                .map(|snapshot| feed::feed(snapshot, &self.memory, utc))
+                .unwrap_or_default();
+            let calm = calm_line(snapshot, &feed, self.filter, watched, missions.len());
+            (feed, calm)
+        };
+        self.sync_motion(&feed, &missions, now, reduced);
+        let header = enter_block(
+            self.enter_progress(0, now),
+            self.render_header(&feed, watched, now, &theme, cx),
+        );
+        let body = enter_block(
+            self.enter_progress(1, now),
+            self.render_feed(&feed, calm, now, &theme, cx),
+        );
+        let mission_block = self
+            .render_missions(&missions, now, &theme, cx)
+            .map(|block| enter_block(self.enter_progress(2, now), block));
         let column = widgets::page_column()
             .max_w(px(820.0))
-            .gap(px(26.0))
-            .child(self.render_header(watched_count(&watches), &theme, cx))
-            .child(self.render_needs_you(&snapshot.needs_you, &theme, cx))
-            .child(self.render_missions(missions, &theme, cx))
-            .child(self.render_questions(&snapshot.questions, &theme, cx))
-            .child(self.render_interventions(&snapshot.interventions, &snapshot.wakes, &theme, cx))
-            .when(!cfg!(windows), |el| {
-                el.child(self.render_resources(&theme, cx))
-            })
-            .child(self.render_authority(&theme, cx))
-            .child(self.render_wake_log(&theme, cx));
+            .child(header)
+            .child(body)
+            .children(mission_block);
         let scroll = widgets::scroll_faded(
             "supervisor-page-scroll",
             div()
@@ -3051,40 +4088,33 @@ impl Render for SupervisorPage {
                 .overflow_y_scroll()
                 .child(column),
         );
-        let docked = (!self.pane_open)
-            .then(|| self.pane.as_ref().map(|pane| pane.composer.clone()))
-            .flatten();
-        let left = div()
-            .flex_1()
-            .min_w(px(360.0))
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(scroll))
-            .children(docked.map(|composer| {
-                div()
-                    .flex_none()
-                    .w_full()
-                    .max_w(px(820.0))
-                    .mx_auto()
-                    .px(px(24.0))
-                    .child(composer)
-            }));
+        let bottom = self.render_bottom(now, &theme, window, cx);
         let drawer = self
             .drawer
             .clone()
-            .map(|owner| self.render_drawer(&owner, &theme, window, cx));
+            .map(|owner| self.render_drawer(&owner, now, &theme, window, cx));
+        if self.animating(now) {
+            window.request_animation_frame();
+        }
         div()
             .id("supervisor-page")
             .debug_selector(|| "supervisor-page".into())
             .relative()
             .size_full()
             .flex()
-            .flex_row()
-            .child(left)
-            .when(self.pane_open, |el| el.child(self.render_pane(&theme, cx)))
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(scroll))
+            .child(bottom)
             .children(drawer)
     }
+}
+
+fn enter_block(progress: f32, element: impl IntoElement) -> gpui::Div {
+    div()
+        .relative()
+        .top(px((1.0 - progress) * 6.0))
+        .opacity(progress)
+        .child(element)
 }
 
 #[cfg(test)]
