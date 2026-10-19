@@ -124,23 +124,24 @@ pub(crate) fn button(
         }))
 }
 
-pub(crate) fn badge(count: usize, theme: &Theme) -> Div {
+pub(crate) fn badge(count: usize, scale: f32, theme: &Theme) -> Div {
     let label = if count > 99 {
         "99+".to_owned()
     } else {
         count.to_string()
     };
+    let grow = 7.5 * (scale - 1.0);
     div()
         .absolute()
-        .top(px(1.0))
-        .right(px(0.0))
-        .min_w(px(15.0))
-        .h(px(15.0))
-        .px(px(4.0))
+        .top(px(1.0 - grow))
+        .right(px(-grow))
+        .min_w(px(15.0 * scale))
+        .h(px(15.0 * scale))
+        .px(px(4.0 * scale))
         .rounded_full()
         .bg(theme.accent)
         .text_color(theme.on_accent)
-        .text_size(crate::typography::ui_rems(9.5))
+        .text_size(crate::typography::ui_rems(9.5 * scale))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .flex()
         .items_center()
