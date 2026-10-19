@@ -871,11 +871,7 @@ impl BrowserSurface {
     }
 
     pub fn fixture_eval(&self, script: &str) {
-        #[cfg(target_os = "macos")]
-        if let Some(native) = &self.native {
-            native.fixture_eval(script);
-        }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = &self.native {
             native.evaluate(script);
         }

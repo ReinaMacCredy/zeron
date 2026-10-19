@@ -969,10 +969,6 @@ impl NativePage {
             self.0.borrow().view.configuration().websiteDataStore().httpCookieStore().getAllCookies(&block);
         }
     }
-
-    pub fn fixture_eval(&self, script: &str) {
-        self.evaluate(script);
-    }
 }
 
 impl NativePage {
