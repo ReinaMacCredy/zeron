@@ -238,6 +238,7 @@ impl TaskCard {
         cx: &mut Context<Self>,
     ) {
         if self.task_id() == Some(task_id.as_str()) {
+            self.focus_field(focus, window, cx);
             return;
         }
         self.flush(cx);
@@ -323,14 +324,6 @@ impl TaskCard {
                 cx.notify();
             }),
         ];
-        if let Some(window) = window {
-            let target = match focus {
-                CardFocus::Title => title_input.focus_handle(cx),
-                CardFocus::Notes => notes_input.focus_handle(cx),
-                CardFocus::Agent => self.start_focus.clone(),
-            };
-            window.focus(&target, cx);
-        }
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
         let previous = self.open.replace(Open {
@@ -353,6 +346,7 @@ impl TaskCard {
             orchestrate: None,
             _subscriptions: subscriptions,
         });
+        self.focus_field(focus, window, cx);
         match previous {
             Some(mut open) if !reduced => {
                 open.save = None;
@@ -379,6 +373,18 @@ impl TaskCard {
             }
         }
         cx.notify();
+    }
+
+    fn focus_field(&self, focus: CardFocus, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let (Some(window), Some(open)) = (window, self.open.as_ref()) else {
+            return;
+        };
+        let target = match focus {
+            CardFocus::Title => open.title.focus_handle(cx),
+            CardFocus::Notes => open.notes.focus_handle(cx),
+            CardFocus::Agent => self.start_focus.clone(),
+        };
+        window.focus(&target, cx);
     }
 
     pub fn close(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -1920,6 +1926,32 @@ mod tests {
             page.card().read(cx).task_id().map(str::to_owned)
         });
         assert_eq!(open.as_deref(), Some("orch"));
+
+        std::thread::sleep(crate::motion::MENU_OUT.total());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let at = cx.debug_bounds("task-row-orch").unwrap().center();
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let edit = cx.debug_bounds("task-row-menu-edit").unwrap().center();
+        cx.simulate_click(edit, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let title = page.read_with(cx, |page, cx| {
+            page.card()
+                .read(cx)
+                .open
+                .as_ref()
+                .unwrap()
+                .title
+                .focus_handle(cx)
+        });
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            Some(title),
+            "Edit on the task the card already shows puts the caret back in its title"
+        );
     }
 
     #[gpui::test]

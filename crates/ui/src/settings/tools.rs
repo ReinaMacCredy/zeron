@@ -7,7 +7,9 @@ use gpui::{
 use zeron_proto::tools::{TOOL_GROUPS, ToolGroup, ToolGroupInfo, ToolSettings, ToolSettingsState};
 use zeron_rpc::methods;
 
-use super::widgets;
+use super::widgets::{self, ActionTone};
+
+mod art;
 use crate::device_panel::setup::activate;
 use crate::icons;
 use crate::popover::{self, Loadable};
@@ -26,6 +28,8 @@ pub struct ToolsPage {
     scroll: widgets::PageScroll,
     settings: Loadable<ToolSettings>,
     open: HashSet<ToolGroup>,
+    pending: HashSet<ToolGroup>,
+    wires: Option<[art::Wire; 6]>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
     switch_task: Option<Task<()>>,
@@ -47,6 +51,8 @@ impl ToolsPage {
             scroll: widgets::PageScroll::default(),
             settings: Loadable::Idle,
             open: HashSet::new(),
+            pending: HashSet::new(),
+            wires: None,
             error: None,
             task: None,
             switch_task: None,
@@ -79,6 +85,8 @@ impl ToolsPage {
                 .call_as::<ToolSettingsState>(method, params)
                 .await;
             this.update(cx, |page, cx| {
+                page.pending
+                    .retain(|group| matches!(group, ToolGroup::Computer | ToolGroup::Devices));
                 match reply {
                     Ok(state) => {
                         page.settings = Loadable::Ready(state.settings);
@@ -131,61 +139,66 @@ impl ToolsPage {
         }
     }
 
-    fn set_group(&mut self, group: ToolGroup, on: bool, cx: &mut Context<Self>) {
-        match group {
-            ToolGroup::Computer => self.set_computer(on, cx),
-            ToolGroup::Devices => self.write_switch(
+    fn set_groups(&mut self, groups: &[ToolGroup], on: bool, cx: &mut Context<Self>) {
+        let plain: Vec<ToolGroup> = groups
+            .iter()
+            .copied()
+            .filter(|group| !matches!(group, ToolGroup::Computer | ToolGroup::Devices))
+            .collect();
+        if !plain.is_empty() && self.settings.ready().is_some() {
+            self.pending.extend(&plain);
+            self.edit(cx, |settings| {
+                for group in &plain {
+                    settings.set_group(*group, on);
+                }
+            });
+        }
+        let mut computer = None;
+        let mut writes = Vec::new();
+        if groups.contains(&ToolGroup::Computer)
+            && let Some(mut next) = self.state.read(cx).computer_settings.clone()
+        {
+            next.computer_control_enabled = on;
+            writes.push((
+                ToolGroup::Computer,
+                methods::SET_COMPUTER_SETTINGS,
+                serde_json::to_value(&next).unwrap_or_default(),
+            ));
+            computer = Some(next);
+        }
+        if groups.contains(&ToolGroup::Devices) && self.devices(cx).is_some_and(|(hub, _)| hub) {
+            writes.push((
+                ToolGroup::Devices,
                 methods::CONFIGURE_DEVICE_HUB,
                 serde_json::json!({ "agentAccessEnabled": on }),
-                cx,
-            ),
-            _ => self.edit(cx, |settings| settings.set_group(group, on)),
+            ));
         }
-    }
-
-    fn set_computer(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(mut next) = self.state.read(cx).computer_settings.clone() else {
+        if writes.is_empty() {
             return;
-        };
-        next.computer_control_enabled = on;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = serde_json::to_value(&next).unwrap_or_default();
+        self.pending
+            .extend(writes.iter().map(|(group, _, _)| *group));
         self.switch_task = Some(cx.spawn(async move |this, cx| {
-            let reply = engine
-                .client()
-                .call(methods::SET_COMPUTER_SETTINGS, params)
-                .await;
-            this.update(cx, |page, cx| {
-                page.switch_task = None;
-                match reply {
-                    Ok(_) => page
-                        .state
-                        .update(cx, |state, _| state.computer_settings = Some(next)),
-                    Err(error) => page.error = Some(format!("Could not save: {error}").into()),
+            let mut computer_saved = false;
+            let mut failed = None;
+            for (group, method, params) in writes {
+                match engine.client().call(method, params).await {
+                    Ok(_) => computer_saved |= group == ToolGroup::Computer,
+                    Err(error) => failed = Some(error.to_string()),
                 }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn write_switch(
-        &mut self,
-        method: &'static str,
-        params: serde_json::Value,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.switch_task = Some(cx.spawn(async move |this, cx| {
-            let reply = engine.client().call(method, params).await;
+            }
             this.update(cx, |page, cx| {
                 page.switch_task = None;
-                if let Err(error) = reply {
+                page.pending.remove(&ToolGroup::Computer);
+                page.pending.remove(&ToolGroup::Devices);
+                if let Some(next) = computer.filter(|_| computer_saved) {
+                    page.state
+                        .update(cx, |state, _| state.computer_settings = Some(next));
+                }
+                if let Some(error) = failed {
                     page.error = Some(format!("Could not save: {error}").into());
                 }
                 cx.notify();
@@ -209,26 +222,150 @@ impl ToolsPage {
         settings.disabled(&also_off)
     }
 
+    fn group_state(
+        &self,
+        settings: &ToolSettings,
+        info: &'static ToolGroupInfo,
+        disabled: &BTreeSet<&'static str>,
+        cx: &gpui::App,
+    ) -> GroupState {
+        let tools = info.tools();
+        let live = tools.iter().filter(|t| !disabled.contains(t.name)).count();
+        if !self.group_on(settings, info.group, cx) || live == 0 {
+            GroupState::Off
+        } else if live < tools.len() {
+            GroupState::Partial(live)
+        } else {
+            GroupState::On
+        }
+    }
+
+    fn turn_all(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on {
+            self.edit(cx, |settings| {
+                for info in TOOL_GROUPS {
+                    for tool in info.tools() {
+                        settings.set_tool(tool.name, true);
+                    }
+                }
+            });
+        }
+        let groups: Vec<ToolGroup> = TOOL_GROUPS.iter().map(|info| info.group).collect();
+        self.set_groups(&groups, on, cx);
+    }
+
+    fn hero(
+        &self,
+        theme: &Theme,
+        wires: [art::Wire; 6],
+        live: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let saving = self.pending.len();
+        let (title, body) = if saving > 0 {
+            (
+                format!("Saving {saving} group{}", if saving == 1 { "" } else { "s" }),
+                "Zeron is updating its MCP server. A running chat picks up the change on its next turn.".to_string(),
+            )
+        } else if live == total {
+            (
+                "Every tool is live".to_string(),
+                format!(
+                    "Agents on this engine can call all {total} Zeron tools across {} groups.",
+                    TOOL_GROUPS.len()
+                ),
+            )
+        } else if live > 0 {
+            (
+                format!("{live} of {total} tools on"),
+                "Open a group to pick single tools. A call to a tool you turn off is refused right away.".to_string(),
+            )
+        } else {
+            (
+                "No Zeron tools".to_string(),
+                "Agents see no Zeron MCP tools. Turn a group on and calls to it work again."
+                    .to_string(),
+            )
+        };
+        let ready = self.settings.ready().is_some() && self.switch_task.is_none();
+        div()
+            .mt(px(14.0))
+            .rounded(px(12.0))
+            .bg(widgets::block_fill(theme))
+            .p(px(6.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(210.0))
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(widgets::row_divider(theme))
+                    .bg(art::backdrop(theme))
+                    .overflow_hidden()
+                    .child(art::hero(theme, wires, live as f32 / total.max(1) as f32).size_full()),
+            )
+            .child(
+                div()
+                    .px(px(40.0))
+                    .pt(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .text_center()
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(13.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
+                            .text_color(theme.text_muted)
+                            .child(body),
+                    ),
+            )
+            .child(
+                div()
+                    .pt(px(10.0))
+                    .pb(px(10.0))
+                    .flex()
+                    .justify_center()
+                    .gap(px(7.0))
+                    .child(activate(
+                        action(theme, "tools-all-on", "Turn all on", ActionTone::Solid),
+                        ready && live < total,
+                        cx,
+                        |page: &mut Self, cx| page.turn_all(true, cx),
+                    ))
+                    .child(activate(
+                        action(theme, "tools-all-off", "Turn all off", ActionTone::Outlined),
+                        ready && live > 0,
+                        cx,
+                        |page: &mut Self, cx| page.turn_all(false, cx),
+                    )),
+            )
+            .into_any_element()
+    }
+
     fn group_card(
         &self,
         theme: &Theme,
         info: &'static ToolGroupInfo,
         settings: &ToolSettings,
         disabled: &BTreeSet<&'static str>,
+        first: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let group = info.group;
         let tools = info.tools();
         let on = self.group_on(settings, group, cx);
         let open = self.open.contains(&group);
-        let live = tools.iter().filter(|t| !disabled.contains(t.name)).count();
-        let badge = if !on {
-            widgets::badge(theme, "Off")
-        } else if live < tools.len() {
-            widgets::badge_active(theme, format!("{live} of {}", tools.len()))
-        } else {
-            widgets::badge(theme, format!("{} tools", tools.len()))
-        };
+        let state = self.group_state(settings, info, disabled, cx);
         let (switch_ready, linked) = match group {
             ToolGroup::Computer => (
                 self.computer_on(cx).is_some(),
@@ -267,8 +404,28 @@ impl ToolsPage {
                     .into_any_element(),
             );
         }
-        let header = widgets::card_row(theme, true)
+        let count = match state {
+            GroupState::Partial(live) => format!("{live}/{} TOOLS", tools.len()),
+            _ => format!("{} TOOLS", tools.len()),
+        };
+        let control = activate(
+            switch(
+                theme,
+                format!("tools-group-switch-{group:?}"),
+                info.title,
+                on,
+            ),
+            switch_ready && !self.pending.contains(&group),
+            cx,
+            move |page: &mut Self, cx| {
+                cx.stop_propagation();
+                page.set_groups(&[group], !on, cx)
+            },
+        );
+        let tile_tone = if on { theme.text } else { theme.text_muted };
+        let header = widgets::card_row(theme, first)
             .id(SharedString::from(format!("tools-group-{group:?}")))
+            .gap(px(12.0))
             .cursor_pointer()
             .on_click(cx.listener(move |page, _, _, cx| {
                 if !page.open.remove(&group) {
@@ -285,40 +442,46 @@ impl ToolsPage {
                 .size(px(14.0))
                 .text_color(theme.text_muted),
             )
-            .child(widgets::row_tile(theme, group_icon(group)))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(28.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(art::backdrop(theme).opacity(0.6))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(group_icon(group))
+                            .size(px(14.0))
+                            .text_color(tile_tone),
+                    ),
+            )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(160.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(widgets::row_title(theme, info.title))
-                            .child(badge),
-                    )
+                    .child(widgets::row_title(theme, info.title))
                     .child(widgets::meta_line(theme, meta)),
             )
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(activate(
-                        switch(
-                            theme,
-                            format!("tools-group-switch-{group:?}"),
-                            info.title,
-                            on,
-                        ),
-                        switch_ready,
-                        cx,
-                        move |page: &mut Self, cx| {
-                            cx.stop_propagation();
-                            page.set_group(group, !on, cx)
-                        },
-                    )),
+                    .child(
+                        div()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(theme.text_faint)
+                            .child(count),
+                    )
+                    .child(control),
             );
-        let mut card = widgets::section_card(theme).mt(px(10.0)).child(header);
+        let mut card = div().flex().flex_col().child(header);
         if open {
             if !on {
                 card = card.child(
@@ -366,9 +529,9 @@ impl ToolsPage {
                 card = card.child(
                     div()
                         .mx(px(16.0))
-                        .pl(px(54.0))
-                        .py(px(8.0))
-                        .min_h(px(if tool.summary.is_empty() { 36.0 } else { 48.0 }))
+                        .ml(px(70.0))
+                        .py(px(7.0))
+                        .min_h(px(if tool.summary.is_empty() { 32.0 } else { 44.0 }))
                         .border_t_1()
                         .border_color(widgets::row_divider(theme))
                         .flex()
@@ -385,9 +548,41 @@ impl ToolsPage {
                         )),
                 );
             }
+            card = card.child(div().h(px(6.0)));
         }
         card.into_any_element()
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupState {
+    Off,
+    Partial(usize),
+    On,
+}
+
+impl GroupState {
+    fn lit(self) -> art::Lit {
+        match self {
+            Self::Off => art::Lit::Off,
+            Self::Partial(_) => art::Lit::Partial,
+            Self::On => art::Lit::On,
+        }
+    }
+}
+
+fn action(
+    theme: &Theme,
+    id: &'static str,
+    label: &'static str,
+    tone: ActionTone,
+) -> Stateful<gpui::Div> {
+    widgets::text_action(theme, tone, label)
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .tab_index(0)
+        .role(gpui::Role::Button)
+        .aria_label(label)
 }
 
 fn group_icon(group: ToolGroup) -> &'static str {
@@ -442,13 +637,33 @@ impl Render for ToolsPage {
             Some(settings) => {
                 let disabled = self.disabled(&settings, cx);
                 let total: usize = TOOL_GROUPS.iter().map(|info| info.tools().len()).sum();
+                let live = total - disabled.len();
+                let states: Vec<GroupState> = TOOL_GROUPS
+                    .iter()
+                    .map(|info| self.group_state(&settings, info, &disabled, cx))
+                    .collect();
+                let animate = self.wires.is_some();
+                let mut wires = self.wires.unwrap_or_default();
+                for (wire, state) in wires.iter_mut().zip(&states) {
+                    wire.set(state.lit(), animate);
+                }
+                self.wires = Some(wires);
+                let groups_on = states
+                    .iter()
+                    .filter(|state| matches!(state, GroupState::On | GroupState::Partial(_)))
+                    .count();
+                let status = if !self.pending.is_empty() {
+                    "SAVING"
+                } else if live == total {
+                    "ALL LIVE"
+                } else if live > 0 {
+                    "PARTIAL"
+                } else {
+                    "OFF"
+                };
                 column = column
                     .child(widgets::page_header(&theme, "Tools", None))
                     .child(widgets::page_subtitle(&theme, SUBTITLE))
-                    .child(widgets::page_subtitle(
-                        &theme,
-                        format!("{} of {total} on", total - disabled.len()),
-                    ))
                     .when_some(self.error.clone(), |el, error| {
                         el.child(
                             div()
@@ -456,16 +671,36 @@ impl Render for ToolsPage {
                                 .child(widgets::error_strip(&theme, error)),
                         )
                     })
-                    .child(div().mt(px(14.0)));
-                for info in TOOL_GROUPS {
-                    column = column.child(self.group_card(&theme, info, &settings, &disabled, cx));
+                    .child(self.hero(&theme, wires, live, total, cx));
+                let mut groups = widgets::section_card(&theme).mt(px(6.0));
+                for (index, info) in TOOL_GROUPS.iter().enumerate() {
+                    groups = groups.child(self.group_card(
+                        &theme,
+                        info,
+                        &settings,
+                        &disabled,
+                        index == 0,
+                        cx,
+                    ));
                 }
-                column = column.child(
+                column = column.child(groups).child(
                     div()
-                        .mt(px(14.0))
+                        .mt(px(12.0))
                         .px(px(4.0))
+                        .flex()
+                        .flex_wrap()
+                        .justify_between()
+                        .gap(px(8.0))
                         .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
                         .text_color(theme.text_muted)
+                        .child(
+                            div()
+                                .font_family(theme.font_mono.clone())
+                                .text_size(crate::typography::ui_rems(10.5))
+                                .child(SharedString::from(format!(
+                                    "{groups_on} GROUPS · {live} / {total} TOOLS · {status}"
+                                ))),
+                        )
                         .child("Applies to every chat on this engine."),
                 );
             }

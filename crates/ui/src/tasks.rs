@@ -24,6 +24,8 @@ use crate::typography::ui_rems;
 
 mod card;
 mod center;
+#[cfg(test)]
+mod image_paths_tests;
 mod images;
 
 use crate::attachments::StagedAttachment;

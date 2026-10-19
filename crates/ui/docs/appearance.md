@@ -36,4 +36,14 @@ With a background set, more rows appear:
 
 Set the family and size for **Interface font**, **Terminal font**, and **Code & diff font**. Geist is the interface default, Geist Mono the default for terminal and code. **Conversation width** sets the maximum width for messages and the composer.
 
+### Math
+
+Zeron typesets LaTeX math in messages, Markdown file previews, and pull request descriptions and comments. Three rows at the end of the fonts card control it:
+
+- **Render math**: on by default. Turn it off to show each formula's source as code instead: inline code for a formula in a line, a `math` code block for one on its own line.
+- **Math font**: **Fira Math** (the default), **STIX Two**, **Computer Modern**, **Libertinus**, **Palatino**, or **Euler**. All six are built into Zeron, so they look the same on every Mac.
+- **Math size**: 90%, 100% (the default), 110%, 120%, 135%, or 150% of the text around the formula.
+
+These read as math: `$…$` or `\(…\)` for a formula inside a line, and `$$…$$` or `\[…\]` for one on its own line. Dollar signs in prices and shell variables stay text, so `$5`, `costs $5 and $10 total`, `$HOME/$USER`, and `echo $PATH and $HOME` show as written, and so does a closing `$` followed by a digit, as in `$x$5`. Nothing inside code spans or code blocks is math. A formula Zeron cannot typeset shows its source as code, as with **Render math** off. Copying a formula copies its source, with its `$` or `$$` delimiters.
+
 > **Compact mode** is in [Settings > General](zeron://settings/general), not here. It collapses thinking and tool calls so only the replies stay in view. For one-line sidebar rows, use **Compact** in the sidebar's **…** menu.
