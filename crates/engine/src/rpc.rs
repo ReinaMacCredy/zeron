@@ -1054,6 +1054,14 @@ enum MutateParams {
         send: bool,
         #[serde(default)]
         from_chat_id: Option<String>,
+        #[serde(default)]
+        orchestrate: bool,
+        #[serde(default = "approve_plan_default")]
+        approve_plan: bool,
+        #[serde(default)]
+        same_agents: bool,
+        #[serde(default)]
+        plan_doc: bool,
     },
     #[serde(rename_all = "camelCase")]
     PlanSteps {
@@ -2343,8 +2351,17 @@ impl EngineRpc {
                 chat_id,
                 send,
                 from_chat_id,
+                orchestrate,
+                approve_plan,
+                same_agents,
+                plan_doc,
             } => {
-                self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref())
+                let lead = orchestrate.then_some(tasks::Lead {
+                    approve_plan,
+                    same_agents,
+                    plan_doc,
+                });
+                self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead)
                     .await
             }
             MutateParams::PlanSteps {

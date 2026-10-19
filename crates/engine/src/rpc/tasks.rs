@@ -16,6 +16,29 @@ fn task_prompt(task: &Task) -> String {
     }
 }
 
+fn first_turn(task: &Task, lead: Option<Lead>) -> String {
+    match lead {
+        Some(lead) => format!("{}\n\n{}", task_prompt(task), lead_brief(&task.id, lead)),
+        None => task_prompt(task),
+    }
+}
+
+fn lead_patch(
+    chat_id: &str,
+    space_id: Option<String>,
+    task: &Task,
+    lead: Option<Lead>,
+) -> TaskPatch {
+    TaskPatch {
+        chat_id: Some(Some(chat_id.to_string())),
+        space_id: space_id.filter(|_| task.space_id.is_none()).map(Some),
+        mode: lead.map(|_| TaskMode::Orchestrated),
+        plan_pending: lead.map(|lead| lead.approve_plan),
+        plan_doc: lead.map(|lead| lead.plan_doc),
+        ..Default::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Lead {
     pub approve_plan: bool,
@@ -216,12 +239,14 @@ impl EngineRpc {
         started
     }
 
+    /// Unlike `start_task`, a lead chat keeps its title and a busy turn is steered, not interrupted.
     pub(super) async fn assign_task(
         &self,
         task_id: &str,
         chat_id: &str,
         send: bool,
         from_chat_id: Option<&str>,
+        lead: Option<Lead>,
     ) -> Result<(), RpcError> {
         let task = self
             .workspace
@@ -235,20 +260,19 @@ impl EngineRpc {
         if chat.device_id != self.doc_host.device_id() {
             return Err(refused("Assign the task to a thread on this device"));
         }
+        let send = send || lead.is_some();
         if send && from_chat_id == Some(chat_id) {
             return Err(refused("A thread cannot send a task to itself"));
         }
         self.update_task(
             task_id,
             &TaskPatch {
-                chat_id: Some(Some(chat_id.to_string())),
-                space_id: chat.space_id.filter(|_| task.space_id.is_none()).map(Some),
                 completed: task.completed_at.is_some().then_some(false),
-                ..Default::default()
+                ..lead_patch(chat_id, chat.space_id, &task, lead)
             },
         )?;
         if send {
-            self.send_to_task_thread(&task, chat_id, from_chat_id, &task_prompt(&task))
+            self.send_to_task_thread(&task, chat_id, from_chat_id, &first_turn(&task, lead))
                 .await?;
         }
         Ok(())
@@ -581,21 +605,12 @@ impl EngineRpc {
         self.update_task(
             &task.id,
             &TaskPatch {
-                chat_id: Some(Some(chat_id.to_string())),
-                space_id: space_id.filter(|_| task.space_id.is_none()).map(Some),
-                mode: lead.map(|_| TaskMode::Orchestrated),
-                plan_pending: lead.map(|lead| lead.approve_plan),
-                plan_doc: lead.map(|lead| lead.plan_doc),
                 send_error: task.send_error.is_some().then_some(None),
-                ..Default::default()
+                ..lead_patch(chat_id, space_id, task, lead)
             },
         )?;
-        let prompt = match lead {
-            Some(lead) => format!("{}\n\n{}", task_prompt(task), lead_brief(&task.id, lead)),
-            None => task_prompt(task),
-        };
         self.doc_host
-            .request_from_chat_row(chat_id, &prompt)
+            .request_from_chat_row(chat_id, &first_turn(task, lead))
             .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
             .and_then(|request| {
                 self.doc_host.queue_command_with_transfers(

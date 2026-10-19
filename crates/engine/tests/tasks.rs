@@ -281,6 +281,58 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
             .all(|brief| !brief.contains("overview")),
         "only a plan.md lead is asked for an overview"
     );
+
+    core.workspace
+        .create_chat_from("talk", None, Some("dev-a"), None, None, None)
+        .unwrap();
+    core.workspace
+        .rename_chat("talk", "Shop design chat")
+        .unwrap();
+    mutate(json!({
+        "op": "createTask", "taskId": "t5", "title": "Shop frontend", "notes": "Next.js and Tailwind",
+    }))
+    .await
+    .unwrap();
+    let chats = core.workspace.read_chats().unwrap().len();
+    mutate(json!({
+        "op": "assignTask", "taskId": "t5", "chatId": "talk", "orchestrate": true, "planDoc": true,
+    }))
+    .await
+    .unwrap();
+    wait_for(
+        || prompts.lock().unwrap().len() == 4,
+        "the chat's lead brief",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(prompts.lock().unwrap().len(), 4, "one brief, sent once");
+    let brief = prompts.lock().unwrap()[3].clone();
+    assert!(
+        brief.starts_with(
+            "Shop frontend\n\nNext.js and Tailwind\n\nYou lead this task (task id t5)."
+        ) && brief.contains("taskId \"t5\", overview"),
+        "{brief}"
+    );
+    let led = core.workspace.task("t5").unwrap();
+    assert_eq!(led.chat_id.as_deref(), Some("talk"));
+    assert_eq!(led.mode, zeron_proto::TaskMode::Orchestrated);
+    assert!(led.plan_pending && led.plan_doc);
+    assert_eq!(
+        core.workspace.read_chats().unwrap().len(),
+        chats,
+        "the chat leads in place; no chat is created"
+    );
+    assert_eq!(
+        core.workspace
+            .chat("talk")
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Shop design chat"),
+        "the lead chat keeps its title"
+    );
+
     let unapproved = core.workspace.task("t2").unwrap();
     assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);
     assert!(!unapproved.plan_pending);
