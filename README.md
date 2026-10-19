@@ -22,14 +22,16 @@ Fork builds are not code-signed. On macOS, the first launch is blocked by Gateke
 
 ## Headless (CLI)
 
-For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only:
+For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only: download `zeron-<version>-linux-<arch>.tar.gz` from [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest), then run:
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+tar -xzf zeron-<version>-linux-<arch>.tar.gz
+zeron-<version>-linux-<arch>/install.sh
+zeron daemon install
 zeron status
 ```
 
-The installer starts the engine as a background service that survives reboots.
+`zeron daemon install` starts the engine as a background service that survives reboots.
 
 ```bash
 zeron status      # local/synced mode and engine status

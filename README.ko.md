@@ -8,7 +8,7 @@
 
 ## 데스크톱 앱
 
-[GitHub Releases](https://github.com/zeronsh/zeron/releases/latest)에서 플랫폼에 맞는 최신 버전을 내려받으세요.
+[GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest)에서 플랫폼에 맞는 최신 버전을 내려받으세요.
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
@@ -18,14 +18,16 @@
 
 ## 헤드리스 실행 (CLI)
 
-서버처럼 디스플레이가 없는 머신용입니다. 예를 들어 노트북을 닫은 뒤에도 에이전트를 계속 돌려 두는 VPS에 쓰면 됩니다. Linux만 지원합니다.
+서버처럼 디스플레이가 없는 머신용입니다. 예를 들어 노트북을 닫은 뒤에도 에이전트를 계속 돌려 두는 VPS에 쓰면 됩니다. Linux만 지원합니다. [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest)에서 `zeron-<version>-linux-<arch>.tar.gz`를 내려받은 뒤 다음을 실행하세요.
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+tar -xzf zeron-<version>-linux-<arch>.tar.gz
+zeron-<version>-linux-<arch>/install.sh
+zeron daemon install
 zeron status
 ```
 
-설치 스크립트는 엔진을 백그라운드 서비스로 실행하며, 재부팅 후에도 자동으로 다시 시작됩니다.
+`zeron daemon install`은 엔진을 백그라운드 서비스로 실행하며, 재부팅 후에도 자동으로 다시 시작됩니다.
 
 ```bash
 zeron status      # 로컬/동기화 모드와 엔진 상태 확인
