@@ -35,7 +35,7 @@ pub struct ArchivePin {
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 4_096;
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 
 /// an archive release whose integrity is proven after extraction (by a
 /// vendor code signature) rather than by a digest pinned in zeron's source.
@@ -585,6 +585,7 @@ fn unpack_tar(reader: impl Read, archive_path: &Path, dest: &Path) -> Result<(),
     let invalid =
         |error: std::io::Error| HarnessError::Install(format!("invalid tar archive: {error}"));
     let mut archive = tar::Archive::new(reader);
+    let mut links = Vec::new();
     for (index, entry) in archive.entries().map_err(invalid)?.enumerate() {
         if index >= MAX_ARCHIVE_ENTRIES {
             return Err(HarnessError::Install(format!(
@@ -620,6 +621,22 @@ fn unpack_tar(reader: impl Read, archive_path: &Path, dest: &Path) -> Result<(),
                 std::io::copy(&mut entry, &mut output_file).map_err(invalid)?;
                 output_file.flush()?;
             }
+            tar::EntryType::Symlink => {
+                let target = entry
+                    .link_name()
+                    .map_err(invalid)?
+                    .map(|target| target.into_owned())
+                    .unwrap_or_default();
+                let relative = output.strip_prefix(dest).unwrap_or(&output).to_owned();
+                if !link_stays_inside(&relative, &target) {
+                    return Err(HarnessError::Install(format!(
+                        "archive link {} -> {} points outside the install",
+                        path.display(),
+                        target.display()
+                    )));
+                }
+                links.push((relative, target));
+            }
             _ => {
                 return Err(HarnessError::Install(format!(
                     "archive entry {} is a link or special file",
@@ -628,7 +645,58 @@ fn unpack_tar(reader: impl Read, archive_path: &Path, dest: &Path) -> Result<(),
             }
         }
     }
+    // Links land last, so no file is ever written through one.
+    for (relative, target) in links {
+        create_link(dest, &relative, &target)?;
+    }
     Ok(())
+}
+
+fn link_stays_inside(link: &Path, target: &Path) -> bool {
+    let mut depth = link.components().count().saturating_sub(1);
+    let mut leading = true;
+    let mut any = false;
+    for component in target.components() {
+        any = true;
+        match component {
+            Component::ParentDir if leading => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            Component::Normal(_) => leading = false,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    any
+}
+
+#[cfg(unix)]
+fn create_link(dest: &Path, relative: &Path, target: &Path) -> Result<(), HarnessError> {
+    let mut within = dest.to_path_buf();
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        within.push(component);
+        if std::fs::symlink_metadata(&within).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(HarnessError::Install(format!(
+                "archive link {} sits under another link",
+                relative.display()
+            )));
+        }
+    }
+    let link = dest.join(relative);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::os::unix::fs::symlink(target, &link)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_link(_dest: &Path, relative: &Path, _target: &Path) -> Result<(), HarnessError> {
+    Err(HarnessError::Install(format!(
+        "archive entry {} is a link, which installs here do not support",
+        relative.display()
+    )))
 }
 
 /// archives built off-unix can lose the executable bit, and the entry spawns
@@ -921,6 +989,7 @@ mod tests {
         assert_eq!(ArchiveKind::from_url("https://x/a.zip"), ArchiveKind::Zip);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn tar_entries_reject_traversal_links_and_special_files() {
         let regular = |name: &[u8]| {
@@ -961,9 +1030,24 @@ mod tests {
             ),
             ("absolute", regular(b"/tmp/evil"), "unsafe path"),
             (
-                "symlink",
+                "escaping symlink",
                 linked(tar::EntryType::Symlink),
-                "link or special",
+                "points outside",
+            ),
+            (
+                "absolute symlink",
+                symlinks(&[("link", "/etc/passwd")]),
+                "points outside",
+            ),
+            (
+                "symlink climbing back out",
+                symlinks(&[("link", "bin/../..")]),
+                "points outside",
+            ),
+            (
+                "symlink under a symlink",
+                symlinks(&[("a", "."), ("a/link", "..")]),
+                "under another link",
             ),
             ("hardlink", linked(tar::EntryType::Link), "link or special"),
             ("fifo", linked(tar::EntryType::Fifo), "link or special"),
@@ -980,10 +1064,51 @@ mod tests {
             assert!(error.to_string().contains(expected), "{case}: {error}");
             assert!(!root.path().join("evil").exists(), "{case}");
             assert!(
-                !dest.join("link").exists() && !dest.join("pipe").exists(),
+                std::fs::symlink_metadata(dest.join("link")).is_err()
+                    && !dest.join("pipe").exists(),
                 "{case}"
             );
         }
+
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("download.tar");
+        std::fs::write(
+            &archive,
+            tar_bytes(|builder| {
+                let mut file = tar::Header::new_gnu();
+                file.set_mode(0o755);
+                file.set_size(10);
+                builder
+                    .append_data(&mut file, "bin/harn", &b"#!/bin/sh\n"[..])
+                    .unwrap();
+                for (path, target) in [("bin/harn-dap", "harn"), ("lib/Current", "../bin")] {
+                    let mut link = tar::Header::new_gnu();
+                    link.set_entry_type(tar::EntryType::Symlink);
+                    link.set_size(0);
+                    builder.append_link(&mut link, path, target).unwrap();
+                }
+            }),
+        )
+        .unwrap();
+        extract_tar(ArchiveKind::Tar, &archive, root.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("lib/Current/harn-dap")).unwrap(),
+            "#!/bin/sh\n"
+        );
+    }
+
+    #[cfg(unix)]
+    fn symlinks(links: &[(&str, &str)]) -> Vec<u8> {
+        tar_bytes(|builder| {
+            for (path, target) in links {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                builder.append_link(&mut header, path, target).unwrap();
+            }
+        })
     }
 
     #[test]
