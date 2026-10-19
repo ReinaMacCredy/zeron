@@ -16695,6 +16695,10 @@ impl Shell {
                         crate::home::HomeEvent::OpenSettings => {
                             this.open_settings(SettingsSection::Home, cx)
                         }
+                        crate::home::HomeEvent::OpenTaskCenter(task_id) => {
+                            this.open_task_center(task_id.clone(), cx)
+                        }
+                        crate::home::HomeEvent::OpenTasks => this.open_tasks(cx),
                     },
                 ));
                 self.home_view = Some(home.clone());

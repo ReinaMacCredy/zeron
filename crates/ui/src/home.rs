@@ -11,7 +11,8 @@ use zeron_proto::change_request_assessment::{CiState, check_failed, check_status
 use zeron_proto::{
     ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
     ChangeRequestReviewDecision, Chat, ChatIndicator, GitActivity, GitActivityRequest,
-    ListeningServices, ListeningServicesRequest, SystemStats,
+    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskMode,
+    TaskStatus,
 };
 use zeron_rpc::methods;
 
@@ -31,11 +32,14 @@ const SERVICES_EVERY: Duration = Duration::from_secs(5);
 const SLOW_EVERY: Duration = Duration::from_secs(120);
 const VISIBLE_GRACE: Duration = Duration::from_secs(2);
 const FAILING_CHECK_LOOKUPS: usize = 3;
+const MISSION_ROWS: usize = 4;
 
 pub enum HomeEvent {
     OpenChat(String),
     OpenPullRequest(String),
     OpenSettings,
+    OpenTaskCenter(String),
+    OpenTasks,
 }
 
 #[derive(Default)]
@@ -689,6 +693,72 @@ pub(crate) fn composer_pr_scope(prs: &HomePrs, state: &AppState) -> PrScope {
         .unwrap_or_else(|| PrScope::Unlinked(space.display_name().to_owned()))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MissionRow {
+    pub task_id: String,
+    pub title: String,
+    pub progress: PlanProgress,
+    pub status: TaskStatus,
+    pub label: String,
+}
+
+pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
+    let mut tasks: Vec<&zeron_proto::Task> = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.mode == TaskMode::Orchestrated && !task.deleted && task.completed_at.is_none()
+        })
+        .collect();
+    tasks.sort_by(|a, b| {
+        (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
+    });
+    let mut rows: Vec<MissionRow> = tasks
+        .into_iter()
+        .map(|task| {
+            let plan = crate::tasks::rollup(state, task, now);
+            let (word, status) = plan.label(task);
+            let label = match (word, status) {
+                ("Plan ready", _) => "Needs you · plan review".to_owned(),
+                ("Planning", _) => "Planning".to_owned(),
+                (_, TaskStatus::NeedsYou) => plan
+                    .steps
+                    .iter()
+                    .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
+                    .map(|index| format!("Needs you · step {}", index + 1))
+                    .unwrap_or_else(|| word.to_owned()),
+                _ if plan.steps.is_empty() => word.to_owned(),
+                _ => {
+                    let counted: Vec<StepStatus> = plan
+                        .steps
+                        .iter()
+                        .map(|row| row.status)
+                        .filter(|status| *status != StepStatus::Skipped)
+                        .collect();
+                    let current = counted
+                        .iter()
+                        .position(|status| *status != StepStatus::Done)
+                        .unwrap_or(counted.len().saturating_sub(1));
+                    format!(
+                        "Step {}/{} · {word}",
+                        current + 1,
+                        plan.progress.total.max(1)
+                    )
+                }
+            };
+            MissionRow {
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                progress: plan.progress,
+                status,
+                label,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|row| row.status != TaskStatus::NeedsYou);
+    rows
+}
+
 fn failing_prs(prs: &HomePrs) -> Vec<&ChangeRequestListItem> {
     prs.mine
         .iter()
@@ -798,6 +868,7 @@ fn line_count(count: u64) -> String {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Widget {
     WorkingNow,
+    Missions,
     PullRequests,
     GitActivity,
     ThisMac,
@@ -807,8 +878,9 @@ enum Widget {
 }
 
 impl Widget {
-    const ORDER: [Widget; 7] = [
+    const ORDER: [Widget; 8] = [
         Widget::WorkingNow,
+        Widget::Missions,
         Widget::PullRequests,
         Widget::GitActivity,
         Widget::RunningServices,
@@ -820,6 +892,7 @@ impl Widget {
     fn enabled(self, toggles: &Toggles) -> bool {
         match self {
             Widget::WorkingNow => toggles.working_now,
+            Widget::Missions => toggles.missions,
             Widget::PullRequests => toggles.pull_requests,
             Widget::GitActivity => toggles.git_activity,
             Widget::ThisMac => toggles.this_mac,
@@ -846,6 +919,10 @@ impl HomeView {
         let state = self.state.read(cx);
         match widget {
             Widget::WorkingNow => running_agents(state, Utc::now()).len().clamp(1, 4) * 2,
+            Widget::Missions => {
+                let count = mission_rows(state, Utc::now()).len();
+                count.clamp(1, MISSION_ROWS) + usize::from(count > MISSION_ROWS)
+            }
             Widget::PullRequests => self
                 .prs
                 .ready()
@@ -875,6 +952,7 @@ impl HomeView {
     ) -> AnyElement {
         match widget {
             Widget::WorkingNow => self.render_working(theme, cx),
+            Widget::Missions => self.render_missions(theme, cx),
             Widget::PullRequests => self.render_prs(theme, cx),
             Widget::GitActivity => self.render_git(theme, cx),
             Widget::ThisMac => self.render_this_mac(theme, cx),
@@ -1012,6 +1090,42 @@ impl HomeView {
             theme,
             icons::SPEEDOMETER,
             "Working now",
+            Some(count.to_string()),
+            None,
+            body,
+        )
+    }
+
+    fn render_missions(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let rows = mission_rows(self.state.read(cx), Utc::now());
+        let count = rows.len();
+        let mut body: Vec<AnyElement> = if rows.is_empty() {
+            vec![empty_line(theme, "No missions running")]
+        } else {
+            rows.into_iter()
+                .take(MISSION_ROWS)
+                .map(|row| mission_row(theme, row, cx))
+                .collect()
+        };
+        if count > MISSION_ROWS {
+            body.push(
+                div()
+                    .id("home-mission-more")
+                    .debug_selector(|| "home-mission-more".into())
+                    .py(px(4.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_faint)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.text_muted))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(HomeEvent::OpenTasks)))
+                    .child(format!("+{} more · Open Tasks", count - MISSION_ROWS))
+                    .into_any_element(),
+            );
+        }
+        card(
+            theme,
+            icons::LUCIDE_CIRCLE_DOT,
+            "Missions",
             Some(count.to_string()),
             None,
             body,
@@ -1689,6 +1803,62 @@ fn pr_row(
         .into_any_element()
 }
 
+fn mission_row(theme: &Theme, row: MissionRow, cx: &mut Context<HomeView>) -> AnyElement {
+    let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
+    let (arc, text) = match row.status {
+        TaskStatus::NeedsYou => {
+            let needs = tone(ChatIndicator::AwaitingInput);
+            (needs, needs)
+        }
+        TaskStatus::Working => (tone(ChatIndicator::Completed), tone(ChatIndicator::Working)),
+        _ => (tone(ChatIndicator::Completed), theme.text_faint),
+    };
+    let PlanProgress { done, total } = row.progress;
+    let percent = (done * 100).checked_div(total).unwrap_or(0).min(100) as u8;
+    let id: SharedString = format!("home-mission-{}", row.task_id).into();
+    let task_id = row.task_id;
+    div()
+        .id(id.clone())
+        .debug_selector(move || id.to_string())
+        .h(px(ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(6.0))
+        .mx(px(-6.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.wash(0.05)))
+        .on_click(
+            cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::OpenTaskCenter(task_id.clone()))),
+        )
+        .child(div().flex_none().child(crate::loaders::upload_progress_arc(
+            percent,
+            13.0,
+            theme.text_faint.opacity(0.6),
+            arc,
+        )))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(theme.text)
+                .child(row.title),
+        )
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(text)
+                .child(row.label),
+        )
+        .into_any_element()
+}
+
 fn git_chart(
     theme: &Theme,
     activity: &GitActivity,
@@ -2239,6 +2409,80 @@ mod tests {
             composer_pr_scope(&listing, &state),
             PrScope::Unlinked("notes".into())
         );
+    }
+
+    #[test]
+    fn missions_list_open_orchestrated_tasks_needs_you_first() {
+        let task = |id: &str, key: &str, extra: serde_json::Value| -> zeron_proto::Task {
+            let mut value = serde_json::json!({
+                "id": id, "title": id, "orderKey": key, "chatId": format!("{id}-lead"),
+                "mode": "orchestrated",
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        let step = |task: &str, key: &str, chat: Option<&str>, outcome: Option<&str>| {
+            serde_json::from_value::<zeron_proto::TaskStep>(serde_json::json!({
+                "id": format!("{task}-{key}"), "taskId": task, "orderKey": key,
+                "chatId": chat, "outcome": outcome,
+            }))
+            .unwrap()
+        };
+        let chat = |id: &str| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "mac", "archived": false,
+                "createdAt": "2026-10-18T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let mut state = AppState::new();
+        state.tasks = vec![
+            task("working", "a", serde_json::json!({})),
+            task("review", "b", serde_json::json!({ "planPending": true })),
+            task("stuck", "c", serde_json::json!({})),
+            task(
+                "done",
+                "d",
+                serde_json::json!({ "completedAt": "2026-10-18T00:00:00Z" }),
+            ),
+            task("gone", "e", serde_json::json!({ "deleted": true })),
+            task("single", "f", serde_json::json!({ "mode": "single" })),
+        ];
+        state.chats = ["working-lead", "review-lead", "stuck-lead", "child"]
+            .into_iter()
+            .map(chat)
+            .collect();
+        state.task_steps = vec![
+            step("working", "1", None, Some("done")),
+            step("working", "2", None, Some("skipped")),
+            step("working", "3", None, Some("done")),
+            step("working", "4", Some("child"), None),
+            step("working", "5", None, None),
+            step("review", "1", None, None),
+            step("stuck", "1", None, Some("done")),
+            step("stuck", "2", Some("child"), None),
+        ];
+        state.task_steps[7].turn = Some(zeron_proto::StepTurn {
+            ended: zeron_proto::StepTurnEnd::Failed,
+            turn: None,
+        });
+        let rows = mission_rows(&state, Utc::now());
+        let labels: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|row| (row.task_id.as_str(), row.label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("review", "Needs you · plan review"),
+                ("stuck", "Needs you · step 2"),
+                ("working", "Step 3/4 · Working"),
+            ]
+        );
+        assert_eq!((rows[2].progress.done, rows[2].progress.total), (2, 4));
     }
 
     #[test]

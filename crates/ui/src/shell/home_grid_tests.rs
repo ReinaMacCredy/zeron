@@ -92,6 +92,7 @@ fn turning_every_widget_off_restores_the_centered_hero(cx: &mut TestAppContext) 
         settings::update_home_widgets(cx, |widgets| {
             *widgets = settings::HomeWidgets {
                 working_now: false,
+                missions: false,
                 pull_requests: false,
                 git_activity: false,
                 this_mac: false,

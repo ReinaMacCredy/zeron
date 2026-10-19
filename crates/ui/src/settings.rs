@@ -343,6 +343,7 @@ impl Default for FrostTuning {
 #[serde(default, rename_all = "camelCase")]
 pub struct HomeWidgets {
     pub working_now: bool,
+    pub missions: bool,
     pub pull_requests: bool,
     pub git_activity: bool,
     pub this_mac: bool,
@@ -357,6 +358,7 @@ impl Default for HomeWidgets {
     fn default() -> Self {
         Self {
             working_now: true,
+            missions: true,
             pull_requests: true,
             git_activity: true,
             this_mac: true,
@@ -372,6 +374,7 @@ impl Default for HomeWidgets {
 impl HomeWidgets {
     pub fn any_visible(&self) -> bool {
         self.working_now
+            || self.missions
             || self.pull_requests
             || self.git_activity
             || self.this_mac
