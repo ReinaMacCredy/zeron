@@ -234,7 +234,7 @@ async fn launch_review(
 
 impl Composer {
     fn hosts_review(&self) -> bool {
-        (self.chat_override.is_none() || self.full_chat) && !self.side_chat
+        self.chat_override.is_none() && !self.side_chat
     }
 
     fn review_target(&self, cx: &App) -> Option<Target> {

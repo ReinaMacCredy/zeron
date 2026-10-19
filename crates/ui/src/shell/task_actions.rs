@@ -744,6 +744,11 @@ impl Shell {
                 self.open_task_center_pane(&center, chat_id, cx);
             }
         }
+        if let Some(pane) = &self.task_center_pane {
+            let open = self.panels.get(&pane.chat_id).terminal_open;
+            let pickers = pane.composer.read(cx).pickers().clone();
+            pickers.update(cx, |pickers, cx| pickers.set_terminal_open(Some(open), cx));
+        }
         div()
             .flex_1()
             .min_w_0()

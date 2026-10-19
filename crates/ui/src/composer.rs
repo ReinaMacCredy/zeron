@@ -8036,8 +8036,6 @@ impl Composer {
 
     pub(crate) fn set_full_chat(&mut self, cx: &mut Context<Self>) {
         self.full_chat = true;
-        self.pickers
-            .update(cx, |pickers, cx| pickers.set_terminal_open(Some(false), cx));
         cx.notify();
     }
 
