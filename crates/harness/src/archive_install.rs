@@ -282,6 +282,7 @@ where
     ));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
+    let _cleanup = RemoveOnDrop(tmp_dir.clone());
     tracing::info!(
         target: "zeron_harness::adapter_install",
         url = source.url,
@@ -292,21 +293,14 @@ where
         Ok(()) => verify(tmp_dir.clone()).await,
         Err(error) => Err(error),
     };
-    if let Err(error) = prepared {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(error);
-    }
+    prepared?;
     std::fs::write(tmp_dir.join(OK_MARKER), format!("{}\n", source.marker))?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
-        if installed().is_none() {
-            let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(&tmp_dir, &final_dir)?;
-        } else {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-        }
+    if std::fs::rename(&tmp_dir, &final_dir).is_err() && installed().is_none() {
+        let _ = std::fs::remove_dir_all(&final_dir);
+        std::fs::rename(&tmp_dir, &final_dir)?;
     }
     installed().ok_or_else(|| {
         HarnessError::Install(format!(
@@ -329,6 +323,15 @@ fn destination_lock(name: &str, version: &str) -> std::sync::Arc<tokio::sync::Mu
         .entry((name.to_owned(), version.to_owned()))
         .or_default()
         .clone()
+}
+
+/// Removes a partial install on every exit, a cancelled future included.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 async fn download_and_extract(
