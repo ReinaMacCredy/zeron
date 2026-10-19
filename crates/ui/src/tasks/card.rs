@@ -1841,7 +1841,7 @@ mod tests {
         }
         assert!(cx.debug_bounds("task-center-add-step").is_some());
         assert!(cx.debug_bounds("task-center-retry-s2").is_none());
-        let click = |cx: &mut gpui::VisualTestContext, selector: &str| {
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
             let at = cx.debug_bounds(selector).unwrap().center();
             cx.simulate_click(at, gpui::Modifiers::none());
             cx.run_until_parked();
