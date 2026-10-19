@@ -37,6 +37,10 @@ const MIN_BYTES_PER_STALL_WINDOW: u64 = 64 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+const UNSUPPORTED_ARCHIVES: &[&str] = &[
+    ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar.lz", ".xz", ".zst", ".gz", ".bz2", ".7z", ".rar",
+    ".dmg", ".pkg", ".msi",
+];
 
 /// an archive release whose integrity is proven after extraction (by a
 /// vendor code signature) rather than by a digest pinned in zeron's source.
@@ -66,13 +70,16 @@ enum ArchiveKind {
     Raw,
 }
 
+fn url_path(url: &str) -> String {
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase()
+}
+
 impl ArchiveKind {
     fn from_url(url: &str) -> Self {
-        let path = url
-            .split(['?', '#'])
-            .next()
-            .unwrap_or(url)
-            .to_ascii_lowercase();
+        let path = url_path(url);
         if path.ends_with(".zip") {
             Self::Zip
         } else if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
@@ -215,6 +222,18 @@ pub async fn install_registry_binary(
         None => format!("unverified:{}", binary.url),
     };
     let sha256 = binary.sha256.map(str::to_ascii_lowercase);
+    let kind = ArchiveKind::from_url(binary.url);
+    let path = url_path(binary.url);
+    if kind == ArchiveKind::Raw
+        && let Some(suffix) = UNSUPPORTED_ARCHIVES
+            .iter()
+            .find(|suffix| path.ends_with(*suffix))
+    {
+        return Err(HarnessError::Install(format!(
+            "{display_name}'s download ({}) is a {suffix} archive, which Zeron cannot unpack",
+            binary.url
+        )));
+    }
     let source = Source {
         name: binary.name,
         version: binary.version,
@@ -222,7 +241,7 @@ pub async fn install_registry_binary(
         entry,
         sha512: None,
         sha256: sha256.as_deref(),
-        kind: ArchiveKind::from_url(binary.url),
+        kind,
         marker: &marker,
     };
     install(source, display_name, |_| async { Ok(()) }).await
