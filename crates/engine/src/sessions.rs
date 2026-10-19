@@ -8353,7 +8353,17 @@ mod tests {
             driver,
             label: "Work".into(),
             accent: None,
-            config: zeron_proto::InstanceConfig::default(),
+            config: match driver {
+                HarnessId::Acp => zeron_proto::InstanceConfig::Acp {
+                    source: zeron_proto::AcpSource::Local {
+                        command: "agent".into(),
+                        args: Vec::new(),
+                    },
+                    env: Default::default(),
+                    icon_path: None,
+                },
+                _ => zeron_proto::InstanceConfig::default(),
+            },
         }
     }
 
