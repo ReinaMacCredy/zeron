@@ -3,6 +3,7 @@ use zeron_proto::computer::{ComputerRect, CuaEffect};
 
 use super::*;
 use crate::computer::backend::ComputerBackendActionResult;
+use crate::computer::cua_backend::CUA_TREE_ELEMENT_LIMIT;
 
 // Catches dropping the driver's display-only rows (Calculator's result text),
 // pointing a tree line at the driver's element_index instead of the engine's
@@ -64,6 +65,37 @@ async fn parses_the_driver_tree_with_static_values_focus_and_root_targets() {
     assert_eq!(tree.focused.unwrap().target, Some(vec![0]));
     assert_eq!(tree.selected_text.as_deref(), Some("40"));
     assert_eq!(tree.url.as_deref(), Some("file:///tmp/calc"));
+}
+
+// Catches counting display-only rows against the ref cap, which left a large
+// window's later buttons with no ref at all.
+#[tokio::test]
+async fn display_rows_past_the_ref_cap_never_crowd_out_an_actionable_node() {
+    let f = fixture();
+    f.set_elements(vec![json!({
+        "element_index": 0,
+        "role": "AXButton",
+        "label": "Save",
+        "frame": { "x": 10, "y": 10, "width": 20, "height": 20 },
+        "element_token": "s1:0",
+        "actions": ["AXPress"],
+    })]);
+    let row = json!({ "depth": 1, "role": "AXStaticText", "frame": { "x": 10, "y": 40, "w": 80, "h": 20 } });
+    let mut nodes = vec![row.clone(); CUA_TREE_ELEMENT_LIMIT];
+    nodes
+        .push(json!({ "depth": 1, "role": "AXButton", "element_index": 0, "description": "Save" }));
+    nodes.push(row);
+    f.knobs().window_state_extra = json!({ "tree_nodes": nodes }).as_object().unwrap().clone();
+    let state = f
+        .backend
+        .get_state(window_state("cua:10:20"))
+        .await
+        .unwrap();
+    let root = state.root.unwrap();
+    assert_eq!(root.children.len(), CUA_TREE_ELEMENT_LIMIT + 1);
+    let save = root.children.last().unwrap();
+    assert_eq!(save.label.as_deref(), Some("Save"));
+    assert!(f.backend.inner.node_element(save).is_some());
 }
 
 fn press_fixture(ax_error: i64, mutate_on_press: bool, pixel_uncertain: bool) -> Fixture {

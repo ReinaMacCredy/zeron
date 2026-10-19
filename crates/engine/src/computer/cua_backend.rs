@@ -2184,10 +2184,8 @@ impl CuaInner {
         let nodes = tree_nodes
             .or_else(|| data.get("elements").and_then(Value::as_array))
             .map_or(&[][..], Vec::as_slice);
+        let (mut capped, mut actionable) = (false, 0);
         for (position, node) in nodes.iter().enumerate() {
-            if children.len() == CUA_TREE_ELEMENT_LIMIT {
-                break;
-            }
             let element = match tree_nodes {
                 Some(_) => node
                     .get("element_index")
@@ -2196,12 +2194,20 @@ impl CuaInner {
                 None => Some(node),
             };
             let field = |name: &str| element.and_then(|element| element.get(name));
+            let token = field("element_token").is_some();
+            if (token && actionable == CUA_TREE_ELEMENT_LIMIT)
+                || (!token && children.len() >= CUA_TREE_ELEMENT_LIMIT)
+            {
+                capped = true;
+                continue;
+            }
             let Some(frame) =
                 optional_rect(node.get("frame")).or_else(|| optional_rect(field("frame")))
             else {
                 continue;
             };
             targets.insert(position, children.len() as u32);
+            actionable += usize::from(token);
             let label = node_label(nodes, position, element);
             let description = text1024(field("value_description"));
             let role = text(node.get("role"), 128);
@@ -2262,7 +2268,7 @@ impl CuaInner {
             accessibility_root: None,
             node_path: None,
             editable: None,
-            truncated: Some(data.get("elements_complete") != Some(&Value::Bool(true))),
+            truncated: Some(capped || data.get("elements_complete") != Some(&Value::Bool(true))),
             children,
         };
         self.remember_tree(&window_id, root.clone(), elements);
