@@ -3,7 +3,7 @@ use crate::tasks::Selection;
 
 const STRIP_HEIGHT: f32 = 30.0;
 pub(super) const STRIP_GAP: f32 = 6.0;
-pub(super) const STRIP_BAND: f32 = STRIP_GAP + STRIP_HEIGHT;
+const STRIP_RADIUS: f32 = 10.0;
 const STRIP_REVEAL: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
 
 impl Shell {
@@ -19,31 +19,75 @@ impl Shell {
             (chat_id, mission)
         };
         let reveal = self.strip_reveal(chat_id, mission.is_some());
+        let tree = mission
+            .as_ref()
+            .filter(|mission| mission.role == crate::tasks::MissionRole::Lead)
+            .map(|mission| self.mission_tree_for(&mission.task_id, cx));
+        if tree.is_none() {
+            self.mission_tree = None;
+        }
         let mission = mission?;
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let (_, _, complete) = chat_status_tone(zeron_proto::ChatIndicator::Completed, &theme);
         let zeron_proto::PlanProgress { done, total } = mission.progress;
         let percent = (done * 100).checked_div(total).unwrap_or(0).min(100) as u8;
         let task_id = mission.task_id.clone();
         let selection = mission.role.selection();
-        let strip = div()
+        let tree_height = match &tree {
+            Some(tree) => {
+                let (height, moving) = tree.update(cx, |tree, cx| tree.band(cx));
+                if moving {
+                    self.motion_active.set(true);
+                }
+                height
+            }
+            None => 0.0,
+        };
+        let open_mission = {
+            let task_id = task_id.clone();
+            let selection = selection.clone();
+            div()
+                .id("mission-strip-open")
+                .debug_selector(|| "mission-strip-open".into())
+                .role(gpui::Role::Button)
+                .aria_label(format!("Open Mission Control: {}", mission.title))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .whitespace_nowrap()
+                .text_color(theme.text)
+                .cursor_pointer()
+                .child("Mission Control")
+                .child(
+                    icon(icons::LUCIDE_CHEVRON_RIGHT)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .on_click(cx.listener(move |shell, _: &gpui::ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    shell.open_mission(task_id.clone(), selection.clone(), cx)
+                }))
+        };
+        let open = tree.as_ref().map(|tree| tree.read(cx).is_open());
+        let head = div()
             .id("mission-strip")
             .debug_selector(|| "mission-strip".into())
             .role(gpui::Role::Button)
-            .aria_label(format!("Open Mission Control: {}", mission.title))
+            .aria_label(match open {
+                Some(true) => format!("Fold the steps of {}", mission.title),
+                Some(false) => format!("Show the steps of {}", mission.title),
+                None => format!("Open Mission Control: {}", mission.title),
+            })
+            .when_some(open, |el, open| el.aria_expanded(open))
+            .flex_none()
             .h(px(STRIP_HEIGHT))
             .px(px(10.0))
             .flex()
             .items_center()
             .gap(px(8.0))
-            .rounded(px(10.0))
-            .bg(theme.wash(0.04))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.wash(0.08)))
+            .hover(|s| s.bg(theme.wash(0.04)))
             .child(div().flex_none().child(crate::loaders::upload_progress_arc(
                 percent,
                 13.0,
@@ -57,7 +101,7 @@ impl Shell {
                     .truncate()
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(SharedString::from(mission.title)),
+                    .child(SharedString::from(mission.title.clone())),
             )
             .child(
                 div()
@@ -81,35 +125,90 @@ impl Shell {
                             .bg(complete),
                     ),
             )
-            .child(
+            .child(open_mission)
+            .on_click(cx.listener(move |shell, _: &gpui::ClickEvent, _, cx| {
+                match shell.mission_tree.as_ref().map(|(tree, _)| tree.clone()) {
+                    Some(tree) => shell.toggle_mission_tree(tree, cx),
+                    None => shell.open_mission(task_id.clone(), selection.clone(), cx),
+                }
+            }));
+        let card = div()
+            .flex()
+            .flex_col()
+            .rounded(px(STRIP_RADIUS))
+            .border_1()
+            .border_color(theme.border)
+            .bg(crate::popover::surface_bg(&theme))
+            .overflow_hidden()
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_muted)
+            .child(head)
+            .children(tree.map(|tree| {
                 div()
                     .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .whitespace_nowrap()
-                    .text_color(theme.text)
-                    .child("Mission Control")
-                    .child(
-                        icon(icons::LUCIDE_CHEVRON_RIGHT)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    ),
-            )
-            .on_click(cx.listener(move |shell, _: &gpui::ClickEvent, _, cx| {
-                shell.open_mission(task_id.clone(), selection.clone(), cx)
+                    .h(px(tree_height))
+                    .overflow_hidden()
+                    .child(tree)
             }));
+        let height = STRIP_HEIGHT + tree_height;
         Some((
             div()
                 .w(px(width))
-                .h(px(STRIP_HEIGHT * reveal))
+                .h(px(height * reveal))
                 .px(px(Theme::SPACE_LG))
                 .overflow_hidden()
                 .opacity(reveal)
-                .child(strip)
+                .child(crate::frost::frosted(
+                    STRIP_RADIUS,
+                    crate::frost::MENU_BLUR * reveal,
+                    card,
+                ))
                 .into_any_element(),
-            reveal,
+            (STRIP_GAP + height) * reveal,
         ))
+    }
+
+    fn mission_tree_for(
+        &mut self,
+        task_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::tasks::StripTree> {
+        if let Some((tree, _)) = &self.mission_tree
+            && tree.read(cx).task_id() == task_id
+        {
+            return tree.clone();
+        }
+        let open = !self.closed_mission_trees.contains(task_id);
+        let state = self.state.clone();
+        let task = task_id.to_string();
+        let tree = cx.new(|cx| crate::tasks::StripTree::new(state, task, open, cx));
+        let task = task_id.to_string();
+        let events = cx.subscribe(
+            &tree,
+            move |shell, _, event: &crate::tasks::StripTreeEvent, cx| {
+                let crate::tasks::StripTreeEvent::Open(selection) = event;
+                shell.open_mission(task.clone(), selection.clone(), cx);
+            },
+        );
+        self.mission_tree = Some((tree.clone(), events));
+        tree
+    }
+
+    fn toggle_mission_tree(
+        &mut self,
+        tree: Entity<crate::tasks::StripTree>,
+        cx: &mut Context<Self>,
+    ) {
+        tree.update(cx, |tree, cx| {
+            let open = !tree.is_open();
+            tree.set_open(open, cx);
+            if open {
+                self.closed_mission_trees.remove(tree.task_id());
+            } else {
+                self.closed_mission_trees.insert(tree.task_id().to_string());
+            }
+        });
+        cx.notify();
     }
 
     fn strip_reveal(&mut self, chat_id: String, shown: bool) -> f32 {

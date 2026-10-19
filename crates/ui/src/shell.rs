@@ -2679,6 +2679,8 @@ pub struct Shell {
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
     task_center_pane: Option<task_actions::TaskCenterPane>,
     task_slide: task_actions::TaskSlide,
+    mission_tree: Option<(Entity<crate::tasks::StripTree>, Subscription)>,
+    closed_mission_trees: std::collections::HashSet<String>,
     supervisor: supervisor_actions::SupervisorShell,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
@@ -3409,6 +3411,8 @@ impl Shell {
             task_center: None,
             task_center_pane: None,
             task_slide: task_actions::TaskSlide::resting(route),
+            mission_tree: None,
+            closed_mission_trees: std::collections::HashSet::new(),
             supervisor: Default::default(),
             pull_request_detail: None,
             pull_request_detail_subscription: None,
@@ -16742,7 +16746,7 @@ impl Shell {
             .then(|| self.render_mission_strip(composer_width, cx))
             .flatten()
         {
-            Some((strip, reveal)) => (Some(strip), mission_strip::STRIP_BAND * reveal),
+            Some((strip, band)) => (Some(strip), band),
             None => (None, 0.0),
         };
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
