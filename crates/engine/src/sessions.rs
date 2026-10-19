@@ -69,11 +69,6 @@ pub struct CompactQueued {
     pub running_subagents: u32,
 }
 
-/// Background shells and sub-agents still running for a chat's live run.
-fn background_work(session: Option<&Session>) -> (usize, u32) {
-    session.map_or((0, 0), |s| (s.background_tasks.len(), s.running_subagents))
-}
-
 /// Result of a manual context compaction — also the RPC result shape.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1061,6 +1056,25 @@ impl SessionsEngine {
             .is_some_and(|h| h.turn.background_live())
     }
 
+    /// Only Claude lists its tasks on the row; Codex counts its shells on the runtime alone.
+    fn background_work(&self, chat_id: &str) -> (usize, u32) {
+        let (tasks, subagents) = self.session_status(chat_id).map_or((0, 0), |s| {
+            (
+                s.background_tasks.len(),
+                s.running_subagents.max(u32::from(s.held_by_subagents)),
+            )
+        });
+        (
+            tasks.max(usize::from(self.holds_background_work(chat_id))),
+            subagents,
+        )
+    }
+
+    fn restart_ends_work(&self, chat_id: &str, in_place: bool) -> bool {
+        let (tasks, subagents) = self.background_work(chat_id);
+        !in_place && tasks + subagents as usize > 0
+    }
+
     /// Any run currently working or blocked on input — the auto-updater's
     /// "don't restart from under a session" gate. Background subagents count:
     /// a restart would kill them with the child.
@@ -2040,10 +2054,10 @@ impl SessionsEngine {
     }
 
     pub async fn compact_idle(&self, chat_id: &str) -> Result<CompactOutcome, EngineError> {
-        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
+        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE)
+            .await
     }
 
-    /// Classifier mode: before a person's message starts a turn, compact if it opens a new task.
     async fn compact_at_boundary(
         &self,
         chat_id: &str,
@@ -2052,13 +2066,14 @@ impl SessionsEngine {
         message_id: Option<&str>,
     ) -> bool {
         let settings = self.inner.registry.compaction_settings();
-        if settings.mode != CompactionMode::Classifier
-            || !self.inner.auto_compacts(chat_id)
-            || zeron_proto::invocation::leading_command(prompt).is_some()
-            || self.turn_in_flight(chat_id)
-            || lock(&self.inner.compacting).contains(chat_id)
-            || lock(&self.inner.agent_compacted).contains(chat_id)
-        {
+        let blocked = || {
+            settings.mode != CompactionMode::Classifier
+                || !self.inner.auto_compacts(chat_id)
+                || self.turn_in_flight(chat_id)
+                || lock(&self.inner.compacting).contains(chat_id)
+                || lock(&self.inner.agent_compacted).contains(chat_id)
+        };
+        if zeron_proto::invocation::leading_command(prompt).is_some() || blocked() {
             return false;
         }
         if let Some(id) = message_id {
@@ -2075,6 +2090,9 @@ impl SessionsEngine {
         let Some(tokens) = self.inner.past_floor(chat_id, config.as_ref()) else {
             return false;
         };
+        if self.restart_ends_work(chat_id, self.compacts_in_place(chat_id)) {
+            return false;
+        }
         let Some(mut entries) = self
             .doc_handle(chat_id)
             .ok()
@@ -2327,9 +2345,8 @@ impl SessionsEngine {
                 harness.display_name()
             )));
         }
-        let session = self.session_status(chat_id);
-        let (background_tasks, running_subagents) = background_work(session.as_ref());
-        if !harness.compacts_in_place() && background_tasks + running_subagents as usize > 0 {
+        let (background_tasks, running_subagents) = self.background_work(chat_id);
+        if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
             return Err(EngineError::Other(format!(
                 "{} restarts its process to compact, which would end the background work still running. Call compact again after it finishes.",
                 harness.display_name()
@@ -2363,7 +2380,6 @@ impl SessionsEngine {
             running_subagents,
         })
     }
-
 
     /// After a restart: a chat whose agent asked for a compaction that never
     /// ran has no status row yet, and auto_compact only sees settled rows.
@@ -2489,15 +2505,12 @@ impl SessionsEngine {
         if !self.agent_compact_due(chat_id, &request).await {
             return Ok(None);
         }
-        if !self.compacts_in_place(chat_id) {
-            let (tasks, subagents) = background_work(self.session_status(chat_id).as_ref());
-            if tasks + subagents as usize > 0 {
-                let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
-                return Ok(Some((
-                    self.decline_agent_compact(chat_id, &request, reason),
-                    request,
-                )));
-            }
+        if self.restart_ends_work(chat_id, self.compacts_in_place(chat_id)) {
+            let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
+            return Ok(Some((
+                self.decline_agent_compact(chat_id, &request, reason),
+                request,
+            )));
         }
         let verdict = match &request.continue_with {
             Some(note) => {
@@ -2692,6 +2705,12 @@ impl SessionsEngine {
                     Err(EngineError::Other("Context compaction timed out.".into()))
                 }
             };
+        }
+        if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
+            return Err(EngineError::Other(format!(
+                "{} restarts its process to compact, which would end the background work still running. Compact again after it finishes.",
+                harness.display_name()
+            )));
         }
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
@@ -3941,7 +3960,6 @@ impl Inner {
         }
         lock(&self.compact_owed).insert(chat_id.to_string(), note);
     }
-
 
     /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
     /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.

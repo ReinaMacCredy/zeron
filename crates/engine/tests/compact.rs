@@ -48,6 +48,8 @@ struct TestHarness {
     first_reading: AtomicU64,
     tokens: AtomicU64,
     background: Mutex<Vec<zeron_proto::BackgroundTask>>,
+    /// Background work counted on the runtime only, the way Codex counts its open commands.
+    shells: std::sync::atomic::AtomicUsize,
 }
 
 impl TestHarness {
@@ -66,6 +68,7 @@ impl TestHarness {
             first_reading: AtomicU64::new(1_000),
             tokens: AtomicU64::new(22_762),
             background: Mutex::new(Vec::new()),
+            shells: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -162,6 +165,9 @@ impl Harness for TestHarness {
                 }));
             }
         } else {
+            controls
+                .turn
+                .set_background(self.shells.load(Ordering::SeqCst));
             let tasks = self.background.lock().unwrap().clone();
             if !tasks.is_empty() {
                 events.push(Ok(AgentEvent::BackgroundTasks { tasks }));
@@ -692,11 +698,11 @@ async fn an_agent_compaction_queues_into_the_parked_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_agent_compaction_that_would_restart_over_background_work_is_refused() {
+async fn a_compaction_that_would_restart_over_background_work_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let harness = Arc::new(TestHarness::new(requests.clone(), true));
-    *harness.background.lock().unwrap() = sleeping_shell();
+    harness.shells.store(1, Ordering::SeqCst);
     let core = engine_with_one_turn_by(tmp.path(), harness.clone()).await;
     let refused = zeron_rpc::memory_client(core.rpc_service())
         .call(
@@ -712,6 +718,21 @@ async fn an_agent_compaction_that_would_restart_over_background_work_is_refused(
             .and_then(|s| s.compact_plan),
         None
     );
+    let refused = core.sessions.compact(CHAT, None).await.expect_err("refused");
+    assert!(refused.to_string().contains("background work"), "{refused}");
+
+    classifier_mode(&core);
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 2, "the message runs").await;
+    assert!(
+        harness.one_shots.lock().unwrap().is_empty(),
+        "no classifier call"
+    );
+    assert_eq!(prompts(&requests), ["hello", "hello"]);
+    assert!(system_entries(&core).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1312,6 +1333,7 @@ async fn a_carry_lists_the_jobs_still_running() {
     let tmp = tempfile::tempdir().unwrap();
     let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.in_place.store(true, Ordering::SeqCst);
     *harness.background.lock().unwrap() = vec![zeron_proto::BackgroundTask {
         id: "b7wb5vp5o".into(),
         kind: zeron_proto::BackgroundTaskKind::Shell,
@@ -1347,12 +1369,9 @@ async fn a_carry_lists_the_jobs_still_running() {
     core.doc_host
         .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
         .expect("queue run");
-    wait_for(
-        || requests.lock().unwrap().len() == 3,
-        "compaction, then the message",
-    )
-    .await;
-    let sent = prompts(&requests)[2].clone();
+    let mailbox = || harness.mailbox.lock().unwrap().clone();
+    wait_for(|| mailbox().len() == 2, "compaction, then the message").await;
+    let sent = mailbox()[1].clone();
     assert!(
         sent.contains("agent: ack: hello\n\nStill running when the chat compacted:\n- background shell b7wb5vp5o: sleep 300 && echo done\n- delegated task child-task: Audit the parser\n</carried_over>\n\nhello"),
         "{sent}"
