@@ -1144,6 +1144,7 @@ impl TaskCenter {
                     .id("task-center-missing-back")
                     .debug_selector(|| "task-center-missing-back".into())
                     .role(gpui::Role::Button)
+                    .aria_label("Back to Tasks")
                     .rounded_full()
                     .on_click(
                         cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)),
@@ -1169,24 +1170,22 @@ impl TaskCenter {
             total,
         } = plan.progress;
         let task_id = task.id.clone();
-        let toggle = widgets::text_action(
-            theme,
-            widgets::ActionTone::Filled,
-            if done { "Reopen" } else { "Mark as done" },
-        )
-        .id("task-center-toggle-done")
-        .debug_selector(|| "task-center-toggle-done".into())
-        .role(gpui::Role::Button)
-        .rounded_full()
-        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-            cx.emit(TaskCenterEvent::Update {
-                task_id: task_id.clone(),
-                patch: TaskPatch {
-                    completed: Some(!done),
-                    ..Default::default()
-                },
-            });
-        }));
+        let toggle_label = if done { "Reopen" } else { "Mark as done" };
+        let toggle = widgets::text_action(theme, widgets::ActionTone::Filled, toggle_label)
+            .id("task-center-toggle-done")
+            .debug_selector(|| "task-center-toggle-done".into())
+            .role(gpui::Role::Button)
+            .aria_label(toggle_label)
+            .rounded_full()
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(TaskCenterEvent::Update {
+                    task_id: task_id.clone(),
+                    patch: TaskPatch {
+                        completed: Some(!done),
+                        ..Default::default()
+                    },
+                });
+            }));
         div()
             .id("task-center-header")
             .debug_selector(|| "task-center-header".into())
@@ -1292,6 +1291,7 @@ impl TaskCenter {
                                 .id("task-center-dismiss-send-error")
                                 .debug_selector(|| "task-center-dismiss-send-error".into())
                                 .role(gpui::Role::Button)
+                                .aria_label("Dismiss")
                                 .flex_none()
                                 .min_h(px(24.0))
                                 .rounded_full()
@@ -1561,6 +1561,7 @@ impl TaskCenter {
                     .id("task-center-edit-cancel")
                     .debug_selector(|| "task-center-edit-cancel".into())
                     .role(gpui::Role::Button)
+                    .aria_label("Cancel")
                     .min_h(px(24.0))
                     .rounded_full()
                     .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.cancel_edit(cx))),
@@ -1570,6 +1571,7 @@ impl TaskCenter {
                     .id("task-center-edit-save")
                     .debug_selector(|| "task-center-edit-save".into())
                     .role(gpui::Role::Button)
+                    .aria_label("Save")
                     .min_h(px(24.0))
                     .rounded_full()
                     .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.commit_edit(cx))),
@@ -1675,6 +1677,7 @@ impl TaskCenter {
                         .id("task-center-undo")
                         .debug_selector(|| "task-center-undo".into())
                         .role(gpui::Role::Button)
+                        .aria_label("Undo")
                         .min_h(px(26.0))
                         .rounded_full()
                         .on_click(
@@ -1686,6 +1689,7 @@ impl TaskCenter {
                         .id("task-center-send")
                         .debug_selector(|| "task-center-send".into())
                         .role(gpui::Role::Button)
+                        .aria_label("Send to lead")
                         .min_h(px(26.0))
                         .rounded_full()
                         .on_click(cx.listener(|center, _: &ClickEvent, _, cx| {
@@ -1755,6 +1759,7 @@ impl TaskCenter {
                 .id("task-center-open-thread")
                 .debug_selector(|| "task-center-open-thread".into())
                 .role(gpui::Role::Button)
+                .aria_label("Open thread")
                 .flex_none()
                 .rounded_full()
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {

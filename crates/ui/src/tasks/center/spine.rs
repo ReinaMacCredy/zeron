@@ -415,6 +415,7 @@ impl TaskCenter {
                         .id("task-center-approve")
                         .debug_selector(|| "task-center-approve".into())
                         .role(gpui::Role::Button)
+                        .aria_label("Approve and run")
                         .flex_none()
                         .min_h(px(24.0))
                         .rounded_full()
@@ -438,6 +439,7 @@ impl TaskCenter {
             .id("task-center-lead")
             .debug_selector(|| "task-center-lead".into())
             .role(gpui::Role::Button)
+            .aria_label("Lead")
             .aria_selected(selected)
             .child(morph::measure(&self.painted, Key::Lead, Edges::default()))
             .child(top)
@@ -1229,6 +1231,7 @@ impl TaskCenter {
                 .id(SharedString::from(key.clone()))
                 .debug_selector(move || key.clone())
                 .role(gpui::Role::Button)
+                .aria_label(label)
                 .min_h(px(26.0))
                 .rounded_full()
             };

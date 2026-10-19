@@ -1940,6 +1940,11 @@ impl TaskCard {
         let theme = theme.for_popup();
         let done_task = task_id.to_owned();
         let delete_task = task_id.to_owned();
+        let toggle_label = if done {
+            "Mark as not done"
+        } else {
+            "Mark as done"
+        };
         let card = popover::popover_card(&theme)
             .w(px(170.0))
             .flex()
@@ -1951,16 +1956,13 @@ impl TaskCard {
                     .id("task-card-toggle-done")
                     .debug_selector(|| "task-card-toggle-done".into())
                     .role(gpui::Role::MenuItem)
+                    .aria_label(toggle_label)
                     .child(
                         icon(icons::LUCIDE_CIRCLE_CHECK)
                             .size(px(15.0))
                             .text_color(theme.text_muted),
                     )
-                    .child(if done {
-                        "Mark as not done"
-                    } else {
-                        "Mark as done"
-                    })
+                    .child(toggle_label)
                     .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         card.close_menu(cx);
