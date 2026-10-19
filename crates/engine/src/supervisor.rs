@@ -834,7 +834,11 @@ pub(crate) fn open_inputs(
 
 fn respond_input_of(call: &ToolCall) -> Option<&serde_json::Value> {
     match call {
-        ToolCall::Mcp { tool, input, .. } if tool == "respond_to_input" => input.as_ref(),
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } if server == "zeron" && tool == "respond_to_input" => input.as_ref(),
         ToolCall::Unknown { name, input } if name.ends_with("respond_to_input") => input.as_ref(),
         _ => None,
     }
