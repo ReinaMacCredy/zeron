@@ -27,6 +27,13 @@ const LEAD: &str = "lead";
 
 pub(crate) enum StripTreeEvent {
     Open(Selection),
+    Brief(Selection),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TreeHost {
+    Strip,
+    Supervisor,
 }
 
 struct Row {
@@ -52,6 +59,7 @@ pub(crate) struct StripTree {
     stats: StatsCache,
     since: Instant,
     tick: Option<gpui::Task<()>>,
+    host: TreeHost,
     _state: Subscription,
 }
 
@@ -62,6 +70,7 @@ impl StripTree {
         state: Entity<AppState>,
         task_id: String,
         open: bool,
+        host: TreeHost,
         cx: &mut Context<Self>,
     ) -> Self {
         let now = Instant::now();
@@ -76,6 +85,7 @@ impl StripTree {
             stats: StatsCache::default(),
             since: now,
             tick: None,
+            host,
         }
     }
 
@@ -230,7 +240,10 @@ impl Render for StripTree {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
-        let theme = Theme::of(cx).for_popup();
+        let theme = match self.host {
+            TreeHost::Strip => Theme::of(cx).for_popup(),
+            TreeHost::Supervisor => Theme::of(cx).clone(),
+        };
         let Some(rows) = self.rows(cx) else {
             return div().into_any_element();
         };
@@ -344,6 +357,7 @@ impl Render for StripTree {
                     .child(row.title.clone())
                     .into_any_element()
             };
+            let group = SharedString::from(format!("strip-tree-row-{}", row.id));
             let kids = rows.iter().filter(|other| other.parent == Some(ix)).count();
             let fold = (kids > 0).then(|| {
                 let folded = self.folded.contains(&row.id);
@@ -405,12 +419,32 @@ impl Render for StripTree {
                         tree.toggle_fold(&id, cx);
                     }))
             });
+            let brief = (self.host == TreeHost::Supervisor).then(|| {
+                let selection = row.selection.clone();
+                let selector = format!("strip-tree-brief-{}", row.id);
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Brief for {}", row.title))
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                    .child("Brief ›")
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(StripTreeEvent::Brief(selection.clone()))
+                    }))
+            });
             let selection = row.selection.clone();
             let selector = format!("strip-tree-row-{}", row.id);
             elements.push(
                 div()
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
+                    .group(group)
                     .role(gpui::Role::Button)
                     .aria_label(format!("{}: {}", row.title, row.word))
                     .absolute()
@@ -469,6 +503,7 @@ impl Render for StripTree {
                     )
                     .children(times[ix].clone().map(|time| div().flex_none().child(time)))
                     .children(fold)
+                    .children(brief)
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         cx.emit(StripTreeEvent::Open(selection.clone()))
                     })),

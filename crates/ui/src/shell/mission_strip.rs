@@ -181,13 +181,16 @@ impl Shell {
         let open = !self.closed_mission_trees.contains(task_id);
         let state = self.state.clone();
         let task = task_id.to_string();
-        let tree = cx.new(|cx| crate::tasks::StripTree::new(state, task, open, cx));
+        let tree = cx.new(|cx| {
+            crate::tasks::StripTree::new(state, task, open, crate::tasks::TreeHost::Strip, cx)
+        });
         let task = task_id.to_string();
         let events = cx.subscribe(
             &tree,
             move |shell, _, event: &crate::tasks::StripTreeEvent, cx| {
-                let crate::tasks::StripTreeEvent::Open(selection) = event;
-                shell.open_mission(task.clone(), selection.clone(), cx);
+                if let crate::tasks::StripTreeEvent::Open(selection) = event {
+                    shell.open_mission(task.clone(), selection.clone(), cx);
+                }
             },
         );
         self.mission_tree = Some((tree.clone(), events));
