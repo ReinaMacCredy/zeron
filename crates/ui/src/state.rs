@@ -853,6 +853,7 @@ pub struct AppState {
     pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,
     pub sidebar_settings: zeron_proto::SidebarSettings,
     pub device_hub: Option<zeron_proto::device_hub::DeviceHubState>,
+    pub supervisor: Option<zeron_proto::supervisor::SupervisorSnapshot>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
     /// Unprobed harnesses are treated as able; the engine has the last word.
@@ -1012,6 +1013,7 @@ impl AppState {
             computer_settings: None,
             sidebar_settings: Default::default(),
             device_hub: None,
+            supervisor: None,
             harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -1414,6 +1416,17 @@ impl AppState {
             return false;
         }
         self.task_steps = steps;
+        true
+    }
+
+    pub fn apply_supervisor(
+        &mut self,
+        snapshot: zeron_proto::supervisor::SupervisorSnapshot,
+    ) -> bool {
+        if self.supervisor.as_ref() == Some(&snapshot) {
+            return false;
+        }
+        self.supervisor = Some(snapshot);
         true
     }
 
@@ -2890,6 +2903,7 @@ impl AppState {
         self.upload_progress = None;
         self.transfers.clear();
         self.local_device_id = None;
+        self.supervisor = None;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
     }
@@ -3051,6 +3065,7 @@ impl AppState {
         }
         self.engine = Some(handle.clone());
         self.device_hub = None;
+        self.supervisor = None;
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
@@ -3104,6 +3119,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_TASK_STEPS,
                 AppState::apply_task_steps,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SUPERVISOR,
+                AppState::apply_supervisor,
             ),
             spawn_watch(
                 cx,

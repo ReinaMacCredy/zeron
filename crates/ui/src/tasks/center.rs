@@ -1088,7 +1088,7 @@ impl TaskCenter {
             .into_any_element()
     }
 
-    fn markdown(key: String, text: &str, theme: &Theme, window: &Window) -> AnyElement {
+    pub(crate) fn markdown(key: String, text: &str, theme: &Theme, window: &Window) -> AnyElement {
         let tree = crate::markdown::parse_full(text);
         let options = crate::markdown::render::RenderOptions {
             tasks: None,

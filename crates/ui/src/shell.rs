@@ -111,6 +111,7 @@ pub(crate) mod spaces;
 mod split;
 mod summary;
 mod swipe_nav;
+mod supervisor_actions;
 mod switcher;
 mod whats_new;
 mod task_actions;
@@ -968,6 +969,7 @@ pub enum Route {
     Terminal,
     Tasks,
     TaskCenter,
+    Supervisor,
     Docs,
 }
 
@@ -1140,6 +1142,7 @@ pub enum NavEntry {
     Inbox,
     Tasks,
     TaskCenter(String),
+    Supervisor,
     Docs(Option<&'static str>),
 }
 
@@ -2620,6 +2623,7 @@ pub struct Shell {
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
     task_center_pane: Option<task_actions::TaskCenterPane>,
     task_slide: task_actions::TaskSlide,
+    supervisor: supervisor_actions::SupervisorShell,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
     /// Opened as its own page, so a narrow window shows it over the board.
@@ -3140,6 +3144,7 @@ impl Shell {
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
+            Some("supervisor") => Route::Supervisor,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
@@ -3188,6 +3193,7 @@ impl Shell {
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
             Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
+            Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
         });
         // Parent notifications carry presentation changes (session status,
@@ -3343,6 +3349,7 @@ impl Shell {
             task_center: None,
             task_center_pane: None,
             task_slide: task_actions::TaskSlide::resting(route),
+            supervisor: Default::default(),
             pull_request_detail: None,
             pull_request_detail_subscription: None,
             pull_request_open: false,
@@ -5414,6 +5421,7 @@ impl Shell {
                     .as_ref()
                     .and_then(|pane| pane.composer_for(transcript))
             })
+            .or_else(|| self.supervisor.composer_for(transcript))
             .unwrap_or_else(|| self.composer.clone())
     }
 
@@ -6157,7 +6165,8 @@ impl Shell {
                 .sidechat_tabs
                 .values()
                 .any(|tab| tab.chat_id == chat_id)
-            || self.task_center_holds(chat_id);
+            || self.task_center_holds(chat_id)
+            || self.supervisor.holds(chat_id);
         if !held {
             self.state
                 .update(cx, |state, _| state.unwatch_subagent_doc(chat_id));
@@ -7626,6 +7635,9 @@ impl Shell {
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.route_task_slide(route, cx);
+        if self.route == Route::Supervisor && route != Route::Supervisor {
+            self.leave_supervisor(cx);
+        }
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
@@ -8544,6 +8556,7 @@ impl Shell {
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
             NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
+            NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
@@ -14018,6 +14031,7 @@ impl Shell {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
             RailItem::Inbox => matches!(self.route, Route::Inbox),
             RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
+            RailItem::Supervisor => matches!(self.route, Route::Supervisor),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
             RailItem::Settings => matches!(self.route, Route::Settings(_)),
@@ -14044,6 +14058,10 @@ impl Shell {
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
                 self.open_tasks(cx);
+            }
+            RailItem::Supervisor => {
+                self.settings_focus_pending = false;
+                self.open_supervisor(cx);
             }
             RailItem::Settings => self.toggle_settings(cx),
         }
@@ -14082,9 +14100,17 @@ impl Shell {
         let awaiting = (item == RailItem::Inbox)
             .then(|| crate::inbox::awaiting_chats(self.state.read(cx), Utc::now()).len())
             .filter(|count| *count > 0);
-        let needs_you = (item == RailItem::Tasks)
-            .then(|| crate::tasks::needs_you_count(self.state.read(cx)))
-            .filter(|count| *count > 0);
+        let needs_you = match item {
+            RailItem::Tasks => Some(crate::tasks::needs_you_count(self.state.read(cx))),
+            RailItem::Supervisor => self
+                .state
+                .read(cx)
+                .supervisor
+                .as_ref()
+                .map(crate::supervisor::needs_you_count),
+            _ => None,
+        }
+        .filter(|count| *count > 0);
         let button = app_rail::button(
             entry.id,
             entry.label,
@@ -16138,8 +16164,12 @@ impl Shell {
             return self.render_tasks_page(window, cx);
         }
 
-        if matches!(self.route, Route::TaskCenter) {
+        if matches!(self.route, Route::TaskCenter) && self.task_handoff_t().is_none() {
             return self.render_task_center_page(window, cx);
+        }
+
+        if matches!(self.route, Route::Supervisor) {
+            return self.render_supervisor_page(window, cx);
         }
 
         if matches!(self.route, Route::Docs) {
@@ -16450,13 +16480,12 @@ impl Shell {
         } else {
             0.0
         };
-        let mission_strip = has_selection
+        let (mission_strip, strip_band) = match has_selection
             .then(|| self.render_mission_strip(composer_width, cx))
-            .flatten();
-        let strip_band = if mission_strip.is_some() {
-            mission_strip::STRIP_BAND
-        } else {
-            0.0
+            .flatten()
+        {
+            Some((strip, reveal)) => (Some(strip), mission_strip::STRIP_BAND * reveal),
+            None => (None, 0.0),
         };
         let zoom_fade = self.task_zoom_fade();
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
@@ -16656,12 +16685,15 @@ impl Shell {
                     .child(status)
                     .child({
                         let composer_opacity = self.composer_dock.borrow().opacity();
+                        let lift = self
+                            .task_handoff_t()
+                            .map_or(0.0, task_actions::handoff_lift);
                         crate::composer_dock::docked_composer(
                             div()
                                 .id("persistent-composer")
                                 .relative()
                                 .w(px(composer_width))
-                                .opacity(composer_opacity)
+                                .opacity(composer_opacity * (1.0 - lift))
                                 .mx_auto()
                                 .children(self.render_btw_ghost(cx))
                                 .child(
@@ -16680,6 +16712,7 @@ impl Shell {
                             frame_time,
                         )
                         .reserve_terminal(terminal_geometry.clone())
+                        .lift(task_actions::HANDOFF_RISE * lift)
                     })
                     .child(self.render_terminal_container(
                         terminal_geometry,
@@ -19178,6 +19211,7 @@ impl Render for Shell {
                     | Route::Usage
                     | Route::Inbox
                     | Route::Tasks
+                    | Route::Supervisor
                     | Route::Docs => {}
                 }),
             )
@@ -19731,6 +19765,7 @@ impl Render for Shell {
                             | Route::Inbox
                             | Route::Tasks
                             | Route::TaskCenter
+                            | Route::Supervisor
                             | Route::Docs
                     );
                 if let Route::Settings(section) = self.route {
@@ -19863,13 +19898,17 @@ impl Render for Shell {
                 let main = if matches!(self.route, Route::Terminal) {
                     self.render_terminal_column(column, window, cx)
                 } else {
-                    self.render_main(
+                    let main = self.render_main(
                         window,
                         main_content_width,
                         transcript_width,
                         sidecar_width,
                         cx,
-                    )
+                    );
+                    match self.task_handoff_t() {
+                        Some(t) => self.render_task_handoff(main, t, window, cx),
+                        None => main,
+                    }
                 };
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`

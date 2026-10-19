@@ -2009,7 +2009,14 @@ impl Pickers {
             return None;
         }
         let state = self.state.read(cx);
-        let device = state.effective_device_id()?;
+        let device = match self.chat_override.as_deref() {
+            Some(id) => state
+                .chats
+                .iter()
+                .find(|chat| chat.id == id)
+                .map(|chat| chat.device_id.clone()),
+            None => state.effective_device_id(),
+        }?;
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -10900,6 +10907,23 @@ mod tests {
             // Only the device switch re-targets the per-device catalogs; the
             // same-device projectless pick kept them.
             assert_eq!(pickers.target_generation, 1);
+        });
+        state.update(cx, |state, _| {
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "local-chat", "deviceId": "local", "archived": false,
+                    "createdAt": "2026-09-01T00:00:00Z"
+                }))
+                .unwrap(),
+            )
+        });
+        let bound = cx.new(|cx| {
+            let mut pickers = Pickers::new(state.clone(), cx);
+            pickers.bind_chat("local-chat".into());
+            pickers
+        });
+        bound.update(cx, |pickers, cx| {
+            assert_eq!(pickers.space_target(cx), None);
         });
     }
 

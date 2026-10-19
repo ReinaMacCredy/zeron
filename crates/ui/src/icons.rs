@@ -286,6 +286,7 @@ icon_assets![
     (LUCIDE_LAYERS, "lucide-layers"),
     (LUCIDE_EYE, "lucide-eye"),
     (LUCIDE_EYE_OFF, "lucide-eye-off"),
+    (LUCIDE_SHIELD, "lucide-shield"),
     (LUCIDE_PEN_LINE, "lucide-pen-line"),
     (LUCIDE_USER_ROUND, "lucide-user-round"),
     (LUCIDE_CIRCLE_SLASH, "lucide-circle-slash"),
