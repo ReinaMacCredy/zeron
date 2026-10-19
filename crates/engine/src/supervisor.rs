@@ -1046,6 +1046,150 @@ mod tests {
         }
     }
 
+    fn transcript(role: &str, parts: serde_json::Value) -> SessionMessageEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("e-{}", parts[0]["id"].as_str().unwrap()),
+            "role": role,
+            "parts": parts,
+            "createdAt": 1_000,
+            "deviceId": "dev-a",
+        }))
+        .unwrap()
+    }
+
+    fn input(request: &str, resolved: bool, answer: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "input", "id": format!("p-{request}"), "requestId": request, "resolved": resolved,
+            "questions": [{ "id": "q1", "header": "", "question": "Stripe or Adyen?", "options": ["Stripe", "Adyen"] }],
+            "answers": answer.map(|label| serde_json::json!([{ "questionId": "q1", "labels": [label] }])),
+        })
+    }
+
+    fn respond(id: &str, input: serde_json::Value, is_error: bool) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "tool", "id": id, "isError": is_error, "resolved": true,
+            "call": { "kind": "mcp", "server": "zeron", "tool": "respond_to_input", "input": input },
+        })
+    }
+
+    #[test]
+    fn a_step_question_reads_open_settled_by_whom_or_dropped() {
+        let mut approval = input("r-approval", false, None);
+        approval["questions"][0]["approval"] = true.into();
+        let mut consent = input("r-consent", false, None);
+        consent["questions"][0]["kind"] = serde_json::json!({ "type": "consent", "scope": "call" });
+        let step = [
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-open", false, None)]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-lead", true, Some("Stripe"))]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-out", true, Some("Adyen"))]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-sup", true, Some("Adyen"))]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([input("r-drop", true, None)]),
+            ),
+            transcript("assistant", serde_json::json!([approval, consent])),
+        ];
+        let lead = [
+            transcript(
+                "assistant",
+                serde_json::json!([
+                    respond(
+                        "t1",
+                        serde_json::json!({ "threadId": "step-1", "requestId": "r-lead" }),
+                        false
+                    ),
+                    respond(
+                        "t2",
+                        serde_json::json!({ "threadId": "step-1", "requestId": "r-out" }),
+                        true
+                    ),
+                    respond(
+                        "t3",
+                        serde_json::json!({ "threadId": "other", "requestId": "r-out" }),
+                        false
+                    ),
+                ]),
+            ),
+            transcript(
+                "assistant",
+                serde_json::json!([respond(
+                    "t4",
+                    serde_json::json!({ "threadId": "step-2" }),
+                    false
+                )]),
+            ),
+        ];
+        let supervisor = InterventionRecord {
+            row: SupervisorIntervention {
+                id: "i1".into(),
+                at: utc(2_000),
+                kind: zeron_proto::supervisor::InterventionKind::Respond,
+                task_id: Some("t".into()),
+                step_ids: Vec::new(),
+                target: Some("step-1".into()),
+                message_id: Some("cmd-1".into()),
+                request_id: Some("r-sup".into()),
+                text: "q1: Adyen".into(),
+                trigger: None,
+                chips: Vec::new(),
+            },
+            steps: Vec::new(),
+        };
+        let at = StepThread {
+            task_id: "t",
+            step_id: "s1",
+            chat_id: "step-1",
+        };
+        let read: Vec<(String, QuestionState)> = lead_questions(&at, &step, &lead, &[supervisor])
+            .into_iter()
+            .map(|row| (row.request_id, row.state))
+            .collect();
+        let settled = |by, label: &str| QuestionState::Settled {
+            by,
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec![label.into()],
+            }],
+        };
+        assert_eq!(
+            read,
+            [
+                ("r-open".to_string(), QuestionState::Open),
+                ("r-lead".to_string(), settled(SettledBy::Lead, "Stripe")),
+                ("r-out".to_string(), settled(SettledBy::Outside, "Adyen")),
+                ("r-sup".to_string(), settled(SettledBy::Supervisor, "Adyen")),
+                ("r-drop".to_string(), QuestionState::Dropped),
+            ]
+        );
+        let bare = StepThread {
+            task_id: "t",
+            step_id: "s2",
+            chat_id: "step-2",
+        };
+        let answered = [transcript(
+            "assistant",
+            serde_json::json!([input("r-bare", true, Some("Stripe"))]),
+        )];
+        let read = lead_questions(&bare, &answered, &lead, &[]);
+        assert_eq!(
+            read[0].state,
+            settled(SettledBy::Lead, "Stripe"),
+            "a call without requestId answered what that thread had pending"
+        );
+    }
+
     #[test]
     fn a_stall_fires_once_per_silence_and_never_while_work_or_the_person_holds_it() {
         let now = 10 * HOUR_MS;
