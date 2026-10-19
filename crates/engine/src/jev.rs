@@ -10,7 +10,7 @@ use crate::agent_accounts::keychain;
 use crate::predictions::{head, key_account, tail, valid_api_key};
 use crate::registry::{CompactionSettings, HarnessRegistry, JevSource};
 
-pub(crate) const MODEL_LABEL: &str = "Jev 1.14";
+const MODEL_LABEL: &str = "Jev 1.14";
 const QUESTIONS: &str = include_str!("jev_questions.json");
 const TIMEOUT: Duration = Duration::from_secs(20);
 const STATE_CHARS: usize = 10_000;

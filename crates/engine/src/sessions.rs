@@ -2486,32 +2486,34 @@ impl SessionsEngine {
             &entries,
             crate::compact_boundary::NewMessage::AgentNote(note),
         );
-        let mut record = if crate::compact_boundary::at_ceiling(tokens, window) {
-            zeron_doc::ClassifierRecord {
-                verdict: ClassifierVerdict::Carry,
-                decided_by: zeron_doc::DecidedBy::Ceiling,
-                input,
-                ..Default::default()
-            }
-        } else if settings.jev.is_some() {
-            zeron_doc::ClassifierRecord {
-                verdict: ClassifierVerdict::Carry,
-                decided_by: zeron_doc::DecidedBy::AgentNote,
-                model: Some(crate::jev::MODEL_LABEL.into()),
-                input,
-                ..Default::default()
-            }
+        let at_ceiling = crate::compact_boundary::at_ceiling(tokens, window);
+        let classified = if at_ceiling || settings.jev.is_some() {
+            None
         } else {
-            match self
-                .run_classifier(chat_id, harness_id, settings.classifier, input, true)
-                .await
-            {
-                Some(mut record) => {
-                    crate::compact_boundary::cap_agent_note(&mut record);
-                    record
-                }
-                None => return ClassifierVerdict::New,
+            self.run_classifier(
+                chat_id,
+                harness_id,
+                settings.classifier,
+                input.clone(),
+                true,
+            )
+            .await
+        };
+        let mut record = match classified {
+            Some(mut record) => {
+                crate::compact_boundary::cap_agent_note(&mut record);
+                record
             }
+            None => zeron_doc::ClassifierRecord {
+                verdict: ClassifierVerdict::Carry,
+                decided_by: if at_ceiling {
+                    zeron_doc::DecidedBy::Ceiling
+                } else {
+                    zeron_doc::DecidedBy::AgentNote
+                },
+                input,
+                ..Default::default()
+            },
         };
         record.context_tokens = tokens;
         let verdict = record.verdict;
