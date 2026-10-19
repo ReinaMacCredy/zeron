@@ -101,7 +101,7 @@ A contention wakes the Supervisor once, and again only after it has cleared. Zer
 
 **Missions**, under the feed, lists every Mission Control task that is not done. Each row shows its progress ring, its name, the step it is on (**Step 2 of 5** and its title) and a thin progress bar. A mission the Supervisor does not watch reads **Not watched**; a mission whose lead runs on another device reads **on** that device's name, **not watched**: the Supervisor can only reach threads on its own Mac.
 
-Click a mission to see who works on it: the **Lead**, then each step and its title, in the order Mission Control numbers them. Each one shows its agent's mark and model, and the agent profile's name when its chat runs one. **Open Mission Control** opens the mission's page, described in [Mission Control](zeron://docs/mission-control). **Watched by the Supervisor** at the bottom has a switch: turn it off and that mission stops waking the Supervisor; turn it on again to bring it back.
+Click a mission to see who works on it, as the same tree the strip at the top of a lead's chat shows: the **Lead** with what it is doing, then each step under it in the order Mission Control numbers them, each with its state, its agent's mark and, while it works, the time so far. The fold button on the lead folds the steps away. Click a row to open Mission Control. **Open Mission Control** opens the mission's page too, described in [Mission Control](zeron://docs/mission-control). **Watched by the Supervisor** at the bottom has a switch: turn it off and that mission stops waking the Supervisor; turn it on again to bring it back.
 
 ## Read a brief
 

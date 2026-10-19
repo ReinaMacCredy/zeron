@@ -93,7 +93,9 @@ The lead's chat and the chat of every step show a strip at the top of the conver
 - a bar with the steps done;
 - **Mission Control**.
 
-Click the strip to open the task's Mission Control page with this chat live on the right. From a step's chat, that step is selected. The page slides in from the right over the chat. Back, or the chat's name in the titlebar, slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
+In the lead's chat, the strip also shows the mission as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and, while it works, the time so far. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
+
+Click **Mission Control** in the strip, or any line of the tree, to open the task's Mission Control page with that thread live on the right. From a step's chat, clicking the strip opens the page with that step selected. The page slides in from the right over the chat. Back, or the chat's name in the titlebar, slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
 
 ## In the sidebar
 
