@@ -2732,15 +2732,27 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         "the lead's brief",
     )
     .await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = format!("port:{}", listener.local_addr().unwrap().port());
     let plan = serde_json::json!({
         "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
         "steps": [{ "title": "Build the API" }, { "title": "Write the docs", "notes": "README" }],
-        "overview": "Ship the API",
+        "overview": "Ship the API", "resources": [port, port],
     });
     let mut stranger = plan.clone();
     stranger["fromChatId"] = "lead".into();
     assert!(mutate(stranger).await.is_err(), "only the lead plans");
+    let mut bad = plan.clone();
+    bad["resources"] = serde_json::json!(["port:0"]);
+    let Err(err) = mutate(bad).await else {
+        panic!("a bad resource key is refused");
+    };
+    assert!(err.to_string().contains("is not a resource"), "{err}");
     mutate(plan).await.unwrap();
+    assert_eq!(
+        rig.core.workspace.task("t1").unwrap().resources,
+        [port.clone()]
+    );
     let steps = rig.core.workspace.task_steps_of("t1");
     assert_eq!(
         steps.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
@@ -3104,6 +3116,97 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         .await,
     );
     assert!(err.contains("supervisor pause"), "{err}");
+
+    if cfg!(unix) {
+        use zeron_proto::supervisor::ResourceState;
+        let act = |params: serde_json::Value| {
+            let mut params = params;
+            params["fromChatId"] = supervisor.as_str().into();
+            call(zeron_rpc::methods::SUPERVISOR_ACT, params)
+        };
+        let pause = serde_json::json!({
+            "action": "pause", "stepId": steps[1].id, "resource": port, "reason": "The frontend serves on it",
+        });
+        let err = refused(act(pause.clone()).await);
+        assert!(err.contains("No verified contention"), "{err}");
+        mutate(serde_json::json!({ "op": "createTask", "taskId": "t2", "title": "Shop frontend" }))
+            .await
+            .unwrap();
+        mutate(serde_json::json!({
+            "op": "startTask", "taskId": "t2", "chatId": "task-lead-2",
+            "spaceId": "space-tt", "orchestrate": true,
+        }))
+        .await
+        .unwrap();
+        wait_for(
+            || !prompts_with(&rig, "You lead this task (task id t2)").is_empty(),
+            "the second lead's brief",
+        )
+        .await;
+        mutate(serde_json::json!({
+            "op": "planSteps", "taskId": "t2", "fromChatId": "task-lead-2",
+            "steps": [{ "title": "Serve the shop" }], "resources": [port],
+        }))
+        .await
+        .unwrap();
+        let shared = |s: &zeron_proto::supervisor::SupervisorSnapshot, state| {
+            s.resources
+                .iter()
+                .any(|row| row.key == port && row.state == state)
+        };
+        let snapshot = supervisor_until(&rpc, |s| shared(s, ResourceState::Contended)).await;
+        let row = snapshot
+            .resources
+            .iter()
+            .find(|row| row.key == port)
+            .unwrap();
+        assert_eq!(row.declared_by, ["t1", "t2"]);
+        assert_eq!(
+            row.check.as_ref().unwrap().uses[0].pid,
+            std::process::id(),
+            "lsof found this test's listener"
+        );
+        let contention = format!("Resource contention on {port}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !wakes(&rig).iter().any(|wake| wake.contains(&contention)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the contention wake"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let paused = act(pause).await.unwrap();
+        let zeron_rpc::RpcReply::Value(paused) = paused else {
+            panic!("a pause reply");
+        };
+        assert_eq!(paused["stopped"], false, "the step's thread was idle");
+        let err = refused(run(&steps[1], "task-lead").await);
+        assert!(err.contains("step_paused"), "{err}");
+        let told = "The Supervisor paused step \"Write the docs\"";
+        wait_for(
+            || !prompts_with(&rig, told).is_empty(),
+            "the lead's pause message",
+        )
+        .await;
+        drop(listener);
+        act(serde_json::json!({ "action": "check" })).await.unwrap();
+        let snapshot = supervisor_until(&rpc, |s| {
+            s.interventions.first().is_some_and(|row| {
+                row.chips.contains(&InterventionChip::StepPaused)
+                    && row.chips.contains(&InterventionChip::ResourceFreed)
+            })
+        })
+        .await;
+        assert_eq!(snapshot.interventions[0].kind, InterventionKind::Pause);
+        assert!(shared(&snapshot, ResourceState::Clear), "the port closed");
+        act(serde_json::json!({
+            "action": "resume", "stepId": steps[1].id, "reason": "The port is free",
+        }))
+        .await
+        .unwrap();
+        started(run(&steps[1], "task-lead").await);
+    }
     rig.core.shutdown().await;
 }
 

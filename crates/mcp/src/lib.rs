@@ -5023,7 +5023,7 @@ mod tests {
             .tools
             .call(
                 "tasks",
-                &json!({ "action": "plan", "taskId": "t1", "overview": "Goal: a shop API", "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
+                &json!({ "action": "plan", "taskId": "t1", "overview": "Goal: a shop API", "resources": ["port:5173"], "steps": [{ "title": "API" }, { "title": "Docs", "notes": "README" }] }),
             )
             .await
             .unwrap();
@@ -5056,6 +5056,7 @@ mod tests {
             [
                 json!({
                     "op": "planSteps", "taskId": "t1", "fromChatId": "a", "overview": "Goal: a shop API",
+                    "resources": ["port:5173"],
                     "steps": [{ "title": "API", "notes": "" }, { "title": "Docs", "notes": "README" }],
                 }),
                 json!({ "op": "updateTaskStep", "stepId": "s5", "patch": { "outcome": "skipped" }, "fromChatId": "a" }),
