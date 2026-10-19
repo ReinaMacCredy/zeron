@@ -383,6 +383,7 @@ pub struct TaskCenter {
     gallery: Entity<ImageGallery>,
     picking: Option<gpui::Task<()>>,
     focus: FocusHandle,
+    shimmer_since: Instant,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -429,6 +430,7 @@ impl TaskCenter {
             press: 0.0,
             settle: None,
             focus: cx.focus_handle(),
+            shimmer_since: Instant::now(),
             _subscriptions: vec![add_events, state_changes],
         }
     }
@@ -1385,6 +1387,10 @@ impl TaskCenter {
         };
         let (mark, tint) = brand.unwrap_or((icons::BOT, None));
         let selected = self.selected == Selection::Lead;
+        let lead_shimmer = self.shimmer(
+            task.completed_at.is_none() && plan.lead == Some(ChatIndicator::Working),
+            cx,
+        );
         div()
             .id("task-center-lead")
             .debug_selector(|| "task-center-lead".into())
@@ -1425,7 +1431,13 @@ impl TaskCenter {
                         div()
                             .text_size(ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .child(Self::lead_line(task, plan)),
+                            .child(Self::shimmer_text(
+                                Self::lead_line(task, plan),
+                                lead_shimmer,
+                                ui_rems(12.0),
+                                theme.text_muted,
+                                theme,
+                            )),
                     ),
             )
             .on_click(
@@ -1572,7 +1584,43 @@ impl TaskCenter {
         }
     }
 
-    fn step_subline(row: &StepRow, thread: Option<&Thread>, theme: &Theme) -> Vec<AnyElement> {
+    fn shimmer(&self, working: bool, cx: &mut Context<Self>) -> Option<f32> {
+        (working && !motion::reduced_motion(cx)).then(|| {
+            motion::pulse_lease(cx.entity_id(), cx);
+            crate::transcript::tool_title_shimmer_phase(self.shimmer_since, Instant::now())
+        })
+    }
+
+    fn shimmer_text(
+        text: impl Into<SharedString>,
+        shimmer: Option<f32>,
+        size: gpui::Rems,
+        base: gpui::Hsla,
+        theme: &Theme,
+    ) -> AnyElement {
+        let text = text.into();
+        match shimmer {
+            Some(phase) => crate::transcript::shimmer_label(
+                text,
+                phase,
+                theme.font_sans.clone(),
+                size.into(),
+                None,
+                base,
+                theme,
+            )
+            .flex_none()
+            .into_any_element(),
+            None => text.into_any_element(),
+        }
+    }
+
+    fn step_subline(
+        row: &StepRow,
+        thread: Option<&Thread>,
+        shimmer: Option<f32>,
+        theme: &Theme,
+    ) -> Vec<AnyElement> {
         let mut parts = Vec::new();
         if let (Some((mark, tint)), Some(thread)) = (row.brand, thread) {
             parts.push(
@@ -1602,7 +1650,13 @@ impl TaskCenter {
                 .items_center()
                 .gap(px(4.0))
                 .text_color(working)
-                .child("Working")
+                .child(Self::shimmer_text(
+                    "Working",
+                    shimmer,
+                    ui_rems(11.5),
+                    working,
+                    theme,
+                ))
                 .children(since.map(|since| {
                     crate::loaders::elapsed_label(
                         format!("task-center-step-elapsed-{}", row.step.id),
@@ -2107,7 +2161,12 @@ impl TaskCenter {
                             .gap(px(5.0))
                             .text_size(ui_rems(11.5))
                             .text_color(theme.text_muted)
-                            .children(Self::step_subline(row, thread, theme)),
+                            .children(Self::step_subline(
+                                row,
+                                thread,
+                                self.shimmer(row.status == StepStatus::Working, cx),
+                                theme,
+                            )),
                     ),
             );
         div()
@@ -2288,7 +2347,8 @@ impl TaskCenter {
                 cx.stop_propagation();
                 center.toggle_spec(&toggle_id, cx);
             }));
-        let mut subline = Self::step_subline(row, thread, theme);
+        let shimmer = self.shimmer(row.status == StepStatus::Working, cx);
+        let mut subline = Self::step_subline(row, thread, shimmer, theme);
         subline.push(div().flex_none().child("·").into_any_element());
         subline.push(spec_toggle.into_any_element());
         let panel = expanded.then(|| {

@@ -217,6 +217,25 @@ pub fn breathing(floor: f32, peak: f32, cx: &mut App) -> Option<gpui::QuadAnimat
     })
 }
 
+pub fn flow_dot(phase_offset: f32, cx: &mut App) -> Option<gpui::QuadAnimation> {
+    fn travel(phase: f32) -> f32 {
+        let p = phase.rem_euclid(1.0);
+        (1.0 - p.min(1.0 - p) / 0.09).max(0.0)
+    }
+    if cx.reduce_motion() {
+        return None;
+    }
+    Some(gpui::QuadAnimation {
+        epoch: cx.default_global::<PulseClock>().epoch,
+        period: Duration::from_millis(550),
+        phase_offset,
+        curve: travel,
+        from: 0.0,
+        to: 1.0,
+        interval: PULSE_TICK,
+    })
+}
+
 /// Schedule cosmetic animation through the same bounded clock as loaders.
 /// Renew only while painting an active animation; the clock parks after the
 /// last lease expires, including when a view is hidden or removed.
