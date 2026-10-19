@@ -16138,7 +16138,7 @@ impl Shell {
             return self.render_tasks_page(window, cx);
         }
 
-        if matches!(self.route, Route::TaskCenter) {
+        if matches!(self.route, Route::TaskCenter) && self.task_handoff_t().is_none() {
             return self.render_task_center_page(window, cx);
         }
 
@@ -16450,13 +16450,12 @@ impl Shell {
         } else {
             0.0
         };
-        let mission_strip = has_selection
+        let (mission_strip, strip_band) = match has_selection
             .then(|| self.render_mission_strip(composer_width, cx))
-            .flatten();
-        let strip_band = if mission_strip.is_some() {
-            mission_strip::STRIP_BAND
-        } else {
-            0.0
+            .flatten()
+        {
+            Some((strip, reveal)) => (Some(strip), mission_strip::STRIP_BAND * reveal),
+            None => (None, 0.0),
         };
         let zoom_fade = self.task_zoom_fade();
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
@@ -16656,12 +16655,15 @@ impl Shell {
                     .child(status)
                     .child({
                         let composer_opacity = self.composer_dock.borrow().opacity();
+                        let lift = self
+                            .task_handoff_t()
+                            .map_or(0.0, task_actions::handoff_lift);
                         crate::composer_dock::docked_composer(
                             div()
                                 .id("persistent-composer")
                                 .relative()
                                 .w(px(composer_width))
-                                .opacity(composer_opacity)
+                                .opacity(composer_opacity * (1.0 - lift))
                                 .mx_auto()
                                 .children(self.render_btw_ghost(cx))
                                 .child(
@@ -16680,6 +16682,7 @@ impl Shell {
                             frame_time,
                         )
                         .reserve_terminal(terminal_geometry.clone())
+                        .lift(task_actions::HANDOFF_RISE * lift)
                     })
                     .child(self.render_terminal_container(
                         terminal_geometry,
@@ -19863,13 +19866,17 @@ impl Render for Shell {
                 let main = if matches!(self.route, Route::Terminal) {
                     self.render_terminal_column(column, window, cx)
                 } else {
-                    self.render_main(
+                    let main = self.render_main(
                         window,
                         main_content_width,
                         transcript_width,
                         sidecar_width,
                         cx,
-                    )
+                    );
+                    match self.task_handoff_t() {
+                        Some(t) => self.render_task_handoff(main, t, window, cx),
+                        None => main,
+                    }
                 };
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
