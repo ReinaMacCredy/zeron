@@ -147,6 +147,15 @@ pub(super) fn clip(text: &str, max: usize) -> String {
 
 const HANDBACK_REPLY_CHARS: usize = 4_000;
 
+pub(super) fn handback_settle() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("ZERON_HANDBACK_SETTLE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(500),
+    )
+}
+
 pub(super) fn agent_response(reply: &str, full_with: &str) -> Option<String> {
     let reply = reply.trim();
     if reply.is_empty() {
@@ -1191,12 +1200,20 @@ impl DocHost {
                 )
             };
             let slot = handle.steer_slot(&row.id)?;
+            handle.hold_handback(&row.id);
             handle.doc.insert_queued(slot, &row)?;
             handle.publish_queue();
             self.save_snapshot(&handle);
             row.id
         };
-        self.deliver_wake(&handle, &row_id).await
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(handback_settle()).await;
+            if let Err(err) = host.deliver_wake(&handle, &row_id).await {
+                tracing::warn!(chat = %handle.chat_id, error = %err, "delivering a wake failed");
+            }
+        });
+        Ok(())
     }
 
     async fn deliver_wake(

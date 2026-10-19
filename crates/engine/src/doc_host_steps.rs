@@ -1,6 +1,6 @@
 use zeron_proto::{Delegation, SessionStatus, StepTurn, StepTurnEnd, TaskStep, TaskStepPatch};
 
-use super::delegation::{agent_response, failure, handback_text};
+use super::delegation::{agent_response, failure, handback_settle, handback_text};
 use super::*;
 use crate::registry::DelegationSettings;
 
@@ -334,9 +334,13 @@ impl DocHost {
         let Some((text, from)) = self.step_wake(workspace, &step_ids) else {
             return Ok(());
         };
-        self.queue_thread_row(lead, Some(&from), &text, step_ids)
-            .await
-            .map(drop)
+        let (handle, row_id) = self.push_thread_row(lead, Some(&from), &text, step_ids)?;
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(handback_settle()).await;
+            host.send_thread_row(&handle, &row_id).await;
+        });
+        Ok(())
     }
 
     /// Runs after `recover_stale`: a step thread nothing revives lost its turn with the previous engine.
