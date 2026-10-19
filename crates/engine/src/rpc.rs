@@ -1426,6 +1426,23 @@ impl EngineRpc {
         Ok(())
     }
 
+    async fn retire_instance_sessions(&self, instance_id: &str) {
+        let local_device = self.doc_host.device_id();
+        let chats = self.workspace.watch_chats().borrow().clone();
+        for chat in chats.iter().filter(|chat| {
+            chat.device_id == local_device
+                && chat
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.instance_id.as_deref())
+                    == Some(instance_id)
+        }) {
+            if let Err(error) = self.sessions.switch_harness(&chat.id).await {
+                tracing::warn!(chat_id = %chat.id, %error, "could not close a provider instance's session");
+            }
+        }
+    }
+
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
         use crate::review::{PromptInput, ReviewScope, ReviewerOptions};
         let failed = |message: &str| RpcError::Failed(message.to_string());
@@ -5719,7 +5736,15 @@ impl RpcService for EngineRpc {
             methods::UPSERT_PROVIDER_INSTANCE => {
                 let p: UpsertProviderInstanceParams = parse_params(params)?;
                 let store = self.provider_instances_store()?;
-                let snapshot = blocking(move || store.upsert(p.instance)).await?;
+                let before = store.instance(p.instance.id.trim());
+                let writer = store.clone();
+                let snapshot = blocking(move || writer.upsert(p.instance)).await?;
+                if let Some(before) = before
+                    && let Some(after) = store.instance(&before.id)
+                    && !crate::provider_instances::keeps_sessions(&before, &after, store.data_dir())
+                {
+                    self.retire_instance_sessions(&before.id).await;
+                }
                 RpcReply::value(&snapshot)
             }
             methods::DELETE_PROVIDER_INSTANCE => {
@@ -5728,6 +5753,7 @@ impl RpcService for EngineRpc {
                 let deleted = store.instance(&p.instance_id);
                 let snapshot = blocking(move || store.delete(&p.instance_id)).await?;
                 if let Some(instance) = deleted {
+                    self.retire_instance_sessions(&instance.id).await;
                     self.agent_accounts.remove_instance(&instance).await;
                 }
                 RpcReply::value(&snapshot)

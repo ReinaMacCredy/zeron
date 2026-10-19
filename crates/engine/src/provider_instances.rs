@@ -335,20 +335,54 @@ pub(crate) fn provider_home(
     home: &HomeDir,
     data_dir: &Path,
 ) -> Result<PathBuf, EngineError> {
+    let dir = home_path(id, home, data_dir)?;
+    if *home == HomeDir::Managed {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir)?;
+    }
+    Ok(dir)
+}
+
+pub(crate) fn home_path(id: &str, home: &HomeDir, data_dir: &Path) -> Result<PathBuf, EngineError> {
     match home {
         HomeDir::Custom { path } if path.trim().is_empty() => Err(EngineError::Other(format!(
             "Provider instance '{id}' has an empty home directory"
         ))),
         HomeDir::Custom { path } => expand(path),
-        HomeDir::Managed => {
-            let dir = managed_home(id, data_dir);
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-            builder.create(&dir)?;
-            Ok(dir)
+        HomeDir::Managed => Ok(managed_home(id, data_dir)),
+    }
+}
+
+pub(crate) fn keeps_sessions(
+    before: &ProviderInstance,
+    after: &ProviderInstance,
+    data_dir: &Path,
+) -> bool {
+    let home = |instance: &ProviderInstance, home: &Option<HomeDir>| {
+        home.as_ref()
+            .map(|home| home_path(&instance.id, home, data_dir).ok())
+    };
+    match (&before.config, &after.config) {
+        (
+            InstanceConfig::Native { home_dir: was, .. },
+            InstanceConfig::Native { home_dir: now, .. },
+        ) => home(before, was) == home(after, now),
+        (InstanceConfig::Acp { source: was, .. }, InstanceConfig::Acp { source: now, .. }) => {
+            match (was, now) {
+                (
+                    AcpSource::Registry { agent_id: was, .. },
+                    AcpSource::Registry { agent_id: now, .. },
+                ) => was == now,
+                (AcpSource::Local { command: was, .. }, AcpSource::Local { command: now, .. }) => {
+                    was.trim() == now.trim()
+                }
+                _ => false,
+            }
         }
+        _ => false,
     }
 }
 

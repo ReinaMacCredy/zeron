@@ -89,7 +89,7 @@ use sha2::{Digest, Sha256};
 use zeron_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentExtraUsage,
     AgentLoginMode, AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
-    HomeDir, InstanceConfig, ProviderInstance,
+    ProviderInstance,
 };
 
 use crate::repos::home_dir;
@@ -926,30 +926,28 @@ impl AgentAccounts {
             accounts.shutdown();
         }
         let config = &self.inner.config;
-        let managed = matches!(
-            &instance.config,
-            InstanceConfig::Native {
-                home_dir: Some(HomeDir::Managed),
-                ..
-            }
-        );
-        let mut dirs = vec![config.instance_root(&instance.id)];
-        if managed {
-            let home = crate::provider_instances::managed_home(&instance.id, &config.data_dir);
-            #[cfg(target_os = "macos")]
-            if instance.driver == HarnessId::ClaudeCode && config.claude_keychain_service.is_some()
-            {
-                keychain::delete_credentials(&claude_keychain_service(Some(&home))).await;
-            }
-            dirs.push(home);
+        let home = crate::provider_instances::managed_home(&instance.id, &config.data_dir);
+        #[cfg(target_os = "macos")]
+        if instance.driver == HarnessId::ClaudeCode
+            && config.claude_keychain_service.is_some()
+            && home.is_dir()
+        {
+            keychain::delete_credentials(&claude_keychain_service(Some(&home))).await;
         }
-        for dir in dirs {
-            match std::fs::remove_dir_all(&dir) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    tracing::warn!(dir = %dir.display(), %error, "could not remove a deleted provider instance's files");
+        let dirs = [config.instance_root(&instance.id), home];
+        let removed = tokio::task::spawn_blocking(move || {
+            for dir in dirs {
+                match std::fs::remove_dir_all(&dir) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        tracing::warn!(dir = %dir.display(), %error, "could not remove a deleted provider instance's files");
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+        })
+        .await;
+        if let Err(error) = removed {
+            tracing::warn!(%error, "removing a deleted provider instance's files failed");
         }
     }
 
@@ -5118,6 +5116,7 @@ mod probe_tests {
 #[cfg(test)]
 mod login_tests {
     use super::*;
+    use zeron_proto::HomeDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Temp homes for every provider; never the real logins or Keychain.
