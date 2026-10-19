@@ -1366,6 +1366,7 @@ impl SessionsEngine {
             .map_err(EngineError::Other)?;
         self.label_computer_chat(chat_id);
         let (harness, instance_id) = self.inner.resolve_for_chat(chat_id, harness_id)?;
+        let launch = self.inner.instance_launch(instance_id.as_deref());
         if request.computer_control && !harness.computer_tools_reachable() {
             self.note_computer_unreachable(chat_id, harness_id);
             request.computer_control = false;
@@ -1389,7 +1390,6 @@ impl SessionsEngine {
                 .await;
         }
         let instructions = self.inner.instructions_for(chat_id);
-        let launch = self.inner.instance_launch(instance_id.as_deref());
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
