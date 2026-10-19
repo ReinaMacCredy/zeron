@@ -1365,7 +1365,6 @@ impl WorkspaceHost {
         self.inner.tasks_tx.borrow().iter().any(|task| {
             task.mode == TaskMode::Orchestrated
                 && !task.deleted
-                && task.completed_at.is_none()
                 && task.chat_id.as_deref() == Some(chat_id)
         }) || self
             .inner
