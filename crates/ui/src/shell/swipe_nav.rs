@@ -351,6 +351,7 @@ impl Shell {
                 .find(|task| &task.id == id)
                 .map(|task| transcript::single_line(&task.title).into())
                 .unwrap_or_else(|| "Task".into()),
+            NavEntry::Supervisor => "Supervisor".into(),
             NavEntry::Docs(article) => article
                 .and_then(crate::docs::article)
                 .map_or_else(|| "Docs".into(), |article| article.title.clone().into()),

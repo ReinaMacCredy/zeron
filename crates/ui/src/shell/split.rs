@@ -419,7 +419,8 @@ impl Shell {
                 .subagent_tabs
                 .values()
                 .any(|tab| tab.doc_id == split.chat_id)
-            || self.task_center_holds(&split.chat_id);
+            || self.task_center_holds(&split.chat_id)
+            || self.supervisor.holds(&split.chat_id);
         if !held_elsewhere {
             self.state
                 .update(cx, |s, _| s.unwatch_subagent_doc(&split.chat_id));

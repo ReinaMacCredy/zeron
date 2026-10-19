@@ -4,6 +4,7 @@ use crate::tasks::{Selection, ZoomFrame};
 const STRIP_HEIGHT: f32 = 30.0;
 pub(super) const STRIP_GAP: f32 = 6.0;
 pub(super) const STRIP_BAND: f32 = STRIP_GAP + STRIP_HEIGHT;
+const STRIP_REVEAL: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TaskZoom {
@@ -27,12 +28,15 @@ impl Shell {
         &mut self,
         width: f32,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let mission = {
+    ) -> Option<(AnyElement, f32)> {
+        let (chat_id, mission) = {
             let state = self.state.read(cx);
-            let chat_id = state.selected_chat.as_deref()?;
-            crate::tasks::mission_thread(state, chat_id, chrono::Utc::now())?
+            let chat_id = state.selected_chat.clone()?;
+            let mission = crate::tasks::mission_thread(state, &chat_id, chrono::Utc::now());
+            (chat_id, mission)
         };
+        let reveal = self.strip_reveal(chat_id, mission.is_some());
+        let mission = mission?;
         let theme = Theme::of(cx).clone();
         let (_, _, complete) = chat_status_tone(zeron_proto::ChatIndicator::Completed, &theme);
         let zeron_proto::PlanProgress { done, total } = mission.progress;
@@ -112,13 +116,35 @@ impl Shell {
             .on_click(cx.listener(move |shell, _: &gpui::ClickEvent, _, cx| {
                 shell.open_mission(task_id.clone(), selection.clone(), cx)
             }));
-        Some(
+        Some((
             div()
                 .w(px(width))
+                .h(px(STRIP_HEIGHT * reveal))
                 .px(px(Theme::SPACE_LG))
+                .overflow_hidden()
+                .opacity(reveal)
                 .child(strip)
                 .into_any_element(),
-        )
+            reveal,
+        ))
+    }
+
+    fn strip_reveal(&mut self, chat_id: String, shown: bool) -> f32 {
+        let now = self.zoom_now();
+        let target = if shown { 1.0 } else { 0.0 };
+        let (seen, tween) = &mut self.task_slide.strip;
+        if seen.as_deref() != Some(chat_id.as_str()) {
+            *seen = Some(chat_id);
+            *tween = motion::Tween::at(target, now);
+        } else if !shown {
+            *tween = motion::Tween::at(0.0, now);
+        } else if tween.target() != target {
+            tween.retarget(target, STRIP_REVEAL, self.reduced_motion, now);
+        }
+        if !tween.settled_at(now) {
+            self.motion_active.set(true);
+        }
+        tween.value_at(now)
     }
 
     fn open_mission(&mut self, task_id: String, selection: Selection, cx: &mut Context<Self>) {

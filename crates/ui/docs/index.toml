@@ -1,6 +1,6 @@
 # In-app Docs. Sections show in this order; articles keep their order within a
 # section. Each article's body is <id>.md, listed in src/docs.rs BODIES.
-# actions: tasks, inbox, usage, pull-requests, changelog, settings/<slug>, docs/<id>.
+# actions: tasks, supervisor, inbox, usage, pull-requests, changelog, settings/<slug>, docs/<id>.
 
 [[section]]
 id = "basics"
@@ -224,6 +224,14 @@ title = "Tasks"
 icon = "hugeicons-apple-reminder"
 blurb = "Plan work as a list or a Kanban board, start a task with one click, or let a lead agent run it in steps."
 actions = ["tasks"]
+
+[[article]]
+id = "supervisor"
+section = "work"
+title = "Supervisor"
+icon = "lucide-shield"
+blurb = "One agent above your missions' leads: it wakes on their events, and you set what it may do."
+actions = ["supervisor", "tasks"]
 
 [[article]]
 id = "inbox"

@@ -459,13 +459,21 @@ impl MotionSpec {
     /// Eased progress (0..1) for a raw timeline delta (0..1 across [`total`](Self::total)).
     /// Pure — unit-testable without a window.
     pub fn progress(&self, raw_delta: f32) -> f32 {
+        self.curve.eval(self.curve_input(raw_delta))
+    }
+
+    pub fn progress_unclamped(&self, raw_delta: f32) -> f32 {
+        self.curve.eval_unclamped(self.curve_input(raw_delta))
+    }
+
+    fn curve_input(&self, raw_delta: f32) -> f32 {
         let total = (self.delay_ms + self.duration_ms) as f32;
         if total <= 0.0 || self.duration_ms == 0 {
             return 1.0;
         }
         let t =
             (raw_delta.clamp(0.0, 1.0) * total - self.delay_ms as f32) / self.duration_ms as f32;
-        self.curve.eval(t.clamp(0.0, 1.0))
+        t.clamp(0.0, 1.0)
     }
 
     /// A oneshot gpui [`Animation`] for this spec (delay folded in).
@@ -518,6 +526,8 @@ pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
 /// teleporting. Drive it through [`CubicBezier::eval_unclamped`].
 pub const EASE_SNAP: CubicBezier = CubicBezier::new(0.22, 1.1, 0.36, 1.0);
 pub const SNAP: MotionSpec = MotionSpec::new(180, EASE_SNAP);
+/// About 2% past the stop, against EASE_SNAP's 0.2%: read it through `value_unclamped_at`.
+pub const EASE_BOUNCE: CubicBezier = CubicBezier::new(0.3, 1.25, 0.5, 1.0);
 /// Slider thumb press feedback: 150ms ease-out disc scale + shadow.
 pub const PRESS: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Reversible new-thread ↔ session handoff. The shared composer moves and
@@ -935,13 +945,21 @@ impl Tween {
     }
 
     pub fn value_at(&self, now: Instant) -> f32 {
+        self.sample(now, MotionSpec::progress)
+    }
+
+    pub fn value_unclamped_at(&self, now: Instant) -> f32 {
+        self.sample(now, MotionSpec::progress_unclamped)
+    }
+
+    fn sample(&self, now: Instant, progress: fn(&MotionSpec, f32) -> f32) -> f32 {
         let duration = self.duration();
         let elapsed = now.saturating_duration_since(self.started);
         if duration.is_zero() || elapsed >= duration {
             return self.to;
         }
         let raw = elapsed.as_secs_f32() / duration.as_secs_f32();
-        lerp(self.from, self.to, self.spec.progress(raw))
+        lerp(self.from, self.to, progress(&self.spec, raw))
     }
 
     pub fn retarget(&mut self, to: f32, spec: MotionSpec, reduced: bool, now: Instant) {
@@ -1457,6 +1475,25 @@ mod tests {
         assert_eq!(EASE_SNAP.eval_unclamped(1.0), 1.0);
         assert_eq!(EASE_SNAP.eval_unclamped(0.0), 0.0);
         assert!((0..=100).all(|i| EASE_SNAP.eval(i as f32 / 100.0) <= 1.0));
+    }
+
+    #[test]
+    fn bounce_tween_overshoots_only_through_the_unclamped_read() {
+        let t0 = Instant::now();
+        let spec = MotionSpec::new(100, EASE_BOUNCE);
+        let mut tween = Tween::at(0.0, t0);
+        tween.retarget(1.0, spec, false, t0);
+        let total = spec.total().mul_f32(speed_scale());
+        let at = |i: u32| t0 + total.mul_f32(i as f32 / 100.0);
+        let peak = (1..100)
+            .map(|i| tween.value_unclamped_at(at(i)))
+            .fold(0.0_f32, f32::max);
+        assert!(peak > 1.0, "no overshoot: peak {peak}");
+        assert!(peak < 1.05, "overshoot too large: peak {peak}");
+        assert!((1..100).all(|i| tween.value_at(at(i)) <= 1.0));
+        assert_eq!(tween.value_unclamped_at(at(100)), 1.0);
+        tween.retarget(0.0, spec, true, at(50));
+        assert_eq!(tween.value_unclamped_at(at(50)), 0.0);
     }
 
     #[test]
