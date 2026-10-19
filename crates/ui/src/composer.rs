@@ -15395,7 +15395,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_takes_the_prediction_into_the_draft_and_sending_retires_it(
+    fn tab_takes_the_prediction_and_shift_tab_toggles_mission_control(
         cx: &mut gpui::TestAppContext,
     ) {
         let (_dir, handle) = composer_focus_window(cx);
@@ -15509,7 +15509,10 @@ mod tests {
         assert_eq!(started[0].chat_id.as_deref(), Some("chat-a"));
         assert_eq!(
             started[0].title_notes(),
-            ("Shop frontend".to_string(), "Next.js and Tailwind".to_string())
+            (
+                "Shop frontend".to_string(),
+                "Next.js and Tailwind".to_string()
+            )
         );
         assert!(started[0].orchestrate.plan_doc && started[0].orchestrate.approve_plan);
     }
