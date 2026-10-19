@@ -406,7 +406,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes), `context` (the threadIds of chats the person gave the lead to read before it planned) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. `plan` also takes `resources`, what the mission needs to itself while it runs: `port:<n>` for a port its servers listen on, `slot:<name>` for a quiet CPU (slot:benchmark for timing runs), `path:<path inside the project>` for files it rewrites; it replaces the declared list, `[]` clears it, and the Supervisor checks them against other missions. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes), `context` (the threadIds of chats the person gave the lead to read before it planned) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. A replaced step's images go to the new step with the same title, or else to the overview, and `imagesMoved` in the reply says where. `plan` also takes `resources`, what the mission needs to itself while it runs: `port:<n>` for a port its servers listen on, `slot:<name>` for a quiet CPU (slot:benchmark for timing runs), `path:<path inside the project>` for files it rewrites; it replaces the declared list, `[]` clears it, and the Supervisor checks them against other missions. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2142,7 +2142,14 @@ impl ThreadTools {
                 let steps = self.statuses_of(steps).await?;
                 let mut row = task_json(&task, false);
                 add_plan(&mut row, &task, &steps, true);
-                Ok(json!({ "task": row }))
+                let mut reply = json!({ "task": row });
+                if planned["imagesMoved"]
+                    .as_array()
+                    .is_some_and(|moved| !moved.is_empty())
+                {
+                    reply["imagesMoved"] = planned["imagesMoved"].clone();
+                }
+                Ok(reply)
             }
             "step" => {
                 let step_id = args["stepId"]
@@ -2757,7 +2764,7 @@ impl ThreadTools {
                 },
                 item = transcript.recv(), if transcript_open && mode != "all" => match item {
                     Some(frame) => {
-                        let arrived = new_peer_entries(&frame, &mut seen);
+                        let arrived = new_peer_entries(&frame, &mut seen, &self.chat_id);
                         if !arrived.is_empty() {
                             return Ok(json!({
                                 "reason": "message",
@@ -2786,6 +2793,7 @@ impl ThreadTools {
 fn new_peer_entries(
     frame: &Value,
     seen: &mut Option<std::collections::HashSet<String>>,
+    own: &str,
 ) -> Vec<Value> {
     let entries: Vec<&Value> = match frame.get("reset") {
         Some(reset) => reset.as_array().into_iter().flatten().collect(),
@@ -2807,7 +2815,7 @@ fn new_peer_entries(
     };
     entries
         .into_iter()
-        .filter(|e| e["role"] == "user" && e["fromChatId"].is_string())
+        .filter(|e| e["role"] == "user" && e["fromChatId"].as_str().is_some_and(|from| from != own))
         .filter(|e| {
             e["id"]
                 .as_str()
@@ -4656,9 +4664,16 @@ mod tests {
             vec![json!({ "kind": "text", "id": "t", "text": "pong from codex" })],
         );
         steered["fromChatId"] = json!("b");
+        let mut own = entry(
+            "m8",
+            "user",
+            vec![json!({ "kind": "text", "id": "t", "text": "Supervisor wake 1 of 12" })],
+        );
+        own["fromChatId"] = json!("a");
         fake.doc_frames = vec![
             json!({ "append": [{ "entry": "m5", "part": "t", "text": "…", "len": 7 }], "count": 6 }),
-            json!({ "upsert": [{ "after": "m5", "entry": steered }], "count": 7 }),
+            json!({ "upsert": [{ "after": "m5", "entry": own }], "count": 7 }),
+            json!({ "upsert": [{ "after": "m8", "entry": steered }], "count": 8 }),
         ];
         let rig = rig(fake);
         let out = rig

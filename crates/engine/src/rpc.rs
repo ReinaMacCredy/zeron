@@ -2449,6 +2449,7 @@ impl EngineRpc {
                     resources,
                     from_chat_id.as_deref(),
                 )
+                .map(drop)
             }
             MutateParams::CreateTaskStep {
                 task_id,
@@ -4450,19 +4451,34 @@ impl RpcService for EngineRpc {
                     )?;
                     return RpcReply::value(&serde_json::json!({ "ok": true, "itemId": item_id }));
                 }
-                let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
-                let planned = match &p {
-                    MutateParams::PlanSteps { task_id, .. } => Some(task_id.clone()),
-                    _ => None,
-                };
-                self.mutate(p).await?;
-                if let Some(task_id) = planned {
+                if let MutateParams::PlanSteps {
+                    task_id,
+                    steps,
+                    overview,
+                    resources,
+                    from_chat_id,
+                } = p
+                {
+                    let steps = steps
+                        .into_iter()
+                        .map(|step| (step.title, step.notes))
+                        .collect();
+                    let images_moved = self.plan_steps(
+                        &task_id,
+                        steps,
+                        overview,
+                        resources,
+                        from_chat_id.as_deref(),
+                    )?;
                     return RpcReply::value(&serde_json::json!({
                         "ok": true,
                         "task": self.workspace.task(&task_id),
                         "steps": self.workspace.task_steps_of(&task_id),
+                        "imagesMoved": images_moved,
                     }));
                 }
+                let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
+                self.mutate(p).await?;
                 if sidebar_pins {
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),

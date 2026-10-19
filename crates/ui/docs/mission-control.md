@@ -84,6 +84,8 @@ Thumbnails show under the overview and in a step's open spec. Click one to see i
 
 The images go to the agent that does the work, the same way an image you attach in a chat does: the overview's images with the lead's first message (images added to the overview later go with the **Send to lead** message), and a step's images with the first message of the step's thread. An image added to a step whose thread has already started does not reach that thread; the edit card says so. The overview's images are the task's own, so images the task had before you started the mission show under the overview.
 
+When the lead rewrites the plan, a step that has not started keeps its images if the new plan has exactly one step with the same title. Otherwise its images move to the overview, up to 12; the lead is told which images moved, and which did not fit.
+
 ## While the steps run
 
 Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > General caps how many steps one lead runs at once.

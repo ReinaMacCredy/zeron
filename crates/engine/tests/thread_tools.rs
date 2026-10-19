@@ -2973,7 +2973,10 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     mutate(serde_json::json!({
         "op": "editTaskPlan", "taskId": "t1",
         "overviewImages": ["/tmp/uploads/aa-overview.png", "/tmp/uploads/dd-flow.png"],
-        "steps": [{ "stepId": steps[0].id, "title": "Grid", "notes": "", "images": shots }],
+        "steps": [
+            { "stepId": steps[0].id, "title": "Grid", "notes": "", "images": shots },
+            { "stepId": steps[1].id, "title": "Cart", "notes": "", "images": ["/tmp/uploads/ee-cart.png"] },
+        ],
     }))
     .await
     .unwrap();
@@ -2993,6 +2996,42 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     );
     assert_eq!(attached_to(&rig, edited), ["/tmp/uploads/dd-flow.png"]);
     assert_eq!(rig.core.workspace.task("t1").unwrap().images.len(), 2);
+
+    let Ok(zeron_rpc::RpcReply::Value(replanned)) = mutate(serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "steps": [{ "title": " Grid " }, { "title": "Checkout" }],
+    }))
+    .await
+    else {
+        panic!("the lead re-plans");
+    };
+    let old = steps;
+    let steps = rig.core.workspace.task_steps_of("t1");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0].images, shots, "a step keeps its images by title");
+    assert!(steps[1].images.is_empty());
+    assert_eq!(
+        rig.core.workspace.task("t1").unwrap().images,
+        [
+            "/tmp/uploads/aa-overview.png",
+            "/tmp/uploads/dd-flow.png",
+            "/tmp/uploads/ee-cart.png"
+        ],
+        "a step no new step names hands its images to the overview"
+    );
+    assert_eq!(
+        replanned["imagesMoved"],
+        serde_json::json!([
+            format!(
+                "Step \"Grid\" (taskStepId {}) had 2 images, now on the new step with its title (taskStepId {}).",
+                old[0].id, steps[0].id
+            ),
+            format!(
+                "Step \"Cart\" (taskStepId {}) had 1 image, now on the overview: no single new step has its title.",
+                old[1].id
+            ),
+        ])
+    );
 
     mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
         .await
@@ -3290,7 +3329,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
             "- Step \"Tag the release\" (taskStepId {}) is removed.",
             added.id
         ),
-        "Last reply from the lead: \"noted\"".to_string(),
+        "Last reply from the lead:\n<agent-response>\nnoted\n</agent-response>".to_string(),
     ] {
         assert!(first.contains(&line), "{line} in {first}");
     }

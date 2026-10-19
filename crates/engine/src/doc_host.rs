@@ -3774,6 +3774,9 @@ impl DocHost {
         text: &str,
         attachments: Vec<String>,
     ) -> Result<String, EngineError> {
+        if from_chat_id == Some(chat_id) {
+            return Err(EngineError::Other("a thread cannot message itself".into()));
+        }
         let (handle, id) =
             self.push_thread_row(chat_id, from_chat_id, text, Vec::new(), attachments)?;
         self.send_thread_row(&handle, &id).await;
@@ -3789,9 +3792,6 @@ impl DocHost {
         task_steps: Vec<String>,
         attachments: Vec<String>,
     ) -> Result<(Arc<ChatDocHandle>, String), EngineError> {
-        if from_chat_id == Some(chat_id) {
-            return Err(EngineError::Other("a thread cannot message itself".into()));
-        }
         let workspace = self
             .workspace()
             .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;

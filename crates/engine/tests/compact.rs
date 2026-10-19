@@ -942,6 +942,93 @@ async fn the_classifier_compacts_before_a_new_task_only() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supervisor_wake_is_never_classified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;
+    classifier_mode(&core);
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mutate = async |params: serde_json::Value| {
+        client
+            .call(zeron_rpc::methods::MUTATE, params)
+            .await
+            .expect("mutate")
+    };
+    let supervisor = client
+        .call(
+            zeron_rpc::methods::ENSURE_SUPERVISOR,
+            serde_json::json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+        )
+        .await
+        .expect("ensureSupervisor")["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cwd = tmp.path().to_string_lossy().to_string();
+    let supervisor_entries = || {
+        core.doc_host
+            .open(&supervisor)
+            .ok()
+            .and_then(|h| h.doc().read_entries().ok())
+            .unwrap_or_default()
+    };
+    let (requests, core, supervisor) = (&requests, &core, &supervisor);
+    let settled = |n: usize| {
+        move || {
+            requests.lock().unwrap().len() == n
+                && !core.sessions.turn_in_flight(&supervisor)
+                && !core.sessions.turn_in_flight("lead-1")
+        }
+    };
+    core.doc_host
+        .queue_command(&supervisor, run_payload("sup-1", &cwd))
+        .expect("queue run");
+    wait_for(settled(2), "the person's first Supervisor turn").await;
+
+    *harness.verdict.lock().unwrap() = Some("NEW".into());
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Shop backend" }))
+        .await;
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "lead-1", "orchestrate": true,
+    }))
+    .await;
+    wait_for(settled(3), "the lead's brief").await;
+    mutate(serde_json::json!({
+        "op": "escalateTask", "taskId": "t1", "fromChatId": "lead-1",
+        "title": "Pay for a Stripe test account?", "why": "spend",
+        "detail": "The checkout tests need a live key.", "options": ["Pay $20", "Use the mock"],
+    }))
+    .await;
+    wait_for(settled(4), "the Supervisor's wake").await;
+    let wake = requests.lock().unwrap()[3].prompt.clone();
+    assert!(wake.starts_with("Supervisor wake 1 of 12"), "{wake}");
+    assert!(
+        harness.one_shots.lock().unwrap().is_empty(),
+        "no classifier call"
+    );
+    let entries = supervisor_entries();
+    assert!(
+        entries.iter().all(|e| record_of(e).is_none()),
+        "no classifier record on the Supervisor's chat"
+    );
+    let row = entries
+        .iter()
+        .find(|e| e.role == MessageRole::User && entry_text(e) == wake)
+        .expect("the wake's entry");
+    assert_eq!(row.from_chat_id.as_deref(), Some(supervisor.as_str()));
+
+    core.doc_host
+        .queue_command(&supervisor, run_payload("sup-2", &cwd))
+        .expect("queue run");
+    wait_for(settled(6), "the person's new topic compacts first").await;
+    assert!(
+        requests.lock().unwrap()[4]
+            .prompt
+            .starts_with("/compact The next message starts a new task."),
+        "the person's own message is still classified"
+    );
+}
+
 fn verdict_of(entry: &SessionMessageEntry) -> Option<ClassifierVerdict> {
     record_of(entry).map(|record| record.verdict)
 }

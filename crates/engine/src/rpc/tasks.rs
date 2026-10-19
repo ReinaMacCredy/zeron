@@ -120,6 +120,48 @@ fn image_change(before: &[String], after: &[String]) -> Option<String> {
     }
 }
 
+fn count_images(n: usize) -> String {
+    match n {
+        1 => "1 image".into(),
+        n => format!("{n} images"),
+    }
+}
+
+fn carry_images(before: &[TaskStep], steps: &mut [TaskStep]) -> (Vec<String>, Vec<String>) {
+    let replaced: Vec<&TaskStep> = before
+        .iter()
+        .filter(|step| step.chat_id.is_none() && step.outcome.is_none())
+        .collect();
+    let mut moved = Vec::new();
+    let mut orphans = Vec::new();
+    for old in replaced.iter().filter(|step| !step.images.is_empty()) {
+        let title = old.title.trim();
+        let namesakes = replaced
+            .iter()
+            .filter(|step| step.title.trim() == title)
+            .count();
+        let mut matches = steps.iter_mut().filter(|step| step.title.trim() == title);
+        let what = count_images(old.images.len());
+        match (namesakes, matches.next(), matches.next()) {
+            (1, Some(new), None) => {
+                new.images = old.images.clone();
+                moved.push(format!(
+                    "Step \"{}\" (taskStepId {}) had {what}, now on the new step with its title (taskStepId {}).",
+                    old.title, old.id, new.id
+                ));
+            }
+            _ => {
+                orphans.extend(old.images.iter().cloned());
+                moved.push(format!(
+                    "Step \"{}\" (taskStepId {}) had {what}, now on the overview: no single new step has its title.",
+                    old.title, old.id
+                ));
+            }
+        }
+    }
+    (moved, orphans)
+}
+
 fn reorder_keys(
     steps: &[(&TaskStep, bool)],
     order: &[String],
@@ -600,7 +642,7 @@ impl EngineRpc {
         overview: Option<String>,
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Vec<String>, RpcError> {
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id, "writes its plan")?;
         let resources = resources
@@ -610,7 +652,7 @@ impl EngineRpc {
             .filter(|keys| *keys != task.resources);
         let before = self.workspace.task_steps_of(task_id);
         let now = chrono::Utc::now();
-        let steps: Vec<TaskStep> = steps
+        let mut steps: Vec<TaskStep> = steps
             .into_iter()
             .map(|(title, notes)| TaskStep {
                 id: crate::new_id(),
@@ -627,6 +669,26 @@ impl EngineRpc {
                 images: Vec::new(),
             })
             .collect();
+        let (mut moved, orphans) = carry_images(&before, &mut steps);
+        let mut images = task.images.clone();
+        let mut left_out = Vec::new();
+        for image in orphans {
+            if images.contains(&image) {
+                continue;
+            }
+            if images.len() < zeron_doc::TASK_IMAGES_MAX {
+                images.push(image);
+            } else {
+                left_out.push(image);
+            }
+        }
+        if !left_out.is_empty() {
+            moved.push(format!(
+                "The overview holds {} images, so these were left out; tell the person: {}",
+                zeron_doc::TASK_IMAGES_MAX,
+                left_out.join(", ")
+            ));
+        }
         self.workspace
             .plan_task_steps(task_id, &steps)
             .map_err(failed)?;
@@ -634,6 +696,7 @@ impl EngineRpc {
             mode: (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated),
             plan: overview,
             resources,
+            images: (images != task.images).then_some(images),
             ..Default::default()
         };
         if patch != TaskPatch::default() {
@@ -641,7 +704,7 @@ impl EngineRpc {
         }
         self.doc_host
             .supervisor_replanned(&task, &before, &steps, from_chat_id);
-        Ok(())
+        Ok(moved)
     }
 
     pub(super) fn create_task_step(

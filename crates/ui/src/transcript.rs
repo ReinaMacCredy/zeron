@@ -9756,9 +9756,7 @@ impl Transcript {
                 let mentions = mentions.clone();
                 let markdown = markdown.clone();
                 let pending = *pending;
-                if from_chat_id.is_none()
-                    && let Some(events) = self.supervisor_wake_events(&row.id, cx)
-                {
+                if let Some(events) = self.supervisor_wake_events(&row.id, cx) {
                     break 'user self.render_supervisor_wake_row(events, row.timestamp, &theme);
                 }
                 let wake = from_chat_id.as_ref().and_then(|from| {
