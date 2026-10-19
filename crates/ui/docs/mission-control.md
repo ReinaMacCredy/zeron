@@ -4,27 +4,38 @@ Mission Control introduces itself once, in a three-page sheet that appears after
 
 ## Start a mission from a task
 
-Open a task's card on the Tasks page. Under **Hand it to an agent**, switch **One agent** to **Mission Control**. The card then shows:
+Open a task's card on the Tasks page and pick the **Mission Control** tab under **Hand it to**. The card then shows:
 
 - **Plan** picks what the lead writes:
   - **plan.md** (the default): a plan you can read and edit, with an overview (the goal, the approach, and how the result will be checked) and a spec for each step (what it builds, where, and how to tell it is done). The plan is stored in Zeron with the task, so tasks with **No project** get one too.
   - **Steps only**: just the steps, as a list of what to do.
-- **Lead**: pick the lead's agent and model, and where it runs with **Run in** or **Folder…**, the same way as for one agent.
-- **Step agents**: **Lead picks per step** (the default) lets the lead choose an agent and model for each step. **Same as the lead** runs every step on the lead's agent and model.
+- **Lead**: pick the lead's agent and model, and under it the project it runs **in**, or **Folder…**, the same way as on the **New chat** tab.
+- **Reads**: chats the lead reads before it plans. See **Chats the lead reads** below.
+- **Steps**: **Lead picks** (the default) lets the lead choose an agent and model for each step. **Same as lead** runs every step on the lead's agent and model.
 - **Let me review the plan before it runs** (with **Steps only**: **Show me the plan before it runs**) is on by default: the lead writes the plan and waits for you. Turn it off to let the lead start the steps as soon as the plan is written.
 
-In this mode the card has no **or assign to a thread** field: a mission always starts a new lead. To make a chat you already have the lead, start the mission from that chat's composer.
+A mission from the card always starts a new lead. To make a chat you already have the lead, start the mission from that chat's composer.
 
 Click **Start mission** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's Mission Control page.
+
+## Chats the lead reads
+
+A mission can read up to 5 chats you already have before it plans: a review that found the bugs, the chat where you worked out the design. In the **Reads** row, type **@** and part of a chat's name, and pick it from the list that opens, or press Enter for the first match. Each chat becomes a chip with its status and a ×; Backspace in the empty field removes the last one. A chat from another project carries that project's name. The list offers chats on this Mac only, because the lead can only read those, and leaves out drafts.
+
+These chats are context, not assignments. Nothing is sent to them, and the task does not follow their status. The lead's first message lists each one by title and id, and the lead reads them with Zeron's `read_thread` tool before it writes the plan. The message tells it that they are context only: it does not write to them or answer their questions. A chat that is still working is fine; the lead is told to read it again before it sends the plan. When a step needs one of them, the lead names it in that step's instructions, so the step's thread can read it too.
+
+If the lead's tools leave out `read_thread`, in its profile or in [Settings > Tools](zeron://settings/tools), the field turns off and says why. With chats already picked, **Start mission** waits until you remove them, turn `read_thread` back on, or pick another lead.
+
+The list is fixed once the mission starts, and the Mission Control page shows it as read-only chips under the lead. To point the lead at another chat later, mention it with **@** in the lead's composer.
 
 ## Start a mission from a composer
 
 You do not need a task card to start a mission. On the New chat canvas, the **Mission Control** tab starts one from what you type: see [Start a new chat](zeron://docs/new-chat).
 
-In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. A mission started from a composer has no **Step agents** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
+In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; the lead's own chat is left out. A mission started from a composer has no **Step agents** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
 
 - **This chat leads**, the default: the chat becomes the mission's lead. It keeps its name and its agent, and the task with the lead's instructions arrives in it as a message, so the agent plans from the conversation you already had. If the agent is working, the message steers its turn instead of stopping it. The step threads show in the sidebar under this chat. A chat leads one unfinished mission at a time: while it still leads one, Zeron refuses a second and gives your text back.
-- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and the task's notes ask the lead to read this chat before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
+- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and this chat is the first of the chats the lead reads before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
 
 ## The Mission Control page
 
@@ -33,6 +44,7 @@ A Mission Control task opens its own page instead of the card, from the Tasks li
 The header reads **MISSION CONTROL** above the task's title, and shows the task's status (**Planning**, **Plan ready**, or its Kanban column), **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
 
 - The lead, with its model and what it is doing: **Not started**, **Planning**, **Watching** its running steps, **Working**, **Waiting on you**, or **Done**.
+- **Reads**, when the mission has chats to read: one chip per chat with its status, read-only.
 - With **plan.md**, the **Overview** the lead wrote.
 - The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Needs you**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**. Click **spec** under a step to read what the lead wrote for it.
 
