@@ -2505,6 +2505,7 @@ fn tasks_round_trip_create_patch_delete_across_devices_and_restart() {
         due_on: Some(None),
         chat_id: Some(Some("chat-9".into())),
         completed: Some(true),
+        context: Some(vec!["chat-2".into(), "chat-3".into()]),
         ..Default::default()
     };
     assert!(b.update_task("t1", &patch, done_at).unwrap());
@@ -2524,6 +2525,7 @@ fn tasks_round_trip_create_patch_delete_across_devices_and_restart() {
     assert_eq!(merged.notes, "Cover the edge cases");
     assert_eq!(merged.due_on, None);
     assert_eq!(merged.chat_id.as_deref(), Some("chat-9"));
+    assert_eq!(merged.context, ["chat-2", "chat-3"]);
     assert_eq!(merged.completed_at, Some(done_at));
     let again = zeron_proto::TaskPatch {
         completed: Some(true),
@@ -2600,6 +2602,28 @@ fn tasks_refuse_invalid_fields() {
         before,
         "a refused patch writes nothing"
     );
+    let mut crowded = task("t3", "Crowded");
+    crowded.context = (1..=6).map(|n| format!("chat-{n}")).collect();
+    assert!(
+        doc.create_task(&crowded).is_err(),
+        "a mission reads up to 5 chats"
+    );
+    crowded.context.truncate(5);
+    assert!(doc.create_task(&crowded).unwrap());
+    for context in [
+        (1..=6).map(|n| format!("chat-{n}")).collect::<Vec<_>>(),
+        vec!["chat-1".into(), "chat-1".into()],
+        vec!["has space".into()],
+    ] {
+        let patch = zeron_proto::TaskPatch {
+            context: Some(context.clone()),
+            ..Default::default()
+        };
+        assert!(
+            doc.update_task("t3", &patch, ts(3_000)).is_err(),
+            "{context:?}"
+        );
+    }
     let mut wide = task("t2", "Wide");
     wide.notes = "語".repeat(9_000);
     assert!(

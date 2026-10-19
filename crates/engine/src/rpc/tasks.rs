@@ -16,11 +16,49 @@ fn task_prompt(task: &Task) -> String {
     }
 }
 
-fn first_turn(task: &Task, lead: Option<Lead>) -> String {
-    match lead {
-        Some(lead) => format!("{}\n\n{}", task_prompt(task), lead_brief(&task.id, lead)),
-        None => task_prompt(task),
+fn first_turn(task: &Task, lead: Option<Lead>, reads: Option<&str>) -> String {
+    let Some(lead) = lead else {
+        return task_prompt(task);
+    };
+    let reads_part = reads
+        .map(|reads| format!("{reads}\n\n"))
+        .unwrap_or_default();
+    format!(
+        "{}\n\n{reads_part}{}",
+        task_prompt(task),
+        lead_brief(&task.id, lead, reads.is_some())
+    )
+}
+
+struct ContextChat {
+    id: String,
+    title: String,
+    project: Option<String>,
+    working: bool,
+}
+
+fn reads_block(chats: &[ContextChat]) -> Option<String> {
+    if chats.is_empty() {
+        return None;
     }
+    let lines: Vec<String> = chats
+        .iter()
+        .map(|chat| {
+            let mut line = format!("- \"{}\" (threadId {}", chat.title, chat.id);
+            if let Some(project) = &chat.project {
+                line.push_str(&format!(", project {project}"));
+            }
+            if chat.working {
+                line.push_str(", still working: read it again before you send the plan");
+            }
+            line.push(')');
+            line
+        })
+        .collect();
+    Some(format!(
+        "Before you plan, read these chats with read_thread. They are context only: do not message them or answer their questions.\n{}",
+        lines.join("\n")
+    ))
 }
 
 fn lead_patch(
@@ -196,7 +234,7 @@ pub(super) struct Rebrief<'a> {
     pub reason: &'a str,
 }
 
-fn lead_brief(task_id: &str, lead: Lead) -> String {
+fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     let plan = if lead.plan_doc {
         format!(
             "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", overview, steps [{{title, notes}}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
@@ -229,6 +267,11 @@ fn lead_brief(task_id: &str, lead: Lead) -> String {
     lines.push(
         "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.",
     );
+    if reads {
+        lines.push(
+            "When a step needs one of the chats you read, name it with its threadId in that step's prompt.",
+        );
+    }
     let steps: Vec<String> = lines
         .iter()
         .enumerate()
@@ -264,7 +307,9 @@ impl EngineRpc {
         due_on: Option<String>,
         order_key: Option<String>,
         images: Vec<String>,
+        context: Vec<String>,
     ) -> Result<(), RpcError> {
+        self.check_context_chats(&context)?;
         let now = chrono::Utc::now();
         self.workspace
             .create_task(&Task {
@@ -286,16 +331,72 @@ impl EngineRpc {
                 plan_doc: false,
                 resources: Vec::new(),
                 images,
+                context,
             })
             .map_err(failed)
             .map(drop)
     }
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
+        if let Some(context) = &patch.context {
+            let task = self.task_or_refuse(task_id)?;
+            if task.mode == TaskMode::Orchestrated && task.chat_id.is_some() {
+                return Err(refused(
+                    "The chats a mission reads are fixed once it starts; write to its lead instead",
+                ));
+            }
+            self.check_context_chats(context)?;
+        }
         match self.workspace.update_task(task_id, patch).map_err(failed)? {
             true => Ok(()),
             false => Err(refused("Task no longer exists")),
         }
+    }
+
+    fn check_context_chats(&self, context: &[String]) -> Result<(), RpcError> {
+        for id in context {
+            let chat = self.workspace.chat(id).map_err(failed)?;
+            if chat.is_none_or(|chat| chat.device_id != self.doc_host.device_id()) {
+                return Err(refused("A mission reads chats on this device only"));
+            }
+        }
+        Ok(())
+    }
+
+    fn context_reads(
+        &self,
+        task: &Task,
+        home: Option<&str>,
+        config: Option<&ChatConfig>,
+    ) -> Option<String> {
+        if task.context.is_empty() || !self.sessions.reads_threads(config) {
+            return None;
+        }
+        let chats: Vec<ContextChat> = task
+            .context
+            .iter()
+            .filter_map(|id| self.workspace.chat(id).ok().flatten())
+            .map(|chat| ContextChat {
+                title: chat
+                    .title
+                    .as_deref()
+                    .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| "Untitled chat".into()),
+                project: chat
+                    .space_id
+                    .as_deref()
+                    .filter(|space| Some(*space) != home)
+                    .and_then(|space| self.workspace.space(space).ok().flatten())
+                    .map(|space| space.display_name().to_string()),
+                working: self
+                    .sessions
+                    .session_status(&chat.id)
+                    .is_some_and(|session| session.status == zeron_proto::SessionStatus::Working),
+                id: chat.id,
+            })
+            .collect();
+        reads_block(&chats)
     }
 
     pub(super) async fn start_task(
@@ -357,12 +458,14 @@ impl EngineRpc {
                 chat_id,
                 space_id.as_deref(),
                 Some(&device),
-                config,
+                config.clone(),
                 None,
                 None,
             )
             .map_err(failed)?;
-        let started = self.link_and_send(&task, chat_id, space_id, lead);
+        let reads =
+            lead.and_then(|_| self.context_reads(&task, space_id.as_deref(), config.as_ref()));
+        let started = self.link_and_send(&task, chat_id, space_id, lead, reads.as_deref());
         if started.is_err() {
             if self
                 .workspace
@@ -425,6 +528,9 @@ impl EngineRpc {
         if send && from_chat_id == Some(chat_id) {
             return Err(refused("A thread cannot send a task to itself"));
         }
+        let reads = lead.and_then(|_| {
+            self.context_reads(&task, chat.space_id.as_deref(), chat.config.as_ref())
+        });
         self.update_task(
             task_id,
             &TaskPatch {
@@ -437,7 +543,7 @@ impl EngineRpc {
                 &task,
                 chat_id,
                 from_chat_id,
-                &first_turn(&task, lead),
+                &first_turn(&task, lead, reads.as_deref()),
                 task.images.clone(),
             )
             .await?;
@@ -965,6 +1071,7 @@ impl EngineRpc {
         chat_id: &str,
         space_id: Option<String>,
         lead: Option<Lead>,
+        reads: Option<&str>,
     ) -> Result<String, RpcError> {
         self.workspace
             .rename_chat(chat_id, &task.title)
@@ -977,7 +1084,8 @@ impl EngineRpc {
             },
         )?;
         let message_id = crate::new_id();
-        let prompt = crate::doc_host::queued_message_prompt(&first_turn(task, lead), &task.images);
+        let prompt =
+            crate::doc_host::queued_message_prompt(&first_turn(task, lead, reads), &task.images);
         self.doc_host
             .request_from_chat_row(chat_id, &prompt)
             .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
@@ -1052,6 +1160,21 @@ mod tests {
             "the new keys sort into the new order"
         );
         Ok(moves.into_iter().map(|(id, _)| id).collect())
+    }
+
+    #[test]
+    fn the_reads_block_marks_other_projects_and_working_chats() {
+        let chat = |id: &str, project: Option<&str>, working: bool| ContextChat {
+            id: id.into(),
+            title: format!("Chat {id}"),
+            project: project.map(str::to_owned),
+            working,
+        };
+        assert_eq!(reads_block(&[]), None);
+        assert_eq!(
+            reads_block(&[chat("a", None, true), chat("b", Some("astra"), false)]).unwrap(),
+            "Before you plan, read these chats with read_thread. They are context only: do not message them or answer their questions.\n- \"Chat a\" (threadId a, still working: read it again before you send the plan)\n- \"Chat b\" (threadId b, project astra)"
+        );
     }
 
     #[test]

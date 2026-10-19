@@ -92,6 +92,30 @@ impl TaskOrigin {
     }
 }
 
+fn mission_context(
+    state: &crate::state::AppState,
+    source: Option<&str>,
+    text: &str,
+    lead: Option<&str>,
+) -> Vec<String> {
+    let local = state.local_device_id.as_deref();
+    let mentioned = zeron_proto::chat_mentions::chat_mention_links(text)
+        .into_iter()
+        .map(|link| link.chat_id);
+    let mut context: Vec<String> = Vec::new();
+    for id in source.map(str::to_owned).into_iter().chain(mentioned) {
+        let readable = state
+            .chats
+            .iter()
+            .any(|chat| chat.id == id && Some(chat.device_id.as_str()) == local);
+        if readable && Some(id.as_str()) != lead && !state.is_draft(&id) && !context.contains(&id) {
+            context.push(id);
+        }
+    }
+    context.truncate(zeron_doc::TASK_CONTEXT_MAX);
+    context
+}
+
 impl Shell {
     fn task_engine(&mut self, cx: &mut Context<Self>) -> Option<crate::state::EngineHandle> {
         let engine = self.state.read(cx).engine().cloned();
@@ -149,7 +173,9 @@ impl Shell {
             .chat_id
             .clone()
             .filter(|_| settings::current(cx).chat_mission == settings::ChatMission::Lead);
-        if let Some(chat_id) = start.chat_id.as_deref().filter(|_| lead.is_none()) {
+        let source = start.chat_id.as_deref().filter(|_| lead.is_none());
+        let context = mission_context(self.state.read(cx), source, &start.text, lead.as_deref());
+        if let Some(chat_id) = source.filter(|id| context.first().map(String::as_str) != Some(id)) {
             let read = format!(
                 "Before you plan, read the chat this mission came from with read_thread, threadId \"{chat_id}\"."
             );
@@ -158,8 +184,11 @@ impl Shell {
                 notes => format!("{notes}\n\n{read}"),
             };
         }
-        let create =
+        let mut create =
             Self::create_task_params(&task_id, &title, &notes, start.space_id.clone(), None);
+        if !context.is_empty() {
+            create["context"] = context.into();
+        }
         let orchestrate = start.orchestrate;
         let (space_id, config) = (start.space_id.clone(), start.config.clone());
         let origin = TaskOrigin::Mission { start, create };
@@ -1322,5 +1351,50 @@ impl Shell {
             .child(inner);
         self.titlebar_drag_region("tasks-titlebar", bar, cx)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mission_lifts_readable_chat_chips_after_its_source_chat() {
+        let chat = |id: &str, device: &str| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": id, "deviceId": device, "archived": false,
+                "createdAt": "2026-10-18T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let mut state = crate::state::AppState::new();
+        state.local_device_id = Some("mac".into());
+        state.chats = ["src", "a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|id| chat(id, "mac"))
+            .chain([chat("far", "pc")])
+            .collect();
+        let link = |id: &str| zeron_proto::chat_mentions::chat_mention_link(id, id).unwrap();
+        let text = format!(
+            "Fix it\nUse {} {} {} and {}",
+            link("src"),
+            link("far"),
+            link("a"),
+            link("a")
+        );
+        assert_eq!(
+            mission_context(&state, None, &text, Some("src")),
+            ["a"],
+            "the lead and other devices' chats are left out"
+        );
+        assert_eq!(
+            mission_context(&state, Some("src"), &text, None),
+            ["src", "a"]
+        );
+        let many: String = ["a", "b", "c", "d", "e", "f"].map(link).join(" ");
+        assert_eq!(
+            mission_context(&state, Some("src"), &many, None),
+            ["src", "a", "b", "c", "d"]
+        );
     }
 }

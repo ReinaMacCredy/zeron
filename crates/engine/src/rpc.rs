@@ -103,6 +103,12 @@ struct ChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ChatsParams {
+    chat_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
@@ -1026,6 +1032,8 @@ enum MutateParams {
         order_key: Option<String>,
         #[serde(default)]
         images: Vec<String>,
+        #[serde(default)]
+        context: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     UpdateTask {
@@ -2354,7 +2362,10 @@ impl EngineRpc {
                 due_on,
                 order_key,
                 images,
-            } => self.create_task(task_id, title, notes, space_id, due_on, order_key, images),
+                context,
+            } => self.create_task(
+                task_id, title, notes, space_id, due_on, order_key, images, context,
+            ),
             MutateParams::UpdateTask {
                 task_id,
                 patch,
@@ -3680,6 +3691,22 @@ impl RpcService for EngineRpc {
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))??;
                 RpcReply::value(&summary)
+            }
+            methods::GET_SESSION_STATS => {
+                let p: ChatsParams = parse_params(params)?;
+                let host = self.doc_host.clone();
+                let stats = tokio::task::spawn_blocking(move || {
+                    p.chat_ids
+                        .into_iter()
+                        .filter_map(|id| {
+                            let stats = host.open_local(&id).ok()?.doc().session_stats()?;
+                            Some((id, stats))
+                        })
+                        .collect::<std::collections::HashMap<_, _>>()
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&stats)
             }
             methods::TAKE_THREAD_MESSAGES => {
                 let p: ChatParams = parse_params(params)?;

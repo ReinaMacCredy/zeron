@@ -138,6 +138,7 @@ mod tests {
             plan_doc: false,
             resources: Vec::new(),
             images: Vec::new(),
+            context: Vec::new(),
         }
     }
 

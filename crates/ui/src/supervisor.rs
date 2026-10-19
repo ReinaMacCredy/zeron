@@ -32,7 +32,7 @@ use crate::pickers::Pickers;
 use crate::popover::{self, Loadable, Popup};
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::tasks::{Rollup, TaskCenter, chat_brand, linked_chat, rollup, step_chat};
+use crate::tasks::{Rollup, TaskCenter, linked_chat, rollup, step_chat};
 use crate::theme::Theme;
 use crate::transcript::Transcript;
 use crate::typography::ui_rems;
@@ -831,6 +831,7 @@ pub struct SupervisorPage {
     ticks: HashMap<Kind, Tick>,
     chips: HashMap<String, ChipFade>,
     missions: HashMap<String, MissionMotion>,
+    trees: HashMap<String, (Entity<crate::tasks::StripTree>, Subscription)>,
     earlier_open: bool,
     earlier: Fold,
     earlier_chevron: Tween,
@@ -885,6 +886,7 @@ impl SupervisorPage {
             ticks: HashMap::new(),
             chips: HashMap::new(),
             missions: HashMap::new(),
+            trees: HashMap::new(),
             earlier_open: false,
             earlier: Fold::at(false, now),
             earlier_chevron: Tween::at(0.0, now),
@@ -1468,15 +1470,6 @@ impl SupervisorPage {
             self.expanded.insert(task_id.to_owned());
         }
         cx.notify();
-    }
-
-    fn profile_name(&self, chat: &Chat) -> Option<String> {
-        let id = chat.config.as_ref()?.profile_id.as_deref()?;
-        self.profiles
-            .ready()?
-            .iter()
-            .find(|profile| profile.id == id)
-            .map(|profile| profile.name.clone())
     }
 
     fn sync_motion(&mut self, feed: &Feed, missions: &[Mission], now: Instant, reduced: bool) {
@@ -2830,105 +2823,56 @@ impl SupervisorPage {
         )
     }
 
-    fn render_owner(
-        &self,
-        owner: Owner,
-        role: String,
-        scope: String,
-        chat: Option<&Chat>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (mark, tint) = chat.map(chat_brand).unwrap_or((icons::BOT, None));
-        let model = chat.and_then(|chat| model_label(chat, cx));
-        let profile = chat.and_then(|chat| self.profile_name(chat));
-        let key = format!(
-            "{}-{}",
-            owner.task_id,
-            owner.step_id.as_deref().unwrap_or("lead")
-        );
-        let group = SharedString::from(format!("supervisor-owner-{key}"));
-        let brief_key = format!("supervisor-brief-{key}");
-        let brief_label = format!("Brief for {role}");
-        div()
-            .debug_selector({
-                let group = group.clone();
-                move || group.to_string()
+    fn sync_trees(&mut self, missions: &[Mission], now: Instant, cx: &mut Context<Self>) {
+        let open: HashSet<String> = missions
+            .iter()
+            .map(|mission| mission.row.task_id.clone())
+            .filter(|id| {
+                self.missions
+                    .get(id)
+                    .is_some_and(|motion| !motion.fold.gone(now))
             })
-            .group(group.clone())
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .pl(px(37.0))
-            .pr(px(12.0))
-            .py(px(5.0))
-            .text_size(ui_rems(12.0))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(62.0))
-                    .truncate()
-                    .text_color(theme.text_muted)
-                    .child(role),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(if chat.is_some() {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .child(scope),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .when(chat.is_some(), |el| {
-                        el.child(
-                            icon(mark)
-                                .size(px(12.0))
-                                .text_color(tint.unwrap_or(theme.text_muted)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(match (chat, model) {
-                                (_, Some(model)) => model,
-                                (Some(_), None) => "Default model".into(),
-                                (None, None) => "not started".into(),
-                            }),
-                    ),
-            )
-            .children(profile.map(|name| tone_chip(theme, name, None)))
-            .child(
-                div()
-                    .id(SharedString::from(brief_key.clone()))
-                    .debug_selector(move || brief_key.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(brief_label)
-                    .flex_none()
-                    .w(px(46.0))
-                    .text_right()
-                    .cursor_pointer()
-                    .text_size(ui_rems(11.0))
-                    .text_color(theme.accent)
-                    .opacity(0.0)
-                    .group_hover(group, |s| s.opacity(1.0))
-                    .child("Brief ›")
-                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        page.open_drawer(owner.clone(), cx);
-                    })),
-            )
-            .into_any_element()
+            .collect();
+        self.trees.retain(|id, _| open.contains(id));
+        for task_id in open {
+            if self.trees.contains_key(&task_id) {
+                continue;
+            }
+            let state = self.state.clone();
+            let id = task_id.clone();
+            let tree = cx.new(|cx| {
+                crate::tasks::StripTree::new(
+                    state,
+                    id,
+                    true,
+                    crate::tasks::TreeHost::Supervisor,
+                    cx,
+                )
+            });
+            let id = task_id.clone();
+            let events = cx.subscribe(
+                &tree,
+                move |page, _, event: &crate::tasks::StripTreeEvent, cx| match event {
+                    crate::tasks::StripTreeEvent::Open(_) => {
+                        cx.emit(SupervisorEvent::OpenTaskCenter(id.clone()))
+                    }
+                    crate::tasks::StripTreeEvent::Brief(selection) => {
+                        let step_id = match selection {
+                            crate::tasks::Selection::Lead => None,
+                            crate::tasks::Selection::Step(step) => Some(step.clone()),
+                        };
+                        page.open_drawer(
+                            Owner {
+                                task_id: id.clone(),
+                                step_id,
+                            },
+                            cx,
+                        );
+                    }
+                },
+            );
+            self.trees.insert(task_id, (tree, events));
+        }
     }
 
     fn render_owners(
@@ -2938,54 +2882,7 @@ impl SupervisorPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let task_id = mission.row.task_id.as_str();
-        let (lead, steps) = {
-            let state = self.state.read(cx);
-            let Some(task) = state.tasks.iter().find(|task| task.id == task_id) else {
-                return div().into_any_element();
-            };
-            let plan = rollup(state, task, Utc::now());
-            let lead = linked_chat(&state.chats, task).cloned();
-            let steps: Vec<(String, String, String, Option<Chat>)> = plan
-                .steps
-                .iter()
-                .enumerate()
-                .map(|(ix, row)| {
-                    (
-                        row.step.id.clone(),
-                        format!("Step {}", ix + 1),
-                        row.step.title.clone(),
-                        step_chat(&state.chats, &row.step).cloned(),
-                    )
-                })
-                .collect();
-            (lead, steps)
-        };
-        let lead_scope = lead
-            .as_ref()
-            .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
-            .unwrap_or_else(|| "Not started".into());
-        let owner = |step_id: Option<String>| Owner {
-            task_id: task_id.to_owned(),
-            step_id,
-        };
-        let mut rows = vec![self.render_owner(
-            owner(None),
-            "Lead".into(),
-            lead_scope,
-            lead.as_ref(),
-            theme,
-            cx,
-        )];
-        for (step_id, label, title, chat) in &steps {
-            rows.push(self.render_owner(
-                owner(Some(step_id.clone())),
-                label.clone(),
-                title.clone(),
-                chat.as_ref(),
-                theme,
-                cx,
-            ));
-        }
+        let tree = self.trees.get(task_id).map(|(tree, _)| tree.clone());
         let open_id = task_id.to_owned();
         let open_key = format!("supervisor-open-center-{task_id}");
         let footer = |el: gpui::Div| {
@@ -3039,10 +2936,10 @@ impl SupervisorPage {
         div()
             .border_t_1()
             .border_color(widgets::row_divider(theme))
-            .pt(px(3.0))
+            .pt(px(4.0))
             .flex()
             .flex_col()
-            .children(rows)
+            .children(tree)
             .child(
                 div().pl(px(37.0)).pt(px(3.0)).pb(px(6.0)).child(
                     div()
@@ -4067,6 +3964,7 @@ impl Render for SupervisorPage {
             (feed, calm)
         };
         self.sync_motion(&feed, &missions, now, reduced);
+        self.sync_trees(&missions, now, cx);
         let header = enter_block(
             self.enter_progress(0, now),
             self.render_header(&feed, watched, now, &theme, cx),

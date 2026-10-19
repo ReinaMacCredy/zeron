@@ -4,55 +4,69 @@ Mission Control introduces itself once, in a three-page sheet that appears after
 
 ## Start a mission from a task
 
-Open a task's card on the Tasks page. Under **Hand it to an agent**, switch **One agent** to **Mission Control**. The card then shows:
+Open a task's card on the Tasks page and pick the **Mission Control** tab under **Hand it to**. The card then shows:
 
 - **Plan** picks what the lead writes:
   - **plan.md** (the default): a plan you can read and edit, with an overview (the goal, the approach, and how the result will be checked) and a spec for each step (what it builds, where, and how to tell it is done). The plan is stored in Zeron with the task, so tasks with **No project** get one too.
   - **Steps only**: just the steps, as a list of what to do.
-- **Lead**: pick the lead's agent and model, and where it runs with **Run in** or **Folder…**, the same way as for one agent.
-- **Step agents**: **Lead picks per step** (the default) lets the lead choose an agent and model for each step. **Same as the lead** runs every step on the lead's agent and model.
+- **Lead**: pick the lead's agent and model, and under it the project it runs **in**, or **Folder…**, the same way as on the **New chat** tab.
+- **Reads**: chats the lead reads before it plans. See **Chats the lead reads** below.
+- **Steps**: **Lead picks** (the default) lets the lead choose an agent and model for each step. **Same as lead** runs every step on the lead's agent and model.
 - **Let me review the plan before it runs** (with **Steps only**: **Show me the plan before it runs**) is on by default: the lead writes the plan and waits for you. Turn it off to let the lead start the steps as soon as the plan is written.
 
-In this mode the card has no **or assign to a thread** field: a mission always starts a new lead. To make a chat you already have the lead, start the mission from that chat's composer.
+A mission from the card always starts a new lead. To make a chat you already have the lead, start the mission from that chat's composer.
 
 Click **Start mission** or press Cmd+Enter. Zeron starts the lead's chat and opens the task's Mission Control page.
+
+## Chats the lead reads
+
+A mission can read up to 5 chats you already have before it plans: a review that found the bugs, the chat where you worked out the design. In the **Reads** row, type **@** and part of a chat's name, and pick it from the list that opens, or press Enter for the first match. Each chat becomes a chip with its status and a ×; Backspace in the empty field removes the last one. A chat from another project carries that project's name. The list offers chats on this Mac only, because the lead can only read those, and leaves out drafts.
+
+These chats are context, not assignments. Nothing is sent to them, and the task does not follow their status. The lead's first message lists each one by title and id, and the lead reads them with Zeron's `read_thread` tool before it writes the plan. The message tells it that they are context only: it does not write to them or answer their questions. A chat that is still working is fine; the lead is told to read it again before it sends the plan. When a step needs one of them, the lead names it in that step's instructions, so the step's thread can read it too.
+
+If the lead's tools leave out `read_thread`, in its profile or in [Settings > Tools](zeron://settings/tools), the field turns off and says why. With chats already picked, **Start mission** waits until you remove them, turn `read_thread` back on, or pick another lead.
+
+The list is fixed once the mission starts, and the Mission Control page shows it as read-only chips under the lead. To point the lead at another chat later, mention it with **@** in the lead's composer.
 
 ## Start a mission from a composer
 
 You do not need a task card to start a mission. On the New chat canvas, the **Mission Control** tab starts one from what you type: see [Start a new chat](zeron://docs/new-chat).
 
-In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. A mission started from a composer has no **Step agents** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
+In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; the lead's own chat is left out. A mission started from a composer has no **Step agents** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
 
 - **This chat leads**, the default: the chat becomes the mission's lead. It keeps its name and its agent, and the task with the lead's instructions arrives in it as a message, so the agent plans from the conversation you already had. If the agent is working, the message steers its turn instead of stopping it. The step threads show in the sidebar under this chat. A chat leads one unfinished mission at a time: while it still leads one, Zeron refuses a second and gives your text back.
-- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and the task's notes ask the lead to read this chat before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
+- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and this chat is the first of the chats the lead reads before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
 
 ## The Mission Control page
 
 A Mission Control task opens its own page instead of the card, from the Tasks list, the board, the Inbox, the **Missions** widget on Home, the Supervisor's **Missions** list, or the strip at the top of its chats. The back button in the titlebar takes you back: to the chat you came from, named after it, or else to **Tasks**.
 
-The header reads **MISSION CONTROL** above the task's title, and shows the task's status (**Planning**, **Plan ready**, or its Kanban column), **Mark as done** or **Reopen**, and how many steps are done. On the left is the plan:
+The header reads **MISSION CONTROL** above the task's title, and shows the task's status (**Planning**, **Plan ready**, or its Kanban column), **Mark as done** or **Reopen**, and how many steps are done. Under it the plan is drawn as a tree:
 
-- The lead, with its model and what it is doing: **Not started**, **Planning**, **Watching** its running steps, **Working**, **Waiting on you**, or **Done**.
-- With **plan.md**, the **Overview** the lead wrote.
-- The steps in order. Each one shows its thread and its state: **Planned**, **Working** with the time so far, **Asked you a question**, **Needs you**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**. Click **spec** under a step to read what the lead wrote for it.
+- **Steps** at the top sums it up: how many steps, how many are working, a **needs you** and a **failed** button when any step needs you or failed, and the tokens the whole mission has used so far. Click **needs you** or **failed** for a small window that lists those steps, with **Open thread** and **Answer**, **Approve and run** for a plan that waits for you, or **Skip** and **Retry**.
+- The lead's card on top: its agent and model, its state (**Not started**, **Planning**, **Working**, **Needs you**, **Done**), what it is doing (**The lead is planning**, **Watching** its running steps, **Working**, **Waiting on you**), and, with **plan.md**, the **Overview** the lead wrote. The overview shows one line; click **Overview** to read all of it. **Reads**, when the mission has chats to read, shows one chip per chat with its status, read-only. The bottom line has the tokens the lead and its steps have used, and a button with the number of steps that folds them away and brings them back.
+- The steps, from the top down, alternating left and right of a line that runs down the middle, each joined to it. Each card shows the step's number, its agent and model (or **Not started**), its state (**Planned**, **Working**, **Needs you**, **Failed**, **Stopped**, **Interrupted**, **Done**, or **Skipped**), its title, and the tokens it has used and its time: the time so far while it works, then the time its agent spent working. A failed step shows what went wrong. Click **spec** on a card to read what the lead wrote for it.
+- **Add a step**, a dashed card at the end.
 
-Click a step to watch its thread live on the right, with a composer to write to it. **Open thread** opens the full chat. The lead, and any step that has not started, show the lead's chat.
+As the plan arrives, the lines draw themselves from the lead and the cards rise in one after another; when cards move, they glide to their new place. Running steps shimmer. With reduced motion, everything appears and moves at once.
+
+Click a card to watch its thread live in a panel that slides in from the right, with a composer to write to it. The tree makes room for it. **Open thread** opens the full chat; × or Escape closes the panel. The lead, and any step that has not started, show the lead's chat.
 
 The page keeps its place while you are away: go back to it from a chat, and the specs you opened, the edit you were writing, your unsent changes and the scroll position are as you left them.
 
 ## Approve the plan
 
-While the lead writes the plan, the page reads **The lead is planning**. Then **Plan ready** shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first.
+While the lead writes the plan, its card reads **The lead is planning**. Then **Plan ready** on the lead's card shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first.
 
 ## Change the plan
 
 You can change the plan once the lead has started, before you approve it and while the steps run, in both **plan.md** and **Steps only**. A task marked done cannot be edited.
 
-- Open a step's **spec** and click **Edit**, or right-click the step and pick **Edit spec**, to change its title and its spec. The step opens as a card. Press Cmd+Enter or click **Save** to keep the change, or press Escape or click **Cancel** to drop it. Enter in the title saves too.
-- With **plan.md**, **Edit** on the **Overview** changes the overview in the same kind of card.
+- Open a step's **spec** and click **Edit**, or right-click the step and pick **Edit spec**, to change its title and its spec. The step's card opens for editing in its place and grows taller. Press Cmd+Enter or click **Save** to keep the change, or press Escape or click **Cancel** to drop it. Enter in the title saves too.
+- With **plan.md**, **Edit** on the lead card's **Overview** changes the overview in the same kind of card.
 - Type a new step in **Add a step** and press Enter.
 - **Remove** takes out a step that has not started. **Restore** brings it back.
-- Drag a step that has not started by the grip at its left edge, which shows when you hover the step, to change the order, or right-click it and pick **Move up** or **Move down**. A step can only land below the last step that has started; steps that are done or running keep their place, and their grip says so. Steps you added and have not sent stay at the end, in the order you put them.
+- Drag a step that has not started by the grip that takes the place of its agent's mark when you hover the card, to change the order; a bar shows where it will land. Or right-click it and pick **Move up** or **Move down**. A step can only land below the last step that has started; steps that are done or running have no grip, and keep their place. Because the cards alternate sides, the steps after a moved one glide to the other side. Steps you added and have not sent stay at the end, in the order you put them.
 
 Right-click a step for **Edit spec**, **Open thread** (when the step has a thread), **Add image**, **Move up**, **Move down**, **Skip** or **Reopen**, and **Remove**. An item that does not apply to that step is greyed out. Escape or a click outside closes the menu.
 
@@ -95,7 +109,9 @@ The lead's chat and the chat of every step show a strip at the top of the conver
 - a bar with the steps done;
 - **Mission Control**.
 
-Click the strip to open the task's Mission Control page with this chat live on the right. From a step's chat, that step is selected. The page slides in from the right over the chat. Back, or the chat's name in the titlebar, slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
+In the lead's chat, the strip also shows the mission as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and, while it works, the time so far. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
+
+Click **Mission Control** in the strip, or any line of the tree, to open the task's Mission Control page with that thread live on the right. From a step's chat, clicking the strip opens the page with that step selected. The page slides in from the right over the chat. Back, or the chat's name in the titlebar, slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
 
 ## In the sidebar
 

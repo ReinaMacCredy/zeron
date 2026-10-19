@@ -31,6 +31,8 @@ pub(super) enum Key {
     Overview,
     Steps,
     Editor,
+    Lead,
+    Canvas,
 }
 
 pub(super) type Rects = HashMap<Key, Bounds<Pixels>>;

@@ -32,11 +32,14 @@ use crate::attachments::StagedAttachment;
 use images::ImageGallery;
 mod logic;
 mod morph;
+mod strip_tree;
+mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
+pub(crate) use strip_tree::{StripTree, StripTreeEvent, TreeHost};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
@@ -1925,8 +1928,11 @@ impl Render for TasksPage {
                     page.close_row_menu(cx);
                 } else if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
                     cx.stop_propagation();
-                    page.card
-                        .update(cx, |card, cx| card.close(Some(window), cx));
+                    page.card.update(cx, |card, cx| {
+                        if !card.dismiss_popups(cx) {
+                            card.close(Some(window), cx)
+                        }
+                    });
                 }
             }))
             .child(
