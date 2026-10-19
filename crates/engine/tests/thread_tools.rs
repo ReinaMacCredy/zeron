@@ -23,6 +23,7 @@ use zeron_proto::{
 /// when steerable, what reached its mid-turn mailbox.
 struct RecordingHarness {
     prompts: Arc<Mutex<Vec<String>>>,
+    attachments: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     steers: Arc<Mutex<Vec<String>>>,
     steerable: bool,
     step_delay: Duration,
@@ -59,6 +60,10 @@ impl Harness for RecordingHarness {
         mut controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
+        self.attachments
+            .lock()
+            .unwrap()
+            .push((request.prompt.clone(), request.attachments.clone()));
         let interrupt = controls.interrupt.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
         let steers = self.steers.clone();
@@ -126,6 +131,7 @@ impl Harness for RecordingHarness {
 struct Rig {
     core: EngineCore,
     prompts: Arc<Mutex<Vec<String>>>,
+    attachments: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     steers: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
 }
@@ -137,8 +143,10 @@ fn rig(step_delay: Duration) -> Rig {
 fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let steers = Arc::new(Mutex::new(Vec::new()));
+    let attachments = Arc::new(Mutex::new(Vec::new()));
     let rig = rig_on(Arc::new(RecordingHarness {
         prompts: prompts.clone(),
+        attachments: attachments.clone(),
         steers: steers.clone(),
         steerable,
         step_delay,
@@ -147,6 +155,7 @@ fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
     Rig {
         prompts,
         steers,
+        attachments,
         ..rig
     }
 }
@@ -167,6 +176,7 @@ fn rig_on(harness: Arc<dyn Harness>) -> Rig {
     Rig {
         core,
         prompts: Arc::default(),
+        attachments: Arc::default(),
         steers: Arc::default(),
         _dir: dir,
     }
@@ -1332,6 +1342,7 @@ fn review_rig() -> Rig {
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let rig = rig_on(Arc::new(RecordingHarness {
         prompts: prompts.clone(),
+        attachments: Arc::default(),
         steers: Arc::default(),
         steerable: false,
         step_delay: Duration::from_millis(5),
@@ -2101,6 +2112,7 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(RecordingHarness {
             prompts: prompts.clone(),
+            attachments: Arc::default(),
             steers: Arc::new(Mutex::new(Vec::new())),
             steerable: false,
             step_delay: Duration::from_millis(50),
@@ -2901,6 +2913,119 @@ async fn a_plan_edit_moves_unstarted_steps_and_names_the_new_order() {
         steps[3].id
     );
     assert!(message.contains(&line), "{line} in {message}");
+}
+
+fn attached_to(rig: &Rig, needle: &str) -> Vec<String> {
+    rig.attachments
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(prompt, _)| prompt.contains(needle))
+        .map(|(_, attachments)| attachments.clone())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_them() {
+    let rig = rig(Duration::from_millis(50));
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let trailer = "Attached images (local files — open them to view):";
+    mutate(serde_json::json!({
+        "op": "createTask", "taskId": "t1", "title": "Shop",
+        "images": ["/tmp/uploads/aa-overview.png"],
+    }))
+    .await
+    .unwrap();
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "task-lead",
+        "spaceId": "space-tt", "orchestrate": true,
+    }))
+    .await
+    .unwrap();
+    wait_for(
+        || !prompts_with(&rig, "You lead this task").is_empty(),
+        "the lead's first turn",
+    )
+    .await;
+    let first = prompts_with(&rig, "You lead this task").remove(0);
+    assert!(
+        first.ends_with(&format!("{trailer}\n- /tmp/uploads/aa-overview.png")),
+        "{first}"
+    );
+    assert_eq!(
+        attached_to(&rig, "You lead this task"),
+        ["/tmp/uploads/aa-overview.png"]
+    );
+
+    mutate(serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "task-lead",
+        "steps": [{ "title": "Grid" }, { "title": "Cart" }],
+    }))
+    .await
+    .unwrap();
+    let steps = rig.core.workspace.task_steps_of("t1");
+    let shots = ["/tmp/uploads/bb-grid.png", "/tmp/uploads/cc-grid-2.png"];
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1",
+        "overviewImages": ["/tmp/uploads/aa-overview.png", "/tmp/uploads/dd-flow.png"],
+        "steps": [{ "stepId": steps[0].id, "title": "Grid", "notes": "", "images": shots }],
+    }))
+    .await
+    .unwrap();
+    let edited = "The person edited the plan in Mission Control (task id t1)";
+    wait_for(
+        || !prompts_with(&rig, edited).is_empty(),
+        "the lead's edit message",
+    )
+    .await;
+    let message = prompts_with(&rig, edited).remove(0);
+    assert!(
+        message.contains(&format!(
+            "- Step \"Grid\" (taskStepId {}) has 2 new images.",
+            steps[0].id
+        )),
+        "{message}"
+    );
+    assert_eq!(attached_to(&rig, edited), ["/tmp/uploads/dd-flow.png"]);
+    assert_eq!(rig.core.workspace.task("t1").unwrap().images.len(), 2);
+
+    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" }))
+        .await
+        .unwrap();
+    let Ok(zeron_rpc::RpcReply::Value(reply)) = call(
+        zeron_rpc::methods::CREATE_THREAD,
+        serde_json::json!({ "fromChatId": "task-lead", "prompt": "build the grid", "taskStepId": steps[0].id }),
+    )
+    .await
+    else {
+        panic!("the step thread starts");
+    };
+    let thread = reply["chatId"].as_str().unwrap().to_string();
+    wait_for(
+        || !prompts_with(&rig, "build the grid").is_empty(),
+        "the step's first turn",
+    )
+    .await;
+    assert_eq!(attached_to(&rig, "build the grid"), shots);
+    let entry = entries(&rig.core, &thread).remove(0);
+    let text = match &entry.parts[0] {
+        zeron_doc::MessagePart::Text { text, .. } => text.clone(),
+        other => panic!("a text part, not {other:?}"),
+    };
+    assert_eq!(
+        text,
+        format!(
+            "build the grid\n\n{trailer}\n- {}\n- {}",
+            shots[0], shots[1]
+        ),
+        "the step's transcript shows the images the way a composer message does"
+    );
+    rig.core.shutdown().await;
 }
 
 #[tokio::test]

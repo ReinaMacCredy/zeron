@@ -508,7 +508,7 @@ fn space_on_device(
     Ok(space)
 }
 
-fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
+pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
     }
@@ -3763,7 +3763,19 @@ impl DocHost {
         from_chat_id: Option<&str>,
         text: &str,
     ) -> Result<String, EngineError> {
-        let (handle, id) = self.push_thread_row(chat_id, from_chat_id, text, Vec::new())?;
+        self.queue_thread_message_with(chat_id, from_chat_id, text, Vec::new())
+            .await
+    }
+
+    pub async fn queue_thread_message_with(
+        &self,
+        chat_id: &str,
+        from_chat_id: Option<&str>,
+        text: &str,
+        attachments: Vec<String>,
+    ) -> Result<String, EngineError> {
+        let (handle, id) =
+            self.push_thread_row(chat_id, from_chat_id, text, Vec::new(), attachments)?;
         self.send_thread_row(&handle, &id).await;
         Ok(id)
     }
@@ -3775,6 +3787,7 @@ impl DocHost {
         from_chat_id: Option<&str>,
         text: &str,
         task_steps: Vec<String>,
+        attachments: Vec<String>,
     ) -> Result<(Arc<ChatDocHandle>, String), EngineError> {
         if from_chat_id == Some(chat_id) {
             return Err(EngineError::Other("a thread cannot message itself".into()));
@@ -3803,7 +3816,7 @@ impl DocHost {
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
-            attachments: Vec::new(),
+            attachments,
             hold_for_turn_end: true,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
@@ -4099,7 +4112,8 @@ impl DocHost {
         if let Some(sessions) = self.sessions() {
             sessions.bind_delegate(from_chat_id, prompt, &chat_id);
         }
-        self.queue_thread_message(&chat_id, Some(from_chat_id), prompt)
+        let images = step.map(|step| step.images).unwrap_or_default();
+        self.queue_thread_message_with(&chat_id, Some(from_chat_id), prompt, images)
             .await?;
         Ok(chat_id)
     }
@@ -5005,7 +5019,7 @@ impl DocHost {
             // dispatch's own idempotent write finds it.
             handle.write_user_message_from(
                 &message_id,
-                &item.text,
+                &prompt,
                 item.issued_at.min(now_ms()),
                 Some(from),
             )?;

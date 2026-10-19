@@ -1,4 +1,6 @@
-use super::tasks::{at, check_notes, check_order_key, check_row_fits, checked_title, invalid};
+use super::tasks::{
+    at, check_images, check_notes, check_order_key, check_row_fits, checked_title, invalid,
+};
 use super::*;
 use zeron_proto::{
     StepOutcome, StepTurn, TaskStep, TaskStepPatch, pin_order_key_between, valid_pin_order_key,
@@ -28,6 +30,8 @@ struct RawTaskStep {
     deleted: bool,
     #[serde(default)]
     turn: Option<StepTurn>,
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 impl From<RawTaskStep> for TaskStep {
@@ -44,6 +48,7 @@ impl From<RawTaskStep> for TaskStep {
             updated_at: at(raw.updated_at),
             deleted: raw.deleted,
             turn: raw.turn,
+            images: raw.images,
         }
     }
 }
@@ -61,6 +66,7 @@ fn step_fields(step: &TaskStep, title: String, order_key: String) -> BTreeMap<St
         ("updatedAt", json!(step.updated_at.timestamp_millis())),
         ("deleted", json!(false)),
         ("turn", json!(step.turn)),
+        ("images", json!(step.images)),
     ])
 }
 
@@ -140,6 +146,7 @@ impl RegistryDoc {
         }
         let title = checked_title(&step.title)?;
         check_notes(&step.notes)?;
+        check_images(&step.images)?;
         let hlc = self.next_hlc();
         let order_key = if step.order_key.is_empty() {
             pin_order_key_between(after, None, &hlc).map_err(invalid)?
@@ -243,6 +250,10 @@ impl RegistryDoc {
         }
         if let Some(turn) = &patch.turn {
             set.insert("turn".into(), json!(turn));
+        }
+        if let Some(images) = &patch.images {
+            check_images(images)?;
+            set.insert("images".into(), json!(images));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let op = RowOp {

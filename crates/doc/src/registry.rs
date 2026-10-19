@@ -50,7 +50,9 @@ mod sidebar_sections;
 mod task_steps;
 mod tasks;
 
-pub use tasks::{TASK_NOTES_MAX_CHARS, TASK_TITLE_MAX_CHARS, check_task_syncs};
+pub use tasks::{
+    TASK_IMAGES_MAX, TASK_NOTES_MAX_CHARS, TASK_TITLE_MAX_CHARS, check_images, check_task_syncs,
+};
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";

@@ -42,6 +42,8 @@ struct RawTask {
     plan_doc: bool,
     #[serde(default)]
     resources: Vec<String>,
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 pub(super) fn at(ms: i64) -> DateTime<Utc> {
@@ -68,6 +70,7 @@ impl From<RawTask> for Task {
             plan: raw.plan,
             plan_doc: raw.plan_doc,
             resources: raw.resources,
+            images: raw.images,
         }
     }
 }
@@ -87,6 +90,21 @@ pub(super) fn checked_title(title: &str) -> Result<String, DocError> {
 pub(super) fn check_notes(notes: &str) -> Result<(), DocError> {
     if notes.chars().count() > TASK_NOTES_MAX_CHARS {
         return Err(invalid("Task notes are limited to 10,000 characters"));
+    }
+    Ok(())
+}
+
+pub const TASK_IMAGES_MAX: usize = 12;
+
+pub fn check_images(images: &[String]) -> Result<(), DocError> {
+    if images.len() > TASK_IMAGES_MAX {
+        return Err(invalid("A task or step holds up to 12 images"));
+    }
+    if images
+        .iter()
+        .any(|path| path.trim().is_empty() || path.chars().any(char::is_control))
+    {
+        return Err(invalid("An image is a single-line file path"));
     }
     Ok(())
 }
@@ -128,6 +146,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("plan", json!(task.plan)),
         ("planDoc", json!(task.plan_doc)),
         ("resources", json!(task.resources)),
+        ("images", json!(task.images)),
     ])
 }
 
@@ -191,6 +210,7 @@ impl RegistryDoc {
         }
         let title = checked_title(&task.title)?;
         check_notes(&task.notes)?;
+        check_images(&task.images)?;
         check_due_on(task.due_on.as_deref())?;
         if self.overlay_row(KIND_TASKS, &task.id).is_some() {
             return Ok(false);
@@ -293,6 +313,10 @@ impl RegistryDoc {
         }
         if let Some(resources) = &patch.resources {
             set.insert("resources".into(), json!(resources));
+        }
+        if let Some(images) = &patch.images {
+            check_images(images)?;
+            set.insert("images".into(), json!(images));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();

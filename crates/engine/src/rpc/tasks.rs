@@ -54,10 +54,33 @@ pub(super) struct PlanEdit {
     pub title: String,
     #[serde(default)]
     pub notes: String,
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
 }
 
 const REORDER_REFUSED: &str =
     "Only steps that have not started can move, and only below the last started step";
+
+fn new_images(before: &[String], after: &[String]) -> Vec<String> {
+    after
+        .iter()
+        .filter(|path| !before.contains(path))
+        .cloned()
+        .collect()
+}
+
+fn image_change(before: &[String], after: &[String]) -> Option<String> {
+    let added = new_images(before, after).len();
+    let removed = before.iter().filter(|path| !after.contains(path)).count();
+    match (added, removed) {
+        (0, 0) => None,
+        (1, 0) => Some("1 new image".into()),
+        (n, 0) => Some(format!("{n} new images")),
+        (0, 1) => Some("1 image removed".into()),
+        (0, n) => Some(format!("{n} images removed")),
+        (added, removed) => Some(format!("{added} new and {removed} removed images")),
+    }
+}
 
 fn reorder_keys(
     steps: &[(&TaskStep, bool)],
@@ -198,6 +221,7 @@ impl EngineRpc {
         space_id: Option<String>,
         due_on: Option<String>,
         order_key: Option<String>,
+        images: Vec<String>,
     ) -> Result<(), RpcError> {
         let now = chrono::Utc::now();
         self.workspace
@@ -219,6 +243,7 @@ impl EngineRpc {
                 plan: String::new(),
                 plan_doc: false,
                 resources: Vec::new(),
+                images,
             })
             .map_err(failed)
             .map(drop)
@@ -366,8 +391,14 @@ impl EngineRpc {
             },
         )?;
         if send {
-            self.send_to_task_thread(&task, chat_id, from_chat_id, &first_turn(&task, lead))
-                .await?;
+            self.send_to_task_thread(
+                &task,
+                chat_id,
+                from_chat_id,
+                &first_turn(&task, lead),
+                task.images.clone(),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -378,10 +409,11 @@ impl EngineRpc {
         chat_id: &str,
         from_chat_id: Option<&str>,
         text: &str,
+        images: Vec<String>,
     ) -> Result<String, RpcError> {
         let sent = self
             .doc_host
-            .queue_thread_message(chat_id, from_chat_id, text)
+            .queue_thread_message_with(chat_id, from_chat_id, text, images)
             .await;
         let send_error = match &sent {
             Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
@@ -486,6 +518,7 @@ impl EngineRpc {
                 updated_at: now,
                 deleted: false,
                 turn: None,
+                images: Vec::new(),
             })
             .collect();
         self.workspace
@@ -512,6 +545,7 @@ impl EngineRpc {
         title: String,
         notes: String,
         order_key: Option<String>,
+        images: Vec<String>,
     ) -> Result<(), RpcError> {
         let now = chrono::Utc::now();
         self.workspace
@@ -527,6 +561,7 @@ impl EngineRpc {
                 updated_at: now,
                 deleted: false,
                 turn: None,
+                images,
             })
             .map_err(failed)
             .map(drop)
@@ -585,9 +620,15 @@ impl EngineRpc {
             ..Default::default()
         };
         self.update_task(task_id, &patch)?;
-        self.send_to_task_thread(&task, &lead, None, "The plan is approved. Run it.")
-            .await
-            .map(drop)
+        self.send_to_task_thread(
+            &task,
+            &lead,
+            None,
+            "The plan is approved. Run it.",
+            Vec::new(),
+        )
+        .await
+        .map(drop)
     }
 
     pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {
@@ -603,7 +644,7 @@ impl EngineRpc {
                 "Step \"{title}\" has not started (taskStepId {id}). Run it with create_thread and taskStepId {id}."
             ),
         };
-        self.send_to_task_thread(&task, &lead, None, &text)
+        self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
             .await
             .map(drop)
     }
@@ -623,6 +664,7 @@ impl EngineRpc {
         &self,
         task_id: &str,
         overview: Option<String>,
+        overview_images: Option<Vec<String>>,
         steps: Vec<PlanEdit>,
         remove_step_ids: &[String],
         order: &[String],
@@ -630,9 +672,12 @@ impl EngineRpc {
     ) -> Result<Option<String>, RpcError> {
         if rebrief.is_some()
             && (overview.is_some()
+                || overview_images.is_some()
                 || !remove_step_ids.is_empty()
                 || !order.is_empty()
-                || steps.iter().any(|edit| edit.step_id.is_none()))
+                || steps
+                    .iter()
+                    .any(|edit| edit.step_id.is_none() || edit.images.is_some()))
         {
             return Err(refused(
                 "A re-brief changes an existing step's title and spec only: the overview, new steps, removals and the order are the person's",
@@ -665,7 +710,18 @@ impl EngineRpc {
         {
             return Err(refused("The overview is limited to 10,000 characters"));
         }
+        let images_ok = |images: &Option<Vec<String>>| {
+            images
+                .as_deref()
+                .map_or(Ok(()), zeron_doc::check_images)
+                .map_err(|error| match error {
+                    zeron_doc::DocError::Schema(message) => refused(&message),
+                    other => failed(other.into()),
+                })
+        };
+        images_ok(&overview_images)?;
         for edit in &steps {
+            images_ok(&edit.images)?;
             let title = edit.title.trim();
             if title.is_empty() || too_long(title, zeron_doc::TASK_TITLE_MAX_CHARS) {
                 return Err(refused("A step needs a title of up to 500 characters"));
@@ -692,13 +748,33 @@ impl EngineRpc {
             moves = reorder_keys(&remaining, order, crate::new_id).map_err(refused)?;
         }
         let mut changes = Vec::new();
-        if let Some(overview) = overview.filter(|overview| *overview != task.plan) {
+        let overview = overview.filter(|overview| *overview != task.plan);
+        let overview_images = overview_images.filter(|images| *images != task.images);
+        let attached = overview_images
+            .as_deref()
+            .map(|images| new_images(&task.images, images))
+            .unwrap_or_default();
+        if overview.is_some() {
+            changes.push("The overview changed.".to_string());
+        }
+        if let Some(what) = overview_images
+            .as_deref()
+            .and_then(|images| image_change(&task.images, images))
+        {
+            let note = if attached.is_empty() {
+                ""
+            } else {
+                "; the new ones are attached to this message"
+            };
+            changes.push(format!("The overview has {what}{note}."));
+        }
+        if overview.is_some() || overview_images.is_some() {
             let patch = TaskPatch {
-                plan: Some(overview),
+                plan: overview,
+                images: overview_images,
                 ..Default::default()
             };
             self.update_task(task_id, &patch)?;
-            changes.push("The overview changed.".to_string());
         }
         if !moves.is_empty() {
             for (id, key) in &moves {
@@ -735,27 +811,54 @@ impl EngineRpc {
             let title = edit.title.trim().to_string();
             let Some(id) = edit.step_id else {
                 let id = crate::new_id();
+                let images = edit.images.unwrap_or_default();
+                let with = match images.len() {
+                    0 => String::new(),
+                    1 => " with 1 image".to_string(),
+                    n => format!(" with {n} images"),
+                };
                 self.create_task_step(
                     task_id.to_string(),
                     id.clone(),
                     title.clone(),
                     edit.notes,
                     None,
+                    images,
                 )?;
-                changes.push(format!("New step \"{title}\" (taskStepId {id})."));
+                changes.push(format!("New step \"{title}\" (taskStepId {id}){with}."));
                 continue;
             };
             let step = find(&id)?;
+            let images = edit.images.filter(|images| *images != step.images);
+            let started = !self.unstarted(step)?;
+            let image_note = images.as_deref().and_then(|images| {
+                let what = image_change(&step.images, images)?;
+                Some(
+                    match started && !new_images(&step.images, images).is_empty() {
+                        true => {
+                            format!("{what} (its thread already started and does not get them)")
+                        }
+                        false => what,
+                    },
+                )
+            });
             let patch = TaskStepPatch {
                 title: (title != step.title).then(|| title.clone()),
                 notes: (edit.notes != step.notes).then_some(edit.notes),
+                images,
                 ..Default::default()
             };
-            let what = match (patch.title.is_some(), patch.notes.is_some()) {
-                (true, true) => format!("is now \"{title}\", and its spec changed"),
-                (true, false) => format!("is now \"{title}\""),
-                (false, true) => "has a new spec".to_string(),
-                (false, false) => continue,
+            let text = match (patch.title.is_some(), patch.notes.is_some()) {
+                (true, true) => Some(format!("is now \"{title}\", and its spec changed")),
+                (true, false) => Some(format!("is now \"{title}\"")),
+                (false, true) => Some("has a new spec".to_string()),
+                (false, false) => None,
+            };
+            let what = match (text, image_note) {
+                (Some(text), Some(note)) => format!("{text}, and has {note}"),
+                (Some(text), None) => text,
+                (None, Some(note)) => format!("has {note}"),
+                (None, None) => continue,
             };
             self.update_task_step(&id, &patch, None)?;
             changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
@@ -788,7 +891,7 @@ impl EngineRpc {
             changes.join("\n- ")
         );
         self.doc_host.supervisor_plan_edited(&task, &changes, from);
-        self.send_to_task_thread(&task, &lead, from, &text)
+        self.send_to_task_thread(&task, &lead, from, &text, attached)
             .await
             .map(Some)
     }
@@ -811,10 +914,12 @@ impl EngineRpc {
             },
         )?;
         let message_id = crate::new_id();
+        let prompt = crate::doc_host::queued_message_prompt(&first_turn(task, lead), &task.images);
         self.doc_host
-            .request_from_chat_row(chat_id, &first_turn(task, lead))
+            .request_from_chat_row(chat_id, &prompt)
             .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
-            .and_then(|request| {
+            .and_then(|mut request| {
+                request.attachments = task.images.clone();
                 self.doc_host.queue_command_with_transfers(
                     chat_id,
                     SessionCommandPayload::Run {
@@ -846,6 +951,7 @@ mod tests {
             updated_at: Default::default(),
             deleted: false,
             turn: None,
+            images: Vec::new(),
         }
     }
 

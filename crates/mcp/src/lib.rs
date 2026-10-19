@@ -3336,6 +3336,9 @@ fn add_plan(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)], whol
                 if let Some(thread) = &step.chat_id {
                     entry["threadId"] = json!(thread);
                 }
+                if !step.images.is_empty() {
+                    entry["images"] = json!(step.images);
+                }
                 entry
             })
             .collect();
@@ -3370,6 +3373,9 @@ fn task_json(task: &Task, preview: bool) -> Value {
     }
     if let Some(error) = &task.send_error {
         row["sendError"] = json!(error);
+    }
+    if !task.images.is_empty() {
+        row["images"] = json!(task.images);
     }
     row
 }

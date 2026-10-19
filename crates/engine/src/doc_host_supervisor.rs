@@ -1147,7 +1147,7 @@ impl DocHost {
                     self.render_wake(workspace, header, &events, &dropped, settings, permission);
                 let busy = sessions.turn_in_flight(&supervisor.id);
                 let delivered = if self.queue_paused(&supervisor.id) {
-                    self.push_thread_row(&supervisor.id, None, &text, Vec::new())
+                    self.push_thread_row(&supervisor.id, None, &text, Vec::new(), Vec::new())
                         .map(|(_, id)| (id, true))
                 } else {
                     self.queue_thread_message(&supervisor.id, None, &text)

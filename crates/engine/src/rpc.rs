@@ -1024,6 +1024,8 @@ enum MutateParams {
         due_on: Option<String>,
         #[serde(default)]
         order_key: Option<String>,
+        #[serde(default)]
+        images: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
     UpdateTask {
@@ -1111,6 +1113,8 @@ enum MutateParams {
         task_id: String,
         #[serde(default)]
         overview: Option<String>,
+        #[serde(default)]
+        overview_images: Option<Vec<String>>,
         #[serde(default)]
         steps: Vec<tasks::PlanEdit>,
         #[serde(default)]
@@ -2349,13 +2353,18 @@ impl EngineRpc {
                 space_id,
                 due_on,
                 order_key,
-            } => self.create_task(task_id, title, notes, space_id, due_on, order_key),
+                images,
+            } => self.create_task(task_id, title, notes, space_id, due_on, order_key, images),
             MutateParams::UpdateTask {
                 task_id,
                 patch,
                 from_chat_id,
             } => {
-                if patch.title.is_some() || patch.notes.is_some() || patch.chat_id.is_some() {
+                if patch.title.is_some()
+                    || patch.notes.is_some()
+                    || patch.images.is_some()
+                    || patch.chat_id.is_some()
+                {
                     supervisor::refuse_supervisor(
                         from_chat_id.as_deref(),
                         supervisor::GOAL_OR_SPEND,
@@ -2436,7 +2445,7 @@ impl EngineRpc {
                 title,
                 notes,
                 order_key,
-            } => self.create_task_step(task_id, step_id, title, notes, order_key),
+            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new()),
             MutateParams::UpdateTaskStep {
                 step_id,
                 patch,
@@ -2448,11 +2457,20 @@ impl EngineRpc {
             MutateParams::EditTaskPlan {
                 task_id,
                 overview,
+                overview_images,
                 steps,
                 remove_step_ids,
                 order,
             } => self
-                .edit_task_plan(&task_id, overview, steps, &remove_step_ids, &order, None)
+                .edit_task_plan(
+                    &task_id,
+                    overview,
+                    overview_images,
+                    steps,
+                    &remove_step_ids,
+                    &order,
+                    None,
+                )
                 .await
                 .map(drop),
             MutateParams::SetMissionSupervised {

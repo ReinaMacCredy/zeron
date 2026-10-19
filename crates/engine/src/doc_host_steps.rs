@@ -343,7 +343,8 @@ impl DocHost {
         let Some((text, from)) = self.step_wake(workspace, &step_ids) else {
             return Ok(());
         };
-        let (handle, row_id) = self.push_thread_row(lead, Some(&from), &text, step_ids)?;
+        let (handle, row_id) =
+            self.push_thread_row(lead, Some(&from), &text, step_ids, Vec::new())?;
         let host = self.clone();
         self.spawn_worker(async move {
             tokio::time::sleep(handback_settle()).await;

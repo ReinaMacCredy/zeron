@@ -235,13 +235,14 @@ impl EngineRpc {
                     step_id: Some(step_id.clone()),
                     title: title.unwrap_or_else(|| step.title.clone()),
                     notes,
+                    images: None,
                 };
                 let rebrief = tasks::Rebrief {
                     supervisor: from,
                     reason: &reason,
                 };
                 let message_id = self
-                    .edit_task_plan(&task.id, None, vec![edit], &[], &[], Some(rebrief))
+                    .edit_task_plan(&task.id, None, None, vec![edit], &[], &[], Some(rebrief))
                     .await?
                     .ok_or_else(|| refused("That step already has this title and spec"))?;
                 self.doc_host
@@ -289,6 +290,7 @@ impl EngineRpc {
                     project_id.clone(),
                     None,
                     None,
+                    Vec::new(),
                 )?;
                 let lead_brief = tasks::Lead {
                     approve_plan: true,
@@ -419,7 +421,7 @@ impl EngineRpc {
             step.title, step.id
         );
         let message_id = match self
-            .send_to_task_thread(&task, &lead, Some(from), &text)
+            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
             .await
         {
             Ok(id) => id,
@@ -479,7 +481,7 @@ impl EngineRpc {
             step.title, step.id, hold.resource, step.id
         );
         let message_id = self
-            .send_to_task_thread(&task, &lead, Some(from), &text)
+            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
             .await?;
         self.doc_host
             .record_intervention(basis, Some(message_id.clone()), None, reason);
@@ -591,7 +593,8 @@ impl EngineRpc {
                 "The person answered Needs-you item {} \"{}\", raised by {raiser}: {choice}\n\nApply it to this mission (task id {}).",
                 item.id, item.title, task.id
             );
-            self.send_to_task_thread(&task, &lead, None, &text).await?;
+            self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
+                .await?;
         }
         if item.raised_by == Raiser::Supervisor
             && self.doc_host.is_live_supervisor(&item.raiser_chat_id)

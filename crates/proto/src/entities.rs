@@ -520,6 +520,8 @@ pub struct Task {
     pub plan_doc: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,6 +561,8 @@ pub struct TaskStep {
     pub deleted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<StepTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,6 +615,8 @@ pub struct TaskStepPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub turn: Option<Option<StepTurn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,6 +722,8 @@ pub struct TaskPatch {
     pub plan_doc: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
