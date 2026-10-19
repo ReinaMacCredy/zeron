@@ -653,7 +653,7 @@ impl TaskCenter {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
                     .child(
-                        icon(icons::LUCIDE_CIRCLE_DOT)
+                        icon(icons::MISSION_CONTROL)
                             .size(px(11.0))
                             .text_color(theme.text_muted),
                     )

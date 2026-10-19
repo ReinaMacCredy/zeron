@@ -620,7 +620,7 @@ impl TasksPage {
                 .items_center()
                 .gap(px(4.0))
                 .child(
-                    icon(icons::LUCIDE_CIRCLE_DOT)
+                    icon(icons::MISSION_CONTROL)
                         .size(px(11.0))
                         .text_color(theme.text_muted),
                 )

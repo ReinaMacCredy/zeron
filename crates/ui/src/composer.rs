@@ -7443,7 +7443,7 @@ impl Composer {
                 tab(
                     "composer-tab-mission",
                     "Mission Control",
-                    Some(crate::icons::LUCIDE_CIRCLE_DOT),
+                    Some(crate::icons::MISSION_CONTROL),
                     None,
                     1,
                 )
@@ -13838,7 +13838,7 @@ impl Composer {
                     .cursor_pointer()
                     .hover(|style| style.text_color(theme.text))
                     .child(
-                        crate::icons::icon(crate::icons::LUCIDE_CIRCLE_DOT)
+                        crate::icons::icon(crate::icons::MISSION_CONTROL)
                             .size(px(12.0))
                             .text_color(tone),
                     )
@@ -14462,7 +14462,7 @@ impl Render for Composer {
                         .debug_selector(|| "composer-started-mission".into())
                         .child(crate::computer::cards::computer_card(
                             crate::computer::cards::CardTone::Info,
-                            crate::icons::LUCIDE_CIRCLE_DOT,
+                            crate::icons::MISSION_CONTROL,
                             format!("Started mission {title}").into(),
                             vec!["Its lead reads this chat".into()],
                             vec![

@@ -1126,7 +1126,7 @@ impl HomeView {
         }
         card(
             theme,
-            icons::LUCIDE_CIRCLE_DOT,
+            icons::MISSION_CONTROL,
             "Missions",
             Some(count.to_string()),
             None,
