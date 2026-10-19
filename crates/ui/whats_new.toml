@@ -45,8 +45,8 @@ description = "The ? on the rail opens recent releases, the full changelog, keyb
 
 [[entry.features]]
 id = "plan-steps-edit"
-title = "Plan steps you can drag and edit"
-description = "Drag unstarted steps into a new order, right-click a step for its actions, and edit it in place."
+title = "Plan steps you can drag, edit and illustrate"
+description = "Drag unstarted steps into a new order, right-click a step for its actions, and edit it in place. Paste images into a step, the overview or a Tasks board task, and the agent that runs it gets them."
 
 [[entry.features]]
 id = "fold-mission-threads"
