@@ -1305,6 +1305,7 @@ impl Shell {
                     false,
                     false,
                     false,
+                    None,
                     Some(query),
                     theme,
                     cx,
