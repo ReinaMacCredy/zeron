@@ -953,6 +953,28 @@ impl TaskCard {
         }
     }
 
+    pub fn dismiss_popups(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.menu.is_open() {
+            self.close_menu(cx);
+            return true;
+        }
+        let Some(open) = self.open.as_mut() else {
+            return false;
+        };
+        let shown = |hidden: bool, input: &Entity<ComposerInput>| {
+            !hidden && !input.read(cx).text().trim().is_empty()
+        };
+        let assign = open.assign_pick.is_none() && shown(open.assign_hidden, &open.assign);
+        let reads = shown(open.reads_hidden, &open.reads);
+        match open.tab {
+            HandOff::Thread if assign => open.assign_hidden = true,
+            HandOff::Mission if reads => open.reads_hidden = true,
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
     fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.menu.begin_close() {
             popover::reap_popup(cx, |card: &mut Self| &mut card.menu);
