@@ -8,12 +8,13 @@ The Supervisor's chat never shows in the sidebar or under **Archived**, and it n
 
 ## What wakes it and what it can do
 
-Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, or the lead escalates. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour.
+Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour.
 
 It acts through the missions' leads, within the switches under **Authority**:
 
 - It messages a lead or a step's thread, and answers their questions and tool approvals.
 - It re-briefs a step: it rewrites that step's title and spec, and the lead gets one message saying what changed and why. It never changes the plan's overview and never adds or removes a step.
+- It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Shared resources**): it stops the step's thread, the lead cannot run that step again until it is resumed, and the lead gets one message each time.
 - It starts a new mission. The new lead writes a plan that you review before any step runs.
 - It asks you. A change to a mission's goal or spend, or a decision it should not make alone, becomes a card under **Needs you**.
 
@@ -67,7 +68,7 @@ Click a row to open the step's thread. Tool approvals are not listed here; they 
 
 ## Interventions
 
-**Interventions** lists what the Supervisor did through its tools, newest first: a message to a lead or a step, an answer to a thread's question, a re-brief, or a mission it started. Each row shows the time, the kind of action, the thread it went to, the Supervisor's own words, and what led to it: **after the 14:05 wake** or **after your message**.
+**Interventions** lists what the Supervisor did through its tools, newest first: a message to a lead or a step, an answer to a thread's question, a re-brief, a step it paused or resumed, or a mission it started. Each row shows the time, the kind of action, the thread it went to, the Supervisor's own words, and what led to it: **after the 14:05 wake** or **after your message**.
 
 Under it, chips show only what has happened since:
 
@@ -75,8 +76,23 @@ Under it, chips show only what has happened since:
 - **Lead ran a turn**: the lead answered after it.
 - **Plan edited on steps 2, 3**: those steps' titles or specs changed since.
 - **Step 2 thread completed a turn**: that step's thread finished a turn since.
+- **Step paused**: the step is still paused and its thread is not running.
+- **Resource freed**: a check after the pause found the process gone or the port closed.
 
 **No effect yet** appears when **Sent** is still the only chip ten minutes later. The chips never judge whether the action helped; the Supervisor's own words are its judgment.
+
+## Shared resources
+
+A mission's lead can declare, in its plan, what the mission needs to itself while it runs: a port its servers listen on (**port:5173**), a quiet CPU for timing runs (**slot:benchmark**), or a folder it rewrites (**path:src/checkout**). A mission holds what it declared while any of its threads works or has written in the last 30 minutes.
+
+**Shared resources** lists each declared resource with the missions that declared it, the ones holding it now, and its state:
+
+- **Free** or **Held**: nobody else wants it, so Zeron does not check it.
+- **Checking…**, then **Clear** or **Contended**, when two running missions share it. Zeron checks the Mac itself, and only then: for a port, which process listens on it (**Verified by lsof** and the time); for a CPU slot, how much CPU each other mission's processes used in two samples ten seconds apart (**Verified by ps**). Another mission using more than half a core in both samples makes the slot contended. When the missions share one folder, Zeron cannot tell them apart and names **a process in** that folder.
+- **Declared by both, not verified**: two missions in the same checkout declared overlapping folders. Zeron does not check files and does not wake the Supervisor for it.
+- **Not verified**: the check could not run.
+
+A contention wakes the Supervisor once, and again only after it has cleared. Zeron checks again when you open this page (at most once a minute), after a pause, and while a contention lasts. This section is not shown on Windows.
 
 ## Read a brief
 
@@ -94,6 +110,7 @@ Click the × to close the drawer.
 
 - **Message a Lead or Peer directly**: send messages to leads and step threads, and answer their questions. Answering a tool approval also needs the Supervisor's chat at **Full** access, its default.
 - **Re-brief a step, through its Lead**
+- **Pause a step that blocks a shared resource**: on by default, and only usable when Zeron has verified a contention. Not shown on Windows.
 - **Start a new mission**: off by default. While it is off, the Supervisor cannot start new threads either.
 
 **Change a mission's goal or spend** has no switch: the Supervisor always asks you. **Check in on its own** wakes it every 30 or 60 minutes while a watched mission runs; it is **Off** by default. Your choices are saved on this Mac and stay after a restart.
