@@ -2757,7 +2757,7 @@ impl ThreadTools {
                 },
                 item = transcript.recv(), if transcript_open && mode != "all" => match item {
                     Some(frame) => {
-                        let arrived = new_peer_entries(&frame, &mut seen);
+                        let arrived = new_peer_entries(&frame, &mut seen, &self.chat_id);
                         if !arrived.is_empty() {
                             return Ok(json!({
                                 "reason": "message",
@@ -2786,6 +2786,7 @@ impl ThreadTools {
 fn new_peer_entries(
     frame: &Value,
     seen: &mut Option<std::collections::HashSet<String>>,
+    own: &str,
 ) -> Vec<Value> {
     let entries: Vec<&Value> = match frame.get("reset") {
         Some(reset) => reset.as_array().into_iter().flatten().collect(),
@@ -2807,7 +2808,7 @@ fn new_peer_entries(
     };
     entries
         .into_iter()
-        .filter(|e| e["role"] == "user" && e["fromChatId"].is_string())
+        .filter(|e| e["role"] == "user" && e["fromChatId"].as_str().is_some_and(|from| from != own))
         .filter(|e| {
             e["id"]
                 .as_str()
@@ -4653,9 +4654,16 @@ mod tests {
             vec![json!({ "kind": "text", "id": "t", "text": "pong from codex" })],
         );
         steered["fromChatId"] = json!("b");
+        let mut own = entry(
+            "m8",
+            "user",
+            vec![json!({ "kind": "text", "id": "t", "text": "Supervisor wake 1 of 12" })],
+        );
+        own["fromChatId"] = json!("a");
         fake.doc_frames = vec![
             json!({ "append": [{ "entry": "m5", "part": "t", "text": "…", "len": 7 }], "count": 6 }),
-            json!({ "upsert": [{ "after": "m5", "entry": steered }], "count": 7 }),
+            json!({ "upsert": [{ "after": "m5", "entry": own }], "count": 7 }),
+            json!({ "upsert": [{ "after": "m8", "entry": steered }], "count": 8 }),
         ];
         let rig = rig(fake);
         let out = rig
