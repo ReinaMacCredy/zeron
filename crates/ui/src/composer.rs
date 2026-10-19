@@ -20977,6 +20977,26 @@ mod tests {
     }
 
     #[test]
+    fn home_tab_indicator_lands_on_each_tab_and_overshoots_past_the_last() {
+        let tab = |left: f32, width: f32| {
+            Some(Bounds::new(
+                point(px(left), px(10.0)),
+                size(px(width), px(20.0)),
+            ))
+        };
+        let slots = [tab(0.0, 60.0), tab(64.0, 120.0), tab(188.0, 100.0)];
+        for (slot, position) in [(0, 0.0), (1, 1.0), (2, 2.0)] {
+            assert_eq!(home_tab_indicator(slots, position), slots[slot]);
+        }
+        let between = home_tab_indicator(slots, 0.5).unwrap();
+        assert_eq!(between.left(), px(32.0));
+        assert_eq!(between.size.width, px(90.0));
+        let past = home_tab_indicator(slots, 2.05).unwrap();
+        assert!(past.left() > px(188.0));
+        assert_eq!(home_tab_indicator([slots[0], None, slots[2]], 0.5), None);
+    }
+
+    #[test]
     fn cluster_inset_glides_between_the_source_endpoints() {
         assert_eq!(ACTION_UTILITY_GAP, 2.0);
         assert_eq!(ACTION_PRIMARY_GAP, Theme::SPACE_SM);
