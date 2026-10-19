@@ -14,7 +14,7 @@
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`의 압축을 풀고 안에 있는 `install.sh` 실행
 
-계정이나 네트워크 연결이 필요 없으며, 세션은 사용 중인 기기에 저장됩니다. 앱은 자동으로 업데이트됩니다.
+계정이나 네트워크 연결이 필요 없으며, 세션은 사용 중인 기기에 저장됩니다. 앱은 업데이트를 확인해 사이드바에 알려 줍니다. `ZERON_AUTO_UPDATE=1`을 설정하면 백그라운드에서 내려받아 종료할 때 설치합니다.
 
 ## 헤드리스 실행 (CLI)
 

@@ -46,11 +46,11 @@ pub const fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Successful checks repeat this often. The feed is a sub-kilobyte,
-/// edge-cached document, so hourly polling is free and bounds how long a
-/// long-running app can sit on a stale release.
+/// Successful checks repeat this often. The manifest is a sub-kilobyte
+/// document, so hourly polling is free and bounds how long a long-running app
+/// can sit on a stale release.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// Failed checks (offline boot, captive portal, transient edge error) back off
+/// Failed checks (offline boot, captive portal, transient server error) back off
 /// through these delays, then stay at the last one.
 const CHECK_RETRY: [Duration; 4] = [
     Duration::from_secs(60),
@@ -210,9 +210,8 @@ async fn fetch_release_metadata_with_limits(
     let request = async {
         let response = client
             .get(url)
-            // Intermediaries must revalidate: the edge already bounds its own
-            // cache to a minute, and a proxy holding an old manifest for
-            // longer is exactly the "prompt appears late" failure.
+            // Intermediaries must revalidate: a proxy holding an old manifest
+            // is exactly the "prompt appears late" failure.
             .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .send()
             .await
@@ -976,8 +975,8 @@ fn auto_update_enabled() -> bool {
 }
 
 /// `ZERON_AUTO_UPDATE=1|true|yes` — the desktop app downloads in the
-/// background and installs on quit. Unset means report-only: an upstream
-/// release must never replace a fork build unasked.
+/// background and installs on quit. Unset, it only offers the update: the
+/// download and the install each wait for a click.
 pub fn desktop_auto_update_enabled() -> bool {
     auto_update_enabled()
 }
