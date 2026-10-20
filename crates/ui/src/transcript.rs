@@ -1140,6 +1140,10 @@ enum HtmlFileState {
 
 #[derive(Clone)]
 pub enum RowKind {
+    NativeRoute {
+        route: zeron_proto::ChildRoute,
+        title: SharedString,
+    },
     /// A page the agent published with `html_render`, shown live above its
     /// reply.
     HtmlRender {
@@ -1851,6 +1855,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                delegate_route,
                 ..
             } => {
                 let computer = computer_call(call);
@@ -1920,6 +1925,42 @@ pub fn rows_for_entry(
                     kind: ToolItemKind::Call,
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                 };
+                if let Some(route) = delegate_route.clone().filter(|_| subagent_ref.is_none()) {
+                    if !compact {
+                        flush_group(
+                            &mut rows,
+                            &mut pending_group,
+                            &mut group_ix,
+                            group_last_part_ix,
+                        );
+                    }
+                    let input = match call {
+                        ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. } => {
+                            input.as_ref()
+                        }
+                        _ => None,
+                    };
+                    let title = input
+                        .and_then(|input| input.get("title")?.as_str())
+                        .or(call.delegate_task_text())
+                        .map(single_line)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| "Delegated task".into());
+                    rows.push(Row {
+                        id: format!("{}#{}-native", entry.id, part.id()).into(),
+                        version: 1,
+                        turn_start: false,
+                        kind: RowKind::NativeRoute {
+                            route,
+                            title: title.into(),
+                        },
+                        entry_id: entry_id.clone(),
+                        timestamp: None,
+                        copy_text: None,
+                        compact_fold: None,
+                    });
+                    continue;
+                }
                 if compact {
                     // Compact mode keeps ONE group for the whole turn —
                     // agent chips fold in with everything else, so the genus
@@ -2335,7 +2376,9 @@ pub fn rows_for_entry(
             inner.retain(|row| {
                 !matches!(
                     row.kind,
-                    RowKind::ComputerNotice { .. } | RowKind::HtmlRender { .. }
+                    RowKind::ComputerNotice { .. }
+                        | RowKind::HtmlRender { .. }
+                        | RowKind::NativeRoute { .. }
                 )
             });
             for row in &mut inner {
@@ -4364,6 +4407,54 @@ pub enum TranscriptEvent {
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    fn render_native_route(
+        &self,
+        row_id: &SharedString,
+        route: &zeron_proto::ChildRoute,
+        title: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let parent = self.chat_id.as_deref().and_then(|id| {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == id)?;
+            chat.config.as_ref().map(route_badge::target_of)
+        });
+        let view = DelegateView {
+            title: title.clone(),
+            harness: parent.as_ref().map(|parent| parent.harness),
+            model: parent
+                .as_ref()
+                .and_then(|parent| parent.model.clone())
+                .map(SharedString::from),
+            status: None,
+            elapsed_secs: None,
+            role: route.role.clone().map(SharedString::from),
+            route: Some(route.clone()),
+        };
+        let badge = route_badge::route_badge(
+            SharedString::from(format!("{row_id}-route")),
+            RouteInfo {
+                route: route.clone(),
+                ran: parent.clone(),
+                parent,
+                native: true,
+            },
+            self.route_links(cx),
+            theme,
+        );
+        delegate_chip(
+            &view,
+            badge,
+            row_id.clone(),
+            None::<fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>,
+            false,
+            theme,
+            cx.entity_id(),
+            cx,
+        )
+    }
+
     fn route_links(&self, cx: &Context<Self>) -> route_badge::OnRouteLink {
         let transcript = cx.weak_entity();
         Rc::new(move |link, _, cx| {
@@ -10193,6 +10284,9 @@ impl Transcript {
                 self.render_visual(&row.id, owner, path, title, cx)
             }
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::NativeRoute { route, title } => {
+                self.render_native_route(&row.id, route, title, &theme, cx)
+            }
             RowKind::ComputerConsent {
                 request_id,
                 question_id,
@@ -11724,11 +11818,11 @@ impl Transcript {
                         &view,
                         badge,
                         SharedString::from(format!("{row_id}#s{ix}")),
-                        cx.listener(move |_, _, _, cx| {
+                        Some(cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenDelegate {
                                 chat_id: child.to_string(),
                             });
-                        }),
+                        })),
                         collapses,
                         theme,
                         cx.entity_id(),
@@ -14223,7 +14317,7 @@ fn delegate_chip(
     view: &DelegateView,
     badge: Option<AnyElement>,
     id: SharedString,
-    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     rail: bool,
     theme: &Theme,
     entity: gpui::EntityId,
@@ -14233,11 +14327,16 @@ fn delegate_chip(
     let running = view.status == Some(DelegationStatus::Running);
     let failed = view.status == Some(DelegationStatus::Failed);
     let (glyph, tint) = crate::pickers::agent_brand_icon(view.harness, view.model.as_deref());
-    let label: SharedString = view
+    let native = on_open.is_none();
+    let harness = view
         .harness
         .map(crate::composer::harness_display_name)
-        .unwrap_or("Agent")
-        .into();
+        .unwrap_or("Agent");
+    let label: SharedString = if native {
+        format!("{harness} native").into()
+    } else {
+        harness.into()
+    };
     let state: SharedString = match (running, view.elapsed_secs) {
         (false, Some(secs)) => format!(
             "{} in {}",
@@ -14316,17 +14415,19 @@ fn delegate_chip(
             )
         })
         .children(badge)
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(11.0))
-                .text_color(if failed {
-                    theme.danger
-                } else {
-                    theme.text_faint
-                })
-                .child(state),
-        )
+        .when(!native, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(if failed {
+                        theme.danger
+                    } else {
+                        theme.text_faint
+                    })
+                    .child(state),
+            )
+        })
         .when(running, |row| {
             row.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
                 format!("delegate-chip-{}", id),
@@ -14336,21 +14437,23 @@ fn delegate_chip(
                 cx,
             )))
         })
-        .child(
-            div()
-                .size(px(18.0))
-                .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::theme::ink(0.06))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.8)),
-                ),
-        );
+        .when(!native, |row| {
+            row.child(
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .bg(crate::theme::ink(0.06))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                            .size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.8)),
+                    ),
+            )
+        });
     agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
 }
 
@@ -14480,7 +14583,7 @@ fn subagent_chip(
         chip_a11y_label(tool),
         None,
         rail,
-        on_open,
+        Some(on_open),
         chip_header_row(
             tool,
             Some(mark),
@@ -14498,7 +14601,7 @@ fn agent_chip_card(
     label: SharedString,
     debug_selector: Option<&'static str>,
     rail: bool,
-    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     header: impl IntoElement,
 ) -> AnyElement {
     div()
@@ -14537,9 +14640,11 @@ fn agent_chip_card(
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .on_click(on_open)
+                .when_some(on_open, |card, on_open| {
+                    card.cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.05)))
+                        .on_click(on_open)
+                })
                 .child(header),
         )
         .into_any_element()

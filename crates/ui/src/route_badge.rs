@@ -27,7 +27,7 @@ impl Source {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RouteLink {
+pub enum RouteLink {
     Routing,
     Usage,
 }
