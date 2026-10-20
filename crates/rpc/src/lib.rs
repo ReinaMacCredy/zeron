@@ -141,8 +141,9 @@ pub mod methods {
     pub const HAND_REVIEW_FINDINGS: &str = "HandReviewFindings";
     /// Compact joined transcript count, last role and bounded prose preview. `{chatId}`.
     pub const GET_THREAD_SUMMARY: &str = "GetThreadSummary";
-    /// `{chatIds}` → `{<chatId>: SessionStats}` for the chats whose document
-    /// has recorded stats. A read: opens no sync room.
+    /// `{chatIds}` (at most 256) → `{<chatId>: SessionStats}` for the chats
+    /// whose document has recorded stats. Opens each existing chat's
+    /// document locally, but no sync room; unknown ids are skipped.
     pub const GET_SESSION_STATS: &str = "GetSessionStats";
     /// `{days}` → `UsageSummary`: tokens and API-priced cost from the Claude,
     /// Codex and Grok CLI transcripts; `days: 1` is the past 24 hours by hour.

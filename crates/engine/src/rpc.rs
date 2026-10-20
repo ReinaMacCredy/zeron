@@ -3684,9 +3684,17 @@ impl RpcService for EngineRpc {
             }
             methods::GET_SESSION_STATS => {
                 let p: ChatsParams = parse_params(params)?;
+                if p.chat_ids.len() > 256 {
+                    return Err(RpcError::BadParams("at most 256 chatIds".into()));
+                }
+                let chat_ids: Vec<String> = p
+                    .chat_ids
+                    .into_iter()
+                    .filter(|id| matches!(self.workspace.chat(id), Ok(Some(_))))
+                    .collect();
                 let host = self.doc_host.clone();
                 let stats = tokio::task::spawn_blocking(move || {
-                    p.chat_ids
+                    chat_ids
                         .into_iter()
                         .filter_map(|id| {
                             let stats = host.open_local(&id).ok()?.doc().session_stats()?;
