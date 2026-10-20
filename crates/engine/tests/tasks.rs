@@ -576,7 +576,10 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
         wake.contains(&format!("itemId {item_id} · why: spend")),
         "{wake}"
     );
-    assert!(wake.contains("Options: Pay $20 | Use the mock"), "{wake}");
+    assert!(
+        wake.contains("Options: \"Pay $20\" | \"Use the mock\"\n</agent-response>"),
+        "{wake}"
+    );
 
     let answered = "The person answered Needs-you item";
     mutate(json!({ "op": "resolveSupervisorItem", "itemId": item_id, "choice": "Use the mock" }))

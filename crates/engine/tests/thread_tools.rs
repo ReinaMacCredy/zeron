@@ -2608,7 +2608,7 @@ async fn a_child_blocked_on_a_tool_approval_wakes_its_owner_with_the_request() {
     );
     assert!(wake.contains(&format!("requestId {request}")), "{wake}");
     assert!(
-        wake.contains("- tool approval q-curl: Execute `curl -o main.jpg"),
+        wake.contains("- tool approval q-curl:\n<agent-response>\nExecute `curl -o main.jpg"),
         "{wake}"
     );
     assert!(
