@@ -88,6 +88,38 @@ pub(super) fn mission_tone(mission: &Mission, theme: &Theme) -> Hsla {
     }
 }
 
+fn rail_button(
+    theme: &Theme,
+    key: &'static str,
+    label: &'static str,
+    glyph: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(key)
+        .debug_selector(move || key.into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tooltip(widgets::text_tooltip(label))
+        .flex_none()
+        .size(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.wash(0.08)))
+        .child(icon(glyph).size(px(14.0)).text_color(theme.text_muted))
+}
+
+fn rail_header(button: impl IntoElement) -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .child(button)
+}
+
 impl SupervisorPage {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_rail(
@@ -114,6 +146,23 @@ impl SupervisorPage {
                         .pb(px(20.0))
                         .flex()
                         .flex_col()
+                        .when(mode == RailMode::Narrow, |el| {
+                            el.child(
+                                rail_header(
+                                    rail_button(
+                                        theme,
+                                        "supervisor-rail-collapse",
+                                        "Collapse the missions rail",
+                                        icons::LUCIDE_CHEVRON_RIGHT,
+                                    )
+                                    .on_click(cx.listener(
+                                        |page, _: &ClickEvent, _, cx| page.toggle_rail(cx),
+                                    )),
+                                )
+                                .ml(px(-2.0))
+                                .mb(px(14.0)),
+                            )
+                        })
                         .child(self.render_status(
                             watched,
                             mode == RailMode::Narrow,
@@ -131,32 +180,6 @@ impl SupervisorPage {
                 )
                 .into_any_element(),
         };
-        let toggle = (frame.shown == RailMode::Narrow).then(|| {
-            div()
-                .id("supervisor-rail-collapse")
-                .debug_selector(|| "supervisor-rail-collapse".into())
-                .role(gpui::Role::Button)
-                .aria_label("Collapse the missions rail")
-                .tooltip(widgets::text_tooltip("Collapse the missions rail"))
-                .absolute()
-                .left(px(-12.0))
-                .top(px(Theme::TITLEBAR_HEIGHT + 14.0))
-                .size(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .bg(theme.bg)
-                .border_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .child(
-                    icon(icons::LUCIDE_CHEVRON_RIGHT)
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                )
-                .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_rail(cx)))
-        });
         div()
             .id("supervisor-rail")
             .debug_selector(|| "supervisor-rail".into())
@@ -173,7 +196,6 @@ impl SupervisorPage {
                     .opacity(frame.opacity)
                     .child(inner),
             )
-            .children(toggle.filter(|_| frame.opacity > 0.0))
             .into_any_element()
     }
 
@@ -257,11 +279,20 @@ impl SupervisorPage {
             .id("supervisor-rail-strip")
             .debug_selector(|| "supervisor-rail-strip".into())
             .w(px(RailMode::Strip.width()))
-            .pt(px(Theme::TITLEBAR_HEIGHT + 18.0))
+            .pt(px(Theme::TITLEBAR_HEIGHT + 16.0))
             .flex()
             .flex_col()
             .items_center()
             .gap(px(14.0))
+            .child(rail_header(
+                rail_button(
+                    theme,
+                    "supervisor-rail-expand",
+                    "Show missions",
+                    icons::LUCIDE_CHEVRON_LEFT,
+                )
+                .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_rail(cx))),
+            ))
             .child(
                 div()
                     .id("supervisor-strip-status")
@@ -273,28 +304,6 @@ impl SupervisorPage {
             )
             .child(sep())
             .children(rings)
-            .child(sep())
-            .child(
-                div()
-                    .id("supervisor-rail-expand")
-                    .debug_selector(|| "supervisor-rail-expand".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Show missions")
-                    .tooltip(widgets::text_tooltip("Show missions"))
-                    .size(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.wash(0.08)))
-                    .child(
-                        icon(icons::LUCIDE_CHEVRON_LEFT)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_rail(cx))),
-            )
             .into_any_element()
     }
 

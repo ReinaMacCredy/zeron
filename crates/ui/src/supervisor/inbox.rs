@@ -3,6 +3,12 @@ use super::*;
 const Q_WIDE: f32 = 190.0;
 const Q_NARROW: f32 = 140.0;
 const HAIRLINE_LEFT: f32 = 38.0;
+const ROWS_FIT: f32 = 860.0;
+const COLUMN_PADDING: f32 = 82.0;
+const DETAIL_MIN: f32 = 72.0;
+const WIDE_ROW: f32 = 124.0;
+const WIDE_INTERVENTION: f32 = 330.0;
+const WIDE_FOOTER: f32 = 440.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Dest {
@@ -192,6 +198,29 @@ fn icon_button(
 }
 
 impl SupervisorPage {
+    pub(super) fn compact(&self) -> bool {
+        self.rail
+            .as_ref()
+            .is_some_and(|rail| rail.to == RailMode::Narrow)
+            && self.width.get() + crate::app_rail::WIDTH < ROWS_FIT
+    }
+
+    fn inbox_width(&self) -> f32 {
+        let rail = match &self.rail {
+            Some(rail) => rail.to,
+            None => RailMode::auto(self.width.get(), self.rail_pref),
+        };
+        (self.width.get() - rail.width() - COLUMN_PADDING).min(PAGE_WIDTH - COLUMN_PADDING)
+    }
+
+    fn fits(&self, options: &[String], beside: f32) -> bool {
+        self.inbox_width() >= segments_width(options) + beside
+    }
+
+    fn detail_fits(&self, options: &[String]) -> bool {
+        self.fits(options, HAIRLINE_LEFT + 30.0 + DETAIL_MIN)
+    }
+
     pub(super) fn render_tabs(
         &self,
         feed: &Feed,
@@ -656,12 +685,14 @@ impl SupervisorPage {
             .hover(|s| s.bg(theme.wash(0.04)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_segments(
         &self,
         selector: &str,
         options: &[String],
         picked: &[String],
         pick: Pick,
+        wrap: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -670,7 +701,8 @@ impl SupervisorPage {
             .flex_none()
             .flex()
             .items_center()
-            .h(px(24.0))
+            .when(wrap, |el| el.flex_wrap().max_w_full().min_h(px(24.0)))
+            .when(!wrap, |el| el.h(px(24.0)))
             .p(px(2.0))
             .rounded(px(7.0))
             .bg(theme.wash(0.06))
@@ -693,11 +725,11 @@ impl SupervisorPage {
                     .relative()
                     .flex()
                     .items_center()
-                    .h(px(18.0))
+                    .when(wrap, |el| el.flex_none().max_w_full().min_h(px(18.0)))
+                    .when(!wrap, |el| el.h(px(18.0)).whitespace_nowrap())
                     .px(px(9.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
-                    .whitespace_nowrap()
                     .text_size(ui_rems(12.0))
                     .when(chosen, |el| {
                         el.bg(theme.solid)
@@ -821,23 +853,33 @@ impl SupervisorPage {
             question: String::new(),
             multi: false,
         };
-        let segments = self.render_segments(&sel, &item.options, &picked, pick, theme, cx);
+        let compact = self.compact() || !self.fits(&item.options, q_width + WIDE_ROW);
+        let segments = self.render_segments(&sel, &item.options, &picked, pick, compact, theme, cx);
         let tools = self.hover_tools(key, &sel, quote, None, clock(item.at), theme, cx);
         let failed = self.failure(key);
+        let detail = crate::transcript::single_line(item.detail.trim());
+        let shell = self.row_shell(key, sel, item.title.clone(), theme);
+        let row = if compact {
+            let detail = self
+                .detail_fits(&item.options)
+                .then(|| faint(theme, detail));
+            two_lines(shell)
+                .child(mark(unread(theme)))
+                .child(question_line(theme, title, None))
+                .child(tools)
+                .child(second_line().child(segments).children(detail))
+        } else {
+            shell
+                .child(mark(unread(theme)))
+                .child(question_cell(theme, title, q_width, None))
+                .child(segments)
+                .child(faint(theme, detail))
+                .child(tools)
+        };
         div()
             .flex()
             .flex_col()
-            .child(
-                self.row_shell(key, sel, item.title.clone(), theme)
-                    .child(mark(unread(theme)))
-                    .child(question_cell(theme, title, q_width, None))
-                    .child(segments)
-                    .child(faint(
-                        theme,
-                        crate::transcript::single_line(item.detail.trim()),
-                    ))
-                    .child(tools),
-            )
+            .child(row)
             .children(failed.map(|error| self.failure_line(error, theme)))
             .into_any_element()
     }
@@ -913,11 +955,13 @@ impl SupervisorPage {
                 question: question.id.clone(),
                 multi: question.multi_select,
             };
+            let compact = self.compact() || !self.fits(&question.options, q_width + WIDE_ROW);
             let segments = self.render_segments(
                 &format!("{sel}-q{qx}"),
                 &question.options,
                 &picked,
                 pick,
+                compact,
                 theme,
                 cx,
             );
@@ -953,20 +997,31 @@ impl SupervisorPage {
                             name.clone(),
                             theme,
                         )
-                        .child(mark(if qx == 0 {
-                            unread(theme).into_any_element()
-                        } else {
-                            div().into_any_element()
-                        }))
-                        .child(question_cell(
-                            theme,
-                            name,
-                            q_width,
-                            (qx == 0 && approval).then_some("Approval"),
-                        ))
-                        .child(segments)
-                        .child(faint(theme, detail))
-                        .child(tools),
+                        .map(|shell| {
+                            let glyph = mark(if qx == 0 {
+                                unread(theme).into_any_element()
+                            } else {
+                                div().into_any_element()
+                            });
+                            let word = (qx == 0 && approval).then_some("Approval");
+                            if compact {
+                                let detail = self
+                                    .detail_fits(&question.options)
+                                    .then(|| faint(theme, detail));
+                                two_lines(shell)
+                                    .child(glyph)
+                                    .child(question_line(theme, name, word))
+                                    .child(tools)
+                                    .child(second_line().child(segments).children(detail))
+                            } else {
+                                shell
+                                    .child(glyph)
+                                    .child(question_cell(theme, name, q_width, word))
+                                    .child(segments)
+                                    .child(faint(theme, detail))
+                                    .child(tools)
+                            }
+                        }),
                     ),
             );
         }
@@ -1155,11 +1210,15 @@ impl SupervisorPage {
         );
         let enabled = !ready.is_empty();
         let send_group = group.to_owned();
+        let compact = self.compact() || self.inbox_width() < WIDE_FOOTER;
         div()
             .flex()
             .items_center()
             .gap(px(12.0))
-            .h(px(40.0))
+            .when(compact, |el| {
+                el.flex_wrap().gap_y(px(6.0)).min_h(px(40.0)).py(px(7.0))
+            })
+            .when(!compact, |el| el.h(px(40.0)))
             .pl(px(HAIRLINE_LEFT))
             .pr(px(10.0))
             .border_t_1()
@@ -1207,18 +1266,20 @@ impl SupervisorPage {
                     .when(!enabled, |el| el.opacity(0.35))
                     .when(enabled, |el| el.cursor_pointer().hover(|s| s.opacity(0.9)))
                     .child(label)
-                    .child(
-                        div()
-                            .px(px(4.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(theme.on_solid.opacity(0.5))
-                            .font_family(theme.font_mono.clone())
-                            .text_size(ui_rems(10.5))
-                            .line_height(ui_rems(15.0))
-                            .opacity(0.7)
-                            .child("⌘↵"),
-                    )
+                    .when(!compact, |el| {
+                        el.child(
+                            div()
+                                .px(px(4.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(theme.on_solid.opacity(0.5))
+                                .font_family(theme.font_mono.clone())
+                                .text_size(ui_rems(10.5))
+                                .line_height(ui_rems(15.0))
+                                .opacity(0.7)
+                                .child("⌘↵"),
+                        )
+                    })
                     .when(enabled, |el| {
                         el.on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
                             page.send_sheet(&send_group, cx)
@@ -1365,13 +1426,15 @@ impl SupervisorPage {
             }
             None => detail,
         };
+        let compact = self.compact()
+            || decision.is_some_and(|(item, _)| !self.fits(&item.options, WIDE_INTERVENTION));
         let correction = decision.map(|(item, answer)| {
             let sel = format!("supervisor-intervention-{}-choice", row.id);
             let pick = Pick::Correct {
                 item_id: item.id.clone(),
             };
             let picked = std::slice::from_ref(&answer.choice);
-            self.render_segments(&sel, &item.options, picked, pick, theme, cx)
+            self.render_segments(&sel, &item.options, picked, pick, compact, theme, cx)
         });
         let failed = decision
             .and_then(|(item, _)| self.corrections.get(&item.id).cloned().flatten())
@@ -1381,21 +1444,34 @@ impl SupervisorPage {
             Some(face) => format!("{action}: {detail} · {}", face.label),
             None => format!("{action}: {detail}"),
         };
-        let shell = self
-            .other_shell(
-                key,
-                format!("supervisor-intervention-{}", row.id),
-                label,
-                icons::LUCIDE_CORNER_DOWN_RIGHT,
-                kind_tone(theme, Kind::Intervention),
-                done,
-                theme,
-            )
-            .child(dim(theme, action))
-            .child(faint(theme, clip(&detail)))
-            .children(correction)
-            .children(face.map(|face| self.render_chip(key, &face, now, theme)))
-            .child(time_cell(theme, clock(row.at)));
+        let shell = self.other_shell(
+            key,
+            format!("supervisor-intervention-{}", row.id),
+            label,
+            icons::LUCIDE_CORNER_DOWN_RIGHT,
+            kind_tone(theme, Kind::Intervention),
+            done,
+            theme,
+        );
+        let chip = face.map(|face| self.render_chip(key, &face, now, theme));
+        let shell = if compact {
+            two_lines(shell)
+                .child(div().flex_1().min_w_0().flex().child(dim(theme, action)))
+                .child(time_cell(theme, clock(row.at)))
+                .child(
+                    second_line()
+                        .children(correction)
+                        .children(chip)
+                        .child(faint(theme, clip(&detail))),
+                )
+        } else {
+            shell
+                .child(dim(theme, action))
+                .child(faint(theme, clip(&detail)))
+                .children(correction)
+                .children(chip)
+                .child(time_cell(theme, clock(row.at)))
+        };
         div()
             .flex()
             .flex_col()
@@ -1627,6 +1703,53 @@ fn question_cell(theme: &Theme, text: String, width: f32, word: Option<&'static 
                 .text_color(needs_tone(theme).opacity(0.9))
                 .child(word)
         }))
+}
+
+fn segments_width(options: &[String]) -> f32 {
+    options
+        .iter()
+        .map(|option| option.chars().count() as f32 * 7.0 + 18.0)
+        .sum::<f32>()
+        + 4.0
+}
+
+fn question_line(theme: &Theme, text: String, word: Option<&'static str>) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(6.0))
+        .child(
+            div()
+                .min_w_0()
+                .text_size(ui_rems(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(text),
+        )
+        .children(word.map(|word| {
+            div()
+                .flex_none()
+                .text_size(ui_rems(11.5))
+                .text_color(needs_tone(theme).opacity(0.9))
+                .child(word)
+        }))
+}
+
+fn two_lines(shell: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+    shell.flex_wrap().gap_x(px(12.0)).gap_y(px(6.0)).py(px(8.0))
+}
+
+fn second_line() -> gpui::Div {
+    div()
+        .w_full()
+        .pl(px(HAIRLINE_LEFT - 14.0))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(10.0))
 }
 
 fn dim(theme: &Theme, text: String) -> gpui::Div {

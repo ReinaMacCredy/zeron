@@ -40,10 +40,10 @@ The number on the app rail's **Supervisor** item counts the open decisions, and 
 ### Window width
 
 - **Wide windows** (1180 points and more): the rail is 384 points wide.
-- **Between 860 and 1180 points**: the rail is 300 points wide. The trees drop each agent's mark and time, the mission rows drop the current step, the status card drops the wake count, and each mission's footer is one row: **Open Mission Control ›** and **Watched**. The chevron on the rail's edge collapses it.
-- **Below 860 points, or collapsed**: the rail is a 52-point strip with the status dot, one ring per mission with an amber count of its open decisions, and a chevron that expands it again. Clicking a ring expands it too. While the strip shows, a status card that needs you (**Stopped**, **Off**, **Couldn't start**) moves under the header.
+- **Between 860 and 1180 points**: the rail is 300 points wide. The trees drop each agent's mark and time, the mission rows drop the current step, the status card drops the wake count, and each mission's footer is one row: **Open Mission Control ›** and **Watched**. The chevron at the top of the rail, level with the gear, collapses it.
+- **Below 860 points, or collapsed**: the rail is a 52-point strip with a chevron at the top that expands it again, the status dot, and one ring per mission with an amber count of its open decisions. Clicking a ring expands it too. While the strip shows, a status card that needs you (**Stopped**, **Off**, **Couldn't start**) moves under the header.
 
-The widths count the window without the sidebar, so an open sidebar narrows the page as if the window were smaller.
+The widths count the window without the sidebar, so an open sidebar narrows the page as if the window were smaller. When the inbox is too narrow for a decision on one line, as when you open the rail on a narrow window, each question takes its own line with its time and its options wrap on the line below it.
 
 ## The inbox
 
