@@ -258,7 +258,14 @@ impl SupervisorStore {
             Ok(bytes) => match serde_json::from_slice::<SupervisorFile>(&bytes) {
                 Ok(file) if file.version == STORE_VERSION => file,
                 Ok(_) | Err(_) => {
-                    tracing::warn!(path = %path.display(), "unreadable supervisor store; starting empty");
+                    let aside = path.with_extension(format!(
+                        "json.unreadable-{}",
+                        Utc::now().timestamp_millis()
+                    ));
+                    if let Err(err) = std::fs::rename(&path, &aside) {
+                        tracing::warn!(error = %err, "moving the unreadable supervisor store aside failed");
+                    }
+                    tracing::warn!(path = %aside.display(), "unreadable supervisor store moved aside; starting empty");
                     empty_file()
                 }
             },
