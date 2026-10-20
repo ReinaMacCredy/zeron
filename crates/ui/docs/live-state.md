@@ -1,5 +1,7 @@
 The **Live state** column sits on the right of a chat's conversation. It sums up what the chat has open and running: its workspace, side chats, actions, subagents, attachments, and usage. Click a row to jump to what it names.
 
+![The Live state column](live-state-column.jpg)
+
 ## Show and hide it
 
 The chevron at the top collapses the column to a narrow rail of icons, and the rail's chevron (**Expand live state**) brings it back. Zeron remembers your choice. Hover a rail icon to see its label and value; click it to do what the row does.

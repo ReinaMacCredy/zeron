@@ -183,6 +183,62 @@ const IMAGES: &[(&str, &[u8])] = &[
         "agent-tools-settings.jpg",
         include_bytes!("../assets/whats_new/agent-tools-settings.jpg"),
     ),
+    (
+        "projects-add.jpg",
+        include_bytes!("../assets/whats_new/projects-add.jpg"),
+    ),
+    (
+        "projects-actions.jpg",
+        include_bytes!("../assets/whats_new/projects-actions.jpg"),
+    ),
+    (
+        "right-pane-menu.jpg",
+        include_bytes!("../assets/whats_new/right-pane-menu.jpg"),
+    ),
+    (
+        "right-pane-diffs.jpg",
+        include_bytes!("../assets/whats_new/right-pane-diffs.jpg"),
+    ),
+    (
+        "live-state-column.jpg",
+        include_bytes!("../assets/whats_new/live-state-column.jpg"),
+    ),
+    (
+        "terminal-drawer.jpg",
+        include_bytes!("../assets/whats_new/terminal-drawer.jpg"),
+    ),
+    (
+        "git-commit-panel.jpg",
+        include_bytes!("../assets/whats_new/git-commit-panel.jpg"),
+    ),
+    (
+        "git-commit.jpg",
+        include_bytes!("../assets/whats_new/git-commit.jpg"),
+    ),
+    (
+        "tasks-card.jpg",
+        include_bytes!("../assets/whats_new/tasks-card.jpg"),
+    ),
+    (
+        "mission-control-tree.jpg",
+        include_bytes!("../assets/whats_new/mission-control-tree.jpg"),
+    ),
+    (
+        "mission-control-strip.jpg",
+        include_bytes!("../assets/whats_new/mission-control-strip.jpg"),
+    ),
+    (
+        "supervisor-feed.jpg",
+        include_bytes!("../assets/whats_new/supervisor-feed.jpg"),
+    ),
+    (
+        "supervisor-authority.jpg",
+        include_bytes!("../assets/whats_new/supervisor-authority.jpg"),
+    ),
+    (
+        "split-view.jpg",
+        include_bytes!("../assets/whats_new/split-view.jpg"),
+    ),
 ];
 
 pub struct Picture {

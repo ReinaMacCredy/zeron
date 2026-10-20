@@ -59,6 +59,8 @@ Rows leave the inbox when they are done, and wait in **Earlier** under it, close
 
 A mission's open decisions form one sheet, one row per decision: the question, a segmented choice with one segment per option, and the detail in faint text. They are decisions its lead or the Supervisor raised, and the questions and tool approvals its threads wait on. A question with several parts takes one line per part.
 
+![The Supervisor's feed](supervisor-feed.jpg)
+
 Picking an option does not send it. The pick is staged: its segment fills, and the row keeps its amber dot because nothing has been sent. Click another option to change it, or the same one to clear it. The footer counts the picks, **2 of 5 picked**, and **Send 2 to the Lead ⌘↵** sends every finished pick of that mission at once. ⌘↵ works after a click on the sheet. The lead gets all of the mission's decisions in one message, so it wakes once, not once per decision. A thread's question or approval is answered in that thread, the same way you answer it in the chat, so the button reads **to the step** when it answers a step.
 
 Staged picks stay while Zeron runs, also when you leave the page and come back. They are not saved when Zeron quits: a decision can be answered elsewhere in the meantime, and an old pick would then send an answer you no longer meant.
@@ -133,6 +135,8 @@ Click the × to close the drawer.
 ## Authority and the wake log
 
 Click the gear in the header to open **Authority** and the **Wake log**. Click outside it or press Esc to close it.
+
+![The Supervisor's Authority popover with Decide for me](supervisor-authority.jpg)
 
 **Authority** sets what the Supervisor may do on its own:
 

@@ -41,6 +41,8 @@ In an open chat, press Shift+Tab in the composer, or click **Mission Control** u
 
 A Mission Control task opens its own page instead of the card, from the Tasks list, the board, the Inbox, the **Missions** widget on Home, the Supervisor's **Missions** list, or the strip at the top of its chats. The back button in the titlebar takes you back: to the chat you came from, named after it, or else to **Tasks**.
 
+![A mission's plan as a tree](mission-control-tree.jpg)
+
 The header shows the task's title, and under it the lead's agent and model and when the mission started, or when it finished. On the right:
 
 - A status pill: **Needs you** with what waits (**plan review**, **1 question**), **1 step failed**, **✓ Done**, or the lead's state (**Planning**, **Working**, **Idle**). Click **Needs you** or **failed** for a small window that lists those steps, with **Open thread** and **Answer**, **Approve and run** for a plan that waits for you, or **Skip** and **Retry**.
@@ -117,6 +119,8 @@ The lead's chat and the chat of every step show a strip at the top of the conver
 - **Mission Control**.
 
 In the lead's chat, the strip also shows the mission as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and, while it works, the time so far. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
+
+![The mission strip at the top of a lead's chat](mission-control-strip.jpg)
 
 Click **Mission Control** in the strip to open the task's Mission Control page with that thread live on the right. Click a step's line in the tree to open that step's chat; a step with no thread yet opens Mission Control on that step. The lead's own line does nothing there, since you are already in its chat. From a step's chat, clicking the strip opens the page with that step selected. The page slides in from the right over the chat. Back, or the chat's name in the titlebar, slides it out to the right and returns you to the chat where you left it, scrolled where it was. Opening the page from anywhere else in a chat, or going back and forward between them, moves the same way. With reduced motion, the page fades in and out instead. The strip goes away when the task is deleted.
 
