@@ -123,6 +123,66 @@ const IMAGES: &[(&str, &[u8])] = &[
         "updates-agent-card.jpg",
         include_bytes!("../assets/whats_new/updates-agent-card.jpg"),
     ),
+    (
+        "providers-add.jpg",
+        include_bytes!("../assets/whats_new/providers-add.jpg"),
+    ),
+    (
+        "agent-profiles-editor.jpg",
+        include_bytes!("../assets/whats_new/agent-profiles-editor.jpg"),
+    ),
+    (
+        "agent-profiles-chip.jpg",
+        include_bytes!("../assets/whats_new/agent-profiles-chip.jpg"),
+    ),
+    (
+        "delegation-finished.jpg",
+        include_bytes!("../assets/whats_new/delegation-finished.jpg"),
+    ),
+    (
+        "threads-from-row.jpg",
+        include_bytes!("../assets/whats_new/threads-from-row.jpg"),
+    ),
+    (
+        "side-chat-tabs.jpg",
+        include_bytes!("../assets/whats_new/side-chat-tabs.jpg"),
+    ),
+    (
+        "handoff-menu.jpg",
+        include_bytes!("../assets/whats_new/handoff-menu.jpg"),
+    ),
+    (
+        "handoff-divider.jpg",
+        include_bytes!("../assets/whats_new/handoff-divider.jpg"),
+    ),
+    (
+        "review-findings.jpg",
+        include_bytes!("../assets/whats_new/review-findings.jpg"),
+    ),
+    (
+        "review-diff-card.jpg",
+        include_bytes!("../assets/whats_new/review-diff-card.jpg"),
+    ),
+    (
+        "compaction-popover.jpg",
+        include_bytes!("../assets/whats_new/compaction-popover.jpg"),
+    ),
+    (
+        "compaction-classifier.jpg",
+        include_bytes!("../assets/whats_new/compaction-classifier.jpg"),
+    ),
+    (
+        "agent-questions-panel.jpg",
+        include_bytes!("../assets/whats_new/agent-questions-panel.jpg"),
+    ),
+    (
+        "agent-questions-pill.jpg",
+        include_bytes!("../assets/whats_new/agent-questions-pill.jpg"),
+    ),
+    (
+        "agent-tools-settings.jpg",
+        include_bytes!("../assets/whats_new/agent-tools-settings.jpg"),
+    ),
 ];
 
 pub struct Picture {

@@ -14,6 +14,8 @@ Open [Settings > Agent profiles](zeron://settings/agent-profiles) and click **Ne
 | **Instructions** | Added to the agent's system prompt on every run of a chat using this profile. |
 | **When to use** | A note agents read to pick a profile when they delegate a task. |
 
+![Editing an agent profile](agent-profiles-editor.jpg)
+
 **Mode** is **Ask**, **Auto**, or **Full**, the same choices as the permission chip.
 
 The **Tools** list has these groups:
@@ -43,6 +45,8 @@ With a profile applied, the model chip in the composer splits in two. The left h
 ## When a chat drifts
 
 If you change the model, effort, mode, tools, or instructions after applying a profile, the chip shows a small warning dot and the profile row reads **Edited** with what changed. Click **Revert** to apply the profile again, or **Save** to write your current settings into the profile. An unchanged profile reads **Active**.
+
+![The profile chip with an edited profile](agent-profiles-chip.jpg)
 
 > Changing a chat's instructions, by switching profile or editing the system prompt, restarts a running Claude, Codex, or ACP session on your next message so the new instructions take effect.
 

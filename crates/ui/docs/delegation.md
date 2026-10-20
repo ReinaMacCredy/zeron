@@ -32,6 +32,8 @@ When the agent needs the result before it can go on, it can wait for the child i
 
 When an agent delegates, a chip appears in the transcript with the child's agent, title, model, and status: **Running**, **Completed**, **Failed**, or **Stopped**. When the child is done, the chip shows how long it took, and the parent chat gets a row such as **Delegated task “Audit” finished**, or **failed** or **stopped**, with **Open subagent**. Children that finish within half a second of each other share one row, such as **2 delegated tasks finished: Audit, Lint**, without the **Open subagent** button. The parent's agent gets each child's final reply in that message, cut short after 4,000 characters.
 
+![A delegated task's finished row with Open subagent](delegation-finished.jpg)
+
 If the parent's agent is in the middle of a turn and its agent takes messages mid-turn, the message reaches it inside that turn. Otherwise it waits for the turn to end and then starts a new one. Archiving the parent chat drops the message.
 
 Click the chip to open the child chat as a tab in the right pane. It has its own composer, so you can talk to the child directly. A line above that composer reads **Subagent of** the parent chat, with **Open parent** to jump back. Delegated chats do not appear in the sidebar.

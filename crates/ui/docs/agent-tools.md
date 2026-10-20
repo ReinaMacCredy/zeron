@@ -58,6 +58,8 @@ The threads tools are described from your side in [Agents and other threads](zer
 
 Open [Settings > Tools](zeron://settings/tools). Each group has a switch, and each tool inside it has its own. Tools are on by default, except the Computer and Device hub groups described below. A group you turn off keeps your per-tool choices for when you turn it back on.
 
+![Settings > Tools](agent-tools-settings.jpg)
+
 The picture at the top of the page lights a wire for each group that is on, and dims it while only some of the group's tools are on. **Turn all off** turns every group off; **Turn all on** turns every group on, Computer included, and turns every single tool back on. It turns on Device hub only when the Device hub itself is on in [Settings > Device hub](zeron://settings/device-hub).
 
 Some tools depend on another. When you turn one off, the tools that need it are off too and say so, for example **Off while delegate_task is off**.
