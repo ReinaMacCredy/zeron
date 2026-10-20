@@ -76,8 +76,18 @@ struct PreviewRow {
     source: String,
     target: Option<RouteTarget>,
     multiplier: Option<f64>,
+    quota: PreviewQuota,
     reason: Option<String>,
     fallback: Option<PreviewFallback>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PreviewQuota {
+    known: bool,
+    used_fraction: Option<f64>,
+    resets_at: Option<i64>,
+    exhausted: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -319,7 +329,32 @@ async fn fetch_preview(engine: &EngineHandle) -> Option<Preview> {
         .ok()
 }
 
-fn quota(harness: HarnessId, cx: &App) -> Option<Quota> {
+fn quota(preview: Option<&Preview>, harness: HarnessId, cx: &App) -> Option<Quota> {
+    let engine = preview
+        .into_iter()
+        .flat_map(|preview| &preview.rows)
+        .find(|row| {
+            row.quota.known
+                && row
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.harness == harness)
+        });
+    if let Some(row) = engine {
+        let fraction = if row.quota.exhausted {
+            1.0
+        } else {
+            row.quota.used_fraction.unwrap_or_default() as f32
+        };
+        let resets_at = row
+            .quota
+            .resets_at
+            .and_then(|at| Utc.timestamp_millis_opt(at).single());
+        return Some(Quota {
+            fraction,
+            reset: accounts::format_reset(resets_at, Utc::now()),
+        });
+    }
     if !accounts::reports_usage(harness) {
         return None;
     }
@@ -336,8 +371,8 @@ fn quota(harness: HarnessId, cx: &App) -> Option<Quota> {
     })
 }
 
-fn exhausted(harness: HarnessId, cx: &App) -> bool {
-    quota(harness, cx).is_some_and(|quota| quota.fraction >= 1.0)
+fn exhausted(preview: Option<&Preview>, harness: HarnessId, cx: &App) -> bool {
+    quota(preview, harness, cx).is_some_and(|quota| quota.fraction >= 1.0)
 }
 
 fn short_name(harness: HarnessId) -> &'static str {
@@ -603,7 +638,10 @@ impl RoutingPage {
             .unwrap_or_default();
         let preview = self.preview_row(role).cloned();
         let target_quota = match &route {
-            RoleRoute::Target(target) => Some((target.harness, quota(target.harness, cx))),
+            RoleRoute::Target(target) => Some((
+                target.harness,
+                quota(self.preview.as_ref(), target.harness, cx),
+            )),
             _ => None,
         };
         let fell_back = preview
@@ -614,21 +652,17 @@ impl RoutingPage {
             .filter(|_| fell_back)
             .map(|row| match &row.fallback {
                 Some(fallback) => {
-                    let to = if fallback.native {
-                        let harness = fallback
-                            .target
-                            .as_ref()
-                            .map_or(HarnessId::ClaudeCode, |target| target.harness);
-                        format!("{} native sub-agent", short_name(harness))
-                    } else {
-                        fallback
-                            .target
-                            .as_ref()
-                            .map_or_else(|| fallback.reason.clone(), target_label)
+                    let line = match (&fallback.target, fallback.native) {
+                        (Some(target), true) => format!(
+                            "Falling back: {} native sub-agent",
+                            short_name(target.harness)
+                        ),
+                        (Some(target), false) => format!("Falling back: {}", target_label(target)),
+                        (None, _) => format!("Out of quota: {}", fallback.reason),
                     };
                     match until(fallback.resets_at) {
-                        Some(until) => format!("Falling back: {to} {until}"),
-                        None => format!("Falling back: {to}"),
+                        Some(until) => format!("{line} {until}"),
+                        None => line,
                     }
                 }
                 None => {
@@ -1057,7 +1091,7 @@ impl RoutingPage {
         let spent: Vec<bool> = settings
             .fallback
             .iter()
-            .map(|target| exhausted(target.harness, cx))
+            .map(|target| exhausted(self.preview.as_ref(), target.harness, cx))
             .collect();
         let chips: Vec<AnyElement> = settings
             .fallback
