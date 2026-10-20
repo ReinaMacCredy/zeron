@@ -17,7 +17,6 @@ const ROW_GAP: f32 = 12.0;
 const COLUMN: f32 = 340.0;
 const LEAD_WIDTH: f32 = 420.0;
 const BODY_GAP: f32 = 28.0;
-const GHOST_WIDTH: f32 = 260.0;
 const CARD_RADIUS: f32 = 10.0;
 const ANCHOR_Y: f32 = 21.0;
 pub(super) const CANVAS_PAD: f32 = 20.0;
@@ -2387,7 +2386,13 @@ impl TaskCenter {
                 }
             })
             .collect();
-        let (tops, end) = spine_tops(&heights);
+        let ghost = self.tree.shown(GHOST);
+        let ghost_height = height_of(&Key::Add, 44.0);
+        let mut slots_h = heights.clone();
+        if ghost {
+            slots_h.push(ghost_height);
+        }
+        let (tops, end) = spine_tops(&slots_h);
         let shown_agents: Vec<usize> = agents
             .iter()
             .copied()
@@ -2450,19 +2455,21 @@ impl TaskCenter {
             );
         }
         let mut next = body + end;
-        let ghost_width = GHOST_WIDTH.min(width);
-        if self.tree.shown(GHOST) {
-            let height = height_of(&Key::Add, 44.0);
+        if ghost {
+            let (side, top) = tops[visible.len()];
+            let x = match side {
+                Side::Left => center - SPINE / 2.0 - column,
+                Side::Right => center + SPINE / 2.0,
+            };
             place(
                 &mut self.tree,
                 GHOST,
-                center - ghost_width / 2.0,
-                next,
-                ghost_width,
-                height,
-                None,
+                x,
+                body + top,
+                column,
+                ghost_height,
+                Some(side),
             );
-            next += height + ROW_GAP + 12.0;
         }
         if self.tree.shown(MARK) {
             let mark_width = MARK_WIDTH.min(width);
