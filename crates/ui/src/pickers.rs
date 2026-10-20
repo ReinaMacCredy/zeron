@@ -1918,10 +1918,27 @@ impl Pickers {
     fn apply_instances(&mut self, instances: Vec<ProviderInstance>, cx: &mut Context<Self>) {
         let previous = std::mem::take(&mut self.instances);
         self.instance_models.retain(|id, _| {
-            instances
-                .iter()
-                .any(|i| &i.id == id && previous.contains(i))
+            instances.iter().any(|i| {
+                &i.id == id
+                    && previous
+                        .iter()
+                        .any(|p| p.id == i.id && p.driver == i.driver && p.config == i.config)
+            })
         });
+        if self
+            .config
+            .instance_id
+            .as_ref()
+            .is_some_and(|id| !instances.iter().any(|i| &i.id == id))
+        {
+            self.config.instance_id = None;
+            self.config.model = None;
+            self.config.reasoning = None;
+            self.config.model_options = None;
+            if self.config.harness == Some(HarnessId::Acp) {
+                self.config.harness = None;
+            }
+        }
         self.instances = instances;
         self.catalog_rev += 1;
         self.prefetch_models(false, cx);
