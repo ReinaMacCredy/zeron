@@ -2137,6 +2137,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn screenshots_are_saved_under_a_fresh_name_and_never_through_a_symlink() {
         assert_eq!(
