@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    InterventionChip, ItemAnswer, LeadQuestion, NeedsYouInput, NeedsYouRow, QuestionState,
-    SettledBy, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
-    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    InterventionChip, ItemAnswer, LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheck,
+    NextCheckKind, QuestionState, SettledBy, SupervisorEventKind, SupervisorEventSummary,
+    SupervisorIntervention, SupervisorItem, SupervisorSettings, SupervisorSnapshot,
+    SupervisorState, SupervisorWake,
 };
 use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
@@ -29,7 +30,7 @@ const KEPT_HOLDS: usize = 200;
 /// Long enough for the run's coalesced doc commit to land the input or turn being refreshed for.
 const REFRESH_DELAY_MS: i64 = 500;
 const HOUR_MS: i64 = 60 * 60 * 1000;
-pub(crate) const WAKES_PER_HOUR: usize = 12;
+pub(crate) use zeron_proto::supervisor::WAKES_PER_HOUR;
 pub(crate) const MISSION_SILENT_MS: i64 = 30 * 60 * 1000;
 pub(crate) const LEAD_SILENT_MS: i64 = 10 * 60 * 1000;
 
@@ -164,6 +165,7 @@ struct Router {
     projections: Projections,
     refresh_at: Option<i64>,
     resources: Resources,
+    next_check: Option<NextCheck>,
 }
 
 struct State {
@@ -193,6 +195,7 @@ impl State {
             chat_id,
             state,
             waiting,
+            next_check: self.router.next_check.clone(),
             wakes: self
                 .file
                 .wakes
@@ -647,6 +650,10 @@ impl SupervisorStore {
         lock(&self.inner.state).router.projections = projections;
     }
 
+    pub(crate) fn set_next_check(&self, check: Option<NextCheck>) {
+        lock(&self.inner.state).router.next_check = check;
+    }
+
     pub(crate) fn publish(&self, chat_id: Option<String>, live: SupervisorState, waiting: usize) {
         let next = lock(&self.inner.state).snapshot(chat_id, live, waiting);
         self.inner.snapshot.send_if_modified(|snapshot| {
@@ -765,6 +772,18 @@ pub(crate) enum Stall {
 }
 
 impl Stall {
+    pub fn check(&self, at: i64) -> NextCheck {
+        let (kind, task_id) = match self {
+            Self::MissionSilent { task_id, .. } => (NextCheckKind::MissionSilent, task_id),
+            Self::LeadSilent { task_id, .. } => (NextCheckKind::LeadSilent, task_id),
+        };
+        NextCheck {
+            at: utc(at),
+            kind,
+            task_id: Some(task_id.clone()),
+        }
+    }
+
     pub fn key(&self) -> String {
         match self {
             Self::MissionSilent { task_id, since } => format!("silent:{task_id}:{since}"),
@@ -779,12 +798,14 @@ pub(crate) fn plan_stalls(
     now: i64,
     missions: &[MissionFacts],
     reported: impl Fn(&str) -> bool,
-) -> (Vec<Stall>, Option<i64>) {
+) -> (Vec<Stall>, Option<(i64, Stall)>) {
     let mut due = Vec::new();
-    let mut next: Option<i64> = None;
+    let mut next: Option<(i64, Stall)> = None;
     let mut consider = |stall: Stall, at: i64| {
         if at > now {
-            next = Some(next.map_or(at, |n| n.min(at)));
+            if next.as_ref().is_none_or(|(n, _)| at < *n) {
+                next = Some((at, stall));
+            }
         } else if !reported(&stall.key()) {
             due.push(stall);
         }
@@ -1437,7 +1458,7 @@ mod tests {
         ];
         for (name, facts, reported, stalls, next) in cases {
             let (due, deadline) = plan_stalls(now, &[facts], |_| reported);
-            assert_eq!((due, deadline), (stalls, next), "{name}");
+            assert_eq!((due, deadline.map(|(at, _)| at)), (stalls, next), "{name}");
         }
     }
 }

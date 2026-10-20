@@ -5,6 +5,7 @@ use crate::{UserInputAnswer, UserInputQuestion};
 
 pub const CHAT_PREFIX: &str = "supervisor-";
 pub const CHAT_TITLE: &str = "Supervisor";
+pub const WAKES_PER_HOUR: usize = 12;
 
 pub fn is_supervisor_chat(chat_id: &str) -> bool {
     chat_id.starts_with(CHAT_PREFIX)
@@ -239,6 +240,25 @@ pub struct SupervisorIntervention {
     pub chips: Vec<InterventionChip>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NextCheckKind {
+    MissionSilent,
+    LeadSilent,
+    Heartbeat,
+    HeldWake,
+    Resource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextCheck {
+    pub at: DateTime<Utc>,
+    pub kind: NextCheckKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupervisorSnapshot {
@@ -247,6 +267,8 @@ pub struct SupervisorSnapshot {
     pub state: SupervisorState,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub waiting: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check: Option<NextCheck>,
     #[serde(default)]
     pub wakes: Vec<SupervisorWake>,
     #[serde(default)]

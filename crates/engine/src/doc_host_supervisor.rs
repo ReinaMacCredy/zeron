@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use zeron_proto::supervisor::{
-    InputAsker, InterventionKind, InterventionTrigger, NeedsYouInput, Raiser,
-    SupervisorEventKind as Kind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
-    SupervisorState, SupervisorWake, WakeDelivery,
+    InputAsker, InterventionKind, InterventionTrigger, NeedsYouInput, NextCheck, NextCheckKind,
+    Raiser, SupervisorEventKind as Kind, SupervisorEventSummary, SupervisorIntervention,
+    SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
     Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskMode, TaskStep,
@@ -661,20 +661,28 @@ impl DocHost {
         let refresh = store.refresh_at();
         let Some(supervisor) = supervisor else {
             store.take_pending();
+            store.set_next_check(None);
             store.publish(None, SupervisorState::Off, 0);
             return refresh;
         };
         let missions: Vec<MissionFacts> = round.missions.values().cloned().collect();
-        let (stalls, mut next) = plan_stalls(now, &missions, |key| store.reported(key));
-        if let Some(at) = refresh {
-            next = Some(next.map_or(at, |n| n.min(at)));
-        }
+        let (stalls, stall_next) = plan_stalls(now, &missions, |key| store.reported(key));
+        let mut check = stall_next.map(|(at, stall)| stall.check(at));
+        let mut sooner = |at: i64, kind: NextCheckKind| {
+            if check.as_ref().is_none_or(|c| at < c.at.timestamp_millis()) {
+                check = Some(NextCheck {
+                    at: utc(at),
+                    kind,
+                    task_id: None,
+                });
+            }
+        };
         for stall in stalls {
             self.supervisor_event(stall_event(stall, &round.step_titles));
         }
         let missions_held = std::mem::take(&mut round.resources);
         if let Some(at) = self.supervise_resources(store, missions_held, &round.edges, now) {
-            next = Some(next.map_or(at, |n| n.min(at)));
+            sooner(at, NextCheckKind::Resource);
         }
         let settings = registry.supervisor_settings();
         let interval = i64::from(settings.heartbeat_minutes) * 60_000;
@@ -689,7 +697,7 @@ impl DocHost {
                     "Heartbeat".to_string(),
                 ));
             } else {
-                next = Some(next.map_or(due, |n| n.min(due)));
+                sooner(due, NextCheckKind::Heartbeat);
             }
         }
         let held = self
@@ -704,7 +712,7 @@ impl DocHost {
             )
             .await;
         if let Some(until) = held {
-            next = Some(next.map_or(until, |n| n.min(until)));
+            sooner(until, NextCheckKind::HeldWake);
         }
         let (state, waiting) = match sessions.session_status(&supervisor.id) {
             Some(session) if live(session.status) => (SupervisorState::Awake, 0),
@@ -714,6 +722,11 @@ impl DocHost {
             ),
             _ => (SupervisorState::Asleep, 0),
         };
+        let next = [refresh, check.as_ref().map(|c| c.at.timestamp_millis())]
+            .into_iter()
+            .flatten()
+            .min();
+        store.set_next_check(check);
         store.publish(Some(supervisor.id), state, waiting);
         next
     }
