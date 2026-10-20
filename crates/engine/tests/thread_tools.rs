@@ -1181,6 +1181,123 @@ async fn a_routed_role_runs_its_child_on_the_route_and_an_agent_choice_wins() {
 }
 
 #[tokio::test]
+async fn an_exhausted_route_follows_the_out_of_quota_policy() {
+    use zeron_engine::routing::{OutOfQuota, Role, RoleRoute};
+    let rig = routed_rig();
+    rig.core.registry.register(Arc::new(RecordingHarness {
+        id: HarnessId::Codex,
+        prompts: rig.prompts.clone(),
+        attachments: rig.attachments.clone(),
+        steers: rig.steers.clone(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: "noted",
+    }));
+    let config = zeron_proto::ChatConfig {
+        harness: HarnessId::ClaudeCode,
+        model: Some("claude-opus-5-5".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Ask,
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+    };
+    rig.core.workspace.set_chat_config("lead", &config).unwrap();
+    let set = |policy| {
+        let mut routing = rig.core.registry.routing_settings();
+        routing.roles.insert(
+            Role::Worker,
+            RoleRoute::Target(zeron_proto::RouteTarget {
+                harness: HarnessId::Codex,
+                model: Some("gpt-6-luna".into()),
+                reasoning: None,
+            }),
+        );
+        routing.out_of_quota = policy;
+        rig.core.registry.set_routing_settings(routing).unwrap();
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let reset = now + 3_600_000;
+    rig.core
+        .sessions
+        .quota()
+        .note_limit(HarnessId::Codex, Some(reset), now);
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let call = |task: &str, extra: serde_json::Value| {
+        let mut params =
+            serde_json::json!({ "ownerChatId": "lead", "task": task, "role": "worker" });
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        client.call(zeron_rpc::methods::DELEGATE_TASK, params)
+    };
+
+    set(OutOfQuota::Native);
+    let native = call("native job", serde_json::json!({})).await.unwrap();
+    assert_eq!(native["status"], "use_native");
+    assert_eq!(native["route"]["source"], "fell_back");
+    assert_eq!(native["route"]["resetsAt"], reset);
+    assert!(native.get("taskId").is_none(), "no child is created");
+
+    set(OutOfQuota::Ask);
+    let asked = call("ask job", serde_json::json!({})).await.unwrap_err();
+    assert!(asked.to_string().contains("quota_exhausted"), "{asked}");
+
+    let waited = call("wait job", serde_json::json!({ "quotaChoice": "wait" }))
+        .await
+        .unwrap();
+    assert_eq!(waited["status"], "queued");
+    let child = rig
+        .core
+        .workspace
+        .chat(waited["taskId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.config.unwrap().harness, HarnessId::Codex);
+    let route = child.delegation.unwrap().route.unwrap();
+    assert_eq!(route.wait_until, Some(reset + 15_000));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        prompts_with(&rig, "wait job").is_empty(),
+        "a waiting child does not start before the reset"
+    );
+    assert!(
+        rig.core
+            .resume_schedule
+            .snapshot()
+            .chats
+            .iter()
+            .all(|chat| chat.chat_id != child.id)
+    );
+
+    set(OutOfQuota::NextInList);
+    let mut routing = rig.core.registry.routing_settings();
+    routing.native = zeron_engine::routing::NativePolicy::Off;
+    routing.fallback = vec![zeron_proto::RouteTarget {
+        harness: HarnessId::ClaudeCode,
+        model: Some("claude-sonnet-5-5".into()),
+        reasoning: None,
+    }];
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    let next = call("next job", serde_json::json!({})).await.unwrap();
+    let child = rig
+        .core
+        .workspace
+        .chat(next["taskId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child.config.unwrap().model.as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    assert_eq!(child.delegation.unwrap().route.unwrap().source, "fell_back");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_unrouted_role_inherits_the_owner_as_today() {
     let rig = routed_rig();
     let lead = rig.core.workspace.chat("lead").unwrap().unwrap();

@@ -651,6 +651,7 @@ struct Inner {
     computer: Mutex<Option<Arc<ComputerRuntime>>>,
     device_hub: Mutex<Option<Arc<crate::device_hub::DeviceHub>>>,
     resume_schedule: OnceLock<crate::resume_schedule::ResumeSchedule>,
+    quota: Arc<crate::routing::quota::QuotaBook>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -904,6 +905,7 @@ impl SessionsEngine {
                 computer: Mutex::new(None),
                 device_hub: Mutex::new(None),
                 resume_schedule: OnceLock::new(),
+                quota: crate::routing::quota::QuotaBook::new(),
             }),
         }
     }
@@ -992,6 +994,25 @@ impl SessionsEngine {
     }
 
     /// Wire the turn-start listener (called once at engine assembly).
+    pub fn defer_start(&self, chat_id: &str, at: i64) -> bool {
+        self.inner
+            .resume_schedule
+            .get()
+            .map(|schedule| schedule.defer_start(chat_id, at))
+            .is_some()
+    }
+
+    pub fn deferred_until(&self, chat_id: &str) -> Option<i64> {
+        self.inner
+            .resume_schedule
+            .get()
+            .and_then(|schedule| schedule.deferred_until(chat_id))
+    }
+
+    pub fn quota(&self) -> &Arc<crate::routing::quota::QuotaBook> {
+        &self.inner.quota
+    }
+
     pub fn set_resume_schedule(&self, schedule: crate::resume_schedule::ResumeSchedule) {
         let _ = self.inner.resume_schedule.set(schedule);
     }
@@ -6975,6 +6996,7 @@ async fn drive_run(
 
         if let AgentEvent::UsageLimit { resets_at } = &event {
             turn_limit = Some(resets_at.or(turn_limit.flatten()));
+            inner.quota.note_limit(harness_id, *resets_at, now_ms());
         }
         if let AgentEvent::Done {
             status,

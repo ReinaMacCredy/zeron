@@ -39,6 +39,8 @@ pub struct DelegateTaskParams {
     pub chosen: Vec<crate::routing::Chosen>,
     #[serde(skip)]
     pub route: Option<zeron_proto::ChildRoute>,
+    #[serde(default)]
+    pub quota_choice: Option<crate::routing::quota::QuotaChoice>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -660,6 +662,9 @@ impl DocHost {
             ..QueuedMessage::new(anchor.clone(), prompt, self.inner.config.device_id.clone())
         })?;
         handle.publish_queue();
+        if self.defers(chat_id, params.route.as_ref()) {
+            return Ok(());
+        }
         self.drain_queue(&handle).await;
         if handle.queue_paused.load(Ordering::Acquire) && self.task_queued(chat_id, &anchor) {
             let _drain = handle.drain_lock.lock().await;
