@@ -1,8 +1,6 @@
 mod feed;
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
@@ -27,7 +25,7 @@ use zeron_rpc::methods;
 use crate::composer::Composer;
 use crate::home::MissionRow;
 use crate::icons::{self, icon};
-use crate::motion::{self, CubicBezier, MotionSpec, Tween};
+use crate::motion::{self, CubicBezier, Fold, MotionSpec, Tween, folded};
 use crate::pickers::Pickers;
 use crate::popover::{self, Loadable, Popup};
 use crate::settings::widgets;
@@ -900,39 +898,6 @@ fn model_label(chat: &Chat, cx: &App) -> Option<String> {
         model,
         cx,
     ))
-}
-
-struct Fold {
-    tween: Tween,
-    height: Rc<Cell<f32>>,
-}
-
-impl Fold {
-    fn at(open: bool, now: Instant) -> Self {
-        Self {
-            tween: Tween::at(if open { 1.0 } else { 0.0 }, now),
-            height: Rc::new(Cell::new(0.0)),
-        }
-    }
-
-    fn set(&mut self, open: bool, spec: MotionSpec, reduced: bool, now: Instant) {
-        let to = if open { 1.0 } else { 0.0 };
-        if self.tween.target() != to {
-            self.tween.retarget(to, spec, reduced, now);
-        }
-    }
-
-    fn value(&self, now: Instant) -> f32 {
-        self.tween.value_at(now)
-    }
-
-    fn moving(&self, now: Instant) -> bool {
-        !self.tween.settled_at(now)
-    }
-
-    fn gone(&self, now: Instant) -> bool {
-        !self.moving(now) && self.tween.target() == 0.0
-    }
 }
 
 fn run(from: f32, to: f32, spec: MotionSpec, reduced: bool, now: Instant) -> Tween {
@@ -4214,37 +4179,6 @@ fn arrive(
                 .inset_0(),
             )
         })
-        .into_any_element()
-}
-
-fn folded(id: String, fold: &Fold, now: Instant, body: impl IntoElement) -> AnyElement {
-    let probe = fold.height.clone();
-    let inner = div().relative().flex_none().w_full().child(body).child(
-        canvas(
-            move |bounds, _, _| {
-                let height = f32::from(bounds.size.height);
-                if (probe.get() - height).abs() > 0.5 {
-                    probe.set(height);
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .inset_0(),
-    );
-    if !fold.moving(now) {
-        return inner.into_any_element();
-    }
-    let value = fold.value(now);
-    div()
-        .id(SharedString::from(id))
-        .relative()
-        .flex_none()
-        .w_full()
-        .overflow_hidden()
-        .h(px(fold.height.get() * value))
-        .opacity(value)
-        .child(inner)
         .into_any_element()
 }
 
