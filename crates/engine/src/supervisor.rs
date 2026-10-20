@@ -601,6 +601,14 @@ impl SupervisorStore {
         Ok(answered)
     }
 
+    pub(crate) fn waits_on_person(&self, task_id: &str) -> bool {
+        lock(&self.inner.state)
+            .file
+            .items
+            .iter()
+            .any(|item| item.answer.is_none() && item.task_id.as_deref() == Some(task_id))
+    }
+
     pub(crate) fn item_open(&self, item_id: &str) -> bool {
         self.item(item_id).is_some_and(|item| item.answer.is_none())
     }

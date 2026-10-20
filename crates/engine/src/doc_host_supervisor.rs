@@ -561,7 +561,8 @@ impl DocHost {
             }
             let mut facts = MissionFacts {
                 task_id: task.id.clone(),
-                waiting_on_person: task.plan_pending && !own.is_empty(),
+                waiting_on_person: (task.plan_pending && !own.is_empty())
+                    || store.waits_on_person(&task.id),
                 lead: thread(&lead.id),
                 steps: Vec::new(),
                 failed: Vec::new(),
@@ -684,8 +685,32 @@ impl DocHost {
         if let Some(at) = refresh {
             next = Some(next.map_or(at, |n| n.min(at)));
         }
+        let holds = store.holds();
         for stall in stalls {
-            self.supervisor_event(stall_event(stall, &round.step_titles));
+            let mut event = stall_event(stall, &round.step_titles);
+            if event.summary.kind == Kind::MissionSilent {
+                event.detail.extend(
+                    holds
+                        .iter()
+                        .filter(|hold| {
+                            hold.resumed_at.is_none()
+                                && event.summary.task_id.as_deref() == Some(hold.task_id.as_str())
+                        })
+                        .map(|hold| {
+                            let title = round
+                                .step_titles
+                                .get(&hold.step_id)
+                                .map_or("", String::as_str);
+                            format!(
+                                "Step \"{}\" (taskStepId {}) is paused for {} until you resume it.",
+                                one_line(title, TITLE_CHARS),
+                                hold.step_id,
+                                hold.resource
+                            )
+                        }),
+                );
+            }
+            self.supervisor_event(event);
         }
         let missions_held = std::mem::take(&mut round.resources);
         if let Some(at) = self.supervise_resources(store, missions_held, &round.edges, now) {
