@@ -258,11 +258,6 @@ impl TasksPage {
         });
         let card_changes = cx.observe(&card, |_, _, cx| cx.notify());
         let settings_changes = cx.observe_global::<settings::SettingsStore>(|_, cx| cx.notify());
-        if std::env::var("ZERON_TASKS_VIEW").as_deref() == Ok("kanban") {
-            settings::update(settings::SavePolicy::Debounced, cx, |s| {
-                s.tasks_view = TasksView::Kanban;
-            });
-        }
         let mut page = Self {
             state,
             add,
@@ -1927,11 +1922,18 @@ impl TasksPage {
     }
 }
 
+pub(crate) fn tasks_view(cx: &gpui::App) -> TasksView {
+    if std::env::var("ZERON_TASKS_VIEW").as_deref() == Ok("kanban") {
+        return TasksView::Kanban;
+    }
+    settings::current(cx).tasks_view
+}
+
 impl Render for TasksPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let (open, done) = self.rows(cx);
-        let view = settings::current(cx).tasks_view;
+        let view = tasks_view(cx);
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
         let mut targets = std::mem::take(&mut *self.painted.borrow_mut());

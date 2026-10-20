@@ -1538,7 +1538,7 @@ impl Shell {
 
     pub(super) fn render_tasks_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let view = settings::current(cx).tasks_view;
+        let view = crate::tasks::tasks_view(cx);
         let thumb = motion::state_t(
             "tasks-view-thumb",
             view == settings::TasksView::Kanban,
