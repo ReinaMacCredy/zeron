@@ -10,6 +10,8 @@ If no agent is set up, the chip reads **No agents available**. Enable an install
 
 The compact picker is the default. It shows the current effort level in large type with the model name under it.
 
+![The compact model picker](models-compact-picker.jpg)
+
 - Drag the slider, or press Left and Right, to change the reasoning effort. Home and End pick the lowest and highest level. On a Mac trackpad, each level change gives a small haptic tick.
 - Click the bolt (**Fast mode**) or press F to turn fast mode on or off.
 - Click the model name, or press Down or Enter, to open the model list. Search covers every provider, and tabs jump to each provider's group, including **Starred**. Click a row's star, or press Cmd+Shift+F on the highlighted model, to add it to favorites.
@@ -18,6 +20,8 @@ The compact picker is the default. It shows the current effort level in large ty
 ## Full picker
 
 The full picker has a row of tabs along the top: a star for your favorites, a tab for agent profiles, then one tab per agent. Each agent's tab is followed by a tab for every extra instance you set up under **Add provider**, and ACP agents you added get tabs at the end. An instance's tab lists that instance's models, and picking one runs the chat on that instance. Search with **Search models…**. Click a row's star to add it to favorites. Cmd+1 to Cmd+9 pick the first nine rows.
+
+![The full model picker](models-full-picker.jpg)
 
 Below the list, the **Reasoning** card shows the current level. Press Down past the last model to reach it, then Left and Right to change the level. A bolt button on the card turns fast mode on or off for models that have it, and a reset button restores the default level and speed.
 

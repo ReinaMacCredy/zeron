@@ -4,6 +4,8 @@ The command palette finds threads, files, and commands from one search box. The 
 
 Press Cmd+K, or click **Search** at the top of the sidebar. Press Cmd+K again, press Escape, or click outside to close it. The search box reads **Search threads, commands and files…**.
 
+![The command palette](palette-all.jpg)
+
 Use the arrow keys to move, Enter to open the highlighted row, and Escape to close.
 
 ## Tabs
@@ -30,6 +32,8 @@ Opening a thread switches to it. Opening a file shows it in the right pane; a co
 ## Session switcher
 
 Hold Ctrl and press Tab to open the switcher: a row of cards for your sessions, most recently used first. The first press lands on the previous session. Keep holding Ctrl and press Tab again to move along (add Shift to go back), then release Ctrl to open the highlighted session. Press Escape to cancel, or click a card.
+
+![The Ctrl+Tab session switcher](palette-switcher.jpg)
 
 Each card shows the last view of that session, its title, project and device, and a status: **Working**, **Input**, **Failed**, or **Done**. When the right pane has focus, Ctrl+Tab cycles the right pane's tabs instead.
 

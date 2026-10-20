@@ -37,6 +37,8 @@ While a run is going, the send button's tooltip reads **Queue message**. What a 
 - **Queue** (the default) holds your message and sends it when the current turn ends.
 - **Steer** delivers it into the running turn right away. Some agents only take input between turns; with one of those, a caption under the composer says **This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes.**
 
+![Queued follow-ups above the composer](composer-queue.jpg)
+
 With Enter as the send key, Cmd+Enter does the opposite of the setting for one message.
 
 Queued messages wait in a tray above the composer. Drag a row to reorder, click **Edit** to change it in the composer (**Save to queue** or **Cancel**, or press Escape), or **Remove** it. Each row also has a button to deliver it early, and which one you get depends on the row and the agent:
@@ -80,6 +82,8 @@ In an open chat, a row under the composer carries, from left to right:
 - The permission chip, which sets how often the agent asks you. See [When an agent asks](zeron://docs/agent-questions).
 - The context ring, which shows how full the context window is. See [Compaction and context](zeron://docs/compaction).
 - The terminal button, which opens the terminal drawer. See [Terminal](zeron://docs/terminal).
+
+![The session footer under the composer](composer-footer.jpg)
 
 The checkout and branch labels are read-only: you pick them on the New chat canvas. Side chats leave out everything before the permission chip.
 

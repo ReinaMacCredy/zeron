@@ -23,6 +23,8 @@ Zeron remembers your choice for the next canvas.
 
 Chips above the composer show the target. Click the project chip to search your projects (**Search projects…**). At the bottom of that list, **New project** adds one (Cmd+Shift+N) and **Don't work in a project** switches to a projectless chat. The device chip picks which machine runs the agent (**This device** by default).
 
+![The new chat canvas with project, device, and checkout chips](new-chat-canvas.jpg)
+
 For a git project, chips below the composer pick the checkout and branch. Choose **Current checkout** to work in place, or **New worktree** to have Zeron cut a fresh worktree and branch for this chat.
 
 To choose the agent and model, see [Models and effort](zeron://docs/models-and-effort).
@@ -41,6 +43,8 @@ Above the composer, **New task**, **Mission Control** and **Running agents** are
 
 - **plan.md** or **Steps only** picks what the lead writes. **plan.md** is the default.
 - **Review plan first**, on by default, makes the lead wait for your approval before it runs any step.
+
+![Starting a mission from the new chat canvas](new-chat-mission.jpg)
 
 Type the mission and click **Start mission**, or press the send key. The first line becomes the task's title and the rest its notes. Zeron creates the task in the project you picked, starts its lead with the agent, model, effort and permissions shown in the composer, and opens the task's Mission Control page. Press Shift+Tab again (**⇧Tab: back to New task** under the composer) or click **New task** to go back to a chat.
 

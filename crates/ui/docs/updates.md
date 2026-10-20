@@ -26,6 +26,8 @@ From a terminal, `zeron update` checks and installs in one step, and `zeron upda
 
 On the new chat canvas, a small card at the bottom lists agent CLIs (Claude, Codex, and others) with an update, across your devices. Each row shows the installed and new version and an **Update** button, or **View steps** when Zeron cannot install that agent for you. While an update runs you can **Cancel** it, and a failed check offers **Check again**. A busy agent shows "Waiting for the current run" and updates once the run ends.
 
+![Agent updates waiting on the new chat canvas](updates-agent-card.jpg)
+
 When two or more updates are waiting, the app itself included, the card shows **Update all**. The dialog lists what will update; the app restarts last. Running threads are interrupted, so keep **Continue threads after restarts** checked to have them pick up again afterwards. Click **Update** to start.
 
 [Settings > Providers](zeron://settings/providers) sets each agent's **Update policy**: **Notify**, **Auto when idle**, or **Off**. Click **Check now** there to look for new versions.
@@ -39,6 +41,8 @@ This follows **Auto-resume after usage limits** in [Settings > Providers](zeron:
 ## What's new
 
 After an update, a card at the bottom of the sidebar names the release's headline feature. Click **See what's new** to open the **What's new?** dialog with that release's highlights, or click the **×** to dismiss the card. In the dialog, **View changelog** shows the **Changelog**: every release, newest first, each one expandable. **Got it** closes the dialog.
+
+![The What's new card](updates-whats-new-card.jpg)
 
 To open the changelog any time, choose **Zeron > What's New…** in the menu bar.
 
