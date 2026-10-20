@@ -27,6 +27,14 @@ const IMAGES: &[(&str, &[u8])] = &[
         "add-provider.jpg",
         include_bytes!("../assets/whats_new/add-provider.jpg"),
     ),
+    (
+        "mission-tree.jpg",
+        include_bytes!("../assets/whats_new/mission-tree.jpg"),
+    ),
+    (
+        "task-card-context.jpg",
+        include_bytes!("../assets/whats_new/task-card-context.jpg"),
+    ),
 ];
 
 pub struct Picture {

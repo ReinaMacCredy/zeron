@@ -9,7 +9,7 @@ hero = "mission-control.jpg"
 [[entry.features]]
 id = "mission-control"
 title = "Mission Control runs a task as a plan"
-description = "A lead agent breaks a task into steps and runs each one on its own thread. Approve the plan, edit steps, and follow every step from the mission strip."
+description = "A lead agent breaks a task into steps and runs each one on its own thread. Approve the plan, edit its steps, and follow every step as a tree on the Mission Control page and at the top of the lead's thread."
 image = "mission-control.jpg"
 details = "Press Shift+Tab in the composer to start a mission, or make a running chat its lead. The Missions widget on Home tracks them all."
 
@@ -52,12 +52,14 @@ description = "Drag unstarted steps into a new order, right-click a step for its
 id = "mission-tree"
 title = "Follow a mission as a tree"
 description = "The lead's strip draws each step on a branch as it starts, and Mission Control lays the steps around a spine with each step's token count. Click a step to open its thread in a drawer."
+image = "mission-tree.jpg"
 details = "The Supervisor's mission cards use the same tree."
 
 [[entry.features]]
 id = "task-card-context"
 title = "Start a task where it belongs"
 description = "A task's card starts it in a new chat, hands it to an existing thread, or runs it as a mission. Give a mission up to five chats to read, and its lead reads them before it plans."
+image = "task-card-context.jpg"
 
 [[entry.features]]
 id = "fold-mission-threads"
