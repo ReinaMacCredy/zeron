@@ -847,6 +847,16 @@ fn a_paste_under_the_threshold_stays_inline(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn a_long_paste_after_a_slash_command_stays_inline(cx: &mut gpui::TestAppContext) {
+    let (_dir, handle) = composer_focus_window(cx);
+    append(&handle, cx, "/review ");
+    let long = long_text(crate::attachments::PASTED_TEXT_MIN_CHARS);
+    paste_clipboard(&handle, cx, ClipboardItem::new_string(long.clone()));
+    assert!(staged_names(&handle, cx).is_empty());
+    assert_eq!(text(&handle, cx), format!("/review {long}"));
+}
+
+#[gpui::test]
 fn a_long_paste_copied_from_a_composer_stays_inline(cx: &mut gpui::TestAppContext) {
     let (_dir, handle) = composer_focus_window(cx);
     let long = long_text(crate::attachments::PASTED_TEXT_MIN_CHARS);
