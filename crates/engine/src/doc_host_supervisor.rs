@@ -29,6 +29,7 @@ use zeron_proto::supervisor::ResourceKey;
 const MAX_NAP: Duration = Duration::from_secs(60);
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const PATH_CHARS: usize = 200;
+const MERGE_RETRY_MS: i64 = 1_000;
 
 pub(crate) fn newest_supervisor<'a>(chats: &'a [Chat], device: &str) -> Option<&'a Chat> {
     chats
@@ -1159,10 +1160,7 @@ impl DocHost {
             .count();
         match plan {
             Flush::Merge(row) => {
-                let Some((_, earlier)) = held else {
-                    store.requeue(keep);
-                    return Some(now);
-                };
+                let earlier = held.map(|(_, earlier)| earlier).unwrap_or_default();
                 if keep.is_empty() {
                     store.merge(&row, Vec::new(), dropped);
                     return None;
@@ -1180,7 +1178,7 @@ impl DocHost {
                     None
                 } else {
                     store.requeue(keep);
-                    Some(now)
+                    Some(now + MERGE_RETRY_MS)
                 }
             }
             _ => {
