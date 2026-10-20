@@ -58,7 +58,7 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-fn tick<T: 'static>(
+pub(crate) fn tick<T: 'static>(
     secs: u64,
     cx: &mut Context<T>,
     on_tick: impl Fn(&mut T, &mut Context<T>) + 'static,
