@@ -986,6 +986,31 @@ impl EngineRpc {
         }
     }
 
+    pub(super) fn set_tree_watched(&self, chat_id: &str, watched: bool) -> Result<(), RpcError> {
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(failed)?
+            .ok_or_else(|| refused("No thread has that id"))?;
+        let root = self.doc_host.tree_of_chat(&chat).map_err(failed)?.root;
+        if zeron_proto::supervisor::is_supervisor_chat(&root)
+            || zeron_proto::voice::is_orchestrator_chat(&root)
+        {
+            return Err(refused(
+                "System threads and the threads they open are never a watched tree",
+            ));
+        }
+        self.supervisor_store()?
+            .set_tree_watched(&root, watched)
+            .map_err(failed)
+    }
+
+    pub(super) fn set_watch_everything(&self, on: bool) -> Result<(), RpcError> {
+        self.supervisor_store()?
+            .set_watch_everything(on)
+            .map_err(failed)
+    }
+
     pub(super) fn set_mission_supervised(
         &self,
         task_id: &str,

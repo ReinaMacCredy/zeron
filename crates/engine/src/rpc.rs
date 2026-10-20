@@ -1139,6 +1139,10 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     SetMissionSupervised { task_id: String, supervised: bool },
     #[serde(rename_all = "camelCase")]
+    SetTreeWatched { root_chat_id: String, watched: bool },
+    #[serde(rename_all = "camelCase")]
+    SetWatchEverything { on: bool },
+    #[serde(rename_all = "camelCase")]
     EscalateTask {
         task_id: String,
         #[serde(default)]
@@ -2543,6 +2547,11 @@ impl EngineRpc {
                 task_id,
                 supervised,
             } => self.set_mission_supervised(&task_id, supervised),
+            MutateParams::SetTreeWatched {
+                root_chat_id,
+                watched,
+            } => self.set_tree_watched(&root_chat_id, watched),
+            MutateParams::SetWatchEverything { on } => self.set_watch_everything(on),
             MutateParams::EscalateTask {
                 task_id,
                 from_chat_id,

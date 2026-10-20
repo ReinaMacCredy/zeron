@@ -3809,6 +3809,141 @@ async fn a_wake_into_a_supervisor_the_person_stopped_waits_for_their_next_messag
     rig.core.shutdown().await;
 }
 
+fn asks_from(snapshot: &zeron_proto::supervisor::SupervisorSnapshot) -> Vec<String> {
+    let mut asks: Vec<String> = snapshot
+        .needs_you
+        .iter()
+        .filter_map(|row| match row {
+            zeron_proto::supervisor::NeedsYouRow::Input(input) => {
+                assert_eq!(input.asker, zeron_proto::supervisor::InputAsker::Thread);
+                Some(input.chat_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    asks.sort();
+    asks
+}
+
+#[tokio::test]
+async fn a_watched_trees_question_reaches_the_supervisor_and_an_unwatched_trees_does_not() {
+    let rig = asking_rig(false);
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let zeron_rpc::RpcReply::Value(ensured) = call(
+        zeron_rpc::methods::ENSURE_SUPERVISOR,
+        serde_json::json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+    )
+    .await
+    .unwrap() else {
+        panic!("a chat id");
+    };
+    assert!(ensured["chatId"].as_str().is_some());
+    let workspace = &rig.core.workspace;
+    workspace.rename_chat("lead", "Shop backend").unwrap();
+    workspace
+        .create_chat("plain-b", Some("space-tt"), None, None, None)
+        .unwrap();
+    for (child, parent) in [("child-a", "lead"), ("child-b", "plain-b")] {
+        workspace
+            .create_chat_from(child, Some("space-tt"), None, None, None, Some(parent))
+            .unwrap();
+        workspace
+            .rename_chat(child, &format!("Ask {child}"))
+            .unwrap();
+    }
+
+    mutate(serde_json::json!({ "op": "setTreeWatched", "rootChatId": "child-a", "watched": true }))
+        .await
+        .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| !s.watched_roots.is_empty()).await;
+    assert_eq!(
+        snapshot.watched_roots,
+        ["lead"],
+        "a child names its tree's root"
+    );
+    assert!(!snapshot.watch_everything);
+
+    queue_run(
+        &rig.core,
+        "child-b",
+        "cmd-b",
+        "msg-b",
+        "please ask about the plan",
+    );
+    wait_for(
+        || pending_request(&rig.core, "child-b").is_some(),
+        "the unwatched tree's question",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    queue_run(
+        &rig.core,
+        "child-a",
+        "cmd-a",
+        "msg-a",
+        "please ask about the plan",
+    );
+    wait_for(
+        || pending_request(&rig.core, "child-a").is_some(),
+        "the watched tree's question",
+    )
+    .await;
+    let request = pending_request(&rig.core, "child-a").unwrap();
+    let snapshot =
+        supervisor_until(&rpc, |s| !s.wakes.is_empty() && !asks_from(s).is_empty()).await;
+    assert_eq!(asks_from(&snapshot), ["child-a"]);
+    let [event] = snapshot.wakes[0].events.as_slice() else {
+        panic!("one event in the wake: {:?}", snapshot.wakes)
+    };
+    assert_eq!(
+        event.kind,
+        zeron_proto::supervisor::SupervisorEventKind::NeedsYou
+    );
+    assert_eq!(event.key, format!("input:child-a:{request}"));
+    assert_eq!(event.root_chat_id.as_deref(), Some("lead"));
+    assert_eq!(event.task_id, None);
+    wait_for(
+        || !prompts_with(&rig, "Supervisor wake").is_empty(),
+        "the Supervisor's wake",
+    )
+    .await;
+    let wake = prompts_with(&rig, "Supervisor wake").remove(0);
+    assert!(
+        wake.contains(
+            "1. Thread \"Ask child-a\" asks a question · tree \"Shop backend\" (root thread lead) · thread child-a"
+        ),
+        "{wake}"
+    );
+    assert!(!wake.contains("child-b"), "{wake}");
+
+    mutate(serde_json::json!({ "op": "setTreeWatched", "rootChatId": "lead", "watched": false }))
+        .await
+        .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| {
+        s.watched_roots.is_empty() && asks_from(s).is_empty()
+    })
+    .await;
+    assert!(!snapshot.watch_everything);
+
+    mutate(serde_json::json!({ "op": "setWatchEverything", "on": true }))
+        .await
+        .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| asks_from(s).len() == 2).await;
+    assert!(snapshot.watch_everything);
+    assert_eq!(asks_from(&snapshot), ["child-a", "child-b"]);
+
+    mutate(serde_json::json!({ "op": "setWatchEverything", "on": false }))
+        .await
+        .unwrap();
+    supervisor_until(&rpc, |s| !s.watch_everything && asks_from(s).is_empty()).await;
+    rig.core.shutdown().await;
+}
+
 struct GatedHarness {
     prompts: Arc<Mutex<Vec<String>>>,
     gates: std::collections::HashMap<&'static str, tokio::sync::watch::Receiver<bool>>,

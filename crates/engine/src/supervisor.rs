@@ -79,6 +79,7 @@ impl SupervisorEvent {
                 task_id: task_id.map(str::to_owned),
                 step_id: None,
                 thread_id: None,
+                root_chat_id: None,
                 label,
                 at: Utc::now(),
             },
@@ -91,6 +92,10 @@ impl SupervisorEvent {
 
     fn task_id(&self) -> Option<&str> {
         self.summary.task_id.as_deref()
+    }
+
+    fn root(&self) -> Option<&str> {
+        self.summary.root_chat_id.as_deref()
     }
 }
 
@@ -154,6 +159,10 @@ struct SupervisorFile {
     #[serde(default)]
     unwatched: BTreeSet<String>,
     #[serde(default)]
+    watched_roots: BTreeSet<String>,
+    #[serde(default)]
+    watch_everything: bool,
+    #[serde(default)]
     items: Vec<SupervisorItem>,
     #[serde(default)]
     interventions: Vec<InterventionRecord>,
@@ -177,6 +186,7 @@ struct Router {
     held: Option<(String, Vec<SupervisorEvent>)>,
     projections: Projections,
     refresh_at: Option<i64>,
+    refresh_then: Option<i64>,
     resources: Resources,
     next_check: Option<NextCheck>,
 }
@@ -218,6 +228,8 @@ impl State {
                 .cloned()
                 .collect(),
             unwatched: self.file.unwatched.iter().cloned().collect(),
+            watched_roots: self.file.watched_roots.iter().cloned().collect(),
+            watch_everything: self.file.watch_everything,
             needs_you,
             questions: projections.questions.clone(),
             interventions: self
@@ -404,13 +416,21 @@ impl SupervisorStore {
         lock(&self.inner.state).file.unwatched.contains(task_id)
     }
 
+    pub(crate) fn watches_tree(&self, root: &str) -> bool {
+        let state = lock(&self.inner.state);
+        state.file.watch_everything || state.file.watched_roots.contains(root)
+    }
+
+    pub(crate) fn watches_any_tree(&self) -> bool {
+        let state = lock(&self.inner.state);
+        state.file.watch_everything || !state.file.watched_roots.is_empty()
+    }
+
     pub(crate) fn offer(&self, event: SupervisorEvent) {
         {
             let mut state = lock(&self.inner.state);
             let key = &event.summary.key;
-            if event
-                .task_id()
-                .is_some_and(|task| state.file.unwatched.contains(task))
+            if !state.file.keeps(&event)
                 || state.router.reported.contains(key)
                 || state.router.pending.iter().any(|e| &e.summary.key == key)
             {
@@ -432,24 +452,40 @@ impl SupervisorStore {
         task_id: &str,
         supervised: bool,
     ) -> Result<(), EngineError> {
+        self.change_watches(|file| match supervised {
+            true => file.unwatched.remove(task_id),
+            false => file.unwatched.insert(task_id.to_string()),
+        })
+    }
+
+    pub(crate) fn set_tree_watched(&self, root: &str, watched: bool) -> Result<(), EngineError> {
+        self.change_watches(|file| match watched {
+            true => file.watched_roots.insert(root.to_string()),
+            false => file.watched_roots.remove(root),
+        })
+    }
+
+    pub(crate) fn set_watch_everything(&self, on: bool) -> Result<(), EngineError> {
+        self.change_watches(|file| {
+            let changed = file.watch_everything != on;
+            file.watch_everything = on;
+            changed
+        })
+    }
+
+    fn change_watches(
+        &self,
+        change: impl FnOnce(&mut SupervisorFile) -> bool,
+    ) -> Result<(), EngineError> {
         let mut state = lock(&self.inner.state);
         let mut file = state.file.clone();
-        let changed = if supervised {
-            file.unwatched.remove(task_id)
-        } else {
-            file.unwatched.insert(task_id.to_string())
-        };
-        if !changed {
+        if !change(&mut file) {
             return Ok(());
         }
         persist_json(&self.inner.path, &file)?;
         state.file = file;
-        if !supervised {
-            state
-                .router
-                .pending
-                .retain(|event| event.task_id() != Some(task_id));
-        }
+        let State { file, router } = &mut *state;
+        router.pending.retain(|event| file.keeps(event));
         drop(state);
         self.mark_stale();
         Ok(())
@@ -732,9 +768,11 @@ impl SupervisorStore {
     pub(crate) fn mark_stale(&self) {
         let at = Utc::now().timestamp_millis() + REFRESH_DELAY_MS;
         {
-            let mut state = lock(&self.inner.state);
-            let due = state.router.refresh_at.map_or(at, |due| due.min(at));
-            state.router.refresh_at = Some(due);
+            let router = &mut lock(&self.inner.state).router;
+            match router.refresh_at {
+                Some(due) if due < at => router.refresh_then = Some(at),
+                _ => router.refresh_at = Some(at),
+            }
         }
         let (chat_id, live, waiting) = {
             let snapshot = self.inner.snapshot.borrow();
@@ -750,9 +788,10 @@ impl SupervisorStore {
 
     pub(crate) fn take_refresh(&self, now: i64) -> bool {
         let mut state = lock(&self.inner.state);
-        let due = state.router.refresh_at.is_some_and(|at| at <= now);
+        let router = &mut state.router;
+        let due = router.refresh_at.is_some_and(|at| at <= now);
         if due {
-            state.router.refresh_at = None;
+            router.refresh_at = router.refresh_then.take().filter(|then| *then > now);
         }
         due
     }
@@ -783,11 +822,24 @@ impl SupervisorStore {
     }
 }
 
+impl SupervisorFile {
+    /// An unwatched mission stays unwatched under Watch everything: the person turned it off by name.
+    fn keeps(&self, event: &SupervisorEvent) -> bool {
+        match (event.task_id(), event.root()) {
+            (Some(task), _) => !self.unwatched.contains(task),
+            (None, Some(root)) => self.watch_everything || self.watched_roots.contains(root),
+            (None, None) => true,
+        }
+    }
+}
+
 fn empty_file() -> SupervisorFile {
     SupervisorFile {
         version: STORE_VERSION,
         wakes: Vec::new(),
         unwatched: BTreeSet::new(),
+        watched_roots: BTreeSet::new(),
+        watch_everything: false,
         items: Vec::new(),
         interventions: Vec::new(),
         holds: Vec::new(),

@@ -623,6 +623,28 @@ pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<Th
     None
 }
 
+/// A sidechat or a fork roots its own tree: neither link makes it a child.
+pub fn tree_path<'a>(
+    chat: &'a Chat,
+    chats: &'a [Chat],
+    tasks: &[Task],
+    steps: &[TaskStep],
+) -> Vec<&'a Chat> {
+    let mut path = vec![chat];
+    while let Some(parent) = path
+        .last()
+        .and_then(|node| thread_link(node, tasks, steps))
+        .filter(|link| matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom))
+        .and_then(|link| chats.iter().find(|chat| chat.id == link.parent))
+    {
+        if path.iter().any(|node| node.id == parent.id) {
+            break;
+        }
+        path.push(parent);
+    }
+    path
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStep {
