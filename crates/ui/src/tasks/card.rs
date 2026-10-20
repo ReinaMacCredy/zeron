@@ -915,6 +915,9 @@ impl TaskCard {
     }
 
     fn pick_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.task_id().map(str::to_owned) else {
+            return;
+        };
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -928,14 +931,14 @@ impl TaskCard {
                 if let Ok(Ok(Some(paths))) = picked
                     && let Some(path) = paths.into_iter().next()
                 {
-                    card.run_in_folder(path.to_string_lossy().into_owned(), cx);
+                    card.run_in_folder(&task_id, path.to_string_lossy().into_owned(), cx);
                 }
             })
             .ok();
         }));
     }
 
-    fn run_in_folder(&mut self, path: String, cx: &mut Context<Self>) {
+    fn run_in_folder(&mut self, task_id: &str, path: String, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(device_id) = state.local_device_id.clone() else {
             return;
@@ -947,6 +950,9 @@ impl TaskCard {
                 space.device_id == device_id && crate::pickers::same_folder_path(&space.path, &path)
             })
             .map(|space| space.id.clone());
+        let Some(open) = self.open.as_mut().filter(|open| open.task_id == task_id) else {
+            return;
+        };
         let space_id = existing.unwrap_or_else(|| {
             let space_id = uuid::Uuid::new_v4().to_string();
             cx.emit(TaskCardEvent::CreateSpace {
@@ -956,10 +962,8 @@ impl TaskCard {
             });
             space_id
         });
-        if let Some(open) = self.open.as_mut() {
-            open.run_in = Some(Some(space_id));
-            open.folder = Some(path);
-        }
+        open.run_in = Some(Some(space_id));
+        open.folder = Some(path);
         cx.notify();
     }
 
