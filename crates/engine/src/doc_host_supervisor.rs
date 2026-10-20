@@ -7,7 +7,7 @@ use zeron_proto::supervisor::{
     SupervisorIntervention, SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
-    Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskMode, TaskPatch, TaskStep,
+    Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskPatch, TaskStep,
     UserInputQuestion,
 };
 
@@ -83,9 +83,7 @@ impl Observed {
     }
 
     fn missions_done(&mut self, tasks: &[Task]) -> Vec<Task> {
-        let started = |task: &&Task| {
-            task.mode == TaskMode::Orchestrated && task.chat_id.is_some() && !task.deleted
-        };
+        let started = |task: &&Task| task.has_plan() && !task.deleted;
         let open_now: HashSet<String> = tasks
             .iter()
             .filter(started)
@@ -202,7 +200,7 @@ impl DocHost {
     fn hosts_mission(&self, workspace: &WorkspaceHost, task_id: &str) -> bool {
         workspace
             .task(task_id)
-            .filter(|task| task.mode == TaskMode::Orchestrated && !task.deleted)
+            .filter(|task| task.has_plan() && !task.deleted)
             .and_then(|task| task.chat_id)
             .and_then(|lead| workspace.chat(&lead).ok().flatten())
             .is_some_and(|lead| lead.device_id == self.device_id() && !lead.archived)
@@ -254,15 +252,7 @@ impl DocHost {
         let task_id = match &step {
             Some(step) => step.task_id.clone(),
             None => {
-                let led = workspace
-                    .watch_tasks()
-                    .borrow()
-                    .iter()
-                    .find(|task| {
-                        task.completed_at.is_none()
-                            && task.mode == TaskMode::Orchestrated
-                            && task.chat_id.as_deref() == Some(&asker.id)
-                    })
+                let led = zeron_proto::plan_of_chat(&workspace.watch_tasks().borrow(), &asker.id)
                     .map(|task| task.id.clone());
                 let Some(task_id) = led else {
                     return;
@@ -356,12 +346,7 @@ impl DocHost {
         thread: &str,
     ) -> Option<(Task, Vec<TaskStep>)> {
         let tasks = workspace.watch_tasks().borrow().clone();
-        if let Some(task) = tasks.iter().find(|task| {
-            task.mode == TaskMode::Orchestrated
-                && !task.deleted
-                && task.completed_at.is_none()
-                && task.chat_id.as_deref() == Some(thread)
-        }) {
+        if let Some(task) = zeron_proto::plan_of_chat(&tasks, thread) {
             let steps = workspace.task_steps_of(&task.id);
             return Some((task.clone(), steps));
         }
@@ -635,7 +620,7 @@ impl DocHost {
         let mut step_titles = HashMap::new();
         let mut resources = Vec::new();
         for task in tasks {
-            if task.mode != TaskMode::Orchestrated
+            if !task.has_plan()
                 || task.deleted
                 || task.completed_at.is_some()
                 || store.is_unwatched(&task.id)

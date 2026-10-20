@@ -437,7 +437,7 @@ impl EngineRpc {
 
     fn watched_mission(&self, task_id: &str) -> Result<(zeron_proto::Task, String), RpcError> {
         let task = self.task_or_refuse(task_id)?;
-        if task.mode != zeron_proto::TaskMode::Orchestrated {
+        if !task.has_plan() {
             return Err(refused("That task is not a Mission Control mission"));
         }
         if self.supervisor_store()?.is_unwatched(&task.id) {

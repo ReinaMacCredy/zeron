@@ -347,6 +347,54 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     );
     assert_eq!(core.workspace.task("t6").unwrap().chat_id, None);
     assert_eq!(prompts.lock().unwrap().len(), 4);
+    let refusal = |reply: Result<RpcReply, zeron_rpc::RpcError>| match reply {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("a second open plan on one chat is refused"),
+    };
+    mutate(json!({ "op": "assignTask", "taskId": "t6", "chatId": "talk" }))
+        .await
+        .unwrap();
+    let err = refusal(
+        mutate(json!({
+            "op": "planSteps", "taskId": "t6", "fromChatId": "talk",
+            "steps": [{ "title": "Build the API" }],
+        }))
+        .await,
+    );
+    assert!(err.contains("already leads a mission"), "{err}");
+    assert!(
+        core.workspace.task_steps_of("t6").is_empty(),
+        "a refused plan writes no steps"
+    );
+    assert_eq!(
+        core.workspace.task("t6").unwrap().mode,
+        zeron_proto::TaskMode::Single
+    );
+    mutate(json!({ "op": "createTask", "taskId": "t7", "title": "Shop admin" }))
+        .await
+        .unwrap();
+    mutate(json!({ "op": "updateTask", "taskId": "t7", "patch": { "mode": "orchestrated" } }))
+        .await
+        .unwrap();
+    let err = refusal(
+        mutate(json!({ "op": "updateTask", "taskId": "t7", "patch": { "chatId": "talk" } })).await,
+    );
+    assert!(err.contains("already leads a mission"), "{err}");
+    assert_eq!(core.workspace.task("t7").unwrap().chat_id, None);
+    mutate(json!({ "op": "updateTask", "taskId": "t5", "patch": { "completed": true } }))
+        .await
+        .unwrap();
+    mutate(json!({ "op": "updateTask", "taskId": "t7", "patch": { "chatId": "talk" } }))
+        .await
+        .unwrap();
+    let err = refusal(
+        mutate(json!({ "op": "updateTask", "taskId": "t5", "patch": { "completed": false } }))
+            .await,
+    );
+    assert!(
+        err.contains("already leads a mission"),
+        "reopening a done plan on a chat that leads another: {err}"
+    );
 
     let unapproved = core.workspace.task("t2").unwrap();
     assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);

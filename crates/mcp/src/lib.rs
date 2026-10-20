@@ -30,7 +30,7 @@ use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
     AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId, PermissionMode,
-    ReasoningLevel, Session, Space, StepStatus, Task, TaskMode, TaskStep, UserInputAnswer,
+    ReasoningLevel, Session, Space, StepStatus, Task, TaskStep, UserInputAnswer,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -2048,7 +2048,7 @@ impl ThreadTools {
                     .iter()
                     .filter(|task| include_done || task.completed_at.is_none())
                     .collect();
-                let steps = match tasks.iter().any(|task| task.mode == TaskMode::Orchestrated) {
+                let steps = match tasks.iter().any(|task| task.has_plan()) {
                     true => self.step_statuses().await?,
                     false => Vec::new(),
                 };
@@ -3379,7 +3379,7 @@ fn error(id: Value, code: i64, message: String) -> Value {
 }
 
 fn add_plan(row: &mut Value, task: &Task, steps: &[(TaskStep, StepStatus)], whole: bool) {
-    if task.mode != TaskMode::Orchestrated {
+    if !task.has_plan() {
         return;
     }
     let own: Vec<&(TaskStep, StepStatus)> = steps

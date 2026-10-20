@@ -10,8 +10,8 @@ use gpui::{
 };
 use zeron_proto::supervisor::NeedsYouRow;
 use zeron_proto::{
-    ChatIndicator, PlanProgress, StepStatus, TaskMode, TaskPatch, TaskStatus, plan_progress,
-    step_status, task_status,
+    ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, plan_progress, step_status,
+    task_status,
 };
 
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
@@ -177,7 +177,7 @@ struct Row {
 
 impl Row {
     fn orchestrated(&self) -> bool {
-        self.task.mode == TaskMode::Orchestrated && self.linked.is_some()
+        self.task.has_plan() && self.linked.is_some()
     }
 
     fn marks(&self) -> Vec<Brand> {
@@ -1445,7 +1445,7 @@ impl TasksPage {
 
 /// A deleted lead leaves the mode without a lead, so the card starts it again.
 pub(crate) fn has_lead(chats: &[zeron_proto::Chat], task: &zeron_proto::Task) -> bool {
-    task.mode == TaskMode::Orchestrated && linked_chat(chats, task).is_some()
+    task.has_plan() && linked_chat(chats, task).is_some()
 }
 
 pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {
@@ -1540,13 +1540,8 @@ pub(crate) fn mission_thread(
     chat_id: &str,
     now: DateTime<Utc>,
 ) -> Option<MissionThread> {
-    let mission = |task: &&zeron_proto::Task| task.mode == TaskMode::Orchestrated && !task.deleted;
-    let lead = state
-        .tasks
-        .iter()
-        .filter(mission)
-        .find(|task| task.chat_id.as_deref() == Some(chat_id));
-    let (task, step_id) = match lead {
+    let mission = |task: &&zeron_proto::Task| task.has_plan() && !task.deleted;
+    let (task, step_id) = match plan_led_by(&state.tasks, chat_id) {
         Some(task) => (task, None),
         None => state
             .task_steps
@@ -1574,6 +1569,21 @@ pub(crate) fn mission_thread(
         title: task.title.clone(),
         role,
         progress: plan.progress,
+    })
+}
+
+/// The open plan, else the one that finished last, so a done lead keeps its strip.
+pub(crate) fn plan_led_by<'a>(
+    tasks: &'a [zeron_proto::Task],
+    chat_id: &str,
+) -> Option<&'a zeron_proto::Task> {
+    zeron_proto::plan_of_chat(tasks, chat_id).or_else(|| {
+        tasks
+            .iter()
+            .filter(|task| {
+                !task.deleted && task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
+            })
+            .max_by_key(|task| task.completed_at)
     })
 }
 

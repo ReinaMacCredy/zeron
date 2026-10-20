@@ -11,8 +11,7 @@ use zeron_proto::change_request_assessment::{CiState, check_failed, check_status
 use zeron_proto::{
     ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
     ChangeRequestReviewDecision, Chat, ChatIndicator, GitActivity, GitActivityRequest,
-    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskMode,
-    TaskStatus,
+    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskStatus,
 };
 use zeron_rpc::methods;
 
@@ -707,9 +706,7 @@ pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionR
     let mut tasks: Vec<&zeron_proto::Task> = state
         .tasks
         .iter()
-        .filter(|task| {
-            task.mode == TaskMode::Orchestrated && !task.deleted && task.completed_at.is_none()
-        })
+        .filter(|task| task.has_plan() && !task.deleted && task.completed_at.is_none())
         .collect();
     tasks.sort_by(|a, b| {
         (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
@@ -728,7 +725,7 @@ pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<Missi
         .tasks
         .iter()
         .filter(|task| {
-            task.mode == TaskMode::Orchestrated
+            task.has_plan()
                 && !task.deleted
                 && task
                     .completed_at

@@ -546,11 +546,7 @@ fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
     if is_supervisor_chat(chat_id) {
         return "Supervisor".into();
     }
-    if let Some(task) = state
-        .tasks
-        .iter()
-        .find(|task| task.chat_id.as_deref() == Some(chat_id))
-    {
+    if let Some(task) = crate::tasks::plan_led_by(&state.tasks, chat_id) {
         return format!("Lead · {}", task.title);
     }
     if let Some(step) = state
@@ -649,11 +645,7 @@ fn wakes_this_hour(wakes: &[SupervisorWake], now: DateTime<Utc>) -> usize {
 }
 
 fn target_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
-    if state
-        .tasks
-        .iter()
-        .any(|task| task.chat_id.as_deref() == Some(chat_id))
-    {
+    if crate::tasks::plan_led_by(&state.tasks, chat_id).is_some() {
         return "the Lead".into();
     }
     let step = state

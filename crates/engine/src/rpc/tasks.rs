@@ -339,19 +339,53 @@ impl EngineRpc {
     }
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
-        if let Some(context) = &patch.context {
+        let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
+        if patch.context.is_some() || leads {
             let task = self.task_or_refuse(task_id)?;
-            if task.mode == TaskMode::Orchestrated && task.chat_id.is_some() {
-                return Err(refused(
-                    "The chats a mission reads are fixed once it starts; write to its lead instead",
-                ));
+            if let Some(context) = &patch.context {
+                if task.has_plan() {
+                    return Err(refused(
+                        "The chats a mission reads are fixed once it starts; write to its lead instead",
+                    ));
+                }
+                self.check_context_chats(context)?;
             }
-            self.check_context_chats(context)?;
+            if leads {
+                self.check_one_plan(&task, patch)?;
+            }
         }
         match self.workspace.update_task(task_id, patch).map_err(failed)? {
             true => Ok(()),
             false => Err(refused("Task no longer exists")),
         }
+    }
+
+    fn check_one_plan(&self, task: &Task, patch: &TaskPatch) -> Result<(), RpcError> {
+        let mut after = task.clone();
+        if let Some(chat_id) = &patch.chat_id {
+            after.chat_id = chat_id.clone();
+        }
+        if let Some(mode) = patch.mode {
+            after.mode = mode;
+        }
+        if let Some(completed) = patch.completed {
+            after.completed_at = completed.then(chrono::Utc::now);
+        }
+        let Some(chat_id) = after
+            .chat_id
+            .as_deref()
+            .filter(|id| after.is_open_plan_of(id))
+        else {
+            return Ok(());
+        };
+        let tasks = self.workspace.read_tasks().map_err(failed)?;
+        if tasks
+            .iter()
+            .any(|other| other.id != task.id && other.is_open_plan_of(chat_id))
+        {
+            return Err(refused("This chat already leads a mission"));
+        }
+        Ok(())
     }
 
     fn check_context_chats(&self, context: &[String]) -> Result<(), RpcError> {
@@ -510,21 +544,6 @@ impl EngineRpc {
         if chat.device_id != self.doc_host.device_id() {
             return Err(refused("Assign the task to a thread on this device"));
         }
-        if lead.is_some()
-            && self
-                .workspace
-                .read_tasks()
-                .map_err(failed)?
-                .iter()
-                .any(|other| {
-                    other.id != task_id
-                        && other.completed_at.is_none()
-                        && other.mode == TaskMode::Orchestrated
-                        && other.chat_id.as_deref() == Some(chat_id)
-                })
-        {
-            return Err(refused("This chat already leads a mission"));
-        }
         let send = send || lead.is_some();
         if send && from_chat_id == Some(chat_id) {
             return Err(refused("A thread cannot send a task to itself"));
@@ -633,6 +652,14 @@ impl EngineRpc {
     ) -> Result<Vec<String>, RpcError> {
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id, "writes its plan")?;
+        let mode = (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated);
+        self.check_one_plan(
+            &task,
+            &TaskPatch {
+                mode,
+                ..Default::default()
+            },
+        )?;
         let resources = resources
             .map(|keys| crate::supervisor_resources::checked_keys(&keys))
             .transpose()
@@ -681,7 +708,7 @@ impl EngineRpc {
             .plan_task_steps(task_id, &steps)
             .map_err(failed)?;
         let patch = TaskPatch {
-            mode: (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated),
+            mode,
             plan: overview,
             resources,
             images: (images != task.images).then_some(images),
