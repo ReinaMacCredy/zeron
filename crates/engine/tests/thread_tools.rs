@@ -1216,6 +1216,129 @@ async fn a_review_child_skips_routing() {
 }
 
 #[tokio::test]
+async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
+    let rig = routed_rig();
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move {
+            match zeron_rpc::RpcService::handle(&*rpc, method, params).await {
+                Ok(zeron_rpc::RpcReply::Value(value)) => value,
+                Ok(_) => panic!("a value"),
+                Err(err) => panic!("{method}: {err}"),
+            }
+        }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let step_titled = |task: &str, title: &str| {
+        rig.core
+            .workspace
+            .task_steps_of(task)
+            .into_iter()
+            .find(|step| step.title == title)
+            .unwrap_or_else(|| panic!("step {title}"))
+    };
+    for (task, lead, same_agents) in [("t1", "lead-1", false), ("t2", "lead-2", true)] {
+        mutate(serde_json::json!({ "op": "createTask", "taskId": task, "title": "Ship it" })).await;
+        mutate(serde_json::json!({
+            "op": "startTask", "taskId": task, "chatId": lead, "spaceId": "space-tt",
+            "orchestrate": true, "sameAgents": same_agents,
+        }))
+        .await;
+        mutate(serde_json::json!({
+            "op": "planSteps", "taskId": task, "fromChatId": lead,
+            "steps": [
+                { "title": "Check the API", "role": "test" },
+                { "title": "Write the docs", "role": "worker" },
+            ],
+        }))
+        .await;
+    }
+    let bad = zeron_rpc::RpcService::handle(
+        &*rpc,
+        zeron_rpc::methods::MUTATE,
+        serde_json::json!({
+            "op": "planSteps", "taskId": "t1", "fromChatId": "lead-1",
+            "steps": [{ "title": "Plan", "role": "planner" }],
+        }),
+    )
+    .await;
+    assert!(bad.is_err(), "an unknown step role is refused");
+    let check = step_titled("t1", "Check the API");
+    assert_eq!(check.role.as_deref(), Some("validator"));
+    let docs = step_titled("t1", "Write the docs");
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1",
+        "steps": [
+            { "stepId": check.id, "title": "Check the whole API" },
+            { "title": "Write the docs", "notes": "README" },
+        ],
+        "removeStepIds": [docs.id],
+    }))
+    .await;
+    let check = step_titled("t1", "Check the whole API");
+    assert_eq!(
+        check.role.as_deref(),
+        Some("validator"),
+        "an edit keeps the role"
+    );
+    let docs = step_titled("t1", "Write the docs");
+    assert_eq!(
+        docs.role.as_deref(),
+        Some("worker"),
+        "a re-added namesake keeps the role"
+    );
+
+    for task in ["t1", "t2"] {
+        mutate(serde_json::json!({ "op": "approvePlan", "taskId": task })).await;
+    }
+    let run = |lead: &str, step: &zeron_proto::TaskStep| {
+        call(
+            zeron_rpc::methods::CREATE_THREAD,
+            serde_json::json!({ "fromChatId": lead, "prompt": format!("do: {}", step.title), "taskStepId": step.id }),
+        )
+    };
+    let thread = run("lead-1", &check).await["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let config = rig
+        .core
+        .workspace
+        .chat(&thread)
+        .unwrap()
+        .unwrap()
+        .config
+        .unwrap();
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
+    let route = rig
+        .core
+        .workspace
+        .task_step(&check.id)
+        .unwrap()
+        .route
+        .expect("step route");
+    assert_eq!(route.source, "routed");
+    assert_eq!(route.role.as_deref(), Some("validator"));
+
+    let same = step_titled("t2", "Check the API");
+    let thread = run("lead-2", &same).await["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let lead = rig.core.workspace.chat("lead-2").unwrap().unwrap();
+    let child = rig.core.workspace.chat(&thread).unwrap().unwrap();
+    assert_eq!(
+        child.config.map(|c| (c.harness, c.model)),
+        lead.config.map(|c| (c.harness, c.model)),
+        "a same-agents mission skips routing"
+    );
+    assert_eq!(rig.core.workspace.task_step(&same.id).unwrap().route, None);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
     let rig = rig(Duration::from_millis(5));
     let mut params = delegate("audit the login flow");

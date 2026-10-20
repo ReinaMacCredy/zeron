@@ -574,6 +574,8 @@ pub struct Task {
     pub plan: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan_doc: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_agents: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -723,6 +725,14 @@ pub struct TaskStep {
     pub turn: Option<StepTurn>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub route: Option<ChildRoute>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -777,6 +787,18 @@ pub struct TaskStepPatch {
     pub turn: Option<Option<StepTurn>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub role: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub route: Option<Option<ChildRoute>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -880,6 +902,8 @@ pub struct TaskPatch {
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_doc: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_agents: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

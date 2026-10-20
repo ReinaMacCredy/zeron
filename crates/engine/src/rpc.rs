@@ -188,6 +188,8 @@ struct CreateThreadParams {
     cwd: Option<String>,
     #[serde(default)]
     task_step_id: Option<String>,
+    #[serde(default)]
+    chosen: Vec<crate::routing::Chosen>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1178,6 +1180,8 @@ struct PlannedStep {
     notes: String,
     #[serde(default)]
     thread_id: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1518,6 +1522,60 @@ impl EngineRpc {
         }
     }
 
+    fn resolve_route(
+        &self,
+        owner_chat_id: &str,
+        request: &crate::routing::Request,
+    ) -> Result<crate::routing::Resolved, RpcError> {
+        let owner = self
+            .workspace
+            .chat(owner_chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        Ok(crate::routing::resolve(
+            request,
+            owner.as_ref().and_then(|chat| chat.config.as_ref()),
+            &self.registry.routing_settings(),
+            &offered,
+        ))
+    }
+
+    fn route_step(
+        &self,
+        p: &mut CreateThreadParams,
+    ) -> Result<Option<zeron_proto::ChildRoute>, RpcError> {
+        let Some(step) = p
+            .task_step_id
+            .as_deref()
+            .and_then(|id| self.workspace.task_step(id))
+        else {
+            return Ok(None);
+        };
+        let role = step.role.as_deref().and_then(crate::routing::Role::parse);
+        let same_agents = self
+            .workspace
+            .task(&step.task_id)
+            .is_some_and(|task| task.same_agents);
+        if role.is_none() || same_agents {
+            return Ok(None);
+        }
+        let resolved = self.resolve_route(
+            &p.from_chat_id,
+            &crate::routing::Request {
+                role,
+                chosen: &p.chosen,
+                harness: p.harness,
+                model: p.model.as_deref(),
+                reasoning: p.reasoning,
+                profile: p.profile.profile_id.is_some(),
+            },
+        )?;
+        p.harness = resolved.harness;
+        p.model = resolved.model;
+        p.reasoning = resolved.reasoning;
+        Ok(resolved.route)
+    }
+
     fn route_delegation(
         &self,
         mut p: crate::doc_host::DelegateTaskParams,
@@ -1525,12 +1583,8 @@ impl EngineRpc {
         let Some(role) = p.role.as_deref().and_then(crate::routing::Role::parse) else {
             return Ok(p);
         };
-        let owner = self
-            .workspace
-            .chat(&p.owner_chat_id)
-            .map_err(|e| RpcError::Failed(e.to_string()))?;
-        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
-        let resolved = crate::routing::resolve(
+        let resolved = self.resolve_route(
+            &p.owner_chat_id,
             &crate::routing::Request {
                 role: Some(role),
                 chosen: &p.chosen,
@@ -1539,10 +1593,7 @@ impl EngineRpc {
                 reasoning: p.reasoning,
                 profile: p.profile.profile_id.is_some(),
             },
-            owner.as_ref().and_then(|chat| chat.config.as_ref()),
-            &self.registry.routing_settings(),
-            &offered,
-        );
+        )?;
         p.harness = resolved.harness;
         p.model = resolved.model;
         p.reasoning = resolved.reasoning;
@@ -2572,7 +2623,7 @@ impl EngineRpc {
             } => {
                 let steps = steps
                     .into_iter()
-                    .map(|step| (step.title, step.notes, step.thread_id))
+                    .map(|step| (step.title, step.notes, step.thread_id, step.role))
                     .collect();
                 self.plan_steps(
                     &task_id,
@@ -2589,7 +2640,7 @@ impl EngineRpc {
                 title,
                 notes,
                 order_key,
-            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new()),
+            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new(), None),
             MutateParams::UpdateTaskStep {
                 step_id,
                 patch,
@@ -3727,8 +3778,9 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&chat)
             }
             methods::CREATE_THREAD => {
-                let p: CreateThreadParams = parse_params(params)?;
+                let mut p: CreateThreadParams = parse_params(params)?;
                 self.supervisor_gate(Some(&p.from_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
+                let route = self.route_step(&mut p)?;
                 let chat_id = self
                     .doc_host
                     .create_step_thread(
@@ -3743,7 +3795,7 @@ impl RpcService for EngineRpc {
                         p.cwd.as_deref(),
                         p.task_step_id
                             .as_deref()
-                            .map(|id| (id, self.registry.delegation_settings())),
+                            .map(|id| (id, self.registry.delegation_settings(), route)),
                     )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -4662,7 +4714,7 @@ impl RpcService for EngineRpc {
                 {
                     let steps = steps
                         .into_iter()
-                        .map(|step| (step.title, step.notes, step.thread_id))
+                        .map(|step| (step.title, step.notes, step.thread_id, step.role))
                         .collect();
                     let images_moved = self.plan_steps(
                         &task_id,

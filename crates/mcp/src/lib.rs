@@ -432,7 +432,8 @@ fn thread_tool_list() -> Value {
                             "properties": {
                                 "title": { "type": "string", "maxLength": 500 },
                                 "notes": { "type": "string", "maxLength": 10000 },
-                                "threadId": { "type": "string" }
+                                "threadId": { "type": "string" },
+                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step's thread runs." }
                             },
                             "required": ["title"],
                             "additionalProperties": false
@@ -1213,6 +1214,7 @@ impl ThreadTools {
         run["spaceId"] = json!(space_id);
         run["cwd"] = json!(args["cwd"].as_str());
         run["taskStepId"] = json!(task_step_id);
+        run["chosen"] = json!(chosen_fields(args, args));
         let created = self.call_engine(methods::CREATE_THREAD, run).await?;
         let thread_id = created["chatId"]
             .as_str()
@@ -1488,7 +1490,7 @@ impl ThreadTools {
         run["task"] = json!(task);
         run["title"] = json!(args["title"].as_str());
         run["role"] = json!(args["role"].as_str());
-        run["chosen"] = json!(chosen_fields(args));
+        run["chosen"] = json!(chosen_fields(args, &args["target"]));
         run["wait"] = json!(wait);
         run["clientRequestId"] = json!(args["clientRequestId"].as_str());
         let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
@@ -2165,6 +2167,9 @@ impl ThreadTools {
                             "title": step["title"].as_str().unwrap_or_default(),
                             "notes": step["notes"].as_str().unwrap_or_default(),
                         });
+                        if let Some(role) = step["role"].as_str().filter(|role| !role.trim().is_empty()) {
+                            planned["role"] = json!(role);
+                        }
                         if let Some(thread) = step["threadId"].as_str().filter(|id| !id.is_empty()) {
                             planned["threadId"] = json!(thread);
                         }
@@ -2877,13 +2882,13 @@ fn new_peer_entries(
         .collect()
 }
 
-fn chosen_fields(args: &Value) -> Vec<&'static str> {
+fn chosen_fields(args: &Value, target: &Value) -> Vec<&'static str> {
     let set = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
     [
         ("profile", &args["profile"]),
-        ("harness", &args["target"]["harness"]),
-        ("model", &args["target"]["model"]),
-        ("reasoning", &args["target"]["reasoning"]),
+        ("harness", &target["harness"]),
+        ("model", &target["model"]),
+        ("reasoning", &target["reasoning"]),
     ]
     .into_iter()
     .filter(|(_, value)| set(value))

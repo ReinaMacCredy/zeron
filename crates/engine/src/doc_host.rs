@@ -4034,7 +4034,11 @@ impl DocHost {
         profile: &ProfileParams,
         space_id: Option<&str>,
         cwd: Option<&str>,
-        step: Option<(&str, crate::registry::DelegationSettings)>,
+        step: Option<(
+            &str,
+            crate::registry::DelegationSettings,
+            Option<zeron_proto::ChildRoute>,
+        )>,
     ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
@@ -4055,10 +4059,11 @@ impl DocHost {
             Some(_) => Some(self.inner.delegation_lock.lock().await),
             None => None,
         };
-        let step = match step {
-            Some((step_id, limits)) => {
-                Some(self.runnable_step(workspace, from_chat_id, step_id, limits)?)
-            }
+        let (step, route) = match step {
+            Some((step_id, limits, route)) => (
+                Some(self.runnable_step(workspace, from_chat_id, step_id, limits)?),
+                route,
+            ),
             None => {
                 let bound = self.bound_step_threads(workspace);
                 let live = workspace
@@ -4075,7 +4080,7 @@ impl DocHost {
                         "this thread already has {live} open threads it created; archive one first"
                     )));
                 }
-                None
+                (None, None)
             }
         };
         let config = self.derived_config(&from, harness, model, reasoning, profile)?;
@@ -4106,6 +4111,7 @@ impl DocHost {
                 &zeron_proto::TaskStepPatch {
                     chat_id: Some(Some(chat_id.clone())),
                     turn: Some(None),
+                    route: Some(route),
                     ..Default::default()
                 },
             )?;
