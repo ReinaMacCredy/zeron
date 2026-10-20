@@ -28,4 +28,4 @@ A short summary of the day: how many prompts you sent across how many chats, how
 
 The last tile shows your tightest plan limit across your agent accounts, for example **Left on Claude Code, week**, with the percent left and when it resets. It only appears once an account reports usage. See [Usage](zeron://docs/usage) for every limit.
 
-> The sidebar has its own Inbox mode: open the **...** menu above the sidebar (**Sidebar view options**) and pick **Inbox** to sort chats into **Inbox** and **Settled**.
+> The sidebar has its own Inbox mode: open the **...** menu above the sidebar (**Sidebar view options**) and pick **Inbox** to sort chats into **Inbox** and **Settled**, plus **Working** when **Show > Working** is on. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).

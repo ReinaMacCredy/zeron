@@ -4,7 +4,7 @@ Every conversation starts on the new chat canvas: a composer in the middle of th
 
 - Press Cmd+N (**New session** in [Settings > Shortcuts](zeron://settings/shortcuts)).
 - Click the square-pen button at the top of the sidebar (tooltip **New session**).
-- Hover a project group in the sidebar and click its **+** (**New chat in project**) to start on that project.
+- With the sidebar organized **By project**, hover a project's group and click its **+** (**New chat in project**) to start on that project. The **Chats** group and the other layouts have no **+**.
 - Open the command palette with Cmd+K and pick **New chat**.
 - Type `/new` in any composer.
 
@@ -29,7 +29,9 @@ To choose the agent and model, see [Models and effort](zeron://docs/models-and-e
 
 ## Send the first message
 
-Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > General](zeron://settings/general)). The canvas becomes the new thread. Until it is named, the thread shows as **New session** in the sidebar. **Thread naming** in Settings > General decides who writes the title.
+Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > General](zeron://settings/general)). The canvas becomes the new thread. Until it is named, the thread shows as **New session** in the sidebar.
+
+**Thread naming** in Settings > General decides who writes the title. It reads **Session agent** by default: a Claude Code or Codex chat is named by its own agent on that agent's cheapest model, and any other chat by the first enabled of Claude Code or Codex. Click the chip to pick one model for every title instead, and **Reset** to go back to **Session agent**. If no title comes back, the thread is named after the first words of your prompt. A thread is named once; rename it yourself from the sidebar.
 
 > With **Send messages with** set to Enter, Cmd+Enter starts the thread in the background and leaves you on a fresh canvas with the same target.
 
@@ -41,6 +43,8 @@ Above the composer, **New task**, **Mission Control** and **Running agents** are
 - **Review plan first**, on by default, makes the lead wait for your approval before it runs any step.
 
 Type the mission and click **Start mission**, or press the send key. The first line becomes the task's title and the rest its notes. Zeron creates the task in the project you picked, starts its lead with the agent, model, effort and permissions shown in the composer, and opens the task's Mission Control page. Press Shift+Tab again (**⇧Tab: back to New task** under the composer) or click **New task** to go back to a chat.
+
+The **Running agents** tab, with the number of working chats beside it, swaps the composer for a list of those chats: each row shows the title and how long it has been running. Click a row to open that chat. With nothing running it says **No agents running**.
 
 You can also turn an open chat into a mission from its own composer. See [Mission Control](zeron://docs/mission-control).
 
