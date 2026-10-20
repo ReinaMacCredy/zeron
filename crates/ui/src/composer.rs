@@ -2306,6 +2306,7 @@ pub struct ComposerInput {
     text_size: f32,
     configured_line_height: f32,
     single_line: bool,
+    wrap: bool,
     mono: bool,
     max_chars: Option<usize>,
     scroll_left: f32,
@@ -2431,6 +2432,7 @@ impl ComposerInput {
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
             single_line: false,
+            wrap: false,
             mono: false,
             max_chars: None,
             scroll_left: 0.0,
@@ -2497,6 +2499,16 @@ impl ComposerInput {
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
+    }
+
+    pub(crate) fn with_wrapping(mut self) -> Self {
+        self.single_line = true;
+        self.wrap = true;
+        self
+    }
+
+    fn one_row(&self) -> bool {
+        self.single_line && !self.wrap
     }
 
     pub(crate) fn with_mono(mut self) -> Self {
@@ -4927,7 +4939,7 @@ impl ComposerInput {
                 text.to_string().into(),
                 font_size,
                 &line_runs,
-                (!self.single_line).then_some((width - indent).max(px(20.0))),
+                (!self.one_row()).then_some((width - indent).max(px(20.0))),
                 None,
             ) {
                 let chips: Vec<_> = self.projection.mentions[self
@@ -4940,7 +4952,7 @@ impl ComposerInput {
                     .map(|(_, r)| r.start - display_at..r.end - display_at)
                     .collect();
                 for mut line in shaped {
-                    if !self.single_line {
+                    if !self.one_row() {
                         wrap_reference_chips(&mut line, &chips, (width - indent).max(px(20.0)));
                     }
                     lines.push(line);
@@ -5016,7 +5028,7 @@ impl ComposerInput {
 
     /// Keep the cursor visible when content exceeds the element height.
     fn clamp_scroll(&mut self, element_height: f32) -> bool {
-        if self.single_line {
+        if self.one_row() {
             let previous = self.scroll_left;
             let width = (self.last_width - 2.0).max(1.0);
             if let Some(cursor) = self.cursor_point() {
