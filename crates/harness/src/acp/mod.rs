@@ -56,6 +56,7 @@ use zeron_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
+use crate::limit_text::done_events;
 pub(crate) use crate::process::owned as child;
 use crate::process::{Command, Stdio};
 use crate::scratch::ScratchDir;
@@ -4640,18 +4641,10 @@ async fn run_session(session: Session) {
                     if interrupted {
                         done_after_interrupt = true;
                     }
-                    if !send(
-                        &event_tx,
-                        AgentEvent::Done {
-                            status,
-                            result: None,
-                            error,
-                            session_id: Some(session_id.clone()),
-                        },
-                    )
-                    .await
-                    {
-                        break 'main;
+                    for event in done_events(status, error, Some(session_id.clone())) {
+                        if !send(&event_tx, event).await {
+                            break 'main;
+                        }
                     }
                     if interrupted || (res.is_err() && !stopped) {
                         break 'main;
@@ -6102,6 +6095,42 @@ mod tests {
 
         let grok = initialize_params(HarnessId::Grok);
         assert!(grok["clientCapabilities"].get("_meta").is_none());
+    }
+
+    #[test]
+    fn limit_text_prompt_error_reports_the_limit_before_done() {
+        let res = Err(HarnessError::Protocol(
+            "session/prompt: 429 Too Many Requests".into(),
+        ));
+        let (status, error) = stop_outcome(&res, false);
+        let events = done_events(status, error, None);
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    AgentEvent::UsageLimit { resets_at: None },
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        ..
+                    },
+                ]
+            ),
+            "{events:?}"
+        );
+
+        let res = Err(HarnessError::Protocol(
+            "session/prompt: Authentication required".into(),
+        ));
+        let (status, error) = stop_outcome(&res, false);
+        assert!(matches!(
+            &done_events(status, error, None)[..],
+            [AgentEvent::Done { .. }]
+        ));
+        let (status, error) = stop_outcome(&res, true);
+        assert!(matches!(
+            &done_events(status, error, None)[..],
+            [AgentEvent::Done { .. }]
+        ));
     }
 
     #[test]

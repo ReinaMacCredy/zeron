@@ -244,6 +244,7 @@ fn thread_tool_list() -> Value {
                     "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
                     "taskStepId": { "type": "string", "description": "A step id from the tasks tool: runs that step of a task this chat leads on the new thread." },
+                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: run on the next fallback (native means this chat's own model for a step) or wait for the reset." },
                     "wait": wait,
                     "timeoutSeconds": timeout
                 },
@@ -432,7 +433,8 @@ fn thread_tool_list() -> Value {
                             "properties": {
                                 "title": { "type": "string", "maxLength": 500 },
                                 "notes": { "type": "string", "maxLength": 10000 },
-                                "threadId": { "type": "string" }
+                                "threadId": { "type": "string" },
+                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step's thread runs." }
                             },
                             "required": ["title"],
                             "additionalProperties": false
@@ -594,12 +596,12 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "orchestrator_capabilities",
-            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, the agent profiles the user saved (pick one by its whenToUse and pass its id to delegate_task), and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
+            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, where each delegate_task role is routed (Settings > Routing), the agent profiles the user saved (pick one by its whenToUse and pass its id to delegate_task), and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
             "name": "delegate_task",
-            "description": "Delegate one task to a Zeron-owned child agent/subagent of THIS chat and run it with only the supplied task prompt, without copying this chat's history. Choose harnesses and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-harness work only when they support the chosen model. Use this for any model missing from the native tool, including same-harness work, for cross-harness work, or for explicitly Zeron-owned child tasks. The childThreadId is backing storage, not an ordinary top-level thread. Harness, model, reasoning and permission mode inherit unless target overrides them; permissionMode may only narrow. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only this chat's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on a later task_status. An async child's completion wakes this chat through a message, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+            "description": "Delegate one task to a Zeron-owned child agent/subagent of THIS chat and run it with only the supplied task prompt, without copying this chat's history. Choose harnesses and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-harness work only when they support the chosen model. Use this for any model missing from the native tool, including same-harness work, for cross-harness work, or for explicitly Zeron-owned child tasks. The childThreadId is backing storage, not an ordinary top-level thread. Harness, model, reasoning and permission mode inherit unless target overrides them; a role with no target or profile runs on its Settings > Routing route when one is set, and orchestrator_capabilities lists the routes. permissionMode may only narrow. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only this chat's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on a later task_status. An async child's completion wakes this chat through a message, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -615,11 +617,12 @@ fn thread_tool_list() -> Value {
                         "additionalProperties": false
                     },
                     "title": { "type": "string", "maxLength": 512 },
-                    "role": { "type": "string", "enum": ["implementation", "research", "review", "design", "test", "general"] },
+                    "role": { "type": "string", "description": "worker | validator | research | design | general. With no target or profile, the child runs where Settings > Routing sends this role." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
-                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] }
+                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] },
+                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: run it as your native sub-agent, on the next harness in the fallback list, or wait for the reset." }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -1213,6 +1216,8 @@ impl ThreadTools {
         run["spaceId"] = json!(space_id);
         run["cwd"] = json!(args["cwd"].as_str());
         run["taskStepId"] = json!(task_step_id);
+        run["chosen"] = json!(chosen_fields(args, args));
+        run["quotaChoice"] = json!(args["quotaChoice"].as_str());
         let created = self.call_engine(methods::CREATE_THREAD, run).await?;
         let thread_id = created["chatId"]
             .as_str()
@@ -1368,9 +1373,15 @@ impl ThreadTools {
                 })
             })
             .collect();
+        let routing = self
+            .call_engine(methods::PREVIEW_ROUTES, json!({ "ownerChatId": caller.id }))
+            .await
+            .map(|preview| preview["rows"].clone())
+            .unwrap_or(Value::Null);
         let config = caller.config.as_ref();
         Ok(json!({
             "parentThreadId": caller.id,
+            "routing": routing,
             "inheritedHarness": config.map(|c| c.harness),
             "inheritedModel": config.and_then(|c| c.model.as_deref()),
             "inheritedReasoning": config.and_then(|c| c.reasoning),
@@ -1482,9 +1493,14 @@ impl ThreadTools {
         run["task"] = json!(task);
         run["title"] = json!(args["title"].as_str());
         run["role"] = json!(args["role"].as_str());
+        run["chosen"] = json!(chosen_fields(args, &args["target"]));
+        run["quotaChoice"] = json!(args["quotaChoice"].as_str());
         run["wait"] = json!(wait);
         run["clientRequestId"] = json!(args["clientRequestId"].as_str());
         let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
+        if view["status"] == "use_native" {
+            return Ok(view);
+        }
         if !wait {
             view["waitTimedOut"] = json!(false);
             return Ok(view);
@@ -2158,6 +2174,9 @@ impl ThreadTools {
                             "title": step["title"].as_str().unwrap_or_default(),
                             "notes": step["notes"].as_str().unwrap_or_default(),
                         });
+                        if let Some(role) = step["role"].as_str().filter(|role| !role.trim().is_empty()) {
+                            planned["role"] = json!(role);
+                        }
                         if let Some(thread) = step["threadId"].as_str().filter(|id| !id.is_empty()) {
                             planned["threadId"] = json!(thread);
                         }
@@ -2868,6 +2887,20 @@ fn new_peer_entries(
             json!({ "id": rendered["id"], "fromChatId": rendered["fromChatId"], "text": rendered["text"] })
         })
         .collect()
+}
+
+fn chosen_fields(args: &Value, target: &Value) -> Vec<&'static str> {
+    let set = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
+    [
+        ("profile", &args["profile"]),
+        ("harness", &target["harness"]),
+        ("model", &target["model"]),
+        ("reasoning", &target["reasoning"]),
+    ]
+    .into_iter()
+    .filter(|(_, value)| set(value))
+    .map(|(name, _)| name)
+    .collect()
 }
 
 fn profile_target(profile: Option<&AgentProfile>, target: &Value) -> Value {

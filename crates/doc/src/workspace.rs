@@ -884,6 +884,35 @@ mod tests {
     }
 
     #[test]
+    fn a_delegation_route_from_a_newer_device_never_drops_the_delegation() {
+        let row = |route: serde_json::Value| {
+            let mut delegation = serde_json::json!({
+                "delegatedByChatId": "lead", "depth": 1, "anchor": "a1",
+                "wake": "always", "status": "running", "startedAt": "2026-10-20T10:00:00Z",
+            });
+            if !route.is_null() {
+                delegation["route"] = route;
+            }
+            let raw: RawChat = serde_json::from_value(serde_json::json!({
+                "id": "child", "deviceId": "dev-a", "delegation": delegation,
+            }))
+            .unwrap();
+            Chat::from(raw).delegation.expect("delegation kept")
+        };
+        assert_eq!(row(serde_json::Value::Null).route, None);
+        let future = row(serde_json::json!({
+            "source": "future_value", "role": "worker", "reason": "why",
+            "table": { "harness": "warp-agent", "model": "w-1" }, "extra": 1,
+        }))
+        .route
+        .expect("route kept");
+        assert_eq!(future.source, "future_value");
+        assert_eq!(future.table, None);
+        assert_eq!(future.reason.as_deref(), Some("why"));
+        assert_eq!(row(serde_json::json!("not an object")).route, None);
+    }
+
+    #[test]
     fn remote_sdk_version_survives_sync_and_old_engines_remain_unknown() {
         let local = WorkspaceDoc::new();
         let mut row = device("remote", "remote engine");

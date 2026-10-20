@@ -9,27 +9,8 @@ use zeron_proto::{
 use super::*;
 use crate::registry::DelegationSettings;
 
-pub const DELEGATION_GUIDANCE: &str = "## Zeron delegation
-
-The `zeron` MCP server runs child agents on any installed harness and model. Treat these distinctly:
-
-- A delegated task is child work owned by this chat. Call `orchestrator_capabilities` for the harnesses and models available, from the same catalog as the composer; a native subagent tool's model list is not the full list. When it lists agent profiles, pick the one whose `whenToUse` fits the task and pass its id as `profile`. Prefer native subagent tools for same-harness work only when they support the chosen model. Use `delegate_task` with that harness and model when native tools cannot, including for same-harness work, for a different harness, or when the user asks for a Zeron child task. Keep each returned `taskId` and use `task_status` or `task_cancel` with it. Its `childThreadId` is backing storage for the child; do not replace delegation with `create_thread`.
-- An async child's completion wakes this chat with a message naming its taskId and quoting its final reply, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use `task_status` when you need the full result. Use mode `wait` only when this turn needs the result before it can continue.
-- A child that blocks on a question or a tool approval wakes this chat the same way, as does any thread this chat watches with `watch_threads`. Answer with `respond_to_input` when the answer follows from the task or an earlier decision (a tool approval needs this chat at Full access); anything irreversible or that only the person can decide goes to them with `ask_user`.
-- `create_thread` opens an ordinary top-level chat. Use it only when the user asks for separate/new threads or conversations, never merely because they said \"subagent\" or asked for parallel delegated work. The exception is a task's lead: it runs each step with `create_thread` and that step's `taskStepId`, as its brief says.
-
-Tool names may carry a harness prefix such as `mcp__zeron__delegate_task`; the semantics are the same. Use a stable `clientRequestId` when retrying `delegate_task`.";
-
 const SUMMARY_CHARS: usize = 600;
 const TITLE_CHARS: usize = 72;
-const ROLES: [&str; 6] = [
-    "implementation",
-    "research",
-    "review",
-    "design",
-    "test",
-    "general",
-];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +35,12 @@ pub struct DelegateTaskParams {
     pub wake: Option<DelegationWake>,
     #[serde(default)]
     pub client_request_id: Option<String>,
+    #[serde(default)]
+    pub chosen: Vec<crate::routing::Chosen>,
+    #[serde(skip)]
+    pub route: Option<zeron_proto::ChildRoute>,
+    #[serde(default)]
+    pub quota_choice: Option<crate::routing::quota::QuotaChoice>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -484,6 +471,85 @@ impl DocHost {
         Ok(config)
     }
 
+    pub(crate) fn child_owner(&self, chat_id: &str) -> Option<Chat> {
+        let workspace = self.workspace()?;
+        let owner = match workspace.chat(chat_id).ok()??.delegation {
+            Some(delegation) => delegation.delegated_by_chat_id,
+            None => self.step_lead_of(chat_id)?,
+        };
+        workspace.chat(&owner).ok()?
+    }
+
+    pub async fn act_on_offer(
+        &self,
+        chat_id: &str,
+        to: &zeron_proto::RouteTarget,
+    ) -> Result<(), EngineError> {
+        let workspace = self.workspace_or_fail()?;
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| failure("orchestration_error", "sessions not wired"))?;
+        let chat = workspace
+            .chat(chat_id)?
+            .ok_or_else(|| failure("thread_not_found", chat_id))?;
+        let Some(mut config) = chat.config.clone() else {
+            return Ok(());
+        };
+        let from = config.harness;
+        if to.harness != from {
+            config.model = None;
+        }
+        config.harness = to.harness;
+        config.model = to.model.clone().or(config.model);
+        config.reasoning = to.reasoning.or(config.reasoning);
+        config.instance_id = None;
+        let note = crate::provider_switch::SystemNote {
+            text: format!(
+                "Provider changed from {} to {}.",
+                from.display_name(),
+                to.harness.display_name()
+            ),
+            hint: Some(format!(
+                "{} hit its usage limit. {} session closed. Handed to {}.",
+                from.display_name(),
+                from.display_name(),
+                to.harness.display_name()
+            )),
+        };
+        crate::provider_switch::apply(self, &sessions, workspace, chat_id, &config, Some(note))
+            .await?;
+        let fell_back = |route: Option<zeron_proto::ChildRoute>| zeron_proto::ChildRoute {
+            source: zeron_proto::ChildRoute::FELL_BACK.to_string(),
+            reason: Some(format!(
+                "{} hit its usage limit mid-run",
+                from.display_name()
+            )),
+            ..route.unwrap_or_default()
+        };
+        if chat.delegation.is_some() {
+            workspace.update_chat_delegation(chat_id, |delegation| {
+                delegation.route = Some(fell_back(delegation.route.take()));
+                true
+            })?;
+        } else if let Some(step) = workspace
+            .read_task_steps()?
+            .into_iter()
+            .find(|step| step.chat_id.as_deref() == Some(chat_id))
+        {
+            workspace.update_task_step(
+                &step.id,
+                &zeron_proto::TaskStepPatch {
+                    route: Some(Some(fell_back(step.route.clone()))),
+                    ..Default::default()
+                },
+            )?;
+        }
+        self.queue_message(chat_id, zeron_proto::RESUME_PROMPT, Vec::new())?;
+        let handle = self.open(chat_id)?;
+        self.drain_queue(&handle).await;
+        Ok(())
+    }
+
     fn workspace_or_fail(&self) -> Result<&WorkspaceHost, EngineError> {
         self.workspace()
             .ok_or_else(|| failure("orchestration_error", "workspace not wired"))
@@ -513,19 +579,20 @@ impl DocHost {
         if task.is_empty() {
             return Err(failure("invalid_request", "task is empty"));
         }
-        let role = params
+        let role = match params
             .role
             .as_deref()
             .map(str::trim)
-            .filter(|role| !role.is_empty());
-        if let Some(role) = role
-            && !ROLES.contains(&role)
+            .filter(|role| !role.is_empty())
         {
-            return Err(failure(
-                "invalid_request",
-                format!("role must be one of {}", ROLES.join(", ")),
-            ));
-        }
+            Some(name) => Some(crate::routing::Role::parse(name).ok_or_else(|| {
+                failure(
+                    "invalid_request",
+                    format!("role must be one of {}", crate::routing::Role::names()),
+                )
+            })?),
+            None => None,
+        };
         let workspace = self.workspace_or_fail()?;
         let owner = workspace
             .chat(&params.owner_chat_id)?
@@ -605,6 +672,7 @@ impl DocHost {
             finding_outcomes: Default::default(),
             findings_handed: Default::default(),
             findings_announced: Default::default(),
+            route: params.route.clone(),
         };
         workspace.create_delegated_chat(
             &chat_id,
@@ -643,7 +711,7 @@ impl DocHost {
         &self,
         params: &DelegateTaskParams,
         task: &str,
-        role: Option<&str>,
+        role: Option<crate::routing::Role>,
         owner_id: &str,
         chat_id: &str,
         anchor: String,
@@ -660,8 +728,11 @@ impl DocHost {
             sessions.bind_delegate(owner_id, &params.task, chat_id);
         }
         let prompt = match role {
-            None | Some("general") => task.to_string(),
-            Some(role) => format!("Act as the {role} sub-agent for this task.\n\n{task}"),
+            None | Some(crate::routing::Role::General) => task.to_string(),
+            Some(role) => format!(
+                "Act as the {} sub-agent for this task.\n\n{task}",
+                role.name()
+            ),
         };
         let handle = self.open(chat_id)?;
         handle.doc.push_queued(&QueuedMessage {
@@ -670,6 +741,9 @@ impl DocHost {
             ..QueuedMessage::new(anchor.clone(), prompt, self.inner.config.device_id.clone())
         })?;
         handle.publish_queue();
+        if self.defers(chat_id, params.route.as_ref()) {
+            return Ok(());
+        }
         self.drain_queue(&handle).await;
         if handle.queue_paused.load(Ordering::Acquire) && self.task_queued(chat_id, &anchor) {
             let _drain = handle.drain_lock.lock().await;
@@ -1510,6 +1584,9 @@ impl DocHost {
                 if chat.device_id != self.inner.config.device_id || sessions.is_reviving(&chat.id) {
                     continue;
                 }
+                if !delegation.cancel_requested && sessions.limit_holds(&chat.id) {
+                    continue;
+                }
                 let session = sessions.session_status(&chat.id);
                 let after_restart = booted_at.is_some_and(|at| delegation.started_at < at);
                 let task_queued = self.task_queued(&chat.id, &delegation.anchor);
@@ -1680,6 +1757,7 @@ mod tests {
             finding_outcomes: Default::default(),
             findings_handed: Default::default(),
             findings_announced: Default::default(),
+            route: None,
         }
     }
 

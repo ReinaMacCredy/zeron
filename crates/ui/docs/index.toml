@@ -136,7 +136,15 @@ section = "agents"
 title = "Delegation and subagents"
 icon = "lucide-bot"
 blurb = "Hand work to a child agent on any installed agent and model, then follow, answer, or stop it."
-actions = ["settings/general", "settings/tools"]
+actions = ["settings/general", "settings/routing", "settings/tools"]
+
+[[article]]
+id = "routing"
+section = "agents"
+title = "Routing"
+icon = "fork"
+blurb = "Send each delegated role to a harness and model, and choose what happens out of quota."
+actions = ["settings/routing", "docs/delegation"]
 
 [[article]]
 id = "threads"

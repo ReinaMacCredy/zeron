@@ -47,6 +47,10 @@ impl Price {
         self.per_million(input, output, cache_read, cache_write) / 1e6
     }
 
+    fn blended(&self) -> f64 {
+        (3.0 * self.input + self.output) / 4.0
+    }
+
     pub(crate) fn cache_savings_usd(&self, cache_read: u64) -> f64 {
         cache_read as f64 * (self.input - self.cache_read.unwrap_or(self.input)) / 1e6
     }
@@ -189,6 +193,16 @@ pub(crate) fn loaded() -> bool {
 pub(crate) fn price(harness: HarnessId, model: &str) -> Option<Price> {
     let table = TABLE.read().unwrap_or_else(|e| e.into_inner()).clone()?;
     lookup(&table, harness, model)
+}
+
+/// USD per million tokens at three input tokens to each output token.
+pub(crate) fn blended(harness: HarnessId, model: &str) -> Option<f64> {
+    price(harness, model).map(|price| price.blended())
+}
+
+#[cfg(test)]
+pub(crate) fn blended_in(api: &Value, harness: HarnessId, model: &str) -> Option<f64> {
+    lookup(&parse(api), harness, model).map(|price| price.blended())
 }
 
 #[cfg(test)]
