@@ -291,10 +291,13 @@ impl TaskCard {
             .as_ref()
             .map(|task| task.images.clone())
             .unwrap_or_default();
-        let context = row
+        let context: Vec<String> = row
             .as_ref()
             .map(|task| task.context.clone())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| self.state.read(cx).chats.iter().any(|chat| &chat.id == id))
+            .collect();
         self.menu = popover::Popup::default();
         self.fetch_tool_settings(cx);
         let title_input = cx.new(|cx| {
@@ -464,16 +467,38 @@ impl TaskCard {
         let Some(open) = self.open.as_mut() else {
             return;
         };
-        let present = self
-            .state
-            .read(cx)
+        let state = self.state.read(cx);
+        let row = state
             .tasks
             .iter()
-            .any(|task| task.id == open.task_id && !task.deleted);
-        if present {
-            open.seen = true;
-        } else if open.seen {
-            self.dismiss(None, cx);
+            .find(|task| task.id == open.task_id && !task.deleted);
+        open.context
+            .retain(|id| state.chats.iter().any(|chat| &chat.id == id));
+        let arrived = match row {
+            Some(row) if !open.seen => {
+                open.seen = true;
+                let added: Vec<String> = std::mem::take(&mut open.images)
+                    .into_iter()
+                    .filter(|path| !row.images.contains(path))
+                    .collect();
+                open.images = row.images.clone();
+                open.images.extend(added);
+                open.images.truncate(zeron_doc::TASK_IMAGES_MAX);
+                if open.context.is_empty() {
+                    open.context = row.context.clone();
+                }
+                open.images != row.images
+            }
+            Some(_) => false,
+            None => {
+                if open.seen {
+                    self.dismiss(None, cx);
+                }
+                return;
+            }
+        };
+        if arrived {
+            self.save_images(cx);
         }
     }
 
@@ -579,7 +604,9 @@ impl TaskCard {
                     crate::toast::error(cx, "A task holds up to 12 images.");
                 }
                 open.images.extend(paths.into_iter().take(room));
-                card.save_images(cx);
+                if open.seen {
+                    card.save_images(cx);
+                }
             })
             .ok();
         }));

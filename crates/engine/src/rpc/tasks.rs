@@ -345,7 +345,12 @@ impl EngineRpc {
                     "The chats a mission reads are fixed once it starts; write to its lead instead",
                 ));
             }
-            self.check_context_chats(context)?;
+            let added: Vec<String> = context
+                .iter()
+                .filter(|id| !task.context.contains(id))
+                .cloned()
+                .collect();
+            self.check_context_chats(&added)?;
         }
         match self.workspace.update_task(task_id, patch).map_err(failed)? {
             true => Ok(()),

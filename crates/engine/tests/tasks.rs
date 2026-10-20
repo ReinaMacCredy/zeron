@@ -457,6 +457,21 @@ async fn a_mission_lead_reads_its_context_chats_first_and_the_list_locks_at_star
         core.workspace.task("t1").unwrap().context,
         ["review", "notes"]
     );
+
+    core.workspace
+        .create_chat_from("gone", None, Some("dev-a"), None, None, None)
+        .unwrap();
+    mutate(json!({
+        "op": "createTask", "taskId": "t2", "title": "Later", "context": ["gone", "review"],
+    }))
+    .await
+    .unwrap();
+    core.workspace.delete_chat("gone").unwrap();
+    for context in [json!(["gone"]), json!(["gone", "notes"])] {
+        mutate(json!({ "op": "updateTask", "taskId": "t2", "patch": { "context": context } }))
+            .await
+            .expect("a deleted chat already on the list does not block edits to it");
+    }
 }
 
 async fn supervisor_snapshot(
