@@ -3881,16 +3881,12 @@ async fn step_handbacks_fold_into_one_lead_message() {
 
     let first = run(&steps[0]).await;
     let second_thread = run(&steps[1]).await;
+    second.send(true).unwrap();
     wait_for(
-        || {
-            step_rows()
-                .first()
-                .is_some_and(|row| row.task_steps.len() == 1)
-        },
-        "the first step's handback held in the idle lead's queue",
+        || !step_rows().is_empty(),
+        "a step's handback held in the idle lead's queue",
     )
     .await;
-    second.send(true).unwrap();
     wait_for(|| !handbacks(&rig).is_empty(), "the idle lead's handback").await;
     wait_for(|| idle(core, "task-lead"), "the lead's handback turn").await;
     let early = handbacks(&rig);

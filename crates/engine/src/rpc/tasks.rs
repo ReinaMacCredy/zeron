@@ -1084,24 +1084,8 @@ impl EngineRpc {
                 ..lead_patch(chat_id, space_id, task, lead)
             },
         )?;
-        let message_id = crate::new_id();
-        let prompt =
-            crate::doc_host::queued_message_prompt(&first_turn(task, lead, reads), &task.images);
         self.doc_host
-            .request_from_chat_row(chat_id, &prompt)
-            .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
-            .and_then(|mut request| {
-                request.attachments = task.images.clone();
-                self.doc_host.queue_command_with_transfers(
-                    chat_id,
-                    SessionCommandPayload::Run {
-                        request,
-                        message_id: message_id.clone(),
-                    },
-                    Vec::new(),
-                )
-            })
-            .map(|_| message_id)
+            .queue_message_detached(chat_id, &first_turn(task, lead, reads), task.images.clone())
             .map_err(failed)
     }
 }

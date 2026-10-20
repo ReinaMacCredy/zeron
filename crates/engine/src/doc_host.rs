@@ -3783,6 +3783,23 @@ impl DocHost {
         Ok(id)
     }
 
+    /// Through the queue, not the command ledger, so a message queued next cannot overtake it.
+    pub fn queue_message_detached(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+    ) -> Result<String, EngineError> {
+        let (handle, id) = self.push_thread_row(chat_id, None, text, Vec::new(), attachments)?;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (host, row) = (self.clone(), id.clone());
+            self.spawn_worker_on(&runtime, async move {
+                host.send_thread_row(&handle, &row).await
+            });
+        }
+        Ok(id)
+    }
+
     /// A row carrying `task_steps` is a step handback, held for its settle window.
     fn push_thread_row(
         &self,
