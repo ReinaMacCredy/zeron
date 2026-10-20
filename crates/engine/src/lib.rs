@@ -44,6 +44,7 @@ mod model_catalogs;
 mod model_prices;
 pub mod predictions;
 pub mod profile;
+pub mod provider_switch;
 pub mod project_actions;
 pub mod provider_instances;
 pub mod registry;
