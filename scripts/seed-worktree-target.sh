@@ -29,6 +29,11 @@ if [ "$(stat -f %d "$SRC")" != "$(stat -f %d "$WORKTREE")" ]; then
 fi
 
 mkdir -p "$DST"
+# cargo writes this tag only when it creates target/ itself, and `cargo clean` refuses a target without it.
+printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' \
+  '# This file is a cache directory tag created by cargo.' \
+  '# For information about cache directory tags see https://bford.info/cachedir/' \
+  >"$WORKTREE/target/CACHEDIR.TAG"
 start=$SECONDS
 # Fingerprints first: a unit the main checkout rebuilds mid-copy then looks stale, never fresh.
 for dir in .fingerprint build deps; do
