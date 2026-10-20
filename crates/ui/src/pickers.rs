@@ -8994,15 +8994,6 @@ pub(crate) fn curated_model_label(harness: HarnessId, id: &str) -> Option<String
         .map(|m| m.label.clone())
 }
 
-/// Display-side model-list hygiene, mirroring the engine's discovery-side
-/// fold (`models_from_session`) for catalogs served by OLDER engines (the
-/// space's device may run any version): the `default` alias row drops when a
-/// real row exists, an orphan `<model>[1m]` variant presents as its base id
-/// with the Context Window trait pinned to 1M, and Claude rows adopt the
-/// curated catalog's labels so the version number always shows ("Opus 5.5",
-/// not the wire's terse "Opus" alias — user request). Idempotent over
-/// already-clean lists. The send path recomposes the advertised id from the
-/// base + trait (`pick_model_value`), so a folded pick still runs.
 fn catalog_error_text(message: &str) -> &str {
     message
         .strip_prefix("model discovery ")
@@ -9016,6 +9007,15 @@ fn catalog_error_text(message: &str) -> &str {
         .map_or(message, |(_, text)| text)
 }
 
+/// Display-side model-list hygiene, mirroring the engine's discovery-side
+/// fold (`models_from_session`) for catalogs served by OLDER engines (the
+/// space's device may run any version): the `default` alias row drops when a
+/// real row exists, an orphan `<model>[1m]` variant presents as its base id
+/// with the Context Window trait pinned to 1M, and Claude rows adopt the
+/// curated catalog's labels so the version number always shows ("Opus 5.5",
+/// not the wire's terse "Opus" alias — user request). Idempotent over
+/// already-clean lists. The send path recomposes the advertised id from the
+/// base + trait (`pick_model_value`), so a folded pick still runs.
 pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Vec<Model> {
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
