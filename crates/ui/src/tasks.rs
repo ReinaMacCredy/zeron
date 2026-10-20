@@ -26,7 +26,7 @@ mod card;
 mod center;
 #[cfg(test)]
 mod image_paths_tests;
-mod images;
+pub(crate) mod images;
 
 use crate::attachments::StagedAttachment;
 use images::ImageGallery;

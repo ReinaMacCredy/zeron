@@ -6070,13 +6070,46 @@ pub struct MissionStart {
     pub space_id: Option<String>,
     pub config: Option<zeron_proto::ChatConfig>,
     pub orchestrate: crate::tasks::Orchestrate,
+    pub staged: SidechatStaged,
+    pub quotes: Vec<crate::quotes::Quote>,
+    pub comments: Vec<crate::comments::ReviewComment>,
 }
 
 impl MissionStart {
     pub fn title_notes(&self) -> (String, String) {
-        let text = self.text.trim();
+        let mut text = String::new();
+        let mut at = 0;
+        for mention in zeron_proto::attachment_mentions::attachment_mentions(&self.text) {
+            let Some(pasted) = self
+                .staged
+                .attachments
+                .iter()
+                .find(|att| att.mention == Some(mention.index) && att.image().is_none())
+            else {
+                continue;
+            };
+            text.push_str(&self.text[at..mention.range.start]);
+            text.push_str(&String::from_utf8_lossy(pasted.bytes()));
+            at = mention.range.end;
+        }
+        text.push_str(&self.text[at..]);
+        let text = zeron_proto::attachment_mentions::attachment_mention_prompt(&text);
+        let text = crate::quotes::with_quotes(&text, &self.quotes);
+        let text = crate::comments::with_comments(&text, &self.comments);
+        let text = text.trim();
         let (title, notes) = text.split_once('\n').unwrap_or((text, ""));
         (title.trim().to_string(), notes.trim().to_string())
+    }
+
+    pub fn images(&self) -> Vec<StagedAttachment> {
+        let staged = &self.staged;
+        staged
+            .attachments
+            .iter()
+            .filter(|att| att.image().is_some())
+            .chain(staged.appshots.iter().map(|appshot| &appshot.screenshot))
+            .cloned()
+            .collect()
     }
 }
 
@@ -11581,8 +11614,38 @@ impl Composer {
                 .selected_space_row()
                 .map(|space| space.id.clone()),
         };
+        if let Some(file) = self.staged().iter().find(|att| {
+            att.image().is_none()
+                && zeron_proto::attachment_mentions::pasted_text_index_from_name(&att.name)
+                    .is_none()
+        }) {
+            let message = format!(
+                "A mission takes images and pasted text; remove {}.",
+                file.name
+            );
+            crate::toast::error(cx, message);
+            return;
+        }
+        let images = self
+            .staged()
+            .iter()
+            .filter(|att| att.image().is_some())
+            .count()
+            + self.staged_appshots().len();
+        if images > zeron_doc::TASK_IMAGES_MAX {
+            crate::toast::error(cx, "A mission holds up to 12 images.");
+            return;
+        }
+        let key = self.current_key.clone();
+        let attachments = self.attachments.remove(&key).unwrap_or_default();
+        self.attachment_drafts.remove(&key);
+        let appshots = self.appshots.remove(&key).unwrap_or_default();
+        let (quotes, comments) = self.state.update(cx, |state, cx| {
+            cx.notify();
+            (state.take_quotes(&key), state.take_review_comments(&key))
+        });
         let start = MissionStart {
-            key: self.current_key.clone(),
+            key,
             text,
             chat_id,
             space_id,
@@ -11592,6 +11655,12 @@ impl Composer {
                 same_agents: false,
                 plan_doc: self.mission_plan_doc,
             },
+            staged: SidechatStaged {
+                attachments,
+                appshots,
+            },
+            quotes,
+            comments,
         };
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.sync_draft(cx);
@@ -11604,8 +11673,28 @@ impl Composer {
         if self.current_key != start.key || !self.input.read(cx).text().is_empty() {
             return;
         }
+        let mut attachments = start.staged.attachments.clone();
+        for att in self.attachments.remove(&start.key).unwrap_or_default() {
+            if !attachments.iter().any(|staged| staged.id == att.id) {
+                attachments.push(att);
+            }
+        }
+        if !attachments.is_empty() {
+            self.attachments.insert(start.key.clone(), attachments);
+        }
+        self.restore_failed_appshots(&start.staged.appshots, &start.key, &start.key);
+        self.state.update(cx, |state, cx| {
+            for quote in &start.quotes {
+                state.add_quote(&start.key, quote.clone());
+            }
+            for comment in &start.comments {
+                state.add_review_comment(&start.key, comment.clone());
+            }
+            cx.notify();
+        });
         self.input
             .update(cx, |input, cx| input.set_text(start.text.clone(), cx));
+        self.sync_draft(cx);
         self.set_mission(true, cx);
     }
 

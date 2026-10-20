@@ -167,6 +167,26 @@ impl Shell {
         start: crate::composer::MissionStart,
         cx: &mut Context<Self>,
     ) {
+        let staged = start.images();
+        if staged.is_empty() {
+            self.start_mission_with(start, Vec::new(), cx);
+            return;
+        }
+        let upload = crate::tasks::images::upload(&self.state, staged, cx);
+        cx.spawn(async move |this, cx| {
+            let images = upload.await;
+            this.update(cx, |shell, cx| shell.start_mission_with(start, images, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn start_mission_with(
+        &mut self,
+        start: crate::composer::MissionStart,
+        images: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let task_id = uuid::Uuid::new_v4().to_string();
         let (title, mut notes) = start.title_notes();
         let lead = start
@@ -188,6 +208,9 @@ impl Shell {
             Self::create_task_params(&task_id, &title, &notes, start.space_id.clone(), None);
         if !context.is_empty() {
             create["context"] = context.into();
+        }
+        if !images.is_empty() {
+            create["images"] = images.into();
         }
         let orchestrate = start.orchestrate;
         let (space_id, config) = (start.space_id.clone(), start.config.clone());
