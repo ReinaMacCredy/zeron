@@ -18437,6 +18437,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -18468,6 +18469,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: None,
+                delegate_route: None,
             }
         };
         let entry = assistant(
@@ -18653,6 +18655,7 @@ mod tests {
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -18741,6 +18744,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         };
         let entry = assistant(
             "m-del",
@@ -21730,6 +21734,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -22793,6 +22798,7 @@ mod computer_tests {
                 subagent_status,
                 subagent_tail,
                 html_render: None,
+                delegate_route: None,
             },
             other => other,
         };

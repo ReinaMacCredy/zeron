@@ -1309,6 +1309,7 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         subagent_status: Some(status),
         subagent_tail: None,
         html_render: None,
+        delegate_route: None,
     }
 }
 

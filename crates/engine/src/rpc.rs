@@ -1622,6 +1622,8 @@ impl EngineRpc {
         let resolved = match gated {
             crate::routing::quota::Gated::Run(resolved) => resolved,
             crate::routing::quota::Gated::UseNative { route, message } => {
+                self.sessions
+                    .bind_native_fallback(&p.owner_chat_id, &p.task, route.clone());
                 return Ok(Err(serde_json::json!({
                     "status": "use_native",
                     "route": route,

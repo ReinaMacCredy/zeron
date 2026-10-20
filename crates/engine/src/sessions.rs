@@ -279,6 +279,7 @@ struct RunHandle {
     stop_tx: mpsc::UnboundedSender<String>,
     /// The MCP call never carries the harness tool id, so the part is matched by task text.
     delegate_binds: Arc<Mutex<Vec<(String, String)>>>,
+    native_binds: Arc<Mutex<Vec<(String, zeron_proto::ChildRoute)>>>,
     /// Published pages awaiting their tool part, keyed by the agent's html.
     html_binds: Arc<Mutex<Vec<(String, zeron_proto::html_render::HtmlRenderRef)>>>,
     /// The user stopped this runtime: it is being torn down and takes no
@@ -545,6 +546,7 @@ impl RunSetup {
                 computer: RunComputer::new(),
                 stop_tx,
                 delegate_binds: Arc::new(Mutex::new(Vec::new())),
+                native_binds: Arc::new(Mutex::new(Vec::new())),
                 html_binds: Arc::new(Mutex::new(Vec::new())),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 compaction: Arc::new(Mutex::new(None)),
@@ -790,13 +792,36 @@ impl Inner {
     }
 
     fn bind_delegates(&self, chat_id: &str, run_id: &str, parts: &mut [MessagePart]) {
-        let Some(binds) = lock(&self.runs)
+        let Some((binds, natives)) = lock(&self.runs)
             .get(chat_id)
             .filter(|run| run.run_id == run_id)
-            .map(|run| run.delegate_binds.clone())
+            .map(|run| (run.delegate_binds.clone(), run.native_binds.clone()))
         else {
             return;
         };
+        lock(&natives).retain(|(task, route)| {
+            let slot = parts.iter_mut().find_map(|part| match part {
+                MessagePart::Tool {
+                    call,
+                    subagent_ref: None,
+                    delegate_route,
+                    ..
+                } if delegate_route.is_none()
+                    && call.is_delegate_task()
+                    && spawned_text(call) == Some(task.as_str()) =>
+                {
+                    Some(delegate_route)
+                }
+                _ => None,
+            });
+            match slot {
+                Some(slot) => {
+                    *slot = Some(route.clone());
+                    false
+                }
+                None => true,
+            }
+        });
         lock(&binds).retain(|(task, child)| {
             let slot = parts.iter_mut().find_map(|part| match part {
                 MessagePart::Tool {
@@ -1062,6 +1087,12 @@ impl SessionsEngine {
     ) {
         if let Some(run) = lock(&self.inner.runs).get(chat_id) {
             lock(&run.html_binds).push((crate::html_render::html_key(html), page));
+        }
+    }
+
+    pub fn bind_native_fallback(&self, chat_id: &str, task: &str, route: zeron_proto::ChildRoute) {
+        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
+            lock(&run.native_binds).push((task.trim().to_string(), route));
         }
     }
 
@@ -5500,6 +5531,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status,
                 subagent_tail,
                 html_render,
+                delegate_route,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -5519,6 +5551,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
                 html_render: html_render.clone(),
+                delegate_route: delegate_route.clone(),
             },
             other => other.clone(),
         })
