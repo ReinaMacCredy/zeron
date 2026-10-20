@@ -349,6 +349,12 @@ pub(crate) fn header_line(now: DateTime<Local>, needs: usize, open_tasks: usize)
     format!("{}. {date}.{rest}", greeting(now))
 }
 
+fn is_overdue(task: &zeron_proto::Task, chats: &[zeron_proto::Chat], today: &str) -> bool {
+    task.completed_at.is_none()
+        && crate::tasks::linked_chat(chats, task).is_none()
+        && task.due_on.as_deref().is_some_and(|due| due < today)
+}
+
 pub(crate) fn resets_in(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
     let seconds = (resets_at - now).num_seconds();
     if seconds <= 0 {
@@ -806,18 +812,16 @@ impl InboxPage {
             .iter()
             .map(|task| {
                 let done = task.completed_at.is_some();
+                let overdue = is_overdue(task, &state.chats, &today_key);
                 let meta = if done {
                     None
                 } else if let Some(chat) = crate::tasks::linked_chat(&state.chats, task) {
                     Some(format!("In {}", chat_title(chat)))
+                } else if overdue {
+                    Some("Overdue".to_owned())
                 } else {
-                    match task.due_on.as_deref() {
-                        Some(due) if due < today_key.as_str() => Some("Overdue".to_owned()),
-                        Some(_) => Some("Today".to_owned()),
-                        None => None,
-                    }
+                    task.due_on.as_ref().map(|_| "Today".to_owned())
                 };
-                let overdue = meta.as_deref() == Some("Overdue");
                 let task_id = task.id.clone();
                 let accent = theme.accent;
                 let check = div()
@@ -979,11 +983,7 @@ impl InboxPage {
             let open: Vec<_> = tasks.iter().filter(|t| t.completed_at.is_none()).collect();
             let overdue = open
                 .iter()
-                .filter(|t| {
-                    t.due_on
-                        .as_deref()
-                        .is_some_and(|due| due < today_key.as_str())
-                })
+                .filter(|task| is_overdue(task, &state.chats, &today_key))
                 .count();
             (open.len(), tasks.len() - open.len(), overdue)
         };
