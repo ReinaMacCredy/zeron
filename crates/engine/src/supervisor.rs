@@ -33,6 +33,17 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 pub(crate) use zeron_proto::supervisor::WAKES_PER_HOUR;
 pub(crate) const MISSION_SILENT_MS: i64 = 30 * 60 * 1000;
 pub(crate) const LEAD_SILENT_MS: i64 = 10 * 60 * 1000;
+pub(crate) const QUESTION_WAITING_MS: i64 = 20 * 60 * 1000;
+pub(crate) const TURN_QUIET_MS: i64 = 2 * 60 * 1000;
+pub(crate) const LIMIT_IDLE_MS: i64 = 5 * 60 * 1000;
+pub(crate) const LOST_WAKE_MS: i64 = 5 * 60 * 1000;
+
+pub(crate) fn stall_ms(default: i64) -> i64 {
+    std::env::var("ZERON_SUPERVISOR_STALL_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(default)
+}
 
 pub(crate) fn fold_ms() -> i64 {
     std::env::var("ZERON_SUPERVISOR_FOLD_MS")
@@ -189,6 +200,15 @@ struct Router {
     refresh_then: Option<i64>,
     resources: Resources,
     next_check: Option<NextCheck>,
+    asked: Vec<Asked>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Asked {
+    pub chat_id: String,
+    pub request_id: String,
+    pub at: i64,
+    pub approval: bool,
 }
 
 struct State {
@@ -504,6 +524,29 @@ impl SupervisorStore {
             .failed_at
             .get(step_id)
             .copied()
+    }
+
+    pub(crate) fn note_asked(&self, asked: Asked) {
+        let mut state = lock(&self.inner.state);
+        let known = state
+            .router
+            .asked
+            .iter()
+            .any(|a| a.chat_id == asked.chat_id && a.request_id == asked.request_id);
+        if !known {
+            state.router.asked.push(asked);
+        }
+    }
+
+    pub(crate) fn asked(&self) -> Vec<Asked> {
+        lock(&self.inner.state).router.asked.clone()
+    }
+
+    pub(crate) fn forget_asked(&self, gone: &[Asked]) {
+        lock(&self.inner.state)
+            .router
+            .asked
+            .retain(|a| !gone.contains(a));
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -991,6 +1034,84 @@ pub(crate) fn plan_stalls(
                 failed_at: failed.failed_at,
             };
             consider(stall, failed.failed_at + LEAD_SILENT_MS);
+        }
+    }
+    (due, next)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StallNode {
+    pub chat_id: String,
+    pub root: String,
+    pub task_id: Option<String>,
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TreeStall {
+    QuestionWaiting {
+        node: StallNode,
+        request_id: String,
+        asked_at: i64,
+        approval: bool,
+    },
+    LimitIdle {
+        node: StallNode,
+        resets_at: i64,
+    },
+    LostWake {
+        node: StallNode,
+        owner: String,
+        completed_at: i64,
+    },
+}
+
+impl TreeStall {
+    pub fn node(&self) -> &StallNode {
+        match self {
+            Self::QuestionWaiting { node, .. }
+            | Self::LimitIdle { node, .. }
+            | Self::LostWake { node, .. } => node,
+        }
+    }
+
+    pub fn key(&self) -> String {
+        match self {
+            Self::QuestionWaiting {
+                node, request_id, ..
+            } => format!("question-waiting:{}:{request_id}", node.chat_id),
+            Self::LimitIdle { node, resets_at } => {
+                format!("limit-idle:{}:{resets_at}", node.chat_id)
+            }
+            Self::LostWake {
+                node, completed_at, ..
+            } => format!("lost-wake:{}:{completed_at}", node.chat_id),
+        }
+    }
+
+    fn due_at(&self) -> i64 {
+        match self {
+            Self::QuestionWaiting { asked_at, .. } => asked_at + stall_ms(QUESTION_WAITING_MS),
+            Self::LimitIdle { resets_at, .. } => resets_at + stall_ms(LIMIT_IDLE_MS),
+            Self::LostWake { completed_at, .. } => completed_at + stall_ms(LOST_WAKE_MS),
+        }
+    }
+}
+
+/// A busy node (background work or live sub-agents) is never stalled, and wakes no timer.
+pub(crate) fn tree_stalls(
+    now: i64,
+    stalls: Vec<TreeStall>,
+    reported: impl Fn(&str) -> bool,
+) -> (Vec<TreeStall>, Option<i64>) {
+    let mut due = Vec::new();
+    let mut next: Option<i64> = None;
+    for stall in stalls.into_iter().filter(|stall| !stall.node().busy) {
+        let at = stall.due_at();
+        if at > now {
+            next = Some(next.map_or(at, |next| next.min(at)));
+        } else if !reported(&stall.key()) {
+            due.push(stall);
         }
     }
     (due, next)
@@ -1722,6 +1843,97 @@ mod tests {
         for (name, facts, reported, stalls, next) in cases {
             let (due, deadline) = plan_stalls(now, &[facts], |_| reported);
             assert_eq!((due, deadline.map(|(at, _)| at)), (stalls, next), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_tree_stall_waits_its_threshold_fires_once_and_never_on_a_busy_node() {
+        let now = 10 * HOUR_MS;
+        let node = |busy| StallNode {
+            chat_id: "child".into(),
+            root: "lead".into(),
+            task_id: None,
+            busy,
+        };
+        let question = |asked_at, busy| TreeStall::QuestionWaiting {
+            node: node(busy),
+            request_id: "r1".into(),
+            asked_at,
+            approval: false,
+        };
+        let limit = |resets_at, busy| TreeStall::LimitIdle {
+            node: node(busy),
+            resets_at,
+        };
+        let lost = |completed_at, busy| TreeStall::LostWake {
+            node: node(busy),
+            owner: "lead".into(),
+            completed_at,
+        };
+        let cases: [(&str, TreeStall, bool, bool, Option<i64>); 10] = [
+            (
+                "asked 21 min ago",
+                question(now - 21 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "already reported",
+                question(now - 21 * MIN, false),
+                true,
+                false,
+                None,
+            ),
+            (
+                "asked 5 min ago",
+                question(now - 5 * MIN, false),
+                false,
+                false,
+                Some(now + 15 * MIN),
+            ),
+            ("busy", question(now - 21 * MIN, true), false, false, None),
+            (
+                "reset 6 min ago",
+                limit(now - 6 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "reset 2 min ago",
+                limit(now - 2 * MIN, false),
+                false,
+                false,
+                Some(now + 3 * MIN),
+            ),
+            (
+                "stopped with a background sub-agent",
+                limit(now - 6 * MIN, true),
+                false,
+                false,
+                None,
+            ),
+            (
+                "handback claimed 6 min",
+                lost(now - 6 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "handback reported",
+                lost(now - 6 * MIN, false),
+                true,
+                false,
+                None,
+            ),
+            ("owner busy", lost(now - 6 * MIN, true), false, false, None),
+        ];
+        for (name, stall, reported, fires, next) in cases {
+            let (due, deadline) = tree_stalls(now, vec![stall.clone()], |_| reported);
+            let expected = if fires { vec![stall] } else { vec![] };
+            assert_eq!((due, deadline), (expected, next), "{name}");
         }
     }
 }

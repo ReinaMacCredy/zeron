@@ -446,6 +446,12 @@ fn kind_word(kind: SupervisorEventKind) -> &'static str {
         SupervisorEventKind::Heartbeat => "check-in",
         SupervisorEventKind::NodeFailed => "thread failed",
         SupervisorEventKind::NodeFinished => "delegated task ended",
+        SupervisorEventKind::QuestionWaiting => "question waiting",
+        SupervisorEventKind::Dirty => "uncommitted files",
+        SupervisorEventKind::Unmerged => "unmerged branch",
+        SupervisorEventKind::LimitIdle => "idle after limit reset",
+        SupervisorEventKind::LostWake => "lost wake",
+        SupervisorEventKind::MergeBlocked => "merge blocked",
     }
 }
 
