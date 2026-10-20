@@ -88,6 +88,8 @@ pub(crate) struct StripTree {
     host: TreeHost,
     fold_hover: Option<String>,
     menu: Popup<RowMenu>,
+    compact: bool,
+    lit: bool,
     _state: Subscription,
 }
 
@@ -116,6 +118,8 @@ impl StripTree {
             host,
             fold_hover: None,
             menu: Popup::default(),
+            compact: false,
+            lit: false,
         }
     }
 
@@ -145,6 +149,20 @@ impl StripTree {
             Instant::now(),
         );
         cx.notify();
+    }
+
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact != compact {
+            self.compact = compact;
+            cx.notify();
+        }
+    }
+
+    pub fn set_lit(&mut self, lit: bool, cx: &mut Context<Self>) {
+        if self.lit != lit {
+            self.lit = lit;
+            cx.notify();
+        }
     }
 
     fn rows(&self, cx: &App) -> Option<Vec<Row>> {
@@ -616,6 +634,7 @@ impl Render for StripTree {
                     .pl(px(6.0))
                     .pr(px(8.0))
                     .rounded(px(6.0))
+                    .when(self.lit && row.head.is_some(), |el| el.bg(theme.wash(0.07)))
                     .when(opens, |el| {
                         el.cursor_pointer()
                             .hover(|s| s.bg(theme.wash(0.07)))
@@ -638,7 +657,7 @@ impl Render for StripTree {
                             )),
                     )
                     .child(title)
-                    .children(row.brand.map(|(mark, tint)| {
+                    .children(row.brand.filter(|_| !self.compact).map(|(mark, tint)| {
                         icon(mark)
                             .size(px(14.0))
                             .flex_none()
@@ -654,7 +673,12 @@ impl Render for StripTree {
                             })
                             .child(row.word),
                     )
-                    .children(times[ix].clone().map(|time| div().flex_none().child(time)))
+                    .children(
+                        times[ix]
+                            .clone()
+                            .filter(|_| !self.compact)
+                            .map(|time| div().flex_none().child(time)),
+                    )
                     .children(fold)
                     .children(go)
                     .when(opens, |el| {
