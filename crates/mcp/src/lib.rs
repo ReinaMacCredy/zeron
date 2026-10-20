@@ -106,12 +106,14 @@ pub fn tool_list() -> Value {
 fn supervisor_tool() -> Value {
     json!({
         "name": "supervisor",
-        "description": "Act as the Supervisor of this device's Mission Control missions, within the Authority the person set; every wake's footer says what is on. `ask` puts a decision in the person's Needs you list and returns its `itemId` without waiting: `title`, `why` (goal, spend or decision), `detail`, one to three `options`, and `taskId` when it concerns a mission. A change to a mission's goal or spend always goes this way. The person's choice comes back to you as a message, and to that mission's lead. `rebrief` rewrites one step's spec through its lead: `stepId` from the tasks tool, the new `notes`, `title` when it changes, and `reason`, which the lead reads in its one message about it. It never touches the overview and never adds or removes a step. `start` creates a mission and starts its lead on `title` and `notes`, in `projectId` (from list_projects) when given, with `planDoc` for a plan doc; the lead writes a plan the person reviews before any step runs. Missions declare shared `resources` (port:<n>, slot:<name>, path:<path>) in their plan. `check` reads the machine for every resource two running missions share, with lsof for ports and ps for CPU slots (two samples 10 s apart), and returns each one's state, `taskId` narrowing it to one mission. `pause` stops one step that blocks a shared resource: `stepId`, the `resource` as declared, and `reason`; it needs a contention the machine verified, stops the step's thread, refuses create_thread with that `taskStepId` until you `resume` it (`stepId`, `reason`), and tells the lead each time.",
+        "description": "Act as the Supervisor of this device's Mission Control missions, within the Authority the person set; every wake's footer says what is on. `ask` puts a decision in the person's Needs you list and returns its `itemId` without waiting: `title`, `why` (goal, spend or decision), `detail`, one to three `options`, and `taskId` when it concerns a mission. A change to a mission's goal or spend goes this way unless the person gave you that authority. The person's choice comes back to you as a message, and to that mission's lead. `rebrief` rewrites one step's spec through its lead: `stepId` from the tasks tool, the new `notes`, `title` when it changes, and `reason`, which the lead reads in its one message about it. It never touches the overview and never adds or removes a step. `start` creates a mission and starts its lead on `title` and `notes`, in `projectId` (from list_projects) when given, with `planDoc` for a plan doc; the lead writes a plan the person reviews before any step runs. Missions declare shared `resources` (port:<n>, slot:<name>, path:<path>) in their plan. `check` reads the machine for every resource two running missions share, with lsof for ports and ps for CPU slots (two samples 10 s apart), and returns each one's state, `taskId` narrowing it to one mission. `pause` stops one step that blocks a shared resource: `stepId`, the `resource` as declared, and `reason`; it needs a contention the machine verified, stops the step's thread, refuses create_thread with that `taskStepId` until you `resume` it (`stepId`, `reason`), and tells the lead each time. Three actions need a switch the person turns on under Authority; the wake footer lists the ones that are on. `decide` (Decide for me) answers a lead's Needs you item for the person: `itemId`, `choice` (one of the item's options) and `reason`. The lead gets your choice the way it gets the person's, and the person sees it with your reason and may change it, which sends the lead a correction. Items whose why is goal or spend also need the goal and spend switch. `approve` (Decide for me) approves a plan that waits for review: `taskId` and `reason`; the lead gets the approval and runs it. `goal` (goal and spend) changes a mission's goal: `taskId`, the new `title` and/or `notes`, and `reason`; its lead gets one message with the change.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["ask", "rebrief", "start", "check", "pause", "resume"] },
+                "action": { "type": "string", "enum": ["ask", "rebrief", "start", "check", "pause", "resume", "decide", "approve", "goal"] },
                 "taskId": { "type": "string" },
+                "itemId": { "type": "string" },
+                "choice": { "type": "string" },
                 "stepId": { "type": "string" },
                 "title": { "type": "string", "maxLength": 500 },
                 "notes": { "type": "string", "maxLength": 10000 },
@@ -1644,7 +1646,15 @@ impl ThreadTools {
             "check" => &["taskId"],
             "pause" => &["stepId", "resource", "reason"],
             "resume" => &["stepId", "resource", "reason"],
-            _ => return Err("action must be ask, rebrief, start, check, pause or resume".into()),
+            "decide" => &["itemId", "choice", "reason"],
+            "approve" => &["taskId", "reason"],
+            "goal" => &["taskId", "title", "notes", "reason"],
+            _ => {
+                return Err(
+                    "action must be ask, rebrief, start, check, pause, resume, decide, approve or goal"
+                        .into(),
+                );
+            }
         };
         if let Some(extra) = args
             .as_object()
