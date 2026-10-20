@@ -679,7 +679,7 @@ impl TaskCard {
         let Some(saved_context) = row.map(|task| task.context.clone()) else {
             return;
         };
-        if self.is_starting(&task_id) {
+        if self.is_starting(&task_id) || self.runs_elsewhere(cx).is_some() {
             return;
         }
         if let Some(open) = self.open.as_mut() {
@@ -1219,12 +1219,19 @@ impl TaskCard {
                         .map(|(_, name)| widgets::SelectOption::new(name.clone()).leading(folder)),
                 )
                 .collect();
-        let selected = match &pending_folder {
-            Some(name) => {
+        let elsewhere = self.runs_elsewhere(cx);
+        let selected = match (&pending_folder, elsewhere) {
+            (Some(name), _) => {
                 options.push(widgets::SelectOption::new(name.clone()).leading(folder));
                 options.len() - 1
             }
-            None => run_in
+            (None, Some((space, device))) => {
+                options.push(
+                    widgets::SelectOption::new(format!("{space} on {device}")).leading(folder),
+                );
+                options.len() - 1
+            }
+            (None, None) => run_in
                 .as_deref()
                 .and_then(|id| spaces.iter().position(|(sid, _)| sid == id))
                 .map_or(0, |ix| ix + 1),
@@ -1289,6 +1296,25 @@ impl TaskCard {
             .into_any_element()
     }
 
+    fn runs_elsewhere(&self, cx: &App) -> Option<(String, String)> {
+        let open = self.open.as_ref()?;
+        let state = self.state.read(cx);
+        let saved = state
+            .tasks
+            .iter()
+            .find(|task| task.id == open.task_id)
+            .and_then(|task| task.space_id.clone());
+        let space_id = open.run_in.clone().unwrap_or(saved)?;
+        let space = state.spaces.iter().find(|space| space.id == space_id)?;
+        let local = state.local_device_id.as_deref()?;
+        (space.device_id != local).then(|| {
+            let device = state
+                .device_name(&space.device_id)
+                .unwrap_or("another device");
+            (space.display_name().to_string(), device.to_string())
+        })
+    }
+
     fn run_in(open: Option<&Open>, row: Option<&Row>) -> Option<String> {
         open.and_then(|open| open.run_in.clone())
             .unwrap_or_else(|| row.and_then(|row| row.task.space_id.clone()))
@@ -1301,7 +1327,7 @@ impl TaskCard {
     fn solid_button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: SharedString,
         enabled: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1309,7 +1335,7 @@ impl TaskCard {
             .id(id)
             .debug_selector(move || id.into())
             .role(gpui::Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .track_focus(&self.start_focus)
             .tab_index(0)
             .rounded_full()
@@ -1347,13 +1373,20 @@ impl TaskCard {
         )
         .debug_selector(|| "task-card-hand-off-mode".into());
         let starting = self.is_starting(task_id);
-        let ready = row.is_some() && !starting;
+        let elsewhere = self
+            .runs_elsewhere(cx)
+            .map(|(_, device)| format!("Runs on {device}"));
+        let ready = row.is_some() && !starting && elsewhere.is_none();
         let (pane, footer) = match tab {
             HandOff::NewChat => {
                 let start = self
                     .solid_button(
                         "task-card-start",
-                        if starting { "Starting…" } else { "Start" },
+                        match &elsewhere {
+                            Some(label) => label.clone().into(),
+                            None if starting => "Starting…".into(),
+                            None => "Start".into(),
+                        },
                         ready,
                         theme,
                     )
@@ -1372,10 +1405,10 @@ impl TaskCard {
                 let start = self
                     .solid_button(
                         "task-card-orchestrate",
-                        if starting {
-                            "Starting…"
-                        } else {
-                            "Start mission"
+                        match &elsewhere {
+                            Some(label) => label.clone().into(),
+                            None if starting => "Starting…".into(),
+                            None => "Start mission".into(),
                         },
                         ready && !blocked,
                         theme,
@@ -1554,7 +1587,12 @@ impl TaskCard {
             .when(!enabled, |el| el.opacity(0.4))
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.assign(false, cx)));
         let send = self
-            .solid_button("task-card-assign-button", "Send task", enabled, theme)
+            .solid_button(
+                "task-card-assign-button",
+                "Send task".into(),
+                enabled,
+                theme,
+            )
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.assign(true, cx)));
         (
             div()
