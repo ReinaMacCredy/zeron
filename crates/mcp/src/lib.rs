@@ -117,7 +117,7 @@ fn supervisor_tool() -> Value {
                 "notes": { "type": "string", "maxLength": 10000 },
                 "why": { "type": "string", "enum": ["goal", "spend", "decision"] },
                 "detail": { "type": "string", "maxLength": 10000 },
-                "options": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3 },
+                "options": { "type": "array", "items": { "type": "string", "maxLength": 200 }, "minItems": 1, "maxItems": 3 },
                 "reason": { "type": "string", "maxLength": 2000 },
                 "projectId": { "type": "string" },
                 "planDoc": { "type": "boolean" },
@@ -445,7 +445,7 @@ fn thread_tool_list() -> Value {
                     "state": { "type": "string", "enum": ["done", "skipped", "open"] },
                     "why": { "type": "string", "enum": ["goal", "spend", "decision"] },
                     "detail": { "type": "string", "maxLength": 10000 },
-                    "options": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 3 }
+                    "options": { "type": "array", "items": { "type": "string", "maxLength": 200 }, "minItems": 1, "maxItems": 3 }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -1668,7 +1668,7 @@ impl ThreadTools {
                 takes.join(", ")
             ));
         }
-        if !matches!(action, "ask" | "check") {
+        if action != "check" {
             self.spend_send()?;
         }
         let mut params = args.clone();
@@ -2219,6 +2219,7 @@ impl ThreadTools {
                     .as_str()
                     .filter(|why| matches!(*why, "goal" | "spend" | "decision"))
                     .ok_or("why must be goal, spend or decision")?;
+                self.spend_send()?;
                 let raised = self
                     .call_engine(
                         methods::MUTATE,

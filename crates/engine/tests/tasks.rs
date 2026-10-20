@@ -556,6 +556,15 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
         panic!("an item id")
     };
     let item_id = raised["itemId"].as_str().unwrap().to_string();
+    let Err(again) = escalate(Some("lead-1")).await else {
+        panic!("the same open question is not raised twice")
+    };
+    assert!(
+        again
+            .to_string()
+            .contains("already in the person's Needs you list"),
+        "{again}"
+    );
     let snapshot = supervisor_snapshot(&rpc, |s| s.needs_you_count() > 0).await;
     let [zeron_proto::supervisor::NeedsYouRow::Item(item)] = snapshot.needs_you.as_slice() else {
         panic!("one item: {:?}", snapshot.needs_you)

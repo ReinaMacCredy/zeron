@@ -25,6 +25,7 @@ const SNAPSHOT_WAKES: usize = 50;
 const KEPT_INTERVENTIONS: usize = 200;
 const SNAPSHOT_INTERVENTIONS: usize = 50;
 const KEPT_ANSWERED_ITEMS: usize = 200;
+const OPEN_ITEMS_PER_RAISER: usize = 10;
 const KEPT_HOLDS: usize = 200;
 /// Long enough for the run's coalesced doc commit to land the input or turn being refreshed for.
 const REFRESH_DELAY_MS: i64 = 500;
@@ -523,6 +524,26 @@ impl SupervisorStore {
     pub(crate) fn add_item(&self, item: SupervisorItem) -> Result<(), EngineError> {
         {
             let mut state = lock(&self.inner.state);
+            let open: Vec<&SupervisorItem> = state
+                .file
+                .items
+                .iter()
+                .filter(|open| open.answer.is_none() && open.raiser_chat_id == item.raiser_chat_id)
+                .collect();
+            if open
+                .iter()
+                .any(|open| open.task_id == item.task_id && open.title == item.title)
+            {
+                return Err(EngineError::Other(format!(
+                    "\"{}\" is already in the person's Needs you list; their answer comes to you as a message",
+                    item.title
+                )));
+            }
+            if open.len() >= OPEN_ITEMS_PER_RAISER {
+                return Err(EngineError::Other(format!(
+                    "{OPEN_ITEMS_PER_RAISER} of this thread's items already wait in the person's Needs you list; raise more once they answer"
+                )));
+            }
             let mut file = state.file.clone();
             file.items.push(item);
             persist_json(&self.inner.path, &file)?;

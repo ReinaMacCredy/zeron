@@ -15,6 +15,8 @@ const PAUSE_OFF: &str = "Pausing steps is off in the Supervisor's Authority; the
 const UNIX_ONLY: &str = "Shared resources are checked against the machine on macOS and Linux only";
 pub(super) const GOAL_OR_SPEND: &str = "A task is the person's: the Supervisor cannot change it, mark it done, delete it or reassign it. Raise it with the supervisor tool, action \"ask\".";
 const MAX_OPTIONS: usize = 3;
+const OPTION_CHARS: usize = 200;
+const REASON_CHARS: usize = 2_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +97,18 @@ fn failed(error: crate::EngineError) -> RpcError {
 
 fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
+}
+
+fn checked_reason(reason: &str, why: &str) -> Result<(), RpcError> {
+    if reason.trim().is_empty() {
+        return Err(refused(&format!(
+            "reason is required: the lead reads why {why}"
+        )));
+    }
+    if reason.chars().count() > REASON_CHARS {
+        return Err(refused("reason is limited to 2,000 characters"));
+    }
+    Ok(())
 }
 
 pub(super) fn refuse_supervisor(from: Option<&str>, refusal: &str) -> Result<(), RpcError> {
@@ -251,11 +265,7 @@ impl EngineRpc {
                         "Re-briefing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.",
                     ));
                 }
-                if reason.trim().is_empty() {
-                    return Err(refused(
-                        "reason is required: the lead reads why the step changed",
-                    ));
-                }
+                checked_reason(&reason, "the step changed")?;
                 let step = self.step_or_refuse(&step_id)?;
                 let task = self.task_or_refuse(&step.task_id)?;
                 let lead = self.lead_of(&task)?;
@@ -363,18 +373,6 @@ impl EngineRpc {
         }
     }
 
-    fn reason_ready(&self, reason: &str, does: &str) -> Result<(), RpcError> {
-        if !cfg!(unix) {
-            return Err(refused(UNIX_ONLY));
-        }
-        if reason.trim().is_empty() {
-            return Err(refused(&format!(
-                "reason is required: the lead reads why its step {does}"
-            )));
-        }
-        Ok(())
-    }
-
     async fn pause_step(
         &self,
         from: &str,
@@ -385,7 +383,10 @@ impl EngineRpc {
         if !self.registry.supervisor_settings().pause_steps {
             return Err(refused(PAUSE_OFF));
         }
-        self.reason_ready(reason, "stopped")?;
+        if !cfg!(unix) {
+            return Err(refused(UNIX_ONLY));
+        }
+        checked_reason(reason, "its step stopped")?;
         let key = ResourceKey::parse(resource).ok_or_else(|| {
             refused("resource is port:<n>, slot:<name> or path:<path>, as the mission declared it")
         })?;
@@ -487,7 +488,7 @@ impl EngineRpc {
         reason: &str,
     ) -> Result<serde_json::Value, RpcError> {
         if from.is_some() {
-            self.reason_ready(reason, "resumes")?;
+            checked_reason(reason, "its step resumes")?;
         }
         let store = self.supervisor_store()?;
         let hold = store
@@ -601,6 +602,12 @@ impl EngineRpc {
             .collect();
         if options.is_empty() || options.len() > MAX_OPTIONS {
             return Err(refused("An item offers one to three options"));
+        }
+        if options
+            .iter()
+            .any(|option| option.chars().count() > OPTION_CHARS)
+        {
+            return Err(refused("An option is limited to 200 characters"));
         }
         let item = SupervisorItem {
             id: crate::new_id(),
