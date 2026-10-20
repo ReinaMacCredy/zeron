@@ -594,7 +594,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "orchestrator_capabilities",
-            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, the agent profiles the user saved (pick one by its whenToUse and pass its id to delegate_task), and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
+            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, where each delegate_task role is routed (Settings > Routing), the agent profiles the user saved (pick one by its whenToUse and pass its id to delegate_task), and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -1368,9 +1368,15 @@ impl ThreadTools {
                 })
             })
             .collect();
+        let routing = self
+            .call_engine(methods::PREVIEW_ROUTES, json!({ "ownerChatId": caller.id }))
+            .await
+            .map(|preview| preview["rows"].clone())
+            .unwrap_or(Value::Null);
         let config = caller.config.as_ref();
         Ok(json!({
             "parentThreadId": caller.id,
+            "routing": routing,
             "inheritedHarness": config.map(|c| c.harness),
             "inheritedModel": config.and_then(|c| c.model.as_deref()),
             "inheritedReasoning": config.and_then(|c| c.reasoning),

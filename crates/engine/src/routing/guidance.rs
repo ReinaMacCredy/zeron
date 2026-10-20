@@ -43,15 +43,21 @@ pub fn routing_line(settings: &RoutingSettings) -> Option<String> {
     })
 }
 
-pub fn guidance(settings: &RoutingSettings, own: Option<&ChatConfig>) -> String {
+pub fn own_model(config: Option<&ChatConfig>) -> Option<&str> {
+    config.map(|config| {
+        config
+            .model
+            .as_deref()
+            .unwrap_or(config.harness.display_name())
+    })
+}
+
+pub fn guidance(settings: &RoutingSettings, own_model: Option<&str>) -> String {
     let routing = routing_line(settings);
     let native = match settings.native {
         NativePolicy::SameModelOnly if routing.is_none() => None,
         NativePolicy::SameModelOnly => {
-            let model = own
-                .and_then(|config| config.model.as_deref())
-                .or(own.map(|config| config.harness.display_name()))
-                .unwrap_or("this chat's model");
+            let model = own_model.unwrap_or("this chat's model");
             Some(format!(
                 "Use your native sub-agent only when the routed model is your own ({model}); otherwise call delegate_task with the role."
             ))
@@ -133,7 +139,7 @@ Tool names may carry a harness prefix such as `mcp__zeron__delegate_task`; the s
             model: Some("claude-opus-5-5".into()),
             ..crate::routing::tests::owner()
         };
-        let text = guidance(&routed(), Some(&own));
+        let text = guidance(&routed(), own_model(Some(&own)));
         assert!(text.contains(
             "- Delegation routing: worker on Codex gpt-6-luna, validator on Claude Code claude-haiku-5-5. Pass role and leave target out to use these; roles not listed: pick yourself.\n"
         ));

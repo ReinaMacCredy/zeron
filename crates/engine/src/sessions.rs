@@ -716,7 +716,7 @@ impl Inner {
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
         let delegation_guidance = Some(crate::routing::guidance::guidance(
             &self.registry.routing_settings(),
-            config.as_ref(),
+            crate::routing::guidance::own_model(config.as_ref()),
         ));
         let blocks: Vec<&str> = [
             Some(instructions).filter(|text| !text.is_empty()),

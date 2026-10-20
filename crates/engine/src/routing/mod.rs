@@ -1,4 +1,5 @@
 pub mod guidance;
+pub mod preview;
 
 use std::collections::BTreeMap;
 
@@ -122,6 +123,15 @@ impl RoutingSettings {
             })
             .chain(&self.fallback)
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaState {
+    pub known: bool,
+    pub used_fraction: Option<f64>,
+    pub resets_at: Option<i64>,
+    pub exhausted: bool,
 }
 
 pub fn check_target(target: &RouteTarget, known: impl Fn(HarnessId) -> bool) -> Result<(), String> {

@@ -1465,6 +1465,59 @@ impl EngineRpc {
         }
     }
 
+    async fn preview_routes(
+        &self,
+        p: crate::routing::preview::PreviewParams,
+    ) -> Result<crate::routing::preview::Preview, RpcError> {
+        use crate::routing::preview;
+        let owner = match p.owner_chat_id.as_deref() {
+            Some(id) => self
+                .workspace
+                .chat(id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .and_then(|chat| chat.config),
+            None => None,
+        };
+        let base = match (p.base, owner) {
+            (Some(base), _) => base,
+            (None, Some(config)) => zeron_proto::RouteTarget {
+                harness: config.harness,
+                model: config.model,
+                reasoning: config.reasoning,
+            },
+            (None, None) => self.default_route_base().await,
+        };
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        let settings = self.registry.routing_settings();
+        Ok(preview::preview(&preview::Inputs {
+            settings: &settings,
+            base,
+            roles: preview::roles(p.roles.as_deref()),
+            offered: &offered,
+            price: &crate::model_prices::blended,
+            quota: &|_| crate::routing::QuotaState::default(),
+        }))
+    }
+
+    async fn default_route_base(&self) -> zeron_proto::RouteTarget {
+        let harness = self.doc_host.default_harness();
+        let model = match self.registry.resolve(harness) {
+            Ok(resolved) => {
+                crate::model_catalogs::list_with_lease(self.repos.data_dir(), resolved, false, None)
+                    .await
+                    .ok()
+                    .and_then(|models| models.into_iter().next())
+                    .map(|model| model.id)
+            }
+            Err(_) => None,
+        };
+        zeron_proto::RouteTarget {
+            harness,
+            model,
+            reasoning: None,
+        }
+    }
+
     fn route_delegation(
         &self,
         mut p: crate::doc_host::DelegateTaskParams,
@@ -2878,6 +2931,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_DELEGATION_SETTINGS
             | methods::GET_ROUTING_SETTINGS
             | methods::SET_ROUTING_SETTINGS
+            | methods::PREVIEW_ROUTES
             | methods::GET_COMPACTION_SETTINGS
             | methods::SET_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
@@ -3375,6 +3429,14 @@ impl RpcService for EngineRpc {
             }
             methods::GET_REVIEW_SETTINGS => RpcReply::value(&self.registry.review_settings()),
             methods::GET_ROUTING_SETTINGS => RpcReply::value(&self.registry.routing_settings()),
+            methods::PREVIEW_ROUTES => {
+                let p: crate::routing::preview::PreviewParams = if params.is_null() {
+                    Default::default()
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(&self.preview_routes(p).await?)
+            }
             methods::SET_ROUTING_SETTINGS => {
                 let p: crate::routing::RoutingSettings = parse_params(params)?;
                 self.registry
