@@ -439,7 +439,7 @@ impl AddProviderDialog {
             .map(|i| i.id.clone())
             .filter(|id| Some(id) != own.as_ref())
             .collect();
-        move |id: &str| ids.iter().any(|taken| taken == id)
+        move |id: &str| ids.iter().any(|taken| taken.eq_ignore_ascii_case(id))
     }
 
     fn derived_id(&self, label: &str) -> String {
