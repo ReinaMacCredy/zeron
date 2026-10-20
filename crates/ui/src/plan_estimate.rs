@@ -1,40 +1,13 @@
 use std::rc::Rc;
 
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
-use serde::Deserialize;
 use zeron_engine::routing::Role;
 use zeron_proto::{Chat, ChildRoute, RouteTarget, Task, TaskStep, ToolCall};
 
 use crate::route_badge::{self, OnRouteLink, RouteInfo, RouteLink, same_model, target_text};
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub(crate) struct Preview {
-    pub base: Option<RouteTarget>,
-    pub rows: Vec<PreviewRow>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub(crate) struct PreviewRow {
-    pub role: String,
-    pub source: String,
-    pub target: Option<RouteTarget>,
-    pub multiplier: Option<f64>,
-    pub reason: Option<String>,
-    pub fallback: Option<PreviewFallback>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub(crate) struct PreviewFallback {
-    pub target: Option<RouteTarget>,
-    pub native: bool,
-    pub reason: String,
-    pub resets_at: Option<i64>,
-    pub multiplier: Option<f64>,
-}
+pub(crate) use zeron_engine::routing::preview::Preview;
 
 pub(crate) fn plan_task_id(call: &ToolCall) -> Option<String> {
     let input = match call {

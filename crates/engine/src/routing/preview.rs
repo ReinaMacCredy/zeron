@@ -17,8 +17,8 @@ pub struct PreviewParams {
     pub steps: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Fallback {
     pub target: Option<RouteTarget>,
     pub native: bool,
@@ -27,11 +27,11 @@ pub struct Fallback {
     pub multiplier: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Row {
-    pub role: &'static str,
-    pub source: &'static str,
+    pub role: String,
+    pub source: String,
     pub target: Option<RouteTarget>,
     pub multiplier: Option<f64>,
     pub quota: QuotaState,
@@ -41,10 +41,10 @@ pub struct Row {
     pub fallback: Option<Fallback>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Preview {
-    pub base: RouteTarget,
+    pub base: Option<RouteTarget>,
     pub rows: Vec<Row>,
     pub guidance: String,
 }
@@ -92,7 +92,7 @@ pub fn preview(inputs: &Inputs) -> Preview {
     let base = &inputs.base;
     let rows = inputs.roles.iter().map(|role| row(inputs, *role)).collect();
     Preview {
-        base: base.clone(),
+        base: Some(base.clone()),
         rows,
         guidance: guidance::guidance(
             inputs.settings,
@@ -114,8 +114,8 @@ fn row(inputs: &Inputs, role: Role) -> Row {
     );
     let Some(route) = resolved.route.clone() else {
         return Row {
-            role: role.name(),
-            source: "off",
+            role: role.name().to_string(),
+            source: "off".to_string(),
             target: None,
             multiplier: Some(1.0),
             quota: (inputs.quota)(base.harness),
@@ -130,8 +130,8 @@ fn row(inputs: &Inputs, role: Role) -> Row {
     };
     let planned = actual(&resolved);
     let row = |target: RouteTarget, source: &'static str, reason, fallback| Row {
-        role: role.name(),
-        source,
+        role: role.name().to_string(),
+        source: source.to_string(),
         multiplier: multiplier(inputs.price, &target, base),
         quota: (inputs.quota)(target.harness),
         target: Some(target),

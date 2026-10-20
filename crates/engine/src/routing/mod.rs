@@ -126,8 +126,8 @@ impl RoutingSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct QuotaState {
     pub known: bool,
     pub used_fraction: Option<f64>,

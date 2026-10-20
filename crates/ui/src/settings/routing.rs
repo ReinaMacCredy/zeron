@@ -6,7 +6,6 @@ use gpui::{
     AnyElement, App, Context, Entity, Hsla, MouseButton, SharedString, Subscription, Task, Window,
     div, prelude::*, px,
 };
-use serde::Deserialize;
 use zeron_engine::routing::{MidRun, NativePolicy, OutOfQuota, Role, RoleRoute, RoutingSettings};
 use zeron_proto::{HarnessId, Model, ReasoningLevel, RouteTarget};
 use zeron_rpc::methods;
@@ -61,43 +60,7 @@ const POLICIES: [(OutOfQuota, &str, &str); 4] = [
     ),
 ];
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct Preview {
-    base: Option<RouteTarget>,
-    rows: Vec<PreviewRow>,
-    guidance: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct PreviewRow {
-    role: String,
-    source: String,
-    target: Option<RouteTarget>,
-    multiplier: Option<f64>,
-    quota: PreviewQuota,
-    reason: Option<String>,
-    fallback: Option<PreviewFallback>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct PreviewQuota {
-    known: bool,
-    used_fraction: Option<f64>,
-    resets_at: Option<i64>,
-    exhausted: bool,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct PreviewFallback {
-    target: Option<RouteTarget>,
-    native: bool,
-    reason: String,
-    resets_at: Option<i64>,
-}
+use zeron_engine::routing::preview::{Preview, Row as PreviewRow};
 
 struct Quota {
     fraction: f32,
