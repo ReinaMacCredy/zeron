@@ -14,6 +14,10 @@ pub const BODIES: &[(&str, &str)] = &[
     ("new-chat", include_str!("../../ui/docs/new-chat.md")),
     ("composer", include_str!("../../ui/docs/composer.md")),
     (
+        "conversation",
+        include_str!("../../ui/docs/conversation.md"),
+    ),
+    (
         "commands-and-mentions",
         include_str!("../../ui/docs/commands-and-mentions.md"),
     ),
@@ -57,6 +61,7 @@ pub const BODIES: &[(&str, &str)] = &[
     ("agent-tools", include_str!("../../ui/docs/agent-tools.md")),
     ("projects", include_str!("../../ui/docs/projects.md")),
     ("right-pane", include_str!("../../ui/docs/right-pane.md")),
+    ("live-state", include_str!("../../ui/docs/live-state.md")),
     ("terminal", include_str!("../../ui/docs/terminal.md")),
     ("git", include_str!("../../ui/docs/git.md")),
     (
@@ -85,6 +90,11 @@ pub const BODIES: &[(&str, &str)] = &[
         include_str!("../../ui/docs/notifications.md"),
     ),
     ("devices", include_str!("../../ui/docs/devices.md")),
+    (
+        "command-line",
+        include_str!("../../ui/docs/command-line.md"),
+    ),
+    ("mobile", include_str!("../../ui/docs/mobile.md")),
 ];
 
 #[derive(Debug, Deserialize)]

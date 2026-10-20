@@ -43,6 +43,14 @@ blurb = "Send, attach files, queue or steer follow-ups, stop, and use prediction
 actions = ["settings/general"]
 
 [[article]]
+id = "conversation"
+section = "basics"
+title = "Reading a conversation"
+icon = "lucide-message-square"
+blurb = "Copy, fork, or rewind messages, follow links and tool calls, and quote a reply."
+actions = ["settings/general"]
+
+[[article]]
 id = "commands-and-mentions"
 section = "basics"
 title = "Commands and mentions"
@@ -202,6 +210,13 @@ blurb = "Open a browser, terminal, file, or diff next to the chat, and browse th
 actions = ["settings/files"]
 
 [[article]]
+id = "live-state"
+section = "work"
+title = "The Live state column"
+icon = "lucide-layers"
+blurb = "What runs beside a chat: changes, terminals, subagents, side chats, and actions."
+
+[[article]]
 id = "terminal"
 section = "work"
 title = "Terminal"
@@ -326,4 +341,20 @@ section = "tools"
 title = "Devices"
 icon = "monitor"
 blurb = "Connect your machines and run chats and projects on another device."
+actions = ["settings/devices"]
+
+[[article]]
+id = "command-line"
+section = "tools"
+title = "Command line and servers"
+icon = "astra-terminal"
+blurb = "The zeron command, running Zeron on a server, and conversation links."
+actions = ["settings/devices"]
+
+[[article]]
+id = "mobile"
+section = "tools"
+title = "Zeron on iPhone"
+icon = "smartphone"
+blurb = "Follow and steer your chats from your phone while agents run on your computers."
 actions = ["settings/devices"]
