@@ -2750,6 +2750,9 @@ impl Pickers {
     }
 
     fn ensure_models(&mut self, harness: HarnessId, force: bool, cx: &mut Context<Self>) {
+        if harness == HarnessId::Acp {
+            return;
+        }
         // Normal prefetches load absent/Idle slots once. Picker-open refreshes
         // also retry Ready/Error slots, while an in-flight load is always
         // reused. Ready rows stay visible until the replacement lands.
