@@ -204,7 +204,6 @@ impl DocHost {
             return;
         }
         let at = now_ms();
-        store.note_failed(&step.id, at);
         let mut event = SupervisorEvent::new(
             Kind::StepFailed,
             format!("failed:{}:{at}", step.id),
@@ -576,9 +575,7 @@ impl DocHost {
                 if step_failed(step) && !step_thread.live {
                     facts.failed.push(crate::supervisor::FailedStep {
                         step_id: step.id.clone(),
-                        failed_at: store
-                            .failed_at(&step.id)
-                            .unwrap_or_else(|| ms(step.updated_at)),
+                        failed_at: ms(step.updated_at),
                     });
                 }
                 facts.steps.push(step_thread);
@@ -834,7 +831,7 @@ impl DocHost {
     }
 
     fn apply_resource_check(&self, store: &SupervisorStore, outcome: CheckOutcome) {
-        let opened = store.resources(|resources| resources.apply(outcome.verdicts, now_ms()));
+        let opened = store.apply_check(outcome.verdicts, now_ms());
         let freed: Vec<PauseHold> = store
             .holds()
             .into_iter()
@@ -1413,7 +1410,7 @@ fn earliest(events: &[&SupervisorEvent], now: i64) -> i64 {
 fn stall_event(stall: Stall, step_titles: &HashMap<String, String>) -> SupervisorEvent {
     let key = stall.key();
     match stall {
-        Stall::MissionSilent { task_id, since } => {
+        Stall::MissionSilent { task_id, since, .. } => {
             let mut event = SupervisorEvent::new(
                 Kind::MissionSilent,
                 key,

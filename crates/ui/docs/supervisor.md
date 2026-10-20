@@ -8,7 +8,7 @@ The Supervisor's chat never shows in the sidebar or under **Archived**, and it n
 
 ## What wakes it and what it can do
 
-Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour.
+Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour. Events still waiting for their wake when Zeron quits are not carried over; a quiet mission or an open contention is noticed again after a restart without waking the Supervisor twice for it.
 
 It acts through the missions' leads, within the switches under **Authority**:
 

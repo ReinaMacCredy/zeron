@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -8,15 +8,15 @@ use tokio::sync::{Notify, watch};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
     InterventionChip, ItemAnswer, LeadQuestion, NeedsYouInput, NeedsYouRow, QuestionState,
-    SettledBy, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
-    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    ResourceKey, SettledBy, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention,
+    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
 use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
 use crate::EngineError;
 use crate::project_actions::persist_json;
 use crate::sessions::asks_person;
-use crate::supervisor_resources::Resources;
+use crate::supervisor_resources::{Contention, ReportedContention, Resources, Verdict};
 
 const STORE_FILE: &str = "supervisor.json";
 const STORE_VERSION: u32 = 1;
@@ -147,6 +147,8 @@ struct SupervisorFile {
     interventions: Vec<InterventionRecord>,
     #[serde(default)]
     holds: Vec<PauseHold>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    contended: BTreeMap<String, ReportedContention>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -161,7 +163,6 @@ struct Router {
     chat_id: Option<String>,
     pending: Vec<SupervisorEvent>,
     reported: HashSet<String>,
-    failed_at: HashMap<String, i64>,
     held: Option<(String, Vec<SupervisorEvent>)>,
     projections: Projections,
     refresh_at: Option<i64>,
@@ -295,6 +296,22 @@ impl SupervisorStore {
 
     pub(crate) fn resources<R>(&self, f: impl FnOnce(&mut Resources) -> R) -> R {
         f(&mut lock(&self.inner.state).router.resources)
+    }
+
+    /// A contention reported before a restart keeps its first `since`, so it wakes the Supervisor once.
+    pub(crate) fn apply_check(
+        &self,
+        verdicts: Vec<(ResourceKey, Verdict)>,
+        now: i64,
+    ) -> Vec<(ResourceKey, Contention)> {
+        let mut state = lock(&self.inner.state);
+        let mut reported = state.file.contended.clone();
+        let opened = state.router.resources.apply(verdicts, now, &mut reported);
+        if reported != state.file.contended {
+            state.file.contended = reported;
+            self.persist(&state);
+        }
+        opened
     }
 
     pub(crate) fn hold_of(&self, step_id: &str) -> Option<PauseHold> {
@@ -433,21 +450,6 @@ impl SupervisorStore {
         drop(state);
         self.mark_stale();
         Ok(())
-    }
-
-    pub(crate) fn note_failed(&self, step_id: &str, at: i64) {
-        lock(&self.inner.state)
-            .router
-            .failed_at
-            .insert(step_id.to_string(), at);
-    }
-
-    pub(crate) fn failed_at(&self, step_id: &str) -> Option<i64> {
-        lock(&self.inner.state)
-            .router
-            .failed_at
-            .get(step_id)
-            .copied()
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -703,6 +705,7 @@ fn empty_file() -> SupervisorFile {
         items: Vec::new(),
         interventions: Vec::new(),
         holds: Vec::new(),
+        contended: BTreeMap::new(),
     }
 }
 
@@ -776,6 +779,13 @@ impl MissionFacts {
         threads().filter_map(ThreadFacts::last_active).max()
     }
 
+    fn written(&self) -> Option<i64> {
+        std::iter::once(&self.lead)
+            .chain(&self.steps)
+            .filter_map(|thread| thread.last_message)
+            .max()
+    }
+
     pub fn lead_silent_after(&self, failed_at: i64) -> bool {
         !self.lead.live && self.lead.last_active().is_none_or(|at| at < failed_at)
     }
@@ -786,6 +796,7 @@ pub(crate) enum Stall {
     MissionSilent {
         task_id: String,
         since: i64,
+        written: Option<i64>,
     },
     LeadSilent {
         task_id: String,
@@ -797,7 +808,9 @@ pub(crate) enum Stall {
 impl Stall {
     pub fn key(&self) -> String {
         match self {
-            Self::MissionSilent { task_id, since } => format!("silent:{task_id}:{since}"),
+            Self::MissionSilent {
+                task_id, written, ..
+            } => format!("silent:{task_id}:{}", written.unwrap_or_default()),
             Self::LeadSilent {
                 step_id, failed_at, ..
             } => format!("lead-silent:{step_id}:{failed_at}"),
@@ -824,6 +837,7 @@ pub(crate) fn plan_stalls(
             let stall = Stall::MissionSilent {
                 task_id: mission.task_id.clone(),
                 since,
+                written: mission.written(),
             };
             consider(stall, since + MISSION_SILENT_MS);
         }
@@ -1403,6 +1417,7 @@ mod tests {
         let silent = |since| Stall::MissionSilent {
             task_id: "t1".into(),
             since,
+            written: Some(old),
         };
         let quiet = mission(
             thread(false, false, old),
@@ -1484,5 +1499,14 @@ mod tests {
             let (due, deadline) = plan_stalls(now, &[facts], |_| reported);
             assert_eq!((due, deadline), (stalls, next), "{name}");
         }
+        let mut seen_ending = quiet.clone();
+        seen_ending.lead.last_live = Some(old + MIN);
+        let (before_restart, _) = plan_stalls(now + 2 * MIN, &[seen_ending], |_| false);
+        let (after_restart, _) = plan_stalls(now + 2 * MIN, &[quiet], |_| false);
+        assert_eq!(
+            before_restart[0].key(),
+            after_restart[0].key(),
+            "a restart forgets when a session ended, so the key rests on persisted messages"
+        );
     }
 }
