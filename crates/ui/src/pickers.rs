@@ -2236,23 +2236,22 @@ impl Pickers {
     /// The resolved harness's steering mode, from the loaded descriptor list.
     /// `None` while the catalog is loading.
     pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {
-        let harness = self.effective_harness(cx)?;
-        self.harnesses
-            .ready()
-            .and_then(|list| list.iter().find(|d| d.id == harness))
-            .map(|d| d.steering_mode)
+        self.effective_descriptor(cx).map(|d| d.steering_mode)
     }
 
     pub(crate) fn steers_mid_turn(&self, cx: &App) -> bool {
-        self.harnesses
-            .ready()
-            .and_then(|list| {
-                let selected = self.effective_harness(cx)?;
-                list.iter().find(|h| h.id == selected)
-            })
-            .is_some_and(|h| {
-                h.supports_steering && h.steering_mode == zeron_proto::SteeringMode::StepBoundary
-            })
+        self.effective_descriptor(cx).is_some_and(|h| {
+            h.supports_steering && h.steering_mode == zeron_proto::SteeringMode::StepBoundary
+        })
+    }
+
+    fn effective_descriptor(&self, cx: &App) -> Option<HarnessDescriptor> {
+        let list = self.harnesses.ready()?;
+        let harness = self.effective_harness(cx)?;
+        self.effective_instance(cx)
+            .and_then(|id| self.instances.iter().find(|i| i.id == id))
+            .and_then(|instance| Self::instance_descriptor(instance, list))
+            .or_else(|| list.iter().find(|d| d.id == harness).cloned())
     }
 
     /// The fully-resolved config the composer threads into the Run request and
@@ -14368,6 +14367,10 @@ mod tests {
                 pickers.defaults.harness,
                 Some(HarnessId::Codex),
                 "a bare `acp` default would start the next chat with no agent"
+            );
+            assert_eq!(
+                pickers.resolved_steering_mode(cx),
+                Some(zeron_proto::SteeringMode::TurnBoundary)
             );
             pickers.activate_model_index(0, cx);
             assert_eq!(pickers.config.model.as_deref(), Some("kimchi-1"));
