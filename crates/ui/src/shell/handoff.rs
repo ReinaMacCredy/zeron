@@ -4,8 +4,6 @@ use zeron_doc::{MessageRole, MessageStatus};
 use zeron_proto::ChatIndicator;
 
 impl Shell {
-    /// d119: no handoff mid-turn, while the chat waits on the person, or
-    /// before it has a finished message to carry over.
     fn handoff_blocked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
         let Some(chat) = state.selected_chat_row() else {
