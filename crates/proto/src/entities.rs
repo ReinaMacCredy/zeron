@@ -595,13 +595,14 @@ pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<Th
         steps
             .iter()
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
-            .find(|step| {
+            .filter(|step| {
                 tasks.iter().any(|task| {
                     task.id == step.task_id
                         && !task.deleted
                         && task.chat_id.as_deref() == Some(parent)
                 })
             })
+            .max_by_key(|step| step.outcome.is_none())
             .map(|step| step.id.clone())
     };
     if let Some(source) = &chat.forked_from_chat_id {
@@ -2551,6 +2552,14 @@ mod tests {
                 step_id: Some("s1".into())
             }),
             "a step thread is owned through its step"
+        );
+        let mut done = bound.clone();
+        done.id = "s0".into();
+        done.outcome = Some(StepOutcome::Done);
+        assert_eq!(
+            link(&opened, &[done, bound.clone()]).and_then(|l| l.step_id),
+            Some("s1".into()),
+            "a thread bound again after a done step fills the open one"
         );
         let mut gone = bound.clone();
         gone.deleted = true;
