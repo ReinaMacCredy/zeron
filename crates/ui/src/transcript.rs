@@ -44,6 +44,8 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
+use crate::route_badge::{self, RouteInfo};
+
 use crate::computer::cards::{
     ApprovalCard, CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice,
     ConsentOutcome, approval_card, computer_card, computer_event_row, computer_notice,
@@ -4354,11 +4356,23 @@ pub enum TranscriptEvent {
     Computer {
         request: ComputerRequest,
     },
+    RouteLink {
+        link: route_badge::RouteLink,
+    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    fn route_links(&self, cx: &Context<Self>) -> route_badge::OnRouteLink {
+        let transcript = cx.weak_entity();
+        Rc::new(move |link, _, cx| {
+            transcript
+                .update(cx, |_, cx| cx.emit(TranscriptEvent::RouteLink { link }))
+                .ok();
+        })
+    }
+
     fn render_wake_row(
         &self,
         row_id: &SharedString,
@@ -11655,11 +11669,26 @@ impl Transcript {
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
                 if let Some(thread) = tool.subagent_ref.clone().filter(|_| is_thread_link(tool)) {
-                    let title =
-                        started_thread_title(&self.state.read(cx).chats, &thread, &tool.call);
+                    let state = self.state.read(cx);
+                    let title = started_thread_title(&state.chats, &thread, &tool.call);
+                    let badge = state
+                        .task_steps
+                        .iter()
+                        .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(&thread))
+                        .find_map(|step| step.route.clone())
+                        .map(|route| RouteInfo::for_child(&state.chats, &thread, route))
+                        .and_then(|info| {
+                            route_badge::route_badge(
+                                SharedString::from(format!("{row_id}#s{ix}-route")),
+                                info,
+                                self.route_links(cx),
+                                theme,
+                            )
+                        });
                     return started_thread_line(
                         SharedString::from(format!("{row_id}#s{ix}")),
                         title,
+                        badge,
                         row_height,
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenChat {
@@ -11677,9 +11706,23 @@ impl Transcript {
                     .clone()
                     .filter(|_| tool.call.is_delegate_task())
                 {
-                    let view = delegate_view(&self.state.read(cx).chats, &child);
+                    let chats = &self.state.read(cx).chats;
+                    let view = delegate_view(chats, &child);
+                    let badge = view
+                        .route
+                        .clone()
+                        .map(|route| RouteInfo::for_child(chats, &child, route))
+                        .and_then(|info| {
+                            route_badge::route_badge(
+                                SharedString::from(format!("{row_id}#s{ix}-route")),
+                                info,
+                                self.route_links(cx),
+                                theme,
+                            )
+                        });
                     return delegate_chip(
                         &view,
+                        badge,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenDelegate {
@@ -14048,6 +14091,8 @@ pub(crate) struct DelegateView {
     pub model: Option<SharedString>,
     pub status: Option<zeron_proto::DelegationStatus>,
     pub elapsed_secs: Option<i64>,
+    pub role: Option<SharedString>,
+    pub route: Option<zeron_proto::ChildRoute>,
 }
 
 pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> DelegateView {
@@ -14068,6 +14113,10 @@ pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> Dele
             let end = d.completed_at.unwrap_or_else(chrono::Utc::now);
             (end - d.started_at).num_seconds()
         }),
+        role: delegation
+            .and_then(|d| d.route.as_ref()?.role.clone())
+            .map(SharedString::from),
+        route: delegation.and_then(|d| d.route.clone()),
     }
 }
 
@@ -14108,6 +14157,7 @@ fn started_thread_title(
 fn started_thread_line(
     id: SharedString,
     title: SharedString,
+    badge: Option<AnyElement>,
     height: f32,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     theme: &Theme,
@@ -14138,6 +14188,7 @@ fn started_thread_line(
                 .text_color(theme.text.opacity(0.8))
                 .child(title.clone()),
         )
+        .children(badge)
         .child(div().flex_none().child("·"))
         .child(
             div()
@@ -14170,6 +14221,7 @@ fn started_thread_line(
 #[allow(clippy::too_many_arguments)]
 fn delegate_chip(
     view: &DelegateView,
+    badge: Option<AnyElement>,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     rail: bool,
@@ -14196,6 +14248,15 @@ fn delegate_chip(
         _ => delegate_status_text(view.status).into(),
     };
     let a11y_label = SharedString::from(format!("{label} {} {state}", view.title));
+    let model = view.model.as_ref().map(|model| match view.harness {
+        Some(harness) => crate::pickers::model_display_label(harness, model, cx),
+        None => model.to_string(),
+    });
+    let meta: Option<SharedString> = match (view.role.as_ref(), model) {
+        (Some(role), Some(model)) => Some(format!("{role} · {model}").into()),
+        (Some(role), None) => Some(role.clone()),
+        (None, model) => model.map(SharedString::from),
+    };
     let header = div()
         .h(px(CHIP_HEADER_HEIGHT))
         .w_full()
@@ -14245,15 +14306,16 @@ fn delegate_chip(
                 })
                 .child(view.title.clone()),
         )
-        .when_some(view.model.clone(), |row, model| {
+        .when_some(meta, |row, meta| {
             row.child(
                 div()
                     .flex_none()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child(model),
+                    .child(meta),
             )
         })
+        .children(badge)
         .child(
             div()
                 .flex_none()
@@ -18708,6 +18770,8 @@ mod tests {
             model: None,
             status: Some(status),
             elapsed_secs: Some(3),
+            role: None,
+            route: None,
         };
         use zeron_proto::DelegationStatus::*;
         assert_eq!(

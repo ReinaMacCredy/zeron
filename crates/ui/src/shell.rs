@@ -5495,6 +5495,12 @@ impl Shell {
             TranscriptEvent::Computer {
                 request: ComputerRequest::OpenSetup(missing),
             } => self.open_computer_permission_guide(missing.clone(), cx),
+            TranscriptEvent::RouteLink { link } => match link {
+                crate::route_badge::RouteLink::Routing => {
+                    self.open_settings(SettingsSection::Routing, cx)
+                }
+                crate::route_badge::RouteLink::Usage => self.open_usage(cx),
+            },
         }
     }
 

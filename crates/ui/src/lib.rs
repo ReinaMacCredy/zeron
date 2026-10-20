@@ -80,6 +80,7 @@ pub mod queue;
 pub mod quotes;
 pub mod rail;
 pub mod review;
+mod route_badge;
 mod roll_text;
 pub mod running_pill;
 mod session_stats;
