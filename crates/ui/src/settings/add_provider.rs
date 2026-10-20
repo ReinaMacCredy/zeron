@@ -634,14 +634,7 @@ impl AddProviderDialog {
             return;
         };
         let identity = self.identity();
-        let fallback = match (&self.selected, self.acp) {
-            (Some(selected), _) => selected.agent.name.clone(),
-            (None, Some(AcpFlow::Local)) => "Local ACP".to_string(),
-            _ => driver_name(self.driver).to_string(),
-        };
-        let label = Some(identity.label.trim().to_string())
-            .filter(|label| !label.is_empty())
-            .unwrap_or(fallback);
+        let label = self.label_or_default(&identity);
         let instance = ProviderInstance {
             id: self.instance_id(),
             driver: self.driver,
@@ -657,6 +650,17 @@ impl AddProviderDialog {
         self.upsert(instance, after, cx);
     }
 
+    fn label_or_default(&self, identity: &Identity) -> String {
+        let fallback = match (&self.selected, self.acp) {
+            (Some(selected), _) => selected.agent.name.clone(),
+            (None, Some(AcpFlow::Local)) => "Local ACP".to_string(),
+            _ => driver_name(self.driver).to_string(),
+        };
+        Some(identity.label.trim().to_string())
+            .filter(|label| !label.is_empty())
+            .unwrap_or(fallback)
+    }
+
     /// D1: upsert before the login starts, since an upsert during a login kills it.
     fn sign_in(&mut self, cx: &mut Context<Self>) {
         if self.saving {
@@ -670,7 +674,7 @@ impl AddProviderDialog {
                 self.go(Step::Identity, cx);
                 return;
             }
-            (identity.label.trim().to_string(), self.instance_id())
+            (self.label_or_default(&identity), self.instance_id())
         };
         let instance = ProviderInstance {
             id,
