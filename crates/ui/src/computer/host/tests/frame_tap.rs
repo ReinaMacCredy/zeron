@@ -5,6 +5,7 @@ use zeron_proto::computer::CuaPreviewTarget;
 #[derive(Default)]
 struct RecordingTap {
     updates: Mutex<Vec<CuaPreviewTarget>>,
+    touches: Mutex<Vec<CuaComputerTask>>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -12,6 +13,9 @@ impl ComputerFrameTapHost for RecordingTap {
     fn update(&self, target: CuaPreviewTarget) -> Result<(), String> {
         self.updates.lock().unwrap().push(target);
         Ok(())
+    }
+    fn touch(&self, task: &CuaComputerTask) {
+        self.touches.lock().unwrap().push(task.clone());
     }
     async fn end_task(&self, _task: CuaComputerTask) -> Result<(), String> {
         Ok(())
@@ -153,6 +157,7 @@ async fn keeps_the_tap_parked_on_target_id_only_browser_calls() {
     assert!(navigated.ok);
     sleep_ms(200).await;
     assert!(tap.targets().is_empty());
+    assert_eq!(*tap.touches.lock().unwrap(), [owner()]);
 }
 
 #[tokio::test]
