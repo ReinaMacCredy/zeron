@@ -4672,10 +4672,15 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let host = self.doc_host.clone();
                 let runs = tokio::task::spawn_blocking(move || {
-                    crate::today_runs::today_runs(&chats, p.since_ms, |chat| {
+                    let ids = p.chat_ids.as_deref();
+                    crate::today_runs::today_runs(&chats, p.since_ms, ids, |chat| {
                         host.open_local(&chat.id)
                             .map(|handle| {
-                                crate::today_runs::turns_since(handle.doc().doc(), p.since_ms)
+                                let doc = handle.doc().doc();
+                                (
+                                    crate::today_runs::turns_since(doc, p.since_ms),
+                                    crate::today_runs::waits_since(doc, p.since_ms),
+                                )
                             })
                             .unwrap_or_default()
                     })

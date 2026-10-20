@@ -285,6 +285,7 @@ impl InboxPage {
         };
         let request = TodayRunsRequest {
             since_ms: work_day_start(Local::now()).timestamp_millis(),
+            chat_ids: None,
         };
         let params = serde_json::to_value(request).unwrap_or_default();
         self.runs_task = Some(cx.spawn(async move |this, cx| {

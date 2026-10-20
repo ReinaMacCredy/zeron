@@ -2134,6 +2134,7 @@ pub fn rows_for_entry(
                         questions,
                         resolved,
                         answers,
+                        ..
                     } if questions.iter().any(|question| {
                         matches!(
                             question.kind,
@@ -2199,6 +2200,7 @@ pub fn rows_for_entry(
                         questions,
                         resolved,
                         answers,
+                        ..
                     } if consent_question(questions).is_some() => {
                         let question = consent_question(questions).expect("guarded");
                         let outcome = consent_outcome(*resolved, answers.as_deref());
@@ -22483,6 +22485,8 @@ mod computer_tests {
             }],
             resolved,
             answers,
+            asked_at_ms: None,
+            answered_at_ms: None,
         }
     }
 
@@ -22516,6 +22520,8 @@ mod computer_tests {
                     labels: vec![label.into()],
                 }]
             }),
+            asked_at_ms: None,
+            answered_at_ms: None,
         }
     }
 
@@ -22626,6 +22632,8 @@ mod computer_tests {
             }],
             resolved,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         assert!(shows_protected_surface(
             &rows(vec![question(false)]),

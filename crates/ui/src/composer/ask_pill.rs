@@ -897,6 +897,8 @@ mod tests {
                 }],
                 resolved: false,
                 answers: None,
+                asked_at_ms: None,
+                answered_at_ms: None,
             }],
             created_at: 0,
             device_id: "mac".into(),

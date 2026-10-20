@@ -468,7 +468,7 @@ impl RowBuilder {
                             });
                             rows.push(Placed { core, gap });
                         }
-                        MessagePart::Input { id, request_id, questions, resolved, answers } => {
+                        MessagePart::Input { id, request_id, questions, resolved, answers, .. } => {
                             let gap = gap_for(&rows, false);
                             if let Some(question) = computer::consent_question(questions) {
                                 let answers = answers.as_deref().or_else(|| sent.get(request_id).map(Vec::as_slice));

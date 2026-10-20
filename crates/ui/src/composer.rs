@@ -20013,6 +20013,8 @@ mod tests {
                     questions: vec![question("q", &["a"], false)],
                     resolved: false,
                     answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 },
             )
         };
@@ -21396,6 +21398,8 @@ mod tests {
             questions: vec![question],
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         let entry = |parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -21422,6 +21426,8 @@ mod tests {
             questions: Vec::new(),
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         assert!(
             pending_input_request(&[entry(vec![undecodable])]).is_none(),
@@ -21520,6 +21526,8 @@ mod tests {
                     questions: vec![q],
                     resolved,
                     answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 }],
                 created_at: 0,
                 device_id: "device".into(),
@@ -21586,6 +21594,8 @@ mod tests {
             questions: vec![question("q", &["a"], false)],
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -21649,6 +21659,8 @@ mod tests {
             questions: vec![],
             resolved: true,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         let t = vec![entry(
             Some(MessageStatus::Streaming),

@@ -318,6 +318,10 @@ pub enum MessagePart {
         resolved: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<Vec<UserInputAnswer>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asked_at_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answered_at_ms: Option<i64>,
     },
     Error {
         id: String,
@@ -412,6 +416,24 @@ impl MessagePart {
 /// - `ToolResult` marks the matching tool part resolved / errored in place.
 /// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
 /// - `Error` and `Done{error}` become visible error parts.
+/// The fold stays pure; the live pump stamps wait times with the wall clock after it.
+pub fn stamp_input_times(parts: &mut [MessagePart], now_ms: i64) {
+    for part in parts {
+        if let MessagePart::Input {
+            resolved,
+            asked_at_ms,
+            answered_at_ms,
+            ..
+        } = part
+        {
+            asked_at_ms.get_or_insert(now_ms);
+            if *resolved {
+                answered_at_ms.get_or_insert(now_ms);
+            }
+        }
+    }
+}
+
 pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     match event {
         AgentEvent::SessionStarted { .. } | AgentEvent::Steered { .. } => {
@@ -553,6 +575,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     questions: questions.clone(),
                     resolved: false,
                     answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 });
             }
         }

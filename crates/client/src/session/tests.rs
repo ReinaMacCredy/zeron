@@ -60,6 +60,8 @@ fn input(request_id: &str, consent: bool) -> MessagePart {
         questions: vec![question("q", consent)],
         resolved: false,
         answers: None,
+        asked_at_ms: None,
+        answered_at_ms: None,
     }
 }
 

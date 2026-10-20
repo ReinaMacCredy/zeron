@@ -6924,6 +6924,7 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
+            zeron_doc::stamp_input_times(&mut folded, crate::now_ms());
             if matches!(
                 event,
                 AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
@@ -7008,6 +7009,7 @@ async fn drive_run(
                     *resolved = true;
                 }
             }
+            zeron_doc::stamp_input_times(&mut folded, crate::now_ms());
             // A Done landing on a PARKED session with nothing streamed (the
             // idle reaper's or an interrupt's own teardown) has no entry to
             // finalize — writing one would leave an empty aborted stub.
