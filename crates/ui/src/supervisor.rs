@@ -602,7 +602,23 @@ fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> St
         input.step_id.as_deref(),
     ) {
         (InputAsker::Supervisor, _, _) => return "Supervisor".into(),
-        (InputAsker::Thread, _, _) => thread_name(state, &input.chat_id, now),
+        (InputAsker::Thread, _, _) => {
+            let name = thread_name(state, &input.chat_id, now);
+            let root = state
+                .chats
+                .iter()
+                .find(|chat| chat.id == input.chat_id)
+                .and_then(|chat| {
+                    zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps)
+                        .last()
+                        .filter(|root| root.id != chat.id)
+                        .map(|root| crate::transcript::single_line(&crate::home::chat_title(root)))
+                });
+            match root {
+                Some(root) => format!("{name} · {root}"),
+                None => name,
+            }
+        }
         (InputAsker::Step, Some(task_id), Some(step_id)) => {
             step_name(state, task_id, step_id, now).unwrap_or_else(|| "A step".into())
         }

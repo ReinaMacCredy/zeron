@@ -949,6 +949,7 @@ impl SupervisorPage {
             let asked = crate::transcript::single_line(question.question.trim());
             let (name, detail) = match (multi, header.is_empty()) {
                 (false, _) => (strip_mission(&asked, mission), who.clone()),
+                (true, _) if qx == 0 && input.task_id.is_none() => (who.clone(), asked),
                 (true, false) => (header.to_owned(), asked),
                 (true, true) => (format!("Question {}", qx + 1), asked),
             };
