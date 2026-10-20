@@ -2234,6 +2234,7 @@ mod sidecar_regressions {
             subagent_status: status,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         };
         let agent = |id: &str, status| {
             spawn(

@@ -308,6 +308,9 @@ pub enum MessagePart {
         /// the engine — the HTML itself never enters the doc).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         html_render: Option<zeron_proto::html_render::HtmlRenderRef>,
+        /// Where a delegate_task that opened no child went instead (a quota fallback to the agent's native sub-agent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegate_route: Option<zeron_proto::ChildRoute>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -520,6 +523,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_status: None,
                     subagent_tail: None,
                     html_render: None,
+                    delegate_route: None,
                 });
             }
         }
@@ -1324,6 +1328,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: None,
+                delegate_route: None,
             },
         ];
         let chunks = split_parts(&parts);
