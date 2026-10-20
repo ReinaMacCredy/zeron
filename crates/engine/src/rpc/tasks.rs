@@ -229,7 +229,7 @@ fn reorder_keys(
     Ok(moves)
 }
 
-pub(super) struct Rebrief<'a> {
+pub(super) struct BySupervisor<'a> {
     pub supervisor: &'a str,
     pub reason: &'a str,
 }
@@ -631,7 +631,7 @@ impl EngineRpc {
             detail,
             options,
         )?;
-        self.doc_host.supervisor_escalated(&item);
+        self.doc_host.supervisor_escalated(&item, false);
         Ok(item.id)
     }
 
@@ -775,7 +775,11 @@ impl EngineRpc {
             .map(drop)
     }
 
-    pub(super) async fn approve_plan(&self, task_id: &str) -> Result<(), RpcError> {
+    pub(super) async fn approve_plan(
+        &self,
+        task_id: &str,
+        by: Option<BySupervisor<'_>>,
+    ) -> Result<String, RpcError> {
         let task = self.task_or_refuse(task_id)?;
         if !task.plan_pending {
             return Err(refused("This plan is not waiting for approval"));
@@ -789,15 +793,18 @@ impl EngineRpc {
             ..Default::default()
         };
         self.update_task(task_id, &patch)?;
-        self.send_to_task_thread(
-            &task,
-            &lead,
-            None,
-            "The plan is approved. Run it.",
-            Vec::new(),
-        )
-        .await
-        .map(drop)
+        let (text, from) = match by {
+            Some(by) => (
+                format!(
+                    "The Supervisor approved the plan. Run it.\n\nWhy: {}",
+                    by.reason.trim()
+                ),
+                Some(by.supervisor),
+            ),
+            None => ("The plan is approved. Run it.".to_string(), None),
+        };
+        self.send_to_task_thread(&task, &lead, from, &text, Vec::new())
+            .await
     }
 
     pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {
@@ -837,7 +844,7 @@ impl EngineRpc {
         steps: Vec<PlanEdit>,
         remove_step_ids: &[String],
         order: &[String],
-        rebrief: Option<Rebrief<'_>>,
+        rebrief: Option<BySupervisor<'_>>,
     ) -> Result<Option<String>, RpcError> {
         if rebrief.is_some()
             && (overview.is_some()

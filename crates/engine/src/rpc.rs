@@ -2415,10 +2415,12 @@ impl EngineRpc {
                     || patch.images.is_some()
                     || patch.chat_id.is_some()
                 {
-                    supervisor::refuse_supervisor(
-                        from_chat_id.as_deref(),
-                        supervisor::GOAL_OR_SPEND,
-                    )?;
+                    let refusal = if self.registry.supervisor_settings().goal_and_spend {
+                        supervisor::GOAL_ACTION
+                    } else {
+                        supervisor::GOAL_OR_SPEND
+                    };
+                    supervisor::refuse_supervisor(from_chat_id.as_deref(), refusal)?;
                 }
                 self.update_task(&task_id, &patch)
             }
@@ -2503,7 +2505,9 @@ impl EngineRpc {
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
             MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
-            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await,
+            MutateParams::ApprovePlan { task_id } => {
+                self.approve_plan(&task_id, None).await.map(drop)
+            }
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
             MutateParams::EditTaskPlan {
                 task_id,

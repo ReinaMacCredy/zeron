@@ -17,7 +17,8 @@ use crate::registry::HarnessRegistry;
 use crate::supervisor::{
     Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
     StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader,
-    chips, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc, wake_text,
+    chips, escalated_item, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc,
+    wake_text,
 };
 use crate::supervisor_resources::{
     CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
@@ -105,8 +106,16 @@ impl Observed {
     }
 }
 
+struct PendingPlan {
+    task_id: String,
+    lead: String,
+    steps: usize,
+    newest: i64,
+}
+
 struct Round {
     missions: HashMap<String, MissionFacts>,
+    plans: Vec<PendingPlan>,
     done: Vec<Task>,
     step_titles: HashMap<String, String>,
     resources: Vec<ResourceMission>,
@@ -121,6 +130,7 @@ pub(crate) struct InterventionBasis {
     steps: Vec<StepSnap>,
     target: Option<String>,
     trigger: Option<InterventionTrigger>,
+    item_id: Option<String>,
 }
 
 impl InterventionBasis {
@@ -131,6 +141,11 @@ impl InterventionBasis {
     pub(crate) fn with_task(mut self, task_id: &str, target: &str) -> Self {
         self.task_id = Some(task_id.to_string());
         self.target = Some(target.to_string());
+        self
+    }
+
+    pub(crate) fn with_item(mut self, item_id: &str) -> Self {
+        self.item_id = Some(item_id.to_string());
         self
     }
 }
@@ -289,10 +304,15 @@ impl DocHost {
         self.supervisor_event(event);
     }
 
-    pub(crate) fn supervisor_escalated(&self, item: &SupervisorItem) {
+    /// A re-wake gets its own key: the first wake of the item is already reported.
+    pub(crate) fn supervisor_escalated(&self, item: &SupervisorItem, rewake: bool) {
+        let key = match rewake {
+            true => format!("escalation:{}:{}", item.id, now_ms()),
+            false => format!("escalation:{}", item.id),
+        };
         let mut event = SupervisorEvent::new(
             Kind::Escalation,
-            format!("escalation:{}", item.id),
+            key,
             item.task_id.as_deref(),
             "Lead escalated".to_string(),
         );
@@ -394,6 +414,7 @@ impl DocHost {
             steps,
             target: target.map(str::to_owned),
             trigger: self.supervisor_trigger(supervisor),
+            item_id: None,
         }
     }
 
@@ -423,6 +444,7 @@ impl DocHost {
                 item: None,
             },
             steps: basis.steps,
+            item_id: basis.item_id,
         });
     }
 
@@ -525,6 +547,7 @@ impl DocHost {
             last_live: observed.last_live.get(id).copied(),
         };
         let mut missions = HashMap::new();
+        let mut plans = Vec::new();
         let mut step_titles = HashMap::new();
         let mut resources = Vec::new();
         for task in tasks {
@@ -549,6 +572,18 @@ impl DocHost {
                 .any(|thread| ended.contains(&thread.to_string()))
             {
                 store.mark_stale();
+            }
+            if task.plan_pending && !own.is_empty() {
+                plans.push(PendingPlan {
+                    task_id: task.id.clone(),
+                    lead: lead.id.clone(),
+                    steps: own.len(),
+                    newest: own
+                        .iter()
+                        .map(|step| ms(step.created_at))
+                        .max()
+                        .unwrap_or(0),
+                });
             }
             let mut facts = MissionFacts {
                 task_id: task.id.clone(),
@@ -620,6 +655,7 @@ impl DocHost {
         }
         Round {
             missions,
+            plans,
             done,
             step_titles,
             resources,
@@ -678,11 +714,16 @@ impl DocHost {
         for stall in stalls {
             self.supervisor_event(stall_event(stall, &round.step_titles));
         }
+        let settings = registry.supervisor_settings();
+        if settings.decide_for_me {
+            for plan in &round.plans {
+                self.supervisor_event(plan_event(plan));
+            }
+        }
         let missions_held = std::mem::take(&mut round.resources);
         if let Some(at) = self.supervise_resources(store, missions_held, &round.edges, now) {
             sooner(at, NextCheckKind::Resource);
         }
-        let settings = registry.supervisor_settings();
         let interval = i64::from(settings.heartbeat_minutes) * 60_000;
         if interval > 0 && !missions.is_empty() {
             let last = store.wake_times().into_iter().max().unwrap_or(0);
@@ -1094,7 +1135,7 @@ impl DocHost {
         let (keep, dropped): (Vec<_>, Vec<_>) = store
             .take_pending()
             .into_iter()
-            .partition(|event| self.still_true(event, workspace, sessions, missions));
+            .partition(|event| self.still_true(event, workspace, sessions, missions, settings));
         let dropped: Vec<SupervisorEventSummary> =
             dropped.into_iter().map(|event| event.summary).collect();
         let permission = supervisor
@@ -1207,6 +1248,7 @@ impl DocHost {
         workspace: &WorkspaceHost,
         sessions: &SessionsEngine,
         missions: &HashMap<String, MissionFacts>,
+        settings: zeron_proto::supervisor::SupervisorSettings,
     ) -> bool {
         let summary = &event.summary;
         let mission = summary.task_id.as_deref().and_then(|id| missions.get(id));
@@ -1216,6 +1258,16 @@ impl DocHost {
                 .as_deref()
                 .and_then(|id| workspace.task_step(id))
                 .is_some_and(|step| step_failed(&step)),
+            Kind::NeedsYou if summary.key.starts_with(PLAN_READY) => {
+                settings.decide_for_me
+                    && summary
+                        .task_id
+                        .as_deref()
+                        .and_then(|id| workspace.task(id))
+                        .is_some_and(|task| {
+                            task.plan_pending && !workspace.task_steps_of(&task.id).is_empty()
+                        })
+            }
             Kind::NeedsYou => match (&summary.thread_id, &event.request_id) {
                 (Some(thread), Some(request)) => sessions.awaits_input(thread, request),
                 _ => false,
@@ -1230,9 +1282,7 @@ impl DocHost {
                         && mission.lead_silent_after(failed.failed_at)
                 })
             }),
-            Kind::Escalation => summary
-                .key
-                .strip_prefix("escalation:")
+            Kind::Escalation => escalated_item(&summary.key)
                 .and_then(|item| self.supervisor().map(|store| store.item_open(item)))
                 .unwrap_or(false),
             Kind::Resource => summary
@@ -1279,7 +1329,7 @@ impl DocHost {
                         .map(|text| clip(&text, WAKE_QUESTION_CHARS)),
                 });
                 let escalation = (event.summary.kind == Kind::Escalation)
-                    .then(|| event.summary.key.strip_prefix("escalation:"))
+                    .then(|| escalated_item(&event.summary.key))
                     .flatten()
                     .and_then(|item| self.supervisor()?.item(item))
                     .map(|item| item.why);
@@ -1354,6 +1404,27 @@ fn earliest(events: &[&SupervisorEvent], now: i64) -> i64 {
         .map(|event| ms(event.summary.at))
         .min()
         .unwrap_or(now)
+}
+
+const PLAN_READY: &str = "plan-ready:";
+
+fn plan_event(plan: &PendingPlan) -> SupervisorEvent {
+    let mut event = SupervisorEvent::new(
+        Kind::NeedsYou,
+        format!("{PLAN_READY}{}:{}", plan.task_id, plan.newest),
+        Some(&plan.task_id),
+        "Plan ready for review".to_string(),
+    );
+    event.summary.thread_id = Some(plan.lead.clone());
+    let steps = match plan.steps {
+        1 => "1 step waits".to_string(),
+        n => format!("{n} steps wait"),
+    };
+    event.detail = vec![format!(
+        "{steps} for approval. Read the plan with the tasks tool (action \"list\", taskId {}), then approve it with the supervisor tool, action \"approve\" (taskId, reason), or leave it for the person.",
+        plan.task_id
+    )];
+    event
 }
 
 fn stall_event(stall: Stall, step_titles: &HashMap<String, String>) -> SupervisorEvent {

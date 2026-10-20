@@ -2,8 +2,8 @@ use super::*;
 use crate::supervisor::{PauseHold, SupervisorStore};
 use crate::supervisor_resources::AFTER_PAUSE_MS;
 use zeron_proto::supervisor::{
-    CHAT_PREFIX, CHAT_TITLE, InterventionKind, ItemWhy, Raiser, ResourceKey, SupervisorItem,
-    SupervisorSettings, is_supervisor_chat,
+    CHAT_PREFIX, CHAT_TITLE, InterventionKind, ItemWhy, Raiser, ResourceKey, SupervisorChoice,
+    SupervisorItem, SupervisorSettings, is_supervisor_chat,
 };
 
 pub(super) const MESSAGE_OFF: &str = "Messaging leads and step threads is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
@@ -12,6 +12,10 @@ pub(super) const NO_INTERRUPT: &str = "The Supervisor does not interrupt threads
 const PAUSE_OFF: &str = "Pausing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 const UNIX_ONLY: &str = "Shared resources are checked against the machine on macOS and Linux only";
 pub(super) const GOAL_OR_SPEND: &str = "A task's title, notes and thread are the person's: the Supervisor cannot change them, delete the task or reassign it. Raise it with the supervisor tool, action \"ask\".";
+pub(super) const GOAL_ACTION: &str = "The Supervisor changes a mission's title and notes with the supervisor tool, action \"goal\", which tells its lead. It cannot delete or reassign a task.";
+const DECIDE_OFF: &str = "Decide for me is off in the Supervisor's Authority: the person decides the leads' Needs you items and approves plans. Raise it with the supervisor tool, action \"ask\", if it needs them.";
+const GOAL_OFF: &str = "Changing a mission's goal or spend is off in the Supervisor's Authority: it is the person's decision. Raise it with the supervisor tool, action \"ask\".";
+const UNWATCHED: &str = "The person turned off the Supervisor's watch on this mission, so its decisions stay with the person.";
 const MAX_OPTIONS: usize = 3;
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +73,23 @@ enum SupervisorAction {
         #[serde(default)]
         task_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    Decide {
+        item_id: String,
+        choice: String,
+        reason: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Approve { task_id: String, reason: String },
+    #[serde(rename_all = "camelCase")]
+    Goal {
+        task_id: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +106,13 @@ fn failed(error: crate::EngineError) -> RpcError {
 
 fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
+}
+
+fn given<'a>(reason: &'a str, who_reads: &str) -> Result<&'a str, RpcError> {
+    match reason.trim() {
+        "" => Err(refused(&format!("reason is required: {who_reads}"))),
+        reason => Ok(reason),
+    }
 }
 
 pub(super) fn refuse_supervisor(from: Option<&str>, refusal: &str) -> Result<(), RpcError> {
@@ -138,8 +166,17 @@ impl EngineRpc {
             }
             methods::SET_SUPERVISOR_SETTINGS => {
                 let p: SupervisorSettings = parse_params(params)?;
+                let before = self.registry.supervisor_settings();
                 self.registry.set_supervisor_settings(p);
-                self.supervisor_store()?.poke();
+                let store = self.supervisor_store()?;
+                for item in store.open_items().iter().filter(|item| {
+                    item.raised_by == Raiser::Lead
+                        && p.decides(item.why)
+                        && !before.decides(item.why)
+                }) {
+                    self.doc_host.supervisor_escalated(item, true);
+                }
+                store.poke();
                 RpcReply::value(&self.registry.supervisor_settings())
             }
             methods::SUPERVISOR_ACT => {
@@ -237,7 +274,7 @@ impl EngineRpc {
                     notes,
                     images: None,
                 };
-                let rebrief = tasks::Rebrief {
+                let rebrief = tasks::BySupervisor {
                     supervisor: from,
                     reason: &reason,
                 };
@@ -326,7 +363,202 @@ impl EngineRpc {
                     .await
             }
             SupervisorAction::Check { task_id } => self.check_resources(task_id.as_deref()).await,
+            SupervisorAction::Decide {
+                item_id,
+                choice,
+                reason,
+            } => self.decide_item(from, &item_id, &choice, &reason).await,
+            SupervisorAction::Approve { task_id, reason } => {
+                if !settings.decide_for_me {
+                    return Err(refused(DECIDE_OFF));
+                }
+                let reason = given(&reason, "the lead reads why its plan was approved")?;
+                let (task, lead) = self.watched_mission(&task_id)?;
+                let basis = self.doc_host.intervention_basis(
+                    InterventionKind::Approve,
+                    from,
+                    Some(&lead),
+                    None,
+                );
+                let by = tasks::BySupervisor {
+                    supervisor: from,
+                    reason,
+                };
+                let message_id = self.approve_plan(&task.id, Some(by)).await?;
+                self.doc_host
+                    .record_intervention(basis, Some(message_id.clone()), None, reason);
+                Ok(
+                    serde_json::json!({ "taskId": task.id, "leadThreadId": lead, "messageId": message_id }),
+                )
+            }
+            SupervisorAction::Goal {
+                task_id,
+                title,
+                notes,
+                reason,
+            } => {
+                if !settings.goal_and_spend {
+                    return Err(refused(GOAL_OFF));
+                }
+                self.change_goal(from, &task_id, title, notes, &reason)
+                    .await
+            }
         }
+    }
+
+    fn watched_mission(&self, task_id: &str) -> Result<(zeron_proto::Task, String), RpcError> {
+        let task = self.task_or_refuse(task_id)?;
+        if task.mode != zeron_proto::TaskMode::Orchestrated {
+            return Err(refused("That task is not a Mission Control mission"));
+        }
+        if self.supervisor_store()?.is_unwatched(&task.id) {
+            return Err(refused(UNWATCHED));
+        }
+        let lead = self.lead_of(&task)?;
+        Ok((task, lead))
+    }
+
+    async fn decide_item(
+        &self,
+        from: &str,
+        item_id: &str,
+        choice: &str,
+        reason: &str,
+    ) -> Result<serde_json::Value, RpcError> {
+        let settings = self.registry.supervisor_settings();
+        let store = self.supervisor_store()?;
+        let item = store
+            .item(item_id)
+            .ok_or_else(|| refused("No Needs-you item has that itemId"))?;
+        if item.raised_by != Raiser::Lead {
+            return Err(refused(
+                "The Supervisor decides only items a lead raised; its own asks are the person's to answer",
+            ));
+        }
+        if !settings.decides(item.why) {
+            return Err(refused(match item.why {
+                ItemWhy::Decision => DECIDE_OFF,
+                ItemWhy::Goal | ItemWhy::Spend => GOAL_OFF,
+            }));
+        }
+        if item.answer.is_some() {
+            return Err(refused("This item is already answered"));
+        }
+        let choice = item
+            .options
+            .iter()
+            .find(|option| option.as_str() == choice.trim())
+            .ok_or_else(|| {
+                refused(&format!(
+                    "choice is one of the item's options: {}",
+                    item.options.join(" | ")
+                ))
+            })?
+            .clone();
+        let reason = given(reason, "the person and the lead read why you chose it")?;
+        let task_id = item
+            .task_id
+            .as_deref()
+            .ok_or_else(|| refused("This item names no mission"))?;
+        let (task, lead) = self.watched_mission(task_id)?;
+        let basis = self
+            .doc_host
+            .intervention_basis(InterventionKind::Decide, from, Some(&lead), None)
+            .with_item(&item.id);
+        let decided = SupervisorChoice {
+            at: chrono::Utc::now(),
+            choice: choice.clone(),
+            reason: reason.to_string(),
+        };
+        store
+            .answer_item(&item.id, &choice, Some(decided))
+            .map_err(failed)?;
+        let text = format!(
+            "The Supervisor decided Needs-you item {} \"{}\", raised by the lead: {choice}\n\nWhy: {reason}\n\nApply it to this mission (task id {}). The person may change it; a change reaches you as a correction.",
+            item.id, item.title, task.id
+        );
+        let message_id = match self
+            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
+            .await
+        {
+            Ok(id) => id,
+            Err(err) => {
+                store.reopen_item(&item.id).ok();
+                return Err(err);
+            }
+        };
+        self.doc_host
+            .record_intervention(basis, Some(message_id.clone()), None, reason);
+        Ok(serde_json::json!({
+            "itemId": item.id, "choice": choice, "leadThreadId": lead, "messageId": message_id,
+        }))
+    }
+
+    async fn change_goal(
+        &self,
+        from: &str,
+        task_id: &str,
+        title: Option<String>,
+        notes: Option<String>,
+        reason: &str,
+    ) -> Result<serde_json::Value, RpcError> {
+        let reason = given(reason, "the lead reads why the goal changed")?;
+        let (task, lead) = self.watched_mission(task_id)?;
+        let title = title
+            .map(|title| title.trim().to_string())
+            .filter(|title| *title != task.title);
+        if title.as_deref().is_some_and(|title| {
+            title.is_empty() || title.chars().count() > zeron_doc::TASK_TITLE_MAX_CHARS
+        }) {
+            return Err(refused("A mission needs a title of up to 500 characters"));
+        }
+        let notes = notes.filter(|notes| *notes != task.notes);
+        if notes
+            .as_deref()
+            .is_some_and(|notes| notes.chars().count() > zeron_doc::TASK_NOTES_MAX_CHARS)
+        {
+            return Err(refused(
+                "A mission's notes are limited to 10,000 characters",
+            ));
+        }
+        let mut changes = Vec::new();
+        if let Some(title) = &title {
+            changes.push(format!(
+                "The title is now \"{title}\" (it was \"{}\").",
+                task.title
+            ));
+        }
+        match notes.as_deref() {
+            Some("") => changes.push("The notes are now empty.".to_string()),
+            Some(notes) => changes.push(format!("The notes are now:\n{notes}")),
+            None => {}
+        }
+        if changes.is_empty() {
+            return Err(refused("That is already this mission's title and notes"));
+        }
+        let basis =
+            self.doc_host
+                .intervention_basis(InterventionKind::Goal, from, Some(&lead), None);
+        self.update_task(
+            &task.id,
+            &zeron_proto::TaskPatch {
+                title,
+                notes,
+                ..Default::default()
+            },
+        )?;
+        let text = format!(
+            "The Supervisor changed this mission's goal (task id {}):\n- {}\n\nWhy: {reason}\n\nCheck the plan against it with the tasks tool: action \"list\", taskId \"{}\", and rewrite the steps that no longer fit with action \"plan\". The person may change the goal back.",
+            task.id,
+            changes.join("\n- "),
+            task.id
+        );
+        let message_id = self
+            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
+            .await?;
+        self.doc_host
+            .record_intervention(basis, Some(message_id.clone()), None, reason);
+        Ok(serde_json::json!({ "taskId": task.id, "leadThreadId": lead, "messageId": message_id }))
     }
 
     fn pause_ready(&self, reason: &str, does: &str) -> Result<(), RpcError> {
@@ -575,7 +807,7 @@ impl EngineRpc {
             return Err(refused("answers is required"));
         }
         let store = self.supervisor_store()?;
-        let mut answered: Vec<(SupervisorItem, String)> = Vec::new();
+        let mut answered: Vec<(SupervisorItem, String, Option<String>)> = Vec::new();
         let mut errors: Vec<RpcError> = Vec::new();
         for answer in answers {
             let choice = answer.choice.trim();
@@ -584,14 +816,17 @@ impl EngineRpc {
                 continue;
             }
             match store.answer_item(&answer.item_id, choice, None) {
-                Ok((item, _)) => answered.push((item, choice.to_string())),
+                Ok((item, previous)) => {
+                    let replaced = previous.map(|previous| previous.choice);
+                    answered.push((item, choice.to_string(), replaced));
+                }
                 Err(error) => errors.push(failed(error)),
             }
         }
         let mut tasks: Vec<&str> = Vec::new();
         for task_id in answered
             .iter()
-            .filter_map(|(item, _)| item.task_id.as_deref())
+            .filter_map(|(item, ..)| item.task_id.as_deref())
         {
             if !tasks.contains(&task_id) {
                 tasks.push(task_id);
@@ -604,27 +839,41 @@ impl EngineRpc {
             let Ok(lead) = self.lead_of(&task) else {
                 continue;
             };
-            let lines: Vec<String> = answered
-                .iter()
-                .filter(|(item, _)| item.task_id.as_deref() == Some(task_id))
-                .map(|(item, choice)| {
+            let mine = || {
+                answered
+                    .iter()
+                    .filter(|(item, ..)| item.task_id.as_deref() == Some(task_id))
+            };
+            let lines: Vec<String> = mine()
+                .map(|(item, choice, replaced)| {
                     let raiser = match item.raised_by {
                         Raiser::Lead => "the lead",
                         Raiser::Supervisor => "the Supervisor",
                     };
+                    let correction = replaced
+                        .as_deref()
+                        .map(|old| {
+                            format!(" (a correction: this replaces the Supervisor's \"{old}\")")
+                        })
+                        .unwrap_or_default();
                     format!(
-                        "{} \"{}\", raised by {raiser}: {choice}",
+                        "{} \"{}\", raised by {raiser}: {choice}{correction}",
                         item.id, item.title
                     )
                 })
                 .collect();
+            let undo = if mine().any(|(.., replaced)| replaced.is_some()) {
+                " If you already acted on the Supervisor's choice, undo or adjust what depends on it where you can, and tell the person what could not be undone."
+            } else {
+                ""
+            };
             let text = match lines.as_slice() {
                 [one] => format!(
-                    "The person answered Needs-you item {one}\n\nApply it to this mission (task id {}).",
+                    "The person answered Needs-you item {one}\n\nApply it to this mission (task id {}).{undo}",
                     task.id
                 ),
                 lines => format!(
-                    "The person answered {} Needs-you items:\n{}\n\nApply them to this mission (task id {}).",
+                    "The person answered {} Needs-you items:\n{}\n\nApply them to this mission (task id {}).{undo}",
                     lines.len(),
                     lines
                         .iter()
@@ -638,7 +887,7 @@ impl EngineRpc {
                 .await?;
         }
         let mut raisers: Vec<&str> = Vec::new();
-        for (item, _) in &answered {
+        for (item, ..) in &answered {
             if item.raised_by == Raiser::Supervisor
                 && !raisers.contains(&item.raiser_chat_id.as_str())
                 && self.doc_host.is_live_supervisor(&item.raiser_chat_id)
@@ -649,10 +898,10 @@ impl EngineRpc {
         for raiser in raisers {
             let lines: Vec<String> = answered
                 .iter()
-                .filter(|(item, _)| {
+                .filter(|(item, ..)| {
                     item.raised_by == Raiser::Supervisor && item.raiser_chat_id == raiser
                 })
-                .map(|(item, choice)| format!("{} \"{}\": {choice}", item.id, item.title))
+                .map(|(item, choice, _)| format!("{} \"{}\": {choice}", item.id, item.title))
                 .collect();
             let text = match lines.as_slice() {
                 [one] => format!("The person answered your Needs-you item {one}"),
@@ -667,6 +916,30 @@ impl EngineRpc {
             };
             self.doc_host
                 .queue_thread_message(raiser, None, &text)
+                .await
+                .map_err(failed)?;
+        }
+        let corrections: Vec<String> = answered
+            .iter()
+            .filter_map(|(item, choice, replaced)| {
+                Some(format!(
+                    "- item {} \"{}\": {choice}, replacing your \"{}\"",
+                    item.id,
+                    item.title,
+                    replaced.as_deref()?
+                ))
+            })
+            .collect();
+        if !corrections.is_empty()
+            && let Some(supervisor) = store.chat_id()
+            && self.doc_host.is_live_supervisor(&supervisor)
+        {
+            let text = format!(
+                "The person changed your decisions; each lead got the correction:\n{}",
+                corrections.join("\n")
+            );
+            self.doc_host
+                .queue_thread_message(&supervisor, None, &text)
                 .await
                 .map_err(failed)?;
         }

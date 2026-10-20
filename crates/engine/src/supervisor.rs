@@ -41,6 +41,10 @@ pub(crate) fn fold_ms() -> i64 {
         .unwrap_or(60_000)
 }
 
+pub(crate) fn escalated_item(key: &str) -> Option<&str> {
+    key.strip_prefix("escalation:")?.split(':').next()
+}
+
 pub(crate) fn utc(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or_default()
 }
@@ -111,6 +115,8 @@ pub(crate) struct InterventionRecord {
     pub row: SupervisorIntervention,
     #[serde(default)]
     pub steps: Vec<StepSnap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +225,10 @@ impl State {
                         .get(&record.row.id)
                         .cloned()
                         .unwrap_or_default(),
+                    item: record
+                        .item_id
+                        .as_deref()
+                        .and_then(|id| self.file.items.iter().find(|item| item.id == id).cloned()),
                     ..record.row.clone()
                 })
                 .collect(),
@@ -594,6 +604,26 @@ impl SupervisorStore {
         };
         self.mark_stale();
         Ok(answered)
+    }
+
+    pub(crate) fn reopen_item(&self, item_id: &str) -> Result<(), EngineError> {
+        {
+            let mut state = lock(&self.inner.state);
+            let mut file = state.file.clone();
+            if let Some(item) = file.items.iter_mut().find(|item| item.id == item_id) {
+                item.answer = None;
+            }
+            persist_json(&self.inner.path, &file)?;
+            state.file = file;
+        }
+        self.mark_stale();
+        Ok(())
+    }
+
+    pub(crate) fn open_items(&self) -> Vec<SupervisorItem> {
+        let state = lock(&self.inner.state);
+        let open = state.file.items.iter().filter(|item| item.answer.is_none());
+        open.cloned().collect()
     }
 
     pub(crate) fn item_open(&self, item_id: &str) -> bool {
@@ -1252,6 +1282,73 @@ mod tests {
         assert_eq!(text.matches("</agent-response>").count(), 1);
     }
 
+    #[test]
+    fn the_footer_names_only_the_authority_that_is_on() {
+        let footer = |settings: SupervisorSettings| {
+            let text = authority_footer(settings, PermissionMode::Full);
+            text[text.find("- start a mission").unwrap()..].to_string()
+        };
+        let off = SupervisorSettings::default();
+        assert_eq!(
+            footer(off),
+            "- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): off\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line."
+        );
+        let decide = footer(SupervisorSettings {
+            decide_for_me: true,
+            ..off
+        });
+        assert!(
+            decide.contains("action \"decide\" (itemId, choice, reason), and approve a plan")
+                && !decide.contains("action \"goal\"")
+                && decide.contains("is the person's decision"),
+            "{decide}"
+        );
+        let goal = footer(SupervisorSettings {
+            goal_and_spend: true,
+            ..off
+        });
+        assert!(
+            goal.contains("with action \"goal\" (taskId, title, notes, reason): on")
+                && !goal.contains("approve a plan")
+                && !goal.contains("is the person's decision")
+                && goal.contains("may change it"),
+            "{goal}"
+        );
+        for (why, settings, decides) in [
+            (ItemWhy::Decision, off, false),
+            (
+                ItemWhy::Decision,
+                SupervisorSettings {
+                    decide_for_me: true,
+                    ..off
+                },
+                true,
+            ),
+            (
+                ItemWhy::Spend,
+                SupervisorSettings {
+                    decide_for_me: true,
+                    ..off
+                },
+                false,
+            ),
+            (
+                ItemWhy::Goal,
+                SupervisorSettings {
+                    goal_and_spend: true,
+                    ..off
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(
+                escalation_line(why, settings) != PERSON_ANSWERS,
+                decides,
+                "{why:?}"
+            );
+        }
+    }
+
     fn thread(live: bool, background: bool, last_message: i64) -> ThreadFacts {
         ThreadFacts {
             live,
@@ -1372,6 +1469,7 @@ mod tests {
                 item: None,
             },
             steps: Vec::new(),
+            item_id: None,
         };
         let at = StepThread {
             task_id: "t",

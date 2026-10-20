@@ -577,6 +577,33 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
         "{wake}"
     );
     assert!(wake.contains("Options: Pay $20 | Use the mock"), "{wake}");
+    assert!(
+        wake.contains(
+            "   The person answers it on the Supervisor page; their choice goes to the lead.\n"
+        ),
+        "{wake}"
+    );
+    assert!(
+        wake.contains("A change to a mission's goal or spend is the person's decision")
+            && !wake.contains("action \"decide\""),
+        "with the switches off the wake is unchanged: {wake}"
+    );
+    for action in [
+        json!({ "action": "decide", "itemId": item_id, "choice": "Use the mock", "reason": "cheaper" }),
+        json!({ "action": "approve", "taskId": "t1", "reason": "fine" }),
+        json!({ "action": "goal", "taskId": "t1", "title": "Shop", "reason": "shorter" }),
+    ] {
+        let mut params = action.clone();
+        params["fromChatId"] = json!(supervisor);
+        let Err(err) = rpc.handle(methods::SUPERVISOR_ACT, params).await else {
+            panic!("{action} is the person's while the switches are off")
+        };
+        assert!(
+            err.to_string()
+                .contains("is off in the Supervisor's Authority"),
+            "{err}"
+        );
+    }
 
     let answered = "The person answered Needs-you item";
     mutate(json!({ "op": "resolveSupervisorItem", "itemId": item_id, "choice": "Use the mock" }))
@@ -690,5 +717,289 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
     );
     let snapshot = supervisor_snapshot(&rpc, |s| s.needs_you_count() == 0).await;
     assert!(snapshot.needs_you.is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_and_the_person_corrects_it()
+ {
+    use zeron_proto::supervisor::{InterventionKind, NeedsYouRow};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Recording(prompts.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    let rpc = core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { rpc.handle(methods::MUTATE, params).await }
+    };
+    let count = |needle: &str| {
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|prompt| prompt.contains(needle))
+            .count()
+    };
+    let sent = |needle: &str| {
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|prompt| prompt.contains(needle))
+            .cloned()
+            .unwrap()
+    };
+    let act = |supervisor: String, action: serde_json::Value| {
+        let rpc = rpc.clone();
+        let mut params = action;
+        params["fromChatId"] = json!(supervisor);
+        async move { rpc.handle(methods::SUPERVISOR_ACT, params).await }
+    };
+    mutate(json!({ "op": "createTask", "taskId": "t1", "title": "Deep Dive review" }))
+        .await
+        .unwrap();
+    mutate(json!({ "op": "startTask", "taskId": "t1", "chatId": "lead-1", "orchestrate": true }))
+        .await
+        .unwrap();
+    wait_for(
+        || count("You lead this task (task id t1)") == 1,
+        "the lead's brief",
+    )
+    .await;
+    let mut items = Vec::new();
+    for (title, why) in [
+        ("Who reviews?", "decision"),
+        ("Pay for a second model?", "spend"),
+    ] {
+        let RpcReply::Value(raised) = mutate(json!({
+            "op": "escalateTask", "taskId": "t1", "fromChatId": "lead-1", "title": title,
+            "why": why, "options": ["Claude", "Codex"],
+        }))
+        .await
+        .unwrap() else {
+            panic!("an item id")
+        };
+        items.push(raised["itemId"].as_str().unwrap().to_string());
+    }
+    let (decision, spend) = (items[0].clone(), items[1].clone());
+    mutate(json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "lead-1",
+        "steps": [{ "title": "Review", "notes": "Read the diff" }],
+    }))
+    .await
+    .unwrap();
+    let RpcReply::Value(ensured) = rpc
+        .handle(
+            methods::ENSURE_SUPERVISOR,
+            json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("a chat id")
+    };
+    let supervisor = ensured["chatId"].as_str().unwrap().to_string();
+
+    let act = |action: serde_json::Value| act(supervisor.clone(), action);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        count("Supervisor wake"),
+        0,
+        "a plan waiting for review wakes nobody while Decide for me is off"
+    );
+
+    rpc.handle(
+        methods::SET_SUPERVISOR_SETTINGS,
+        json!({ "decideForMe": true }),
+    )
+    .await
+    .unwrap();
+    wait_for(
+        || count("Plan ready for review") == 1 && count("Lead escalated") == 1,
+        "the wake that hands the Supervisor the plan and the decision",
+    )
+    .await;
+    let wake = sent("Plan ready for review");
+    assert!(wake.contains("Lead escalated"), "{wake}");
+    assert!(wake.contains(&format!("itemId {decision}")), "{wake}");
+    assert!(
+        !wake.contains(&format!("itemId {spend}")),
+        "a spend item stays with the person: {wake}"
+    );
+    assert!(
+        wake.contains("   You may decide it: the supervisor tool, action \"decide\""),
+        "{wake}"
+    );
+    assert!(
+        wake.contains("approve it with the supervisor tool, action \"approve\"")
+            && wake.contains("action \"approve\" (taskId, reason): on")
+            && wake.contains("A change to a mission's goal or spend is the person's decision"),
+        "{wake}"
+    );
+
+    let refused =
+        act(json!({ "action": "decide", "itemId": spend, "choice": "Codex", "reason": "cheap" }))
+            .await
+            .err()
+            .expect("refused")
+            .to_string();
+    assert!(
+        refused.contains("Changing a mission's goal or spend is off"),
+        "{refused}"
+    );
+    let refused =
+        act(json!({ "action": "decide", "itemId": decision, "choice": "Gemini", "reason": "x" }))
+            .await
+            .err()
+            .expect("refused")
+            .to_string();
+    assert!(
+        refused.contains("choice is one of the item's options"),
+        "{refused}"
+    );
+    act(json!({
+        "action": "decide", "itemId": decision, "choice": "Codex",
+        "reason": "Codex reviewed the last two diffs of this repo",
+    }))
+    .await
+    .unwrap();
+    let decided = "The Supervisor decided Needs-you item";
+    wait_for(
+        || count(decided) == 1,
+        "the lead's answer from the Supervisor",
+    )
+    .await;
+    let to_lead = sent(decided);
+    assert!(
+        to_lead.starts_with(&format!("[Message from thread \"Supervisor\" ({supervisor})."))
+            && to_lead.ends_with(&format!(
+                "\n\n{decided} {decision} \"Who reviews?\", raised by the lead: Codex\n\nWhy: Codex reviewed the last two diffs of this repo\n\nApply it to this mission (task id t1). The person may change it; a change reaches you as a correction."
+            )),
+        "the lead reads who decided, and why: {to_lead}"
+    );
+
+    act(json!({ "action": "approve", "taskId": "t1", "reason": "One small step, in scope" }))
+        .await
+        .unwrap();
+    assert!(!core.workspace.task("t1").unwrap().plan_pending);
+    wait_for(
+        || count("The Supervisor approved the plan. Run it.\n\nWhy: One small step, in scope") == 1,
+        "the approval",
+    )
+    .await;
+    assert!(
+        act(json!({ "action": "approve", "taskId": "t1", "reason": "again" }))
+            .await
+            .is_err(),
+        "an approved plan is not waiting"
+    );
+
+    let snapshot = supervisor_snapshot(&rpc, |s| s.interventions.len() == 2).await;
+    let [approve, decide] = snapshot.interventions.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!(approve.kind, InterventionKind::Approve);
+    assert_eq!(approve.text, "One small step, in scope");
+    assert_eq!(decide.kind, InterventionKind::Decide);
+    assert_eq!(decide.target.as_deref(), Some("lead-1"));
+    let item = decide.item.as_ref().expect("the decision carries its item");
+    let answer = item.answer.as_ref().unwrap();
+    assert_eq!(
+        (answer.choice.as_str(), answer.corrected()),
+        ("Codex", false)
+    );
+    assert!(
+        snapshot
+            .needs_you
+            .iter()
+            .all(|row| !matches!(row, NeedsYouRow::Item(item) if item.id == decision)),
+        "a decided item leaves Needs you"
+    );
+
+    mutate(json!({ "op": "resolveSupervisorItem", "itemId": decision, "choice": "Claude" }))
+        .await
+        .unwrap();
+    let corrected = format!(
+        "The person answered Needs-you item {decision} \"Who reviews?\", raised by the lead: Claude (a correction: this replaces the Supervisor's \"Codex\")\n\nApply it to this mission (task id t1). If you already acted on the Supervisor's choice, undo or adjust what depends on it where you can, and tell the person what could not be undone."
+    );
+    wait_for(|| count(&corrected) == 1, "the lead's correction").await;
+    wait_for(
+        || count(&format!("The person changed your decisions; each lead got the correction:\n- item {decision} \"Who reviews?\": Claude, replacing your \"Codex\"")) == 1,
+        "the Supervisor hears its decision changed",
+    )
+    .await;
+    let snapshot = supervisor_snapshot(&rpc, |s| {
+        s.interventions.iter().any(|row| {
+            row.item
+                .as_ref()
+                .and_then(|i| i.answer.as_ref())
+                .is_some_and(|a| a.corrected())
+        })
+    })
+    .await;
+    assert_eq!(snapshot.interventions.len(), 2, "a correction adds no row");
+    assert!(
+        mutate(json!({ "op": "resolveSupervisorItem", "itemId": decision, "choice": "Claude" }))
+            .await
+            .is_err(),
+        "the same choice again is no correction"
+    );
+
+    rpc.handle(
+        methods::SET_SUPERVISOR_SETTINGS,
+        json!({ "decideForMe": true, "goalAndSpend": true }),
+    )
+    .await
+    .unwrap();
+    act(json!({ "action": "decide", "itemId": spend, "choice": "Codex", "reason": "Within the plan's budget" }))
+        .await
+        .unwrap();
+    wait_for(
+        || count(&format!("{decided} {spend} \"Pay for a second model?\"")) == 1,
+        "the spend decision",
+    )
+    .await;
+    act(json!({
+        "action": "goal", "taskId": "t1", "title": "Deep Dive review of the auth diff",
+        "reason": "The person said the auth diff is the one that matters",
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        core.workspace.task("t1").unwrap().title,
+        "Deep Dive review of the auth diff"
+    );
+    wait_for(
+        || count("The Supervisor changed this mission's goal (task id t1):\n- The title is now \"Deep Dive review of the auth diff\" (it was \"Deep Dive review\").\n\nWhy: The person said the auth diff is the one that matters") == 1,
+        "the goal change",
+    )
+    .await;
+    let refusal = act(json!({ "action": "goal", "taskId": "t1", "title": "Deep Dive review of the auth diff", "reason": "same" }))
+        .await
+        .err().expect("refused")
+        .to_string();
+    assert!(
+        refusal.contains("already this mission's title"),
+        "{refusal}"
+    );
+    let snapshot = supervisor_snapshot(&rpc, |s| s.interventions.len() == 4).await;
+    assert_eq!(
+        snapshot
+            .interventions
+            .iter()
+            .map(|row| row.kind)
+            .collect::<Vec<_>>(),
+        [
+            InterventionKind::Goal,
+            InterventionKind::Decide,
+            InterventionKind::Approve,
+            InterventionKind::Decide,
+        ]
+    );
     core.shutdown().await;
 }
