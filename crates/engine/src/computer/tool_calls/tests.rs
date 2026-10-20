@@ -775,7 +775,7 @@ async fn run_seams_bound_browser_files_to_the_run_cwd_and_read_space_designation
         rig.catalog(&secret).await.unwrap().len(),
         if cfg!(target_os = "macos") { 1 } else { 28 }
     );
-    let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let outside = tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
     let stray = outside.path().join("stray.txt");
     std::fs::write(&stray, "x").unwrap();
     let inside = tempfile::tempdir_in("/tmp").unwrap();

@@ -53,10 +53,11 @@ and copyright.
 
 ## react-grab
 
-`crates/ui/src/browser/annotate/annotate.generated.js` bundles
-[react-grab](https://github.com/aidenybai/react-grab) 0.1.32 and its dependency
-[bippy](https://github.com/aidenybai/bippy) 0.5.43, both MIT licensed,
-Copyright (c) 2024-2025 Aiden Bai.
+`crates/ui/src/browser/annotate/grab.generated.js` bundles
+[react-grab](https://github.com/aidenybai/react-grab) 0.1.32 with the copy of
+[bippy](https://github.com/aidenybai/bippy) it inlines (0.5.39), and
+`crates/ui/src/browser/annotate/hook.generated.js` bundles bippy 0.5.43, all
+MIT licensed, Copyright (c) 2024-2025 Aiden Bai.
 
 ## Math fonts
 

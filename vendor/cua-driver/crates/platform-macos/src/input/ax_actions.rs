@@ -434,11 +434,13 @@ pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()>
             ensure_ax_action_enabled(element_ptr, ax_action)?;
             crate::input::cancellation::gate().ensure_active()
         },
-        || unsafe {
-            match disclosure_target(element, ax_action) {
-                Some(open) => set_bool_attr(element, "AXDisclosing", open),
-                None => perform_action(element, ax_action),
-            }
+        || {
+            crate::input::cancellation::gate().post_ax(element_ptr, || unsafe {
+                match disclosure_target(element, ax_action) {
+                    Some(open) => set_bool_attr(element, "AXDisclosing", open),
+                    None => perform_action(element, ax_action),
+                }
+            })
         },
         || unsafe {
             Some(OwnState {
@@ -463,16 +465,16 @@ const AX_READBACK_POLL: std::time::Duration = std::time::Duration::from_millis(5
 fn dispatch_ax_action_with(
     action: &str,
     before_dispatch: impl FnOnce() -> anyhow::Result<()>,
-    dispatch: impl FnOnce() -> AXError,
+    dispatch: impl FnOnce() -> anyhow::Result<AXError>,
     own_state: impl Fn() -> Option<OwnState>,
 ) -> anyhow::Result<()> {
     before_dispatch().map_err(AxActionFailure::before_dispatch)?;
-    let before = own_state();
-    let err = dispatch();
+    // Some apps (Little Snitch's custom outline actions) act and still return an AX error.
+    let before = (!action.starts_with("AX")).then(&own_state).flatten();
+    let err = dispatch().map_err(AxActionFailure::before_dispatch)?;
     if err == kAXErrorSuccess {
         return Ok(());
     }
-    // Some apps (Little Snitch's custom outline actions) act and still return an AX error.
     if let Some(before) = before {
         let deadline = std::time::Instant::now() + AX_READBACK_TIMEOUT;
         loop {
@@ -719,7 +721,7 @@ mod tests {
     #[test]
     fn ax_dispatch_errors_are_uncertain_after_exactly_one_attempt() {
         for code in [kAXErrorFailure, kAXErrorInvalidUIElement, -25204] {
-            for after in ["unchanged", "gone", "replaced"] {
+            for after in ["unchanged", "gone", "replaced", "changed"] {
                 let dispatches = Cell::new(0);
                 let reads = Cell::new(0);
                 let error = dispatch_ax_action_with(
@@ -727,13 +729,14 @@ mod tests {
                     || Ok(()),
                     || {
                         dispatches.set(dispatches.get() + 1);
-                        code
+                        Ok(code)
                     },
                     || {
                         reads.set(reads.get() + 1);
                         match (reads.get(), after) {
                             (1, _) | (_, "unchanged") => Some(triangle_state("1", "_collapse")),
                             (_, "gone") => None,
+                            (_, "changed") => Some(triangle_state("0", "_expand")),
                             _ => Some(OwnState {
                                 role: "AXRow".to_owned(),
                                 ..triangle_state("0", "_expand")
@@ -743,6 +746,7 @@ mod tests {
                 )
                 .unwrap_err();
                 assert_eq!(dispatches.get(), 1);
+                assert_eq!(reads.get(), 0, "a standard AX action is never read back");
                 assert!(error.downcast_ref::<AxActionFailure>().unwrap().attempted);
                 assert!(error.to_string().contains("do not replay"));
             }
@@ -758,7 +762,7 @@ mod tests {
             || Ok(()),
             || {
                 dispatches.set(dispatches.get() + 1);
-                -25205
+                Ok(-25205)
             },
             || {
                 reads.set(reads.get() + 1);
@@ -780,6 +784,14 @@ mod tests {
             || anyhow::bail!("target is disabled"),
             || panic!("refused AXPress was submitted"),
             || -> Option<OwnState> { panic!("refused AXPress read its target") },
+        )
+        .unwrap_err();
+        assert!(!error.downcast_ref::<AxActionFailure>().unwrap().attempted);
+        let error = dispatch_ax_action_with(
+            "_collapse",
+            || Ok(()),
+            || anyhow::bail!("native_input_cancelled: input was interrupted"),
+            || Some(triangle_state("1", "_collapse")),
         )
         .unwrap_err();
         assert!(!error.downcast_ref::<AxActionFailure>().unwrap().attempted);

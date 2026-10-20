@@ -531,7 +531,7 @@ impl Shell {
 
     /// Navigation requests focus once the destination composer renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
-        self.composer.update(cx, |composer, cx| {
+        self.chat_composer(cx).update(cx, |composer, cx| {
             composer.focus_pending = true;
             cx.notify();
         });

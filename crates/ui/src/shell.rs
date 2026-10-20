@@ -3664,13 +3664,20 @@ impl Shell {
         // the composer only merges on its next key change.
         let key = target
             .unwrap_or_else(|| self.state.read(cx).focused_id().unwrap_or_default());
-        self.composer.update(cx, |composer, cx| {
-            composer.stage_appshot_for(key.clone(), appshot, cx)
+        let (composer, stage_key) = match self.active_btw_tab(cx) {
+            Some((source, tab)) if source == key => (
+                tab.composer.clone(),
+                self.btw[&source].active.clone().unwrap_or_default(),
+            ),
+            _ => (self.composer.clone(), key.clone()),
+        };
+        composer.update(cx, |composer, cx| {
+            composer.stage_appshot_for(stage_key, appshot, cx)
         });
         // A fresh canvas has no id yet; the next snap within the window
         // resolves to it through the interaction the composer focus records.
         self.appshot_last_target = Some((key, std::time::Instant::now()));
-        window.focus(&self.composer.focus_handle(cx), cx);
+        window.focus(&composer.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -3694,9 +3701,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.set_route(Route::Chat, cx);
-        self.composer
-            .update(cx, |composer, cx| composer.show_appshot_error(message, cx));
-        window.focus(&self.composer.focus_handle(cx), cx);
+        let composer = self.chat_composer(cx);
+        composer.update(cx, |composer, cx| composer.show_appshot_error(message, cx));
+        window.focus(&composer.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -3715,6 +3722,7 @@ impl Shell {
         }
         self.prune_file_explorers(cx);
         self.prune_canvas_browsers(cx);
+        self.reconcile_btw(cx);
         self.prune_device_shell(cx);
         self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
@@ -5903,13 +5911,73 @@ impl Shell {
     }
 
     fn btw_reopen_target(&self, source: &str, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        let live = state.live_sidechats_of(source, Utc::now());
-        let active = self.btw.get(source).and_then(|view| view.active.as_deref());
+        let live = self.btw_live(source, cx);
+        let active = self.btw.get(source).and_then(|view| view.active.as_ref());
         live.iter()
-            .find(|chat| Some(chat.id.as_str()) == active)
+            .find(|id| Some(*id) == active)
             .or(live.last())
+            .cloned()
+    }
+
+    // A sidechat expanded into the right pane has left the btw strip.
+    fn btw_live(&self, source: &str, cx: &App) -> Vec<String> {
+        self.state
+            .read(cx)
+            .live_sidechats_of(source, Utc::now())
+            .into_iter()
+            .filter(|chat| !self.btw_expanded(&chat.id))
             .map(|chat| chat.id.clone())
+            .collect()
+    }
+
+    fn btw_expanded(&self, chat_id: &str) -> bool {
+        self.sidechat_tabs
+            .values()
+            .any(|tab| tab.chat_id == chat_id)
+    }
+
+    fn reconcile_btw(&mut self, cx: &mut Context<Self>) {
+        let live: std::collections::HashMap<String, Vec<String>> = self
+            .btw
+            .keys()
+            .map(|source| (source.clone(), self.btw_live(source, cx)))
+            .collect();
+        let dead: Vec<String> = self
+            .btw_tabs
+            .keys()
+            .filter(|id| !live.values().flatten().any(|live| live == *id))
+            .cloned()
+            .collect();
+        for id in dead {
+            self.btw_tabs.remove(&id);
+            self.release_sidechat_doc(&id, cx);
+        }
+        for (source, live) in live {
+            let Some(view) = self.btw.get_mut(&source) else {
+                continue;
+            };
+            if view
+                .active
+                .as_ref()
+                .is_none_or(|active| live.contains(active))
+            {
+                continue;
+            }
+            view.active = None;
+            if !view.is_open() {
+                continue;
+            }
+            match live.last() {
+                Some(next) => {
+                    self.show_btw_tab(&source, next.clone(), cx);
+                }
+                None => {
+                    view.phase = BtwPhase::Closed;
+                    self.composer_dock.borrow_mut().jump();
+                    self.focus_composer(cx);
+                }
+            }
+        }
     }
 
     fn open_btw_source(&self, cx: &App) -> Option<String> {
@@ -5923,12 +5991,13 @@ impl Shell {
     fn active_btw_tab(&self, cx: &App) -> Option<(String, &BtwTab)> {
         let source = self.open_btw_source(cx)?;
         let active = self.btw.get(&source)?.active.as_deref()?;
-        let live = self
-            .state
-            .read(cx)
-            .live_sidechats_of(&source, Utc::now())
-            .iter()
-            .any(|chat| chat.id == active);
+        let live = !self.btw_expanded(active)
+            && self
+                .state
+                .read(cx)
+                .live_sidechats_of(&source, Utc::now())
+                .iter()
+                .any(|chat| chat.id == active);
         live.then(|| self.btw_tabs.get(active).map(|tab| (source, tab)))
             .flatten()
     }
@@ -5959,13 +6028,7 @@ impl Shell {
         chat_id: String,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Composer>> {
-        let live: Vec<String> = self
-            .state
-            .read(cx)
-            .live_sidechats_of(source, Utc::now())
-            .iter()
-            .map(|chat| chat.id.clone())
-            .collect();
+        let live = self.btw_live(source, cx);
         if !live.contains(&chat_id) {
             return None;
         }
@@ -6052,16 +6115,12 @@ impl Shell {
             from,
         });
         self.composer_dock.borrow_mut().jump();
-        let unstarted = view.active.clone().filter(|active| {
-            let state = self.state.read(cx);
-            state
-                .chats
-                .iter()
-                .find(|chat| chat.id == *active)
-                .is_some_and(|chat| state.unstarted_sidechat(chat, Utc::now()))
-        });
-        if let Some(active) = unstarted {
-            self.archive_btw_tab(source, &active, cx);
+        let blank = view
+            .active
+            .clone()
+            .filter(|active| self.blank_btw_tab(active, cx));
+        if let Some(active) = blank {
+            self.close_btw_tab(source, &active, cx);
         }
         self.focus_composer(cx);
         cx.notify();
@@ -6082,14 +6141,22 @@ impl Shell {
         true
     }
 
-    fn archive_btw_tab(&mut self, source: &str, chat_id: &str, cx: &mut Context<Self>) {
-        let live: Vec<String> = self
-            .state
-            .read(cx)
-            .live_sidechats_of(source, Utc::now())
+    fn blank_btw_tab(&self, chat_id: &str, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state
+            .chats
             .iter()
-            .map(|chat| chat.id.clone())
-            .collect();
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| state.unstarted_sidechat(chat, Utc::now()))
+            && self
+                .btw_tabs
+                .get(chat_id)
+                .is_none_or(|tab| !tab.composer.read(cx).has_draft(cx))
+    }
+
+    fn close_btw_tab(&mut self, source: &str, chat_id: &str, cx: &mut Context<Self>) {
+        let blank = self.blank_btw_tab(chat_id, cx);
+        let live = self.btw_live(source, cx);
         let neighbour = live.iter().position(|id| id == chat_id).and_then(|ix| {
             live.get(ix + 1)
                 .or_else(|| ix.checked_sub(1).and_then(|ix| live.get(ix)))
@@ -6102,7 +6169,14 @@ impl Shell {
             }
             cx.notify();
         });
-        self.set_chat_archived(chat_id.to_string(), true, cx);
+        if blank {
+            self.mutate(
+                serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
+                cx,
+            );
+        } else {
+            self.set_chat_archived(chat_id.to_string(), true, cx);
+        }
         self.btw_tabs.remove(chat_id);
         self.release_sidechat_doc(chat_id, cx);
         let view = self.btw.entry(source.to_string()).or_default();
@@ -6577,6 +6651,7 @@ impl Shell {
             state
                 .live_sidechats_of(source, now)
                 .into_iter()
+                .filter(|chat| !self.btw_expanded(&chat.id))
                 .map(|chat| (chat.id.clone(), btw_tab_title(state, chat, now)))
                 .collect()
         };
@@ -6758,7 +6833,7 @@ impl Shell {
                                             .hover(|s| s.bg(crate::theme::wash(0.12)))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
-                                                this.archive_btw_tab(&close_source, &close_id, cx);
+                                                this.close_btw_tab(&close_source, &close_id, cx);
                                             }))
                                     })
                                     .child(
@@ -16749,7 +16824,7 @@ impl Shell {
             Some((strip, band)) => (Some(strip), band),
             None => (None, 0.0),
         };
-        self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
+        self.chat_dropzone("chat-dropzone", self.chat_composer(cx), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
@@ -24724,6 +24799,91 @@ mod right_tab_mouse_regressions {
             assert!(!shell.state.read(cx).open_sidechat_tabs.contains("side"));
             // Falls back to the remaining tabs, never a dead surface.
             assert_ne!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
+        });
+    }
+
+    #[gpui::test]
+    fn btw_follows_tabs_archived_elsewhere_and_keeps_an_unsent_typed_tab(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            let source = zeron_proto::Chat {
+                id: "parent".into(),
+                device_id: "dev".into(),
+                title: Some("Parent".into()),
+                archived: false,
+                cwd: None,
+                branch: None,
+                checkout_id: None,
+                source_context: None,
+                config: None,
+                last_message_preview: None,
+                last_message_at: None,
+                created_at: chrono::Utc::now() - chrono::Duration::minutes(10),
+                harness_session_id: None,
+                harness_session_cwd: None,
+                space_id: None,
+                last_seen_at: None,
+                room_gen: None,
+                sidechat_source_chat_id: None,
+                created_by_chat_id: None,
+                previous_harnesses: Vec::new(),
+                delegation: None,
+                settle: None,
+                unsettled_at: None,
+            };
+            let sidechat = |id: &str, minute: i64, started: bool| {
+                let mut side = source.clone();
+                side.id = id.into();
+                side.sidechat_source_chat_id = Some("parent".into());
+                side.created_at = source.created_at + chrono::Duration::minutes(minute);
+                side.last_message_at = started.then(chrono::Utc::now);
+                side
+            };
+            let (a, b, c) = (
+                sidechat("a", 1, true),
+                sidechat("b", 2, true),
+                sidechat("c", 3, false),
+            );
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![source.clone(), a, b];
+                state.selected_chat = Some("parent".into());
+            });
+            let archive = |shell: &mut Shell, ix: usize, cx: &mut Context<Shell>| {
+                shell
+                    .state
+                    .update(cx, |state, _| state.chats[ix].archived = true);
+                shell.on_state_changed(&shell.state.clone(), cx);
+            };
+            shell.open_sidechat("parent".into(), None, Default::default(), cx);
+            assert_eq!(shell.btw["parent"].active.as_deref(), Some("b"));
+            archive(shell, 2, cx);
+            assert_eq!(shell.btw["parent"].active.as_deref(), Some("a"));
+            assert_eq!(shell.open_btw_source(cx).as_deref(), Some("parent"));
+            assert!(!shell.btw_tabs.contains_key("b"));
+            archive(shell, 1, cx);
+            assert!(shell.open_btw_source(cx).is_none());
+            assert!(matches!(shell.btw["parent"].phase, BtwPhase::Closed));
+            assert!(shell.btw_tabs.is_empty());
+
+            shell.state.update(cx, |state, _| state.chats.push(c));
+            shell.open_sidechat("parent".into(), None, Default::default(), cx);
+            assert_eq!(shell.btw["parent"].active.as_deref(), Some("c"));
+            shell.btw_tabs["c"]
+                .composer
+                .clone()
+                .update(cx, |composer, cx| {
+                    composer.seed_text("half a question".into(), cx)
+                });
+            shell.close_btw("parent", cx);
+            assert!(!shell.state.read(cx).chats[3].archived);
+            shell.open_sidechat("parent".into(), None, Default::default(), cx);
+            assert_eq!(shell.btw["parent"].active.as_deref(), Some("c"));
+            let composer = shell.btw_tabs["c"].composer.clone();
+            assert_eq!(composer.read(cx).input_text(cx), "half a question");
+            composer.update(cx, |composer, cx| composer.seed_text(String::new(), cx));
+            shell.close_btw("parent", cx);
+            assert!(shell.state.read(cx).chats[3].archived);
+            assert!(!shell.btw_tabs.contains_key("c"));
         });
     }
 

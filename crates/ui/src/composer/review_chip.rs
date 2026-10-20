@@ -2039,7 +2039,7 @@ impl Composer {
                 .and_then(|outcome| outcome.note.clone());
             let label = match outcome.and_then(|outcome| outcome.commit.as_deref()) {
                 Some(sha) if state == FindingState::Fixed => {
-                    format!("Fixed · {}", &sha[..sha.len().min(7)])
+                    format!("Fixed · {}", review::short_sha(sha))
                 }
                 _ => state.label().to_string(),
             };
@@ -2090,6 +2090,7 @@ impl Composer {
                             div()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
+                                .line_clamp(3)
                                 .child(reason)
                         }))
                         .child(

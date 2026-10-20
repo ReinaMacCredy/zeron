@@ -64,8 +64,14 @@ pub struct CommitPick {
 
 impl CommitPick {
     pub fn short(&self) -> &str {
-        &self.sha[..self.sha.len().min(7)]
+        short_sha(&self.sha)
     }
+}
+
+pub fn short_sha(sha: &str) -> &str {
+    sha.char_indices()
+        .nth(7)
+        .map_or(sha, |(end, _)| &sha[..end])
 }
 
 impl ChatReview {
@@ -112,6 +118,7 @@ impl ChatReview {
                     finding.id == id
                         && finding.placement != Placement::Outdated
                         && run.outcome(id).is_none()
+                        && !run.handed(id)
                 })
                 .cloned()
                 .collect(),
@@ -281,12 +288,16 @@ impl ReviewRun {
         self.findings.iter().filter(|finding| {
             finding.placement != Placement::Outdated
                 && self.state(&finding.id) == FindingState::Open
-                && !self.handed_here.contains(&finding.id)
-                && !self
-                    .delegation
-                    .as_ref()
-                    .is_some_and(|d| d.findings_handed.contains(&finding.id))
+                && !self.handed(&finding.id)
         })
+    }
+
+    fn handed(&self, id: &str) -> bool {
+        self.handed_here.contains(id)
+            || self
+                .delegation
+                .as_ref()
+                .is_some_and(|d| d.findings_handed.contains(id))
     }
 
     pub fn unsent_hands(&self) -> Vec<String> {
@@ -543,6 +554,14 @@ mod tests {
     }
 
     #[test]
+    fn short_sha_cuts_on_a_char_boundary() {
+        assert_eq!(short_sha("abc123é"), "abc123é");
+        assert_eq!(short_sha("abc123éf9"), "abc123é");
+        assert_eq!(short_sha("a1b2c3d4e5"), "a1b2c3d");
+        assert_eq!(short_sha("abc"), "abc");
+    }
+
+    #[test]
     fn a_stopped_reviewer_reads_as_stopped_not_as_a_missing_block() {
         let partial = "Looking at session.rs, the first thing I notice";
         assert_eq!(read_outcome("cancelled", partial), ReadOutcome::Stopped);
@@ -692,6 +711,10 @@ mod tests {
         assert!(
             review.take_fixable(Some("F1")).is_empty(),
             "a fixed row is done"
+        );
+        assert!(
+            review.take_fixable(Some("F3")).is_empty(),
+            "a second Fix never stages a handed row again"
         );
     }
 

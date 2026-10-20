@@ -21,9 +21,9 @@ When you stop the agent's computer use, the agent loses control of the tab. Only
 
 ## Annotate
 
-On macOS, click the pencil (**Annotate elements, regions, and drawings**) on a loaded page to mark it up. A toolbar at the top of the page has **Select** (V) to pick elements, **Region** (R) to draw a box, **Draw** (D) for freehand marks, and **Erase** (E) to remove one. Type what you want in **Describe the change…**. The expand button next to it opens a style panel where you can try other font, color, border, and spacing values on what you picked.
+On macOS, click the pencil (**Annotate elements, regions, and drawings**) on a loaded page to mark it up. A toolbar at the top of the page has **Select** (V) to pick elements, **Region** (R) to draw a box, **Draw** (D) for freehand marks, and **Erase** (E) to remove one. The expand button next to **Attach** opens a style panel where you can try other font, color, border, and spacing values on what you picked.
 
-Click **Attach** or press Enter. Zeron attaches a screenshot of the marked area to the composer as an [Appshot](zeron://docs/appshots), carrying the page title, URL, and details of the picked elements, and adds your comment and any requested style changes to your draft. Nothing is sent until you send it. Press Escape, or click the pencil again, to cancel.
+Click **Attach** or press Enter. Zeron attaches a screenshot of the marked area to the composer as an [Appshot](zeron://docs/appshots), carrying the page title, URL, and details of the picked elements, adds any requested style changes to your draft, and moves focus to the composer, where you describe the change. You type it there rather than on the page so the page's own scripts cannot change your words. Nothing is sent until you send it. Press Escape, or click the pencil again, to cancel.
 
 ## HTML files the agent mentions
 

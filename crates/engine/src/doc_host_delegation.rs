@@ -146,6 +146,7 @@ pub(super) fn clip(text: &str, max: usize) -> String {
 }
 
 const HANDBACK_REPLY_CHARS: usize = 4_000;
+const FINDING_NOTE_CHARS: usize = 2_000;
 
 pub(super) fn handback_settle() -> std::time::Duration {
     std::time::Duration::from_millis(
@@ -694,23 +695,18 @@ impl DocHost {
             "working"
         };
         let summary = (!delegation.is_running()).then(|| self.result_of(child, &delegation));
-        let findings = summary
-            .as_deref()
-            .filter(|_| crate::review::is_review(&delegation))
-            .filter(|_| delegation.status == DelegationStatus::Completed)
-            .and_then(crate::review::parse_findings)
-            .map(|findings| {
-                findings
-                    .into_iter()
-                    .map(|finding| FindingView {
-                        outcome: delegation.finding_outcomes.get(&finding.id).cloned(),
-                        location: finding.location(),
-                        id: finding.id,
-                        severity: finding.severity,
-                        title: finding.title,
-                    })
-                    .collect::<Vec<_>>()
-            });
+        let findings = self.review_findings(child, &delegation).map(|findings| {
+            findings
+                .into_iter()
+                .map(|finding| FindingView {
+                    outcome: delegation.finding_outcomes.get(&finding.id).cloned(),
+                    location: finding.location(),
+                    id: finding.id,
+                    severity: finding.severity,
+                    title: finding.title,
+                })
+                .collect::<Vec<_>>()
+        });
         let next = findings
             .as_ref()
             .filter(|findings| findings.iter().any(|finding| finding.outcome.is_none()))
@@ -773,9 +769,24 @@ impl DocHost {
         child: &Chat,
         delegation: &Delegation,
     ) -> Option<Vec<crate::review::ReviewFinding>> {
-        (crate::review::is_review(delegation) && delegation.status == DelegationStatus::Completed)
-            .then(|| crate::review::parse_findings(&self.result_of(child, delegation)))
-            .flatten()
+        if !crate::review::is_review(delegation) || delegation.status != DelegationStatus::Completed
+        {
+            return None;
+        }
+        // Ids number the reply the review completed with; a later follow-up must not renumber them.
+        let settled = delegation.completed_at.map(|at| at.timestamp_millis());
+        let text = self
+            .open(&child.id)
+            .ok()
+            .and_then(|handle| handle.doc.read_entries().ok())
+            .map(|mut entries| {
+                entries.retain(|entry| settled.is_none_or(|settled| entry.created_at <= settled));
+                result_parts(&entries, &delegation.anchor)
+                    .0
+                    .unwrap_or_default()
+            })
+            .or_else(|| delegation.summary.clone())?;
+        crate::review::parse_findings(&text)
     }
 
     fn finished_review(
@@ -826,11 +837,24 @@ impl DocHost {
                 text.map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
             };
-            let note = trimmed(resolution.note);
+            let note = trimmed(resolution.note).map(|note| clip(&note, FINDING_NOTE_CHARS));
             if resolution.outcome != FindingOutcomeKind::Fixed && note.is_none() {
                 return Err(failure(
                     "note_required",
                     format!("{} needs a note saying why", resolution.id),
+                ));
+            }
+            let commit = trimmed(resolution.commit);
+            if let Some(commit) = commit
+                .as_deref()
+                .filter(|commit| !crate::working_tree::is_commit_id(commit))
+            {
+                return Err(failure(
+                    "invalid_commit",
+                    format!(
+                        "{}: commit {commit:?} is not a commit id (4 to 64 hex digits)",
+                        resolution.id
+                    ),
                 ));
             }
             outcomes.push((
@@ -838,7 +862,7 @@ impl DocHost {
                 FindingOutcome {
                     outcome: resolution.outcome,
                     note,
-                    commit: trimmed(resolution.commit),
+                    commit,
                 },
             ));
         }

@@ -3611,6 +3611,16 @@ impl RpcService for EngineRpc {
             }
             methods::DELEGATE_TASK => {
                 let p: crate::doc_host::DelegateTaskParams = parse_params(params)?;
+                if p
+                    .client_request_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with(crate::review::REQUEST_PREFIX))
+                {
+                    return Err(RpcError::Failed(format!(
+                        "invalid_request: clientRequestId prefix {} is reserved for review_changes",
+                        crate::review::REQUEST_PREFIX
+                    )));
+                }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 let view = self
                     .doc_host

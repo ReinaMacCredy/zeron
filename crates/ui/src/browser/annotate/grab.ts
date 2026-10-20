@@ -65,4 +65,7 @@ async function grab(id: string) {
 
 (globalThis as { __zeronAnnotateGrab?: unknown }).__zeronAnnotateGrab = async (
   ids: string[],
-): Promise<string> => JSON.stringify((await Promise.all(ids.map(grab))).filter(Boolean));
+): Promise<string> =>
+  JSON.stringify((await Promise.all(ids.map(grab))).filter(Boolean), (_key, value: unknown) =>
+    typeof value === "string" ? value.toWellFormed() : value,
+  );

@@ -4350,7 +4350,7 @@ impl GitHistory {
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!(
                 "Commit {}: {}",
-                &sha[..sha.len().min(7)],
+                crate::review::short_sha(&sha),
                 commit_subject
             )))
             .aria_selected(selected)
