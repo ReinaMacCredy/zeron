@@ -654,6 +654,7 @@ pub enum SettingsSection {
     Harnesses,
     Tools,
     AgentProfiles,
+    Routing,
     CodeReview,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
@@ -675,7 +676,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 17] = [
+    pub const ALL: [SettingsSection; 18] = [
         SettingsSection::General,
         SettingsSection::Home,
         SettingsSection::Appearance,
@@ -685,6 +686,7 @@ impl SettingsSection {
         SettingsSection::Harnesses,
         SettingsSection::Tools,
         SettingsSection::AgentProfiles,
+        SettingsSection::Routing,
         SettingsSection::CodeReview,
         SettingsSection::Devices,
         SettingsSection::Files,
@@ -728,6 +730,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "providers",
             SettingsSection::Tools => "tools",
             SettingsSection::AgentProfiles => "agent-profiles",
+            SettingsSection::Routing => "routing",
             SettingsSection::CodeReview => "code-review",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
@@ -753,6 +756,7 @@ impl SettingsSection {
             "agents" => SettingsSection::Agents,
             "tools" => SettingsSection::Tools,
             "agent-profiles" | "profiles" => SettingsSection::AgentProfiles,
+            "routing" => SettingsSection::Routing,
             "code-review" => SettingsSection::CodeReview,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
@@ -784,6 +788,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Tools => "Tools",
             SettingsSection::AgentProfiles => "Agent profiles",
+            SettingsSection::Routing => "Routing",
             SettingsSection::CodeReview => "Code review",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
@@ -812,6 +817,7 @@ impl SettingsSection {
             SettingsSection::Agents => &["account", "login", "usage", "provider"],
             SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
             SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
+            SettingsSection::Routing => &["model", "route", "quota", "sub-agent"],
             SettingsSection::CodeReview => &["review", "reviewer", "findings", "model"],
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
@@ -2702,6 +2708,7 @@ pub struct Shell {
         std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     devices_page: Option<Entity<DevicesPage>>,
     agent_profiles_page: Option<Entity<crate::settings::agent_profiles::AgentProfilesPage>>,
+    routing_page: Option<Entity<crate::settings::routing::RoutingPage>>,
     code_review_page: Option<Entity<crate::settings::code_review::CodeReviewPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
@@ -3434,6 +3441,7 @@ impl Shell {
             pull_request_cache: Default::default(),
             devices_page: None,
             agent_profiles_page: None,
+            routing_page: None,
             code_review_page: None,
             archived_page: None,
             source_control_page: None,
@@ -8229,6 +8237,11 @@ impl Shell {
         {
             page.update(cx, |page, cx| page.load(cx));
         }
+        if section == SettingsSection::Routing
+            && let Some(page) = &self.routing_page
+        {
+            page.update(cx, |page, cx| page.load(cx));
+        }
         if section == SettingsSection::CodeReview
             && let Some(page) = &self.code_review_page
         {
@@ -8748,6 +8761,15 @@ impl Shell {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
+            }
+            SettingsSection::Routing => {
+                let state = self.state.clone();
+                self.routing_page
+                    .get_or_insert_with(|| {
+                        cx.new(|cx| crate::settings::routing::RoutingPage::new(state, cx))
+                    })
+                    .clone()
+                    .into_any_element()
             }
             SettingsSection::CodeReview => {
                 let state = self.state.clone();
@@ -11318,6 +11340,7 @@ impl Shell {
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Tools => icons::LUCIDE_HAMMER,
             SettingsSection::AgentProfiles => icons::BOT,
+            SettingsSection::Routing => icons::FORK,
             SettingsSection::CodeReview => icons::CHECKLIST,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
