@@ -31,7 +31,7 @@ details = "Each instance signs in to its own home and gets its own tab in the mo
 id = "topic-compaction"
 title = "Compaction that knows when a new task starts"
 description = "A classifier reads each message and compacts first when you change topic. Use your agent's model, or TypeSafe's Jev classifier for about a second and a fraction of a cent."
-details = "Agents can compact themselves, and a switch keeps missions out."
+details = "Agents can compact themselves, and a switch keeps missions out. Asking to commit, push or merge work that just finished runs it at once instead of compacting first."
 
 [[entry.features]]
 id = "child-report-back"
