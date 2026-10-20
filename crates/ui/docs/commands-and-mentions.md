@@ -14,7 +14,7 @@ Type `/` to list the agent's built-in commands. They come from the agent itself,
 | `/resume` | Search and open conversations (the Cmd+K palette). |
 | `/settings` | Open settings, on the page you used last. |
 
-Inside a chat you also get `/diff` (open changes), `/files` (open project files), `/terminal`, `/rename` (rename this conversation), and `/stop` (stop the active run). `/diff`, `/files`, and `/terminal` each open a tab in the [right pane](zeron://docs/right-pane); `/terminal` gives you a terminal tab there, not the Cmd+J drawer.
+Inside a chat you also get `/diff` (open changes), `/files` (open project files), `/terminal`, `/rename` (rename this conversation), and `/stop` (stop the active run). `/diff` and `/terminal` each open a tab in the [right pane](zeron://docs/right-pane), and `/files` opens the Files panel; `/terminal` gives you a terminal tab there, not the Cmd+J drawer.
 
 `/model`, `/new`, `/resume`, `/settings`, and the five chat commands run in Zeron and are never sent to the agent; their menu descriptions start with **Zeron:**. If the agent has a command with one of these names, Zeron's shows as `/zeron:<name>`. `/compact`, `/btw`, and `/sidechat` work differently: when the agent lists its own command with that name, the menu shows only the agent's row, but Zeron still handles what you type. Zeron's `/computer-use` replaces any `/computer-use` the agent has.
 
