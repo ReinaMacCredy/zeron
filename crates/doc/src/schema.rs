@@ -108,6 +108,10 @@ struct DocPartJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    asked_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answered_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     /// Fork seam (`kind: "fork"`, additive): the chat the history above was
     /// copied from, and its title at the time.
@@ -265,12 +269,16 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             questions,
             resolved,
             answers,
+            asked_at_ms,
+            answered_at_ms,
         } => DocPartJson {
             id: request_id.clone(),
             kind: "input".into(),
             questions: Some(serde_json::to_value(questions)?),
             answers: answers.as_ref().map(serde_json::to_value).transpose()?,
             resolved: Some(*resolved),
+            asked_at_ms: *asked_at_ms,
+            answered_at_ms: *answered_at_ms,
             ..Default::default()
         },
         MessagePart::Error { id, message } => DocPartJson {
@@ -344,6 +352,8 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 .unwrap_or_default(),
             resolved: p.resolved.unwrap_or(false),
             answers: p.answers.and_then(|a| serde_json::from_value(a).ok()),
+            asked_at_ms: p.asked_at_ms,
+            answered_at_ms: p.answered_at_ms,
         },
         "error" => MessagePart::Error {
             id: p.id,
@@ -1197,6 +1207,12 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
     }
+    if let Some(at) = doc_part.asked_at_ms {
+        map.insert("askedAtMs", at)?;
+    }
+    if let Some(at) = doc_part.answered_at_ms {
+        map.insert("answeredAtMs", at)?;
+    }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
@@ -1681,6 +1697,12 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
+    }
+    if let Some(at) = doc_part.asked_at_ms {
+        map.insert("askedAtMs", at)?;
+    }
+    if let Some(at) = doc_part.answered_at_ms {
+        map.insert("answeredAtMs", at)?;
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
@@ -2239,6 +2261,8 @@ mod tests {
                 questions: vec![],
                 resolved: false,
                 answers: None,
+                asked_at_ms: None,
+                answered_at_ms: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),
@@ -2876,6 +2900,8 @@ mod computer_marker_tests {
                 questions: vec![question()],
                 resolved: false,
                 answers: None,
+                asked_at_ms: None,
+                answered_at_ms: None,
             }],
         ))
         .unwrap();

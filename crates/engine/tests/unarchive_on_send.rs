@@ -180,7 +180,7 @@ async fn sending_a_message_unarchives_the_chat() {
         .set_chat_archived(CHAT, true)
         .expect("re-archive chat");
     core.doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .expect("queue interrupt");
     assert!(
         archived(&core),

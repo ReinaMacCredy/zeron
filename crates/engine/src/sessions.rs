@@ -967,6 +967,10 @@ impl SessionsEngine {
         let _ = self.inner.resume_schedule.set(schedule);
     }
 
+    pub(crate) fn resume_schedule(&self) -> Option<&crate::resume_schedule::ResumeSchedule> {
+        self.inner.resume_schedule.get()
+    }
+
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
     }
@@ -3226,6 +3230,18 @@ impl SessionsEngine {
             answers: Some(answers),
         });
         Ok(true)
+    }
+
+    pub(crate) fn chats_awaiting_input(&self) -> Vec<String> {
+        lock(&self.inner.runs)
+            .iter()
+            .filter(|(_, run)| {
+                lock(&run.pending_inputs)
+                    .values()
+                    .any(|resolver| !resolver.tx.is_closed())
+            })
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect()
     }
 
     pub fn awaits_input(&self, chat_id: &str, request_id: &str) -> bool {
@@ -6912,6 +6928,7 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
+            zeron_doc::stamp_input_times(&mut folded, crate::now_ms());
             if matches!(
                 event,
                 AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
@@ -6996,6 +7013,7 @@ async fn drive_run(
                     *resolved = true;
                 }
             }
+            zeron_doc::stamp_input_times(&mut folded, crate::now_ms());
             // A Done landing on a PARKED session with nothing streamed (the
             // idle reaper's or an interrupt's own teardown) has no entry to
             // finalize — writing one would leave an empty aborted stub.

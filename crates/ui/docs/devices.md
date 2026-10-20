@@ -45,6 +45,8 @@ To dig deeper, `zeron sync` in a terminal shows the live sync state.
 - **This device** is the machine you are using.
 - **Other devices** shows the rest, with their platform, Zeron version, and **Online** or when they were last seen. With no other devices yet, it says "Sign in on another device to see it here." A local workspace has no **Other devices** list.
 
+![Settings > Devices](devices-settings.jpg)
+
 Each row has **Copy ID** (it reads **Copied** for a moment) and **Rename**. A new name applies across the workspace.
 
 A new device takes its name from the computer's name or hostname. To pick the name a server registers with, set `ZERON_DEVICE_NAME` before it first starts; a name you set with **Rename** is kept after that. Phones show up with the platform **iOS**.

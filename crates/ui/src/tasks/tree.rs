@@ -12,6 +12,7 @@ use crate::icons::{self, icon};
 use crate::motion::{self, CubicBezier, MotionSpec, Tween};
 use crate::state::AppState;
 use crate::theme::{Appearance, Theme};
+use crate::typography::ui_rems;
 
 pub(crate) const EASE: CubicBezier = CubicBezier::new(0.32, 0.72, 0.24, 1.0);
 pub(crate) const RISE: MotionSpec = MotionSpec::new(360, EASE);
@@ -34,8 +35,8 @@ const REMOVE_AFTER: Duration = Duration::from_millis(30);
 const SHINE: Duration = Duration::from_millis(1100);
 const MUTED_OPACITY: f32 = 0.6;
 const CORNER: f32 = 8.0;
-const LINK_WIDTH: f32 = 1.5;
-const DOT_RADIUS: f32 = 3.25;
+pub(crate) const LINK_WIDTH: f32 = 1.5;
+pub(crate) const DOT_RADIUS: f32 = 3.25;
 const STATS_POLL: Duration = Duration::from_secs(10);
 const STATS_SETTLE: Duration = Duration::from_secs(2);
 
@@ -111,11 +112,10 @@ pub(crate) fn lead_status(
         None => (Status::Queued, "Not started"),
         _ if plan.phase(task) == super::PlanPhase::Planning => (Status::Running, "Planning"),
         Some(ChatIndicator::Working) => (Status::Running, "Working"),
-        Some(ChatIndicator::AwaitingInput) => (Status::Waiting, "Needs you"),
         Some(ChatIndicator::Errored) => (Status::Failed, "Failed"),
-        _ if plan.phase(task) == super::PlanPhase::PlanReady => (Status::Waiting, "Needs you"),
+        _ if super::TaskCenter::lead_waits(task, plan).is_some() => (Status::Waiting, "Needs you"),
         _ if plan.count(StepStatus::Working) > 0 => (Status::Running, "Working"),
-        _ => (Status::Waiting, "Waiting"),
+        _ => (Status::Queued, "Idle"),
     }
 }
 
@@ -192,9 +192,25 @@ pub(crate) struct Frame {
 pub(crate) struct TreeMotion {
     built: bool,
     nodes: HashMap<String, Node>,
+    solid: bool,
 }
 
 impl TreeMotion {
+    pub fn solid() -> Self {
+        Self {
+            solid: true,
+            ..Self::default()
+        }
+    }
+
+    fn opacity(&self, status: Status) -> f32 {
+        if self.solid && status == Status::Queued {
+            1.0
+        } else {
+            status.opacity()
+        }
+    }
+
     pub fn sync(&mut self, nodes: &[NodeIn], reduced: bool, now: Instant) {
         let mut fresh = 0;
         let mut leaving = Vec::new();
@@ -274,8 +290,8 @@ impl TreeMotion {
             };
         };
         let mute = motion::lerp(
-            node.from.opacity(),
-            node.status.opacity(),
+            self.opacity(node.from),
+            self.opacity(node.status),
             node.tone.value_at(now),
         );
         match node.leave {
@@ -414,7 +430,7 @@ fn drawn(points: &[(f32, f32)], fraction: f32) -> Vec<(f32, f32)> {
     out
 }
 
-pub(crate) fn links(links: Vec<Link>, dots: Vec<Dot>) -> impl IntoElement {
+pub(crate) fn links(links: Vec<Link>, dots: Vec<Dot>, width: f32, radius: f32) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -424,7 +440,7 @@ pub(crate) fn links(links: Vec<Link>, dots: Vec<Dot>) -> impl IntoElement {
                     continue;
                 }
                 let points = drawn(&link_points(link.from, link.to), link.drawn);
-                let mut path = PathBuilder::stroke(px(LINK_WIDTH));
+                let mut path = PathBuilder::stroke(px(width));
                 path.move_to(at(points[0]));
                 for point in &points[1..] {
                     path.line_to(at(*point));
@@ -433,7 +449,7 @@ pub(crate) fn links(links: Vec<Link>, dots: Vec<Dot>) -> impl IntoElement {
                     window.paint_path(path, link.color);
                 }
                 for end in [points[0], points[points.len() - 1]] {
-                    cap(window, at(end), LINK_WIDTH, link.color);
+                    cap(window, at(end), width, link.color);
                 }
             }
             for dot in &dots {
@@ -441,12 +457,11 @@ pub(crate) fn links(links: Vec<Link>, dots: Vec<Dot>) -> impl IntoElement {
                     continue;
                 }
                 let center = at(dot.at);
-                let bounds =
-                    Bounds::centered_at(center, size(px(DOT_RADIUS * 2.0), px(DOT_RADIUS * 2.0)));
+                let bounds = Bounds::centered_at(center, size(px(radius * 2.0), px(radius * 2.0)));
                 window.paint_quad(
                     gpui::fill(bounds, dot.fill.opacity(dot.opacity))
-                        .corner_radii(px(DOT_RADIUS))
-                        .border_widths(px(LINK_WIDTH))
+                        .corner_radii(px(radius))
+                        .border_widths(px(width))
                         .border_color(dot.stroke.opacity(dot.opacity)),
                 );
             }
@@ -538,6 +553,41 @@ pub(crate) fn spinner(diameter: f32, color: Hsla, reduced: bool) -> impl IntoEle
     )
     .flex_none()
     .size(px(diameter))
+}
+
+pub(crate) fn kind_badge(mission: bool, theme: &Theme) -> AnyElement {
+    let (mark, label, fg, bg) = if mission {
+        (
+            icons::MISSION_CONTROL,
+            "Mission",
+            motion::mix(theme.accent, theme.text, 0.2),
+            theme.accent.opacity(0.14),
+        )
+    } else {
+        (
+            icons::LUCIDE_LIST_TREE,
+            "Tree",
+            theme.text_muted,
+            theme.wash(0.07),
+        )
+    };
+    div()
+        .debug_selector(move || format!("kind-badge-{label}"))
+        .flex_none()
+        .h(px(18.0))
+        .pl(px(5.0))
+        .pr(px(6.0))
+        .rounded(px(5.0))
+        .bg(bg)
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(icon(mark).size(px(11.0)).text_color(fg))
+        .child(label)
+        .into_any_element()
 }
 
 pub(crate) fn glyph(status: Status, diameter: f32, color: Hsla, reduced: bool) -> AnyElement {

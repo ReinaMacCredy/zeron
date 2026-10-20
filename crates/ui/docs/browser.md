@@ -31,6 +31,8 @@ When you stop the agent's computer use, the agent loses control of the tab. Only
 
 On macOS, click the pencil (**Annotate elements, regions, and drawings**) on a loaded page to mark it up. A toolbar at the top of the page has **Select** (V) to pick elements, **Region** (R) to draw a box, **Draw** (D) for freehand marks, and **Erase** (E) to remove one. The expand button at the left end of the row that holds **Attach** opens a style panel where you can try other font, color, border, and spacing values on what you picked.
 
+![Annotating a page in the browser](browser-annotate.jpg)
+
 Click **Attach** or press Enter. Zeron attaches a screenshot of the marked area to the composer as an [Appshot](zeron://docs/appshots), carrying the page title, URL, and details of the picked elements, adds any requested style changes to your draft, and moves focus to the composer, where you describe the change. You type it there rather than on the page so the page's own scripts cannot change your words. Nothing is sent until you send it. Press Escape, or click the pencil again, to cancel.
 
 ## HTML files the agent mentions
@@ -40,3 +42,5 @@ On macOS, when an agent's message links or names an `.html` file, it shows a car
 ## Pages rendered in the chat
 
 An agent can also publish an HTML page straight into the chat, sized to fit. Click the expand arrow on its header to open it larger, switch between **Live** and **Source**, or click **Save .html** to keep a copy. Press Escape to close it. Live pages show on macOS; elsewhere you read the source.
+
+![An HTML page in the chat](browser-html-card.jpg)

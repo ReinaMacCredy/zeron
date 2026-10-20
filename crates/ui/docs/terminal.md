@@ -4,6 +4,8 @@ Zeron has real terminals in three places: a drawer under each chat, full-window 
 
 Press Cmd+J, or click the terminal button at the far right of the session footer (tooltip **Terminal**), to open the drawer under the chat. Press Cmd+J again to close it and return to the composer. The footer button stays highlighted while the drawer is open.
 
+![The terminal drawer under a chat](terminal-drawer.jpg)
+
 Each chat keeps its own drawer tabs, and they keep running when you switch chats. The first tab opens in the chat's folder.
 
 - Click **+** (tooltip **New terminal**) for another tab.

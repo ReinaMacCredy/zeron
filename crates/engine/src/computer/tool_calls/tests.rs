@@ -224,7 +224,7 @@ impl Rig {
     }
 
     async fn stop(&self, secret: &str) {
-        self.command("stop", SessionCommandPayload::Interrupt {});
+        self.command("stop", SessionCommandPayload::Interrupt { teardown: false });
         wait_for(
             || self.core.sessions.computer_run(CHAT, secret).is_none(),
             "the secret to be revoked",

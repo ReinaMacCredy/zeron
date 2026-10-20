@@ -2079,6 +2079,9 @@ mod tests {
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
 
+mod fold;
+pub(crate) use fold::{Fold, clipped, folded};
+
 /// A bounded activation sheen for Fast service tier; GPUI handles reduced motion.
 pub fn fast_tier(
     id: impl Into<ElementId>,

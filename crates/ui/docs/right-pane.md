@@ -15,6 +15,8 @@ While this chat's subagents run, the Files button shows how many, because they a
 
 An empty right pane lists what it can show. Once a tab is open, click **+** (tooltip **New tab**) for the same list, plus **Files**, which docks the Files panel.
 
+![The right pane's + menu](right-pane-menu.jpg)
+
 | Row | Opens |
 | --- | --- |
 | **Browser** | A web browser tab. See [Browser](zeron://docs/browser). |
@@ -69,6 +71,8 @@ Click a file name on a tool row in the transcript: if that file has uncommitted 
 ### Comment on a line
 
 Hover a line and click the **+** in the line numbers. Type in **Request a change…** and click **Comment** or press Enter (Shift+Enter adds a line, Escape cancels). In split view only the new (right) side takes comments.
+
+![Reviewing changes in the Diffs tab](right-pane-diffs.jpg)
 
 The comment stays on its line, with an edit button and **Remove comment** on hover. Comments belong to the chat, so they show in every Diffs tab where that line appears.
 

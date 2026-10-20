@@ -10,6 +10,8 @@ The checkout chip in the toolbar chooses what you look at: **Main checkout**, or
 
 The main area is the commit graph, with **Fetch all**, commit search, and a toggle for branch tips only.
 
+![The Git tab with a commit open](git-commit-panel.jpg)
+
 Click a commit to open the commit panel. It shows the author, date, parents, and SHA, plus **Files** with each diff inline. From there you can **Checkout**, **Cherry-pick**, **Copy SHA**, or **Create branch** at that commit. Drag the panel's left edge to resize it, and double-click the edge to reset it.
 
 ## Commit
@@ -21,6 +23,8 @@ Click the top row, **Uncommitted changes**, click the commit button next to the 
 - Type a message in the box and press Cmd+Enter to commit the staged files. Plain Enter adds a new line.
 - Click **Write with AI** to draft the message from the staged diff. The model chip beside it picks a model for this commit only.
 - The chevron next to the composer's commit button offers **Commit**, **Amend**, and **Commit all**.
+
+![Writing a commit](git-commit.jpg)
 
 When an agent is working in the same checkout, a banner says what the Git tab can still do.
 

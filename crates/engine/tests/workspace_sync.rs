@@ -767,6 +767,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 last_seen_at: Some(now),
                 sidechat_source_chat_id: None,
                 created_by_chat_id: None,
+                forked_from_chat_id: None,
                 previous_harnesses: Vec::new(),
                 delegation: None,
                 settle: None,

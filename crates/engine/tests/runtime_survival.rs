@@ -3,7 +3,8 @@
 //! now", switching models, or leaving a session parked must never tear it
 //! down behind the user's back (2026-09-29: "sometimes sending a message
 //! closes the existing claude session and re-opens it … it kills subagents
-//! and sub processes"). The user's Stop is the one deliberate teardown.
+//! and sub processes"). The user's Stop ends only the turn; a teardown Stop
+//! (the Supervisor's pause) is the one deliberate teardown.
 //!
 //! The harness here models one persistent agent process per `run()`: every
 //! `run()` is a spawn, the `interrupt` token is its death, a turn stop ends
@@ -595,17 +596,14 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
     .await;
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .unwrap();
     wait_for(
-        || {
-            rig.ledger.kills.load(Ordering::SeqCst) == 1
-                && status(&rig.core) == Some(SessionStatus::Idle)
-                && queued(&rig).is_empty()
-        },
+        || status(&rig.core) == Some(SessionStatus::Idle) && queued(&rig).is_empty(),
         "the stop to cancel the held send",
     )
     .await;
+    assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0, "no teardown");
     rig.core
         .doc_host
         .queue_command(
@@ -697,11 +695,11 @@ async fn a_message_the_stop_cancelled_never_reaches_a_fresh_runtime() {
     rig.core.sessions.shutdown().await;
 }
 
-/// "Send now" replaces the in-flight turn but keeps the runtime and its
-/// background work; the user's Stop is a hard boundary that tears all of it
-/// down, and the next message starts a fresh process.
+/// "Send now" and the user's Stop both end only the in-flight turn: the
+/// runtime and its background work keep running, and the next message
+/// routes into the same process.
 #[tokio::test]
-async fn send_now_keeps_the_runtime_and_stop_tears_it_down() {
+async fn send_now_and_stop_keep_the_runtime_and_its_background_work() {
     let rig = rig();
     rig.core
         .sessions
@@ -754,31 +752,28 @@ async fn send_now_keeps_the_runtime_and_stop_tears_it_down() {
     assert_eq!(rig.ledger.spawns.load(Ordering::SeqCst), 1, "one process");
     assert!(turn.background_live());
 
-    // Stop (the Cancel command): the runtime and its work are gone.
+    // Stop (the Cancel command): the turn ends, the runtime and its work stay.
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .unwrap();
     wait_for(
         || status(&rig.core) == Some(SessionStatus::Idle),
         "stop to settle",
     )
     .await;
-    wait_for(
-        || rig.ledger.kills.load(Ordering::SeqCst) == 1,
-        "the runtime to be torn down",
-    )
-    .await;
-    assert!(!rig.core.sessions.live_run_steerable(CHAT));
+    assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0, "no teardown");
+    assert!(turn.background_live());
+    assert!(rig.core.sessions.live_run_steerable(CHAT));
 
-    // The next message starts a fresh process.
+    // The next message routes into the same process.
     rig.core
         .sessions
         .dispatch(CHAT, HarnessId::Mock, request("status?"), None)
         .await
         .unwrap();
     settle(&rig, 3).await;
-    assert_eq!(rig.ledger.spawns.load(Ordering::SeqCst), 2);
+    assert_eq!(rig.ledger.spawns.load(Ordering::SeqCst), 1);
     rig.core.sessions.shutdown().await;
 }
 
@@ -800,19 +795,26 @@ async fn a_stop_right_after_send_stops_that_turn() {
         .unwrap();
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .unwrap();
     wait_for(
-        || rig.ledger.kills.load(Ordering::SeqCst) == 1,
-        "the Stop to tear the turn down",
+        || {
+            status(&rig.core) == Some(SessionStatus::Idle)
+                && rig.ledger.prompts.lock().unwrap().len() == 1
+        },
+        "the Stop to end the turn",
     )
     .await;
-    wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
-        "the stopped chat to settle",
-    )
-    .await;
-    assert_eq!(rig.ledger.prompts.lock().unwrap().len(), 1);
+    let doc = rig.core.doc_host.open(CHAT).unwrap();
+    assert!(
+        doc.doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.status == Some(MessageStatus::Aborted)),
+        "the turn reads as stopped"
+    );
+    assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
     rig.core.sessions.shutdown().await;
 }
 
@@ -834,7 +836,7 @@ async fn a_send_right_after_stop_runs_in_a_fresh_runtime() {
     .await;
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: true })
         .unwrap();
     rig.core
         .doc_host
@@ -941,7 +943,7 @@ async fn a_steer_sent_before_stop_is_cancelled_with_it() {
         .unwrap();
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: true })
         .unwrap();
     wait_for(
         || {
@@ -961,10 +963,10 @@ async fn a_steer_sent_before_stop_is_cancelled_with_it() {
     rig.core.sessions.shutdown().await;
 }
 
-/// The idle reaper spares a parked runtime holding background work, so the
-/// user's Stop must reach it and end that work.
+/// The idle reaper spares a parked runtime holding background work. The
+/// user's Stop leaves that work running; a teardown Stop ends it.
 #[tokio::test]
-async fn stop_ends_a_parked_runtime_holding_background_work() {
+async fn only_a_teardown_ends_a_parked_runtime_holding_background_work() {
     let rig = rig();
     rig.core
         .sessions
@@ -980,7 +982,7 @@ async fn stop_ends_a_parked_runtime_holding_background_work() {
     // A runtime parked with nothing running is left alone.
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: true })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
@@ -989,11 +991,19 @@ async fn stop_ends_a_parked_runtime_holding_background_work() {
     turn.set_background(1);
     rig.core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
+    assert!(rig.core.sessions.live_run_steerable(CHAT));
+
+    rig.core
+        .doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: true })
         .unwrap();
     wait_for(
         || rig.ledger.kills.load(Ordering::SeqCst) == 1,
-        "the Stop to end the background work",
+        "the teardown to end the background work",
     )
     .await;
     assert!(!rig.core.sessions.live_run_steerable(CHAT));

@@ -918,6 +918,8 @@ mod tests {
                     labels: vec![label.into()],
                 }]
             }),
+            asked_at_ms: None,
+            answered_at_ms: None,
         }
     }
 

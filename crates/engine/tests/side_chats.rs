@@ -128,6 +128,25 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
             MessageStatus::Streaming,
         ))
         .unwrap();
+    let mut owned = core.workspace.chat("main").unwrap().unwrap();
+    owned.delegation = Some(zeron_proto::Delegation {
+        delegated_by_chat_id: "owner".into(),
+        depth: 1,
+        anchor: "u1".into(),
+        client_request_id: None,
+        owner_turn_started_at: None,
+        wake: zeron_proto::DelegationWake::Always,
+        status: zeron_proto::DelegationStatus::Running,
+        cancel_requested: false,
+        delivery: None,
+        summary: None,
+        started_at: owned.created_at,
+        completed_at: None,
+        finding_outcomes: Default::default(),
+        findings_handed: Default::default(),
+        findings_announced: Default::default(),
+    });
+    core.workspace.import_chat_row(&owned).unwrap();
     let client = zeron_rpc::memory_client(core.rpc_service());
     let params = serde_json::json!({ "chatId": "side", "sourceChatId": "main", "targetDeviceId": core.device_id });
     let fork = client
@@ -135,6 +154,11 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
         .await
         .unwrap();
     assert_eq!(fork.created_by_chat_id.as_deref(), Some("main"));
+    assert_eq!(fork.forked_from_chat_id.as_deref(), Some("main"));
+    assert_eq!(
+        fork.delegation, None,
+        "a fork of a delegated child is not a second child of its owner"
+    );
     assert_eq!(fork.harness_session_id, None);
     assert_eq!(fork.cwd, Some("/tmp".into()));
     assert!(fork.on_chat2());

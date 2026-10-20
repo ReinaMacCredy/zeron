@@ -343,6 +343,7 @@ impl Shell {
             NavEntry::Usage => "Usage".into(),
             NavEntry::Inbox => "Inbox".into(),
             NavEntry::Tasks => "Tasks".into(),
+            NavEntry::MissionControl => "Mission Control".into(),
             NavEntry::TaskCenter(id) => self
                 .state
                 .read(cx)

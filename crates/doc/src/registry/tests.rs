@@ -282,6 +282,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         room_gen: None,
         sidechat_source_chat_id: None,
         created_by_chat_id: None,
+        forked_from_chat_id: None,
         previous_harnesses: Vec::new(),
         delegation: None,
         settle: None,
@@ -462,6 +463,7 @@ fn an_agent_created_row_round_trips_its_creator_across_devices() {
     let mut b = RegistryDoc::new("dev-b");
     let mut created = chat("chat-2", "dev-a");
     created.created_by_chat_id = Some("chat-1".into());
+    created.forked_from_chat_id = Some("chat-0".into());
     a.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
     a.upsert_chat(&created).unwrap();
     assert_eq!(a.read_chats().unwrap()[1], created);
@@ -472,6 +474,7 @@ fn an_agent_created_row_round_trips_its_creator_across_devices() {
     let on_b = b.read_chats().unwrap();
     assert_eq!(on_b.len(), 2);
     assert_eq!(on_b[1].created_by_chat_id.as_deref(), Some("chat-1"));
+    assert_eq!(on_b[1].forked_from_chat_id.as_deref(), Some("chat-0"));
     assert_eq!(on_b[0].created_by_chat_id, None);
 }
 

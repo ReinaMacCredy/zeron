@@ -323,6 +323,7 @@ async fn fork_copies_through_the_reply_and_branches_the_next_run() {
     );
     assert_eq!(forked.title.as_deref(), Some("Fork: Auth work"));
     assert_eq!(forked.sidechat_source_chat_id, None);
+    assert_eq!(forked.forked_from_chat_id.as_deref(), Some(SOURCE));
     assert_eq!(forked.space_id, row_before.space_id);
     let fork_entries = entries(&rig.core, FORK);
     assert_eq!(

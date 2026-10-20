@@ -29,8 +29,8 @@ use tokio::sync::watch;
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
 use zeron_proto::{
-    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskMode,
-    TaskPatch, TaskStep, TaskStepPatch,
+    Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space, Task, TaskPatch,
+    TaskStep, TaskStepPatch,
 };
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -895,7 +895,7 @@ impl WorkspaceHost {
                     self.inner.config.settle_after_days,
                 )
             })
-                .map_err(EngineError::from)
+            .map_err(EngineError::from)
         });
         if let Err(err) = result {
             tracing::warn!(chat = %chat_id, error = %err, "registry last-message write failed");
@@ -1082,6 +1082,7 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 sidechat_source_chat_id: None,
                 created_by_chat_id: created_by_chat_id.map(str::to_string),
+                forked_from_chat_id: None,
                 previous_harnesses: Vec::new(),
                 delegation,
                 settle: None,
@@ -1138,6 +1139,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: Some(source_chat_id.to_string()),
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -1195,6 +1197,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: Some(source.id.clone()),
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -1253,6 +1256,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses,
             delegation: None,
             settle: None,
@@ -1357,15 +1361,17 @@ impl WorkspaceHost {
         self.read(|doc| doc.task_step(step_id))
     }
 
+    pub fn read_task_steps(&self) -> Result<Vec<TaskStep>, EngineError> {
+        Ok(self.read(|doc| doc.read_task_steps())?)
+    }
+
     pub fn task_steps_of(&self, task_id: &str) -> Vec<TaskStep> {
         self.read(|doc| doc.task_steps_of(task_id))
     }
 
     pub(crate) fn mission_thread(&self, chat_id: &str) -> bool {
         self.inner.tasks_tx.borrow().iter().any(|task| {
-            task.mode == TaskMode::Orchestrated
-                && !task.deleted
-                && task.chat_id.as_deref() == Some(chat_id)
+            task.has_plan() && !task.deleted && task.chat_id.as_deref() == Some(chat_id)
         }) || self
             .inner
             .task_steps_tx

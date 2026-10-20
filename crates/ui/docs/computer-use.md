@@ -35,6 +35,8 @@ The status line under **Computer control** says whether the desktop is ready. Wh
 
 Before the agent touches an app, the chat shows a consent card such as **Allow Zeron to use Safari?**. Choose **Allow this conversation**, **Always allow**, or **Deny**. Always-allowed apps are listed under **Always-allowed apps** in Settings, where you can remove them. Zeron may still ask **Approve this tool call?** before consequential steps.
 
+![Approving computer use for an app](computer-use-consent.jpg)
+
 ## Watch and take back control
 
 A live preview shows what the agent sees and what it is doing. Its menu has **Hide for this task**, **Hide for all active tasks**, **Move to floating window**, and **Move to sidebar**. Closing the preview only hides it.
@@ -59,5 +61,7 @@ The agent shares your desktop and works in the background by default. It can bri
 - **Getting started**: a three-step guide (**Ask for a task**, **Approve the task**, **Follow and stop**). It stays open until you click **Got it** or **Hide guide**; after that, **Show guide** brings it back.
 - **Recent Computer actions**: collapsed until you click **Show history**. It lists recent actions across chats, without read-only observations, typed text, page contents, or file paths. Each row shows the action, the app, the time, and what happened: **Effect observed**, **Sent; effect unconfirmed**, **Not sent**, **Blocked**, or **Failed**. **Refresh history** reloads it and **Load older actions** pages back, up to the latest 100.
 - **Advanced**: the macOS permissions, plus two read-only rows. **Desktop driver** shows the driver revision and whether it matches this build. **Desktop abilities**, shown once the desktop is ready, lists what the driver can do, such as screen capture, input, and window raising.
+
+![Settings > Computer](computer-use-settings.jpg)
 
 > To show an agent a window without giving it control, use an [Appshot](zeron://docs/appshots).

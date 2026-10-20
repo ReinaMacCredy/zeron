@@ -24,6 +24,8 @@ Click a task to open its card beside the list. Edits save on their own. You can 
 - a due date: **No date**, **Today**, or **Tomorrow**
 - the project, or **No project**
 
+![A task card with Hand it to](tasks-card.jpg)
+
 The **⋯** button next to the close button holds **Mark as done** and **Delete**. Delete does not ask first. Press Escape or click the close button to close the card.
 
 Under **Hand it to**, three tabs pick who does the task: **New chat**, **Thread** or **Mission Control**. Each tab shows only its own settings and its own button, and Cmd+Enter presses that button.

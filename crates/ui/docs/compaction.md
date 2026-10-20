@@ -4,6 +4,8 @@ Every agent has a context window, the amount of conversation it can hold at once
 
 The ring at the right of the session footer shows how much of the context window is in use. It turns to a warning color at 75% and to danger at 90%. Click it to open **Context window**, with the tokens used and remaining. When a compaction is planned, the popover also says when: **Compacts at** a time for idle compaction, or **Compacts when this turn ends** when the agent asked.
 
+![The context window popover](compaction-popover.jpg)
+
 ## Compact by hand
 
 Click **Compact context** in that popover, or type `/compact` in the composer. You can add a focus for the summary:
@@ -107,6 +109,8 @@ What leaves your Mac for each check: your last four messages, each with the agen
 ## What you see in the transcript
 
 While the classifier runs on an agent model, a row reads **Classifier** with the model and **checking if this is a new task**, or **checking the agent's note**. Then a row such as **Compacting 180K before the new task** or **Compacting 180K, carrying the last turns over** shows while the chat compacts.
+
+![A classifier decision in the transcript](compaction-classifier.jpg)
 
 Afterwards a **Classifier** row stays in the transcript with its answer: **New task**, **Carry over**, **Same task**, or **No answer**. Click it to see the model, how it decided, the time taken, the context size, the tokens used, exactly what was sent, and the reply.
 

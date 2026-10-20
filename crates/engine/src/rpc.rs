@@ -1083,6 +1083,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        attach_plan: bool,
     },
     #[serde(rename_all = "camelCase")]
     PlanSteps {
@@ -1117,6 +1119,8 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
+    TakeBackPlanApproval { task_id: String },
+    #[serde(rename_all = "camelCase")]
     RetryTaskStep { step_id: String },
     #[serde(rename_all = "camelCase")]
     EditTaskPlan {
@@ -1135,6 +1139,10 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     SetMissionSupervised { task_id: String, supervised: bool },
     #[serde(rename_all = "camelCase")]
+    SetTreeWatched { root_chat_id: String, watched: bool },
+    #[serde(rename_all = "camelCase")]
+    SetWatchEverything { on: bool },
+    #[serde(rename_all = "camelCase")]
     EscalateTask {
         task_id: String,
         #[serde(default)]
@@ -1147,6 +1155,15 @@ enum MutateParams {
     },
     #[serde(rename_all = "camelCase")]
     ResolveSupervisorItem { item_id: String, choice: String },
+    #[serde(rename_all = "camelCase")]
+    ResolveSupervisorItems { answers: Vec<ItemChoice> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ItemChoice {
+    item_id: String,
+    choice: String,
 }
 
 fn approve_plan_default() -> bool {
@@ -1154,10 +1171,13 @@ fn approve_plan_default() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlannedStep {
     title: String,
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2406,10 +2426,12 @@ impl EngineRpc {
                     || patch.images.is_some()
                     || patch.chat_id.is_some()
                 {
-                    supervisor::refuse_supervisor(
-                        from_chat_id.as_deref(),
-                        supervisor::GOAL_OR_SPEND,
-                    )?;
+                    let refusal = if self.registry.supervisor_settings().goal_and_spend {
+                        supervisor::GOAL_ACTION
+                    } else {
+                        supervisor::GOAL_OR_SPEND
+                    };
+                    supervisor::refuse_supervisor(from_chat_id.as_deref(), refusal)?;
                 }
                 self.update_task(&task_id, &patch)
             }
@@ -2437,6 +2459,7 @@ impl EngineRpc {
                     approve_plan,
                     same_agents,
                     plan_doc,
+                    attach: false,
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
@@ -2451,12 +2474,14 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                attach_plan,
             } => {
                 supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
                     plan_doc,
+                    attach: attach_plan,
                 });
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead)
                     .await
@@ -2470,7 +2495,7 @@ impl EngineRpc {
             } => {
                 let steps = steps
                     .into_iter()
-                    .map(|step| (step.title, step.notes))
+                    .map(|step| (step.title, step.notes, step.thread_id))
                     .collect();
                 self.plan_steps(
                     &task_id,
@@ -2494,7 +2519,10 @@ impl EngineRpc {
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
             MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
-            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await,
+            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
+            MutateParams::TakeBackPlanApproval { task_id } => {
+                self.take_back_plan_approval(&task_id).await
+            }
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
             MutateParams::EditTaskPlan {
                 task_id,
@@ -2519,6 +2547,11 @@ impl EngineRpc {
                 task_id,
                 supervised,
             } => self.set_mission_supervised(&task_id, supervised),
+            MutateParams::SetTreeWatched {
+                root_chat_id,
+                watched,
+            } => self.set_tree_watched(&root_chat_id, watched),
+            MutateParams::SetWatchEverything { on } => self.set_watch_everything(on),
             MutateParams::EscalateTask {
                 task_id,
                 from_chat_id,
@@ -2537,7 +2570,11 @@ impl EngineRpc {
                 )
                 .map(drop),
             MutateParams::ResolveSupervisorItem { item_id, choice } => {
-                self.resolve_supervisor_item(&item_id, &choice).await
+                self.resolve_supervisor_items(vec![ItemChoice { item_id, choice }])
+                    .await
+            }
+            MutateParams::ResolveSupervisorItems { answers } => {
+                self.resolve_supervisor_items(answers).await
             }
         }
     }
@@ -3804,7 +3841,7 @@ impl RpcService for EngineRpc {
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
                 let respond = match &p.command {
-                    SessionCommandPayload::Interrupt {} => {
+                    SessionCommandPayload::Interrupt { .. } => {
                         supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
                         None
                     }
@@ -3815,6 +3852,7 @@ impl RpcService for EngineRpc {
                         Some(from)
                             if self.supervisor_gate(Some(from), |s| s.message_threads, supervisor::MESSAGE_OFF)? =>
                         {
+                            self.supervisor_may_answer(from, &p.chat_id)?;
                             let text: Vec<String> = answers
                                 .iter()
                                 .map(|answer| format!("{}: {}", answer.question_id, answer.labels.join(", ")))
@@ -3929,6 +3967,8 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.created_by_chat_id = Some(created_by_chat_id);
+                chat.forked_from_chat_id = Some(source.id.clone());
+                chat.delegation = None;
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
@@ -4525,7 +4565,7 @@ impl RpcService for EngineRpc {
                 {
                     let steps = steps
                         .into_iter()
-                        .map(|step| (step.title, step.notes))
+                        .map(|step| (step.title, step.notes, step.thread_id))
                         .collect();
                     let images_moved = self.plan_steps(
                         &task_id,
@@ -4632,10 +4672,15 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let host = self.doc_host.clone();
                 let runs = tokio::task::spawn_blocking(move || {
-                    crate::today_runs::today_runs(&chats, p.since_ms, |chat| {
+                    let ids = p.chat_ids.as_deref();
+                    crate::today_runs::today_runs(&chats, p.since_ms, ids, |chat| {
                         host.open_local(&chat.id)
                             .map(|handle| {
-                                crate::today_runs::turns_since(handle.doc().doc(), p.since_ms)
+                                let doc = handle.doc().doc();
+                                (
+                                    crate::today_runs::turns_since(doc, p.since_ms),
+                                    crate::today_runs::waits_since(doc, p.since_ms),
+                                )
                             })
                             .unwrap_or_default()
                     })

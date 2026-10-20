@@ -11,6 +11,8 @@ Hover a message to see the strip under it:
 | Branch icon (replies) | Forks the chat from this reply. See Fork or rewind below. |
 | Restart icon (your prompts) | Rewinds the chat to before this prompt. |
 
+![Hovering a reply shows its time, Copy message, and fork](conversation-hover.jpg)
+
 A long prompt (more than five lines, or about 400 characters) is clipped. Click **Show more** under it to read the rest and **Show less** to fold it again, or press and hold the bubble.
 
 Images you attached show as thumbnails above your message. Click one to see it full size.
@@ -96,6 +98,8 @@ When you let go, an **Add to chat** pill appears under the selection. Click it t
 ## The agent's work
 
 The agent's tool calls fold into groups. Each group's title sums up what happened, such as **Ran 3 commands · edited 2 files**, **Read 1 file · searched 2 times**, **Thought 2 times**, or **Used Safari · 1 action**. A group stays open while the agent is still working in it, then folds to its title. Click the title to open or close it. Subagent chips and **Started thread** rows stay outside the groups.
+
+![The agent's tool calls grouped under one summary](conversation-tools.jpg)
 
 Inside a group, each chip names one call. Click a chip to see exactly what ran and its output or diff.
 

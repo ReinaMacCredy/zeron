@@ -13,6 +13,8 @@ You need an existing chat first; the new chat canvas has no sidechats.
 
 The sidechat takes the place of the main composer, marked with a **btw** pill. Each sidechat gets a tab named after its first question.
 
+![Sidechats above the composer](side-chat-tabs.jpg)
+
 - **+** (**New btw tab**) opens another sidechat.
 - The × on a tab (**Archive sidechat**) archives it.
 - A **Draft** chip shows the unsent text you left in the main composer, so nothing is lost.

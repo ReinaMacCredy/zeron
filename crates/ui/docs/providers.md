@@ -34,6 +34,8 @@ The account in use is marked **In use**. Click another account to switch to it, 
 
 **Add provider** sets up another instance of an agent, for example a work login next to a personal one. Each instance has its own label and settings, and its own tab in the model picker.
 
+![The Add provider dialog](providers-add.jpg)
+
 1. **Provider**: pick a tile. For Claude, Codex, and Pi, **Sign in with Claude** or **Continue with ChatGPT** creates a numbered instance with a home folder of its own and starts its sign-in in one step. **Configure manually**, or **Next** for the other agents, walks through the rest.
 2. **Identity**: a **Label** shown in the provider list and the model picker, an **Instance ID** (up to 64 letters, digits, `-`, or `_`, starting with a letter; the id of a built-in agent such as `codex` reads as taken), and an optional **Accent color** for the picker.
 3. **Config**: a **Binary path**, **Launch arguments**, and **Environment** variables set for this instance only. Claude, Codex, and Pi also take a separate home folder, so the instance keeps its own login and settings. Cursor instances take only environment variables.

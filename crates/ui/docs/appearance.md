@@ -4,6 +4,8 @@
 
 Pick **System**, **Light**, or **Dark** at the top of the page. **System** follows macOS. The same choice is in the menu bar under **View** (**Appearance: System**, **Appearance: Light**, **Appearance: Dark**), and in the command palette.
 
+![Theme and accent settings](appearance-themes.jpg)
+
 **Light theme** and **Dark theme** choose the theme used for each mode, so you can pair, say, GitHub Light with Tokyo Night. The defaults are Zeron Light and Zeron Dark. Zeron ships many themes, including Catppuccin, Dracula, Nord, Gruvbox, One Dark Pro, and Rosé Pine.
 
 **Accent color** offers **Theme default** or a preset: Zeron, Orange, Amber, Green, Cyan, Blue, or Pink. Turn on **Match wallpaper colors** to take accents and subtle tints for surfaces and borders from your background image instead. It only has an effect while a **New thread background** is set; your accent color comes back when it is off.
@@ -18,6 +20,8 @@ Pick **System**, **Light**, or **Dark** at the top of the page. **System** follo
 ### Background art
 
 **New thread background** sets an image behind the new chat canvas. Click **Choose image**; once set, use **Adjust** to drag and zoom it, **Replace image**, or **Remove**.
+
+![A new chat background with an effect](appearance-background.jpg)
 
 **Wallpaper folder** points at a folder of images. **Shuffle**, or Cmd+U (**Random wallpaper**), picks a new background from it.
 

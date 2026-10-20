@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use loro::{Container, LoroDoc, ToJson, ValueOrContainer};
 use serde::Deserialize;
 use zeron_doc::{MessageRole, MessageStatus};
-use zeron_proto::{Chat, TodayRun, TodayRunStatus, TodayRuns};
+use zeron_proto::{Chat, TodayRun, TodayRunStatus, TodayRuns, TodayWait};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Turn {
@@ -65,31 +65,80 @@ pub(crate) fn turns_since(doc: &LoroDoc, since_ms: i64) -> Vec<Turn> {
     turns
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartHead {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    asked_at_ms: Option<i64>,
+    #[serde(default)]
+    answered_at_ms: Option<i64>,
+}
+
+/// Questions stamped with when they were asked, as `(asked, answered)`; older parts carry no stamp.
+pub(crate) fn waits_since(doc: &LoroDoc, since_ms: i64) -> Vec<(i64, Option<i64>)> {
+    let messages = doc.get_list("messages");
+    let mut waits = Vec::new();
+    for index in 0..messages.len() {
+        let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index) else {
+            continue;
+        };
+        let Some(ValueOrContainer::Container(Container::List(parts))) = map.get("parts") else {
+            continue;
+        };
+        let Ok(parts) =
+            serde_json::from_value::<Vec<PartHead>>(parts.get_deep_value().to_json_value())
+        else {
+            continue;
+        };
+        for part in parts.into_iter().filter(|part| part.kind == "input") {
+            if let Some(asked) = part.asked_at_ms
+                && part.answered_at_ms.is_none_or(|ended| ended >= since_ms)
+            {
+                waits.push((asked, part.answered_at_ms));
+            }
+        }
+    }
+    waits
+}
+
 pub(crate) fn today_runs(
     chats: &[Chat],
     since_ms: i64,
-    mut turns_for: impl FnMut(&Chat) -> Vec<Turn>,
+    chat_ids: Option<&[String]>,
+    mut read: impl FnMut(&Chat) -> (Vec<Turn>, Vec<(i64, Option<i64>)>),
 ) -> TodayRuns {
-    let mut runs: Vec<TodayRun> = chats
-        .iter()
-        .filter(|chat| !chat.archived && chat.is_top_level())
-        .filter(|chat| {
-            chat.last_message_at
-                .is_some_and(|at| at.timestamp_millis() >= since_ms)
-        })
-        .flat_map(|chat| {
-            turns_for(chat).into_iter().map(|turn| TodayRun {
-                chat_id: chat.id.clone(),
-                title: chat.title.clone(),
-                harness: chat.config.as_ref().map(|config| config.harness),
-                started_at_ms: turn.started_at_ms,
-                duration_ms: turn.duration_ms,
-                status: turn.status,
-            })
-        })
-        .collect();
+    let mut runs = Vec::new();
+    let mut waits = Vec::new();
+    let picked = chats.iter().filter(|chat| match chat_ids {
+        Some(ids) => ids.iter().any(|id| *id == chat.id),
+        None => {
+            !chat.archived
+                && chat.is_top_level()
+                && chat
+                    .last_message_at
+                    .is_some_and(|at| at.timestamp_millis() >= since_ms)
+        }
+    });
+    for chat in picked {
+        let (turns, chat_waits) = read(chat);
+        runs.extend(turns.into_iter().map(|turn| TodayRun {
+            chat_id: chat.id.clone(),
+            title: chat.title.clone(),
+            harness: chat.config.as_ref().map(|config| config.harness),
+            started_at_ms: turn.started_at_ms,
+            duration_ms: turn.duration_ms,
+            status: turn.status,
+        }));
+        waits.extend(chat_waits.into_iter().map(|(asked, ended)| TodayWait {
+            chat_id: chat.id.clone(),
+            started_at_ms: asked,
+            ended_at_ms: ended,
+        }));
+    }
     runs.sort_by_key(|run| std::cmp::Reverse(run.started_at_ms));
-    TodayRuns { runs }
+    TodayRuns { runs, waits }
 }
 
 #[cfg(test)]
@@ -191,14 +240,15 @@ mod tests {
             archived,
         ];
         let mut opened = Vec::new();
-        let runs = today_runs(&chats, 1_000, |chat| {
+        let runs = today_runs(&chats, 1_000, None, |chat| {
             opened.push(chat.id.clone());
             let start = if chat.id == "a" { 2_000 } else { 3_000 };
-            vec![Turn {
+            let turn = Turn {
                 started_at_ms: start,
                 duration_ms: Some(10),
                 status: TodayRunStatus::Complete,
-            }]
+            };
+            (vec![turn], Vec::new())
         });
         assert_eq!(opened, ["a", "b"]);
         let order: Vec<(&str, i64)> = runs
@@ -207,5 +257,67 @@ mod tests {
             .map(|run| (run.chat_id.as_str(), run.started_at_ms))
             .collect();
         assert_eq!(order, [("b", 3_000), ("a", 2_000)]);
+    }
+
+    #[test]
+    fn explicit_chats_skip_the_inbox_filters_and_bring_their_stamped_waits() {
+        let doc = SessionDoc::init("c").unwrap();
+        let question = |id: &str, asked: Option<i64>, answered: Option<i64>| MessagePart::Input {
+            id: format!("in-{id}"),
+            request_id: id.into(),
+            questions: Vec::new(),
+            resolved: answered.is_some(),
+            answers: None,
+            asked_at_ms: asked,
+            answered_at_ms: answered,
+        };
+        let mut asks = entry("a0", MessageRole::Assistant, 900, None, None, None);
+        asks.parts = vec![
+            question("old", None, None),
+            question("done", Some(1_200), Some(1_500)),
+            question("open", Some(2_000), None),
+            question("before", Some(100), Some(400)),
+        ];
+        doc.push_message(&asks).unwrap();
+        assert_eq!(
+            waits_since(doc.doc(), 1_000),
+            vec![(1_200, Some(1_500)), (2_000, None)],
+            "an unstamped question and a wait over before `since` are left out"
+        );
+
+        let mut child = chat("child", None);
+        child.created_by_chat_id = Some("parent".into());
+        child.delegation = serde_json::from_value(serde_json::json!({
+            "delegatedByChatId": "parent", "depth": 1, "anchor": "m", "wake": "always", "status": "running",
+            "startedAt": "2026-10-17T00:00:00Z",
+        }))
+        .unwrap();
+        assert!(!child.is_top_level());
+        let chats = vec![
+            chat("parent", Some(5_000)),
+            child,
+            chat("other", Some(5_000)),
+        ];
+        let ids = ["child".to_string()];
+        let runs = today_runs(&chats, 1_000, Some(&ids), |_| {
+            (
+                vec![Turn {
+                    started_at_ms: 1_100,
+                    duration_ms: Some(10),
+                    status: TodayRunStatus::Complete,
+                }],
+                vec![(1_200, None)],
+            )
+        });
+        assert_eq!(runs.runs.len(), 1);
+        assert_eq!(runs.runs[0].chat_id, "child");
+        assert_eq!(
+            runs.waits,
+            vec![TodayWait {
+                chat_id: "child".into(),
+                started_at_ms: 1_200,
+                ended_at_ms: None,
+            }]
+        );
     }
 }

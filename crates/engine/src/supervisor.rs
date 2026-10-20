@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    InterventionChip, ItemAnswer, LeadQuestion, NeedsYouInput, NeedsYouRow, QuestionState,
-    SettledBy, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
-    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    InterventionChip, InterventionKind, ItemAnswer, ItemWhy, LeadQuestion, NeedsYouInput,
+    NeedsYouRow, NextCheck, NextCheckKind, PlanApproval, QuestionState, SettledBy,
+    SupervisorChoice, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention,
+    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
 use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
@@ -29,15 +30,37 @@ const KEPT_HOLDS: usize = 200;
 /// Long enough for the run's coalesced doc commit to land the input or turn being refreshed for.
 const REFRESH_DELAY_MS: i64 = 500;
 const HOUR_MS: i64 = 60 * 60 * 1000;
-pub(crate) const WAKES_PER_HOUR: usize = 12;
+pub(crate) use zeron_proto::supervisor::WAKES_PER_HOUR;
 pub(crate) const MISSION_SILENT_MS: i64 = 30 * 60 * 1000;
 pub(crate) const LEAD_SILENT_MS: i64 = 10 * 60 * 1000;
+pub(crate) const QUESTION_WAITING_MS: i64 = 20 * 60 * 1000;
+pub(crate) const TURN_QUIET_MS: i64 = 2 * 60 * 1000;
+pub(crate) const LIMIT_IDLE_MS: i64 = 5 * 60 * 1000;
+pub(crate) const LOST_WAKE_MS: i64 = 5 * 60 * 1000;
+
+pub(crate) fn stall_ms(default: i64) -> i64 {
+    std::env::var("ZERON_SUPERVISOR_STALL_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(default)
+}
 
 pub(crate) fn fold_ms() -> i64 {
     std::env::var("ZERON_SUPERVISOR_FOLD_MS")
         .ok()
         .and_then(|ms| ms.parse().ok())
         .unwrap_or(60_000)
+}
+
+pub(crate) fn approval_hold_ms() -> i64 {
+    std::env::var("ZERON_SUPERVISOR_APPROVAL_HOLD_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(30_000)
+}
+
+pub(crate) fn escalated_item(key: &str) -> Option<&str> {
+    key.strip_prefix("escalation:")?.split(':').next()
 }
 
 pub(crate) fn utc(ms: i64) -> DateTime<Utc> {
@@ -67,6 +90,7 @@ impl SupervisorEvent {
                 task_id: task_id.map(str::to_owned),
                 step_id: None,
                 thread_id: None,
+                root_chat_id: None,
                 label,
                 at: Utc::now(),
             },
@@ -79,6 +103,10 @@ impl SupervisorEvent {
 
     fn task_id(&self) -> Option<&str> {
         self.summary.task_id.as_deref()
+    }
+
+    fn root(&self) -> Option<&str> {
+        self.summary.root_chat_id.as_deref()
     }
 }
 
@@ -110,6 +138,8 @@ pub(crate) struct InterventionRecord {
     pub row: SupervisorIntervention,
     #[serde(default)]
     pub steps: Vec<StepSnap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +170,10 @@ struct SupervisorFile {
     #[serde(default)]
     unwatched: BTreeSet<String>,
     #[serde(default)]
+    watched_roots: BTreeSet<String>,
+    #[serde(default)]
+    watch_everything: bool,
+    #[serde(default)]
     items: Vec<SupervisorItem>,
     #[serde(default)]
     interventions: Vec<InterventionRecord>,
@@ -163,7 +197,18 @@ struct Router {
     held: Option<(String, Vec<SupervisorEvent>)>,
     projections: Projections,
     refresh_at: Option<i64>,
+    refresh_then: Option<i64>,
     resources: Resources,
+    next_check: Option<NextCheck>,
+    asked: Vec<Asked>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Asked {
+    pub chat_id: String,
+    pub request_id: String,
+    pub at: i64,
+    pub approval: bool,
 }
 
 struct State {
@@ -193,6 +238,7 @@ impl State {
             chat_id,
             state,
             waiting,
+            next_check: self.router.next_check.clone(),
             wakes: self
                 .file
                 .wakes
@@ -202,6 +248,8 @@ impl State {
                 .cloned()
                 .collect(),
             unwatched: self.file.unwatched.iter().cloned().collect(),
+            watched_roots: self.file.watched_roots.iter().cloned().collect(),
+            watch_everything: self.file.watch_everything,
             needs_you,
             questions: projections.questions.clone(),
             interventions: self
@@ -216,6 +264,10 @@ impl State {
                         .get(&record.row.id)
                         .cloned()
                         .unwrap_or_default(),
+                    item: record
+                        .item_id
+                        .as_deref()
+                        .and_then(|id| self.file.items.iter().find(|item| item.id == id).cloned()),
                     ..record.row.clone()
                 })
                 .collect(),
@@ -239,6 +291,7 @@ struct Inner {
     snapshot: watch::Sender<SupervisorSnapshot>,
     ensuring: Mutex<()>,
     checking: Arc<tokio::sync::Mutex<()>>,
+    approving: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Written only at a flush or a toggle: events arrive on every step turn end and input raise.
@@ -279,6 +332,7 @@ impl SupervisorStore {
                 snapshot,
                 ensuring: Mutex::new(()),
                 checking: Arc::default(),
+                approving: Arc::default(),
             }),
         })
     }
@@ -382,13 +436,21 @@ impl SupervisorStore {
         lock(&self.inner.state).file.unwatched.contains(task_id)
     }
 
+    pub(crate) fn watches_tree(&self, root: &str) -> bool {
+        let state = lock(&self.inner.state);
+        state.file.watch_everything || state.file.watched_roots.contains(root)
+    }
+
+    pub(crate) fn watches_any_tree(&self) -> bool {
+        let state = lock(&self.inner.state);
+        state.file.watch_everything || !state.file.watched_roots.is_empty()
+    }
+
     pub(crate) fn offer(&self, event: SupervisorEvent) {
         {
             let mut state = lock(&self.inner.state);
             let key = &event.summary.key;
-            if event
-                .task_id()
-                .is_some_and(|task| state.file.unwatched.contains(task))
+            if !state.file.keeps(&event)
                 || state.router.reported.contains(key)
                 || state.router.pending.iter().any(|e| &e.summary.key == key)
             {
@@ -410,24 +472,40 @@ impl SupervisorStore {
         task_id: &str,
         supervised: bool,
     ) -> Result<(), EngineError> {
+        self.change_watches(|file| match supervised {
+            true => file.unwatched.remove(task_id),
+            false => file.unwatched.insert(task_id.to_string()),
+        })
+    }
+
+    pub(crate) fn set_tree_watched(&self, root: &str, watched: bool) -> Result<(), EngineError> {
+        self.change_watches(|file| match watched {
+            true => file.watched_roots.insert(root.to_string()),
+            false => file.watched_roots.remove(root),
+        })
+    }
+
+    pub(crate) fn set_watch_everything(&self, on: bool) -> Result<(), EngineError> {
+        self.change_watches(|file| {
+            let changed = file.watch_everything != on;
+            file.watch_everything = on;
+            changed
+        })
+    }
+
+    fn change_watches(
+        &self,
+        change: impl FnOnce(&mut SupervisorFile) -> bool,
+    ) -> Result<(), EngineError> {
         let mut state = lock(&self.inner.state);
         let mut file = state.file.clone();
-        let changed = if supervised {
-            file.unwatched.remove(task_id)
-        } else {
-            file.unwatched.insert(task_id.to_string())
-        };
-        if !changed {
+        if !change(&mut file) {
             return Ok(());
         }
         persist_json(&self.inner.path, &file)?;
         state.file = file;
-        if !supervised {
-            state
-                .router
-                .pending
-                .retain(|event| event.task_id() != Some(task_id));
-        }
+        let State { file, router } = &mut *state;
+        router.pending.retain(|event| file.keeps(event));
         drop(state);
         self.mark_stale();
         Ok(())
@@ -446,6 +524,29 @@ impl SupervisorStore {
             .failed_at
             .get(step_id)
             .copied()
+    }
+
+    pub(crate) fn note_asked(&self, asked: Asked) {
+        let mut state = lock(&self.inner.state);
+        let known = state
+            .router
+            .asked
+            .iter()
+            .any(|a| a.chat_id == asked.chat_id && a.request_id == asked.request_id);
+        if !known {
+            state.router.asked.push(asked);
+        }
+    }
+
+    pub(crate) fn asked(&self) -> Vec<Asked> {
+        lock(&self.inner.state).router.asked.clone()
+    }
+
+    pub(crate) fn forget_asked(&self, gone: &[Asked]) {
+        lock(&self.inner.state)
+            .router
+            .asked
+            .retain(|a| !gone.contains(a));
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -545,7 +646,8 @@ impl SupervisorStore {
         &self,
         item_id: &str,
         choice: &str,
-    ) -> Result<SupervisorItem, EngineError> {
+        decided: Option<SupervisorChoice>,
+    ) -> Result<(SupervisorItem, Option<ItemAnswer>), EngineError> {
         let answered = {
             let mut state = lock(&self.inner.state);
             let mut file = state.file.clone();
@@ -554,16 +656,29 @@ impl SupervisorStore {
                 .iter_mut()
                 .find(|item| item.id == item_id)
                 .ok_or_else(|| EngineError::Other(format!("no Needs-you item {item_id}")))?;
-            if item.answer.is_some() {
-                return Err(EngineError::Other(format!(
-                    "item {item_id} is already answered"
-                )));
-            }
+            let previous = item.answer.clone();
+            let supervisor = match (&previous, decided) {
+                (None, decided) => decided,
+                (Some(answer), None) if answer.supervisor.is_some() => {
+                    if answer.choice == choice {
+                        return Err(EngineError::Other(format!(
+                            "item {item_id} already has {choice}"
+                        )));
+                    }
+                    answer.supervisor.clone()
+                }
+                (Some(_), _) => {
+                    return Err(EngineError::Other(format!(
+                        "item {item_id} is already answered"
+                    )));
+                }
+            };
             item.answer = Some(ItemAnswer {
                 at: Utc::now(),
                 choice: choice.to_string(),
+                supervisor,
             });
-            let answered = item.clone();
+            let answered = (item.clone(), previous);
             let answered_count = file.items.iter().filter(|i| i.answer.is_some()).count();
             let mut excess = answered_count.saturating_sub(KEPT_ANSWERED_ITEMS);
             file.items.retain(|i| {
@@ -577,6 +692,26 @@ impl SupervisorStore {
         };
         self.mark_stale();
         Ok(answered)
+    }
+
+    pub(crate) fn reopen_item(&self, item_id: &str) -> Result<(), EngineError> {
+        {
+            let mut state = lock(&self.inner.state);
+            let mut file = state.file.clone();
+            if let Some(item) = file.items.iter_mut().find(|item| item.id == item_id) {
+                item.answer = None;
+            }
+            persist_json(&self.inner.path, &file)?;
+            state.file = file;
+        }
+        self.mark_stale();
+        Ok(())
+    }
+
+    pub(crate) fn open_items(&self) -> Vec<SupervisorItem> {
+        let state = lock(&self.inner.state);
+        let open = state.file.items.iter().filter(|item| item.answer.is_none());
+        open.cloned().collect()
     }
 
     pub(crate) fn item_open(&self, item_id: &str) -> bool {
@@ -596,6 +731,64 @@ impl SupervisorStore {
             self.persist(&state);
         }
         self.mark_stale();
+    }
+
+    /// The newest Supervisor approval of the task's plan, when it carries a hold.
+    pub(crate) fn approval_of(&self, task_id: &str) -> Option<(String, PlanApproval)> {
+        let state = lock(&self.inner.state);
+        let record = state.file.interventions.iter().rev().find(|record| {
+            record.row.kind == InterventionKind::Approve
+                && record.row.task_id.as_deref() == Some(task_id)
+        })?;
+        Some((record.row.id.clone(), record.row.approval.clone()?))
+    }
+
+    pub(crate) fn held_approvals(&self) -> Vec<(String, String, i64, String)> {
+        let state = lock(&self.inner.state);
+        state
+            .file
+            .interventions
+            .iter()
+            .filter_map(|record| match (&record.row.approval, &record.row.task_id) {
+                (Some(PlanApproval::Held { starts_at }), Some(task_id)) => Some((
+                    record.row.id.clone(),
+                    task_id.clone(),
+                    starts_at.timestamp_millis(),
+                    record.row.text.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_approval(
+        &self,
+        id: &str,
+        approval: Option<PlanApproval>,
+        message_id: Option<String>,
+    ) {
+        {
+            let mut state = lock(&self.inner.state);
+            let Some(record) = state
+                .file
+                .interventions
+                .iter_mut()
+                .find(|record| record.row.id == id)
+            else {
+                return;
+            };
+            record.row.approval = approval;
+            if message_id.is_some() {
+                record.row.message_id = message_id;
+            }
+            self.persist(&state);
+        }
+        self.mark_stale();
+    }
+
+    /// Held across releasing or taking back an approval, so the two never interleave.
+    pub(crate) fn approving(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner.approving.clone()
     }
 
     pub(crate) fn interventions(&self) -> Vec<InterventionRecord> {
@@ -618,9 +811,11 @@ impl SupervisorStore {
     pub(crate) fn mark_stale(&self) {
         let at = Utc::now().timestamp_millis() + REFRESH_DELAY_MS;
         {
-            let mut state = lock(&self.inner.state);
-            let due = state.router.refresh_at.map_or(at, |due| due.min(at));
-            state.router.refresh_at = Some(due);
+            let router = &mut lock(&self.inner.state).router;
+            match router.refresh_at {
+                Some(due) if due < at => router.refresh_then = Some(at),
+                _ => router.refresh_at = Some(at),
+            }
         }
         let (chat_id, live, waiting) = {
             let snapshot = self.inner.snapshot.borrow();
@@ -636,15 +831,20 @@ impl SupervisorStore {
 
     pub(crate) fn take_refresh(&self, now: i64) -> bool {
         let mut state = lock(&self.inner.state);
-        let due = state.router.refresh_at.is_some_and(|at| at <= now);
+        let router = &mut state.router;
+        let due = router.refresh_at.is_some_and(|at| at <= now);
         if due {
-            state.router.refresh_at = None;
+            router.refresh_at = router.refresh_then.take().filter(|then| *then > now);
         }
         due
     }
 
     pub(crate) fn set_projections(&self, projections: Projections) {
         lock(&self.inner.state).router.projections = projections;
+    }
+
+    pub(crate) fn set_next_check(&self, check: Option<NextCheck>) {
+        lock(&self.inner.state).router.next_check = check;
     }
 
     pub(crate) fn publish(&self, chat_id: Option<String>, live: SupervisorState, waiting: usize) {
@@ -665,11 +865,24 @@ impl SupervisorStore {
     }
 }
 
+impl SupervisorFile {
+    /// An unwatched mission stays unwatched under Watch everything: the person turned it off by name.
+    fn keeps(&self, event: &SupervisorEvent) -> bool {
+        match (event.task_id(), event.root()) {
+            (Some(task), _) => !self.unwatched.contains(task),
+            (None, Some(root)) => self.watch_everything || self.watched_roots.contains(root),
+            (None, None) => true,
+        }
+    }
+}
+
 fn empty_file() -> SupervisorFile {
     SupervisorFile {
         version: STORE_VERSION,
         wakes: Vec::new(),
         unwatched: BTreeSet::new(),
+        watched_roots: BTreeSet::new(),
+        watch_everything: false,
         items: Vec::new(),
         interventions: Vec::new(),
         holds: Vec::new(),
@@ -765,6 +978,18 @@ pub(crate) enum Stall {
 }
 
 impl Stall {
+    pub fn check(&self, at: i64) -> NextCheck {
+        let (kind, task_id) = match self {
+            Self::MissionSilent { task_id, .. } => (NextCheckKind::MissionSilent, task_id),
+            Self::LeadSilent { task_id, .. } => (NextCheckKind::LeadSilent, task_id),
+        };
+        NextCheck {
+            at: utc(at),
+            kind,
+            task_id: Some(task_id.clone()),
+        }
+    }
+
     pub fn key(&self) -> String {
         match self {
             Self::MissionSilent { task_id, since } => format!("silent:{task_id}:{since}"),
@@ -779,12 +1004,14 @@ pub(crate) fn plan_stalls(
     now: i64,
     missions: &[MissionFacts],
     reported: impl Fn(&str) -> bool,
-) -> (Vec<Stall>, Option<i64>) {
+) -> (Vec<Stall>, Option<(i64, Stall)>) {
     let mut due = Vec::new();
-    let mut next: Option<i64> = None;
+    let mut next: Option<(i64, Stall)> = None;
     let mut consider = |stall: Stall, at: i64| {
         if at > now {
-            next = Some(next.map_or(at, |n| n.min(at)));
+            if next.as_ref().is_none_or(|(n, _)| at < *n) {
+                next = Some((at, stall));
+            }
         } else if !reported(&stall.key()) {
             due.push(stall);
         }
@@ -812,10 +1039,89 @@ pub(crate) fn plan_stalls(
     (due, next)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StallNode {
+    pub chat_id: String,
+    pub root: String,
+    pub task_id: Option<String>,
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TreeStall {
+    QuestionWaiting {
+        node: StallNode,
+        request_id: String,
+        asked_at: i64,
+        approval: bool,
+    },
+    LimitIdle {
+        node: StallNode,
+        resets_at: i64,
+    },
+    LostWake {
+        node: StallNode,
+        owner: String,
+        completed_at: i64,
+    },
+}
+
+impl TreeStall {
+    pub fn node(&self) -> &StallNode {
+        match self {
+            Self::QuestionWaiting { node, .. }
+            | Self::LimitIdle { node, .. }
+            | Self::LostWake { node, .. } => node,
+        }
+    }
+
+    pub fn key(&self) -> String {
+        match self {
+            Self::QuestionWaiting {
+                node, request_id, ..
+            } => format!("question-waiting:{}:{request_id}", node.chat_id),
+            Self::LimitIdle { node, resets_at } => {
+                format!("limit-idle:{}:{resets_at}", node.chat_id)
+            }
+            Self::LostWake {
+                node, completed_at, ..
+            } => format!("lost-wake:{}:{completed_at}", node.chat_id),
+        }
+    }
+
+    fn due_at(&self) -> i64 {
+        match self {
+            Self::QuestionWaiting { asked_at, .. } => asked_at + stall_ms(QUESTION_WAITING_MS),
+            Self::LimitIdle { resets_at, .. } => resets_at + stall_ms(LIMIT_IDLE_MS),
+            Self::LostWake { completed_at, .. } => completed_at + stall_ms(LOST_WAKE_MS),
+        }
+    }
+}
+
+/// A busy node (background work or live sub-agents) is never stalled, and wakes no timer.
+pub(crate) fn tree_stalls(
+    now: i64,
+    stalls: Vec<TreeStall>,
+    reported: impl Fn(&str) -> bool,
+) -> (Vec<TreeStall>, Option<i64>) {
+    let mut due = Vec::new();
+    let mut next: Option<i64> = None;
+    for stall in stalls.into_iter().filter(|stall| !stall.node().busy) {
+        let at = stall.due_at();
+        if at > now {
+            next = Some(next.map_or(at, |next| next.min(at)));
+        } else if !reported(&stall.key()) {
+            due.push(stall);
+        }
+    }
+    (due, next)
+}
+
 pub(crate) struct WakeEntry<'a> {
     pub event: &'a SupervisorEvent,
     pub mission: Option<String>,
     pub reply: Option<Reply>,
+    pub escalation: Option<ItemWhy>,
 }
 
 pub(crate) struct Reply {
@@ -872,6 +1178,9 @@ pub(crate) fn wake_text(
         for line in &entry.event.detail {
             text.push_str(&format!("   {line}\n"));
         }
+        if let Some(why) = entry.escalation {
+            text.push_str(&format!("   {}\n", escalation_line(why, settings)));
+        }
         if let Some(reply) = &entry.reply {
             let whose = if reply.from_lead {
                 "from the lead"
@@ -911,13 +1220,38 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     } else {
         String::new()
     };
+    let mut decides = String::new();
+    if settings.decide_for_me {
+        decides.push_str("\n- decide each lead's Needs you item whose why is decision yourself, in the person's place, with the supervisor tool, action \"decide\" (itemId, choice, reason), and approve a plan that waits for review with action \"approve\" (taskId, reason) when it fits the mission: on");
+    }
+    let goal = if settings.goal_and_spend {
+        decides.push_str("\n- decide each lead's goal and spend items yourself too with action \"decide\", and change a mission's goal, its title and notes, with action \"goal\" (taskId, title, notes, reason): on");
+        "Anything else you should not settle alone goes to the person with the supervisor tool, action \"ask\"."
+    } else {
+        "A change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\"."
+    };
+    if settings.full_authority() {
+        decides.push_str("\nThe person sees each of these decisions with your reason and may change it, so give a reason they can check.");
+    }
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- answer the questions of a watched tree without a plan with respond_to_input (Decide for me): {}; decide, approve, goal, re-brief and pause apply once a tree has a plan\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
+        on(settings.message_threads && settings.decide_for_me),
         on(settings.rebrief),
         on(settings.start_missions),
     )
+}
+
+const PERSON_ANSWERS: &str =
+    "The person answers it on the Supervisor page; their choice goes to the lead.";
+
+fn escalation_line(why: ItemWhy, settings: SupervisorSettings) -> &'static str {
+    if settings.decides(why) {
+        "The person gave you this decision: decide it with the supervisor tool, action \"decide\", this itemId, one of its options as choice, and your reason. Your choice goes to the lead; the person sees it and may change it."
+    } else {
+        PERSON_ANSWERS
+    }
 }
 
 pub(crate) fn open_inputs(
@@ -1159,6 +1493,7 @@ mod tests {
         let entries = [WakeEntry {
             event: &event,
             mission: None,
+            escalation: None,
             reply: Some(Reply {
                 from_lead: false,
                 text: Some(hostile.into()),
@@ -1186,6 +1521,73 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.matches("</agent-response>").count(), 1);
+    }
+
+    #[test]
+    fn the_footer_names_only_the_authority_that_is_on() {
+        let footer = |settings: SupervisorSettings| {
+            let text = authority_footer(settings, PermissionMode::Full);
+            text[text.find("- start a mission").unwrap()..].to_string()
+        };
+        let off = SupervisorSettings::default();
+        assert_eq!(
+            footer(off),
+            "- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): off\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line."
+        );
+        let decide = footer(SupervisorSettings {
+            decide_for_me: true,
+            ..off
+        });
+        assert!(
+            decide.contains("action \"decide\" (itemId, choice, reason), and approve a plan")
+                && !decide.contains("action \"goal\"")
+                && decide.contains("is the person's decision"),
+            "{decide}"
+        );
+        let goal = footer(SupervisorSettings {
+            goal_and_spend: true,
+            ..off
+        });
+        assert!(
+            goal.contains("with action \"goal\" (taskId, title, notes, reason): on")
+                && !goal.contains("approve a plan")
+                && !goal.contains("is the person's decision")
+                && goal.contains("may change it"),
+            "{goal}"
+        );
+        for (why, settings, decides) in [
+            (ItemWhy::Decision, off, false),
+            (
+                ItemWhy::Decision,
+                SupervisorSettings {
+                    decide_for_me: true,
+                    ..off
+                },
+                true,
+            ),
+            (
+                ItemWhy::Spend,
+                SupervisorSettings {
+                    decide_for_me: true,
+                    ..off
+                },
+                false,
+            ),
+            (
+                ItemWhy::Goal,
+                SupervisorSettings {
+                    goal_and_spend: true,
+                    ..off
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(
+                escalation_line(why, settings) != PERSON_ANSWERS,
+                decides,
+                "{why:?}"
+            );
+        }
     }
 
     fn thread(live: bool, background: bool, last_message: i64) -> ThreadFacts {
@@ -1305,8 +1707,11 @@ mod tests {
                 text: "q1: Adyen".into(),
                 trigger: None,
                 chips: Vec::new(),
+                item: None,
+                approval: None,
             },
             steps: Vec::new(),
+            item_id: None,
         };
         let at = StepThread {
             task_id: "t",
@@ -1437,7 +1842,98 @@ mod tests {
         ];
         for (name, facts, reported, stalls, next) in cases {
             let (due, deadline) = plan_stalls(now, &[facts], |_| reported);
-            assert_eq!((due, deadline), (stalls, next), "{name}");
+            assert_eq!((due, deadline.map(|(at, _)| at)), (stalls, next), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_tree_stall_waits_its_threshold_fires_once_and_never_on_a_busy_node() {
+        let now = 10 * HOUR_MS;
+        let node = |busy| StallNode {
+            chat_id: "child".into(),
+            root: "lead".into(),
+            task_id: None,
+            busy,
+        };
+        let question = |asked_at, busy| TreeStall::QuestionWaiting {
+            node: node(busy),
+            request_id: "r1".into(),
+            asked_at,
+            approval: false,
+        };
+        let limit = |resets_at, busy| TreeStall::LimitIdle {
+            node: node(busy),
+            resets_at,
+        };
+        let lost = |completed_at, busy| TreeStall::LostWake {
+            node: node(busy),
+            owner: "lead".into(),
+            completed_at,
+        };
+        let cases: [(&str, TreeStall, bool, bool, Option<i64>); 10] = [
+            (
+                "asked 21 min ago",
+                question(now - 21 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "already reported",
+                question(now - 21 * MIN, false),
+                true,
+                false,
+                None,
+            ),
+            (
+                "asked 5 min ago",
+                question(now - 5 * MIN, false),
+                false,
+                false,
+                Some(now + 15 * MIN),
+            ),
+            ("busy", question(now - 21 * MIN, true), false, false, None),
+            (
+                "reset 6 min ago",
+                limit(now - 6 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "reset 2 min ago",
+                limit(now - 2 * MIN, false),
+                false,
+                false,
+                Some(now + 3 * MIN),
+            ),
+            (
+                "stopped with a background sub-agent",
+                limit(now - 6 * MIN, true),
+                false,
+                false,
+                None,
+            ),
+            (
+                "handback claimed 6 min",
+                lost(now - 6 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "handback reported",
+                lost(now - 6 * MIN, false),
+                true,
+                false,
+                None,
+            ),
+            ("owner busy", lost(now - 6 * MIN, true), false, false, None),
+        ];
+        for (name, stall, reported, fires, next) in cases {
+            let (due, deadline) = tree_stalls(now, vec![stall.clone()], |_| reported);
+            let expected = if fires { vec![stall] } else { vec![] };
+            assert_eq!((due, deadline), (expected, next), "{name}");
         }
     }
 }

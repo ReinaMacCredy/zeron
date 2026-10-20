@@ -1,5 +1,7 @@
 The Zeron window has three parts: the app rail on the far left, the sidebar with your sessions, and the main column where the open chat or page lives.
 
+![The Zeron window: app rail, sidebar, and an open chat](getting-around-window.jpg)
+
 ## The app rail
 
 The narrow strip on the left switches between Zeron's pages. Hover a button to see its name.
@@ -49,6 +51,8 @@ On a trackpad that supports it, you feel a light tick when the swipe is far enou
 ## Session tabs
 
 The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it.
+
+![Session tabs in the titlebar with the tab menu open](getting-around-tabs.jpg)
 
 Selecting a session anywhere (the sidebar, the command palette, a notification) opens its tab. A chat you started opens its tab again by itself when it begins a new run, and any chat that starts waiting for your input opens its tab too.
 

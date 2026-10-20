@@ -1,5 +1,7 @@
 Zeron tells you when a chat needs you: a short sound, a desktop banner, or both. Open [Settings > Notifications](zeron://settings/notifications) to choose which.
 
+![Settings > Notifications](notifications-settings.jpg)
+
 ## What triggers a notification
 
 A notification fires when a chat you started changes state, when Zeron loses its connection, or when something new is available:

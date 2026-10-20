@@ -29,6 +29,8 @@ Two shortcuts live on their feature's own settings page instead: **Hold to dicta
 
 The **Keyboard shortcuts** page groups rows under **Appearance**, **Files**, **Browser**, **Panels**, **Sessions**, **Projects**, and **Jump to session**.
 
+![Rebinding a shortcut](shortcuts-recording.jpg)
+
 1. Click the binding on the right of a row. It changes to **Press keys…**.
 2. Press the new combination.
 3. Press Escape to cancel instead.

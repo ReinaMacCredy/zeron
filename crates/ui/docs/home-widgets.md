@@ -4,6 +4,8 @@ Home widgets are small cards under the composer on the new chat canvas. They sho
 
 The grid appears only on the new chat canvas, below the composer. It hides once you are in a chat, and when every widget is turned off. A summary pill at the top of the grid reads something like "2 running · 1 to review · 3 commits" (or just **Home** when there is nothing to report). Click it to collapse or expand the grid; Zeron remembers which.
 
+![Home widgets under the composer](home-widgets-grid.jpg)
+
 Widgets refresh only while the grid is visible.
 
 ## The widgets

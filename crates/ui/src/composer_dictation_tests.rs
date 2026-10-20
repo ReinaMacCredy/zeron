@@ -650,6 +650,8 @@ fn dictation_question_takeover_stops_capture_without_losing_draft(cx: &mut TestA
                     multiline: false,
                     kind: Default::default(),
                 }],
+                asked_at_ms: None,
+                answered_at_ms: None,
             }],
         }];
         cx.notify();
