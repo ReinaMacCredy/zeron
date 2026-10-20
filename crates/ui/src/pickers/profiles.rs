@@ -501,7 +501,14 @@ impl Pickers {
         draft
     }
 
+    fn profile_can_save(&self, cx: &App) -> bool {
+        self.effective_harness(cx) != Some(HarnessId::Acp)
+    }
+
     pub(super) fn save_current_as_profile(&mut self, cx: &mut Context<Self>) {
+        if !self.profile_can_save(cx) {
+            return;
+        }
         let draft = self.current_draft(cx);
         self.open_profile_edit(None, draft, cx);
     }
@@ -657,6 +664,7 @@ impl Pickers {
         }
         let applied = self.applied_profile(cx);
         let resolved = self.resolved(cx);
+        let can_save = self.profile_can_save(cx);
         let offset = self.default_rows(cx);
         if offset == 1 {
             list = list.child(self.render_default_row(applied.is_none(), &theme, cx));
@@ -673,9 +681,10 @@ impl Pickers {
                 .as_ref()
                 .filter(|drift| !drift.is_empty())
                 .map(|drift| self.drift_line(profile, drift, &resolved));
-            let savable = drift
-                .as_ref()
-                .is_some_and(|drift| drift.iter().any(|change| *change != Drift::Instructions));
+            let savable = can_save
+                && drift
+                    .as_ref()
+                    .is_some_and(|drift| drift.iter().any(|change| *change != Drift::Instructions));
             let edited = drift.as_ref().is_some_and(|drift| !drift.is_empty());
             let switches =
                 drift.is_none() && switching.is_some_and(|harness| harness != profile.harness);
@@ -884,6 +893,7 @@ impl Pickers {
                     .items_center()
                     .gap(px(10.0))
                     .cursor_pointer()
+                    .when(!can_save, |el| el.opacity(0.5).cursor_default())
                     .when(self.active == save_ix, |el| el.bg(crate::theme::ink(0.05)))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered && this.active != save_ix {
@@ -911,7 +921,11 @@ impl Pickers {
                         div()
                             .text_size(crate::typography::ui_rems(12.5))
                             .text_color(theme.text_muted)
-                            .child("Save current as profile"),
+                            .child(if can_save {
+                                "Save current as profile"
+                            } else {
+                                "A profile can't hold an ACP agent yet"
+                            }),
                     ),
             );
         list.into_any_element()

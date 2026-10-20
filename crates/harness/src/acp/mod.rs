@@ -1554,6 +1554,7 @@ impl AcpHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         cmd.args(&self.launch.args);
+        child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
         self.launch.apply(&mut cmd, None);
@@ -2120,17 +2121,6 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     }
 }
 
-/// Derive the model list a `session/new` response advertises. The `model`
-/// config option's choices come FIRST, the legacy first-class `models` state
-/// is only a fallback: the org adapters enumerate one `availableModels` entry
-/// per model × effort combination on that deprecated surface (Zed dropped it
-/// entirely), while their `configOptions` carry base model ids with effort as
-/// a separate `thought_level` option. `[1m]`-suffixed long-context variants
-/// collapse into the base model's Context Window trait, matching the static
-/// catalogs. Traits come off the wire too — every select/boolean config
-/// option outside mode/model/thought_level becomes a `ModelOption` — so
-/// unmatched models keep fast mode etc.; the catalog only enriches matched
-/// ids with label/description/per-model ladders.
 fn lead_with_current_model(models: &mut [Model], session_response: &Value) {
     let current = session_response
         .get("configOptions")
@@ -2148,6 +2138,17 @@ fn lead_with_current_model(models: &mut [Model], session_response: &Value) {
     }
 }
 
+/// Derive the model list a `session/new` response advertises. The `model`
+/// config option's choices come FIRST, the legacy first-class `models` state
+/// is only a fallback: the org adapters enumerate one `availableModels` entry
+/// per model × effort combination on that deprecated surface (Zed dropped it
+/// entirely), while their `configOptions` carry base model ids with effort as
+/// a separate `thought_level` option. `[1m]`-suffixed long-context variants
+/// collapse into the base model's Context Window trait, matching the static
+/// catalogs. Traits come off the wire too — every select/boolean config
+/// option outside mode/model/thought_level becomes a `ModelOption` — so
+/// unmatched models keep fast mode etc.; the catalog only enriches matched
+/// ids with label/description/per-model ladders.
 fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model> {
     let config_options = session_response
         .get("configOptions")
@@ -2513,7 +2514,18 @@ impl Harness for AcpHarness {
         } else {
             vec![]
         };
-        crate::model_context::context(self.id(), &binary, &extra, &self.launch).map(Some)
+        // npx and local agents share an interpreter; the script and flags name the agent.
+        let launch = LaunchOverrides {
+            args: self
+                .spec
+                .args
+                .iter()
+                .chain(&self.launch.args)
+                .cloned()
+                .collect(),
+            ..self.launch.clone()
+        };
+        crate::model_context::context(self.id(), &binary, &extra, &launch).map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
         (self.spec.models)()
@@ -6223,6 +6235,32 @@ mod tests {
             ),
             Vec::new()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generic_agents_on_one_interpreter_keep_separate_model_catalogs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node");
+        std::fs::write(&node, "#!/bin/sh\necho v22.0.0\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hash = |script: &str| {
+            AcpHarness::generic(AcpLaunch {
+                display_name: "Agent".into(),
+                program: node.clone(),
+                args: vec![script.into()],
+                env: Default::default(),
+            })
+            .unwrap()
+            .model_context()
+            .unwrap()
+            .unwrap()
+            .hash
+        };
+        let claude = hash("/adapters/claude-agent-acp/dist/index.js");
+        assert_ne!(claude, hash("/adapters/codex-acp/dist/index.js"));
+        assert_eq!(claude, hash("/adapters/claude-agent-acp/dist/index.js"));
     }
 
     #[test]
