@@ -80,7 +80,13 @@ impl ComposerDefaults {
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => match serde_json::from_str::<ComposerDefaults>(&text) {
-                Ok(defaults) => defaults,
+                Ok(mut defaults) => {
+                    if defaults.harness == Some(HarnessId::Acp) {
+                        defaults.harness = None;
+                    }
+                    defaults.model_by_harness.remove(&HarnessId::Acp);
+                    defaults
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "composer-defaults corrupt; using defaults");
                     Self::default()
@@ -126,9 +132,21 @@ impl ComposerDefaults {
         self.model_by_harness.get(&harness)
     }
 
+    /// Remember the harness new chats start on; false for `acp`, which is never one (D3).
+    pub fn remember_harness(&mut self, harness: HarnessId) -> bool {
+        if harness == HarnessId::Acp {
+            return false;
+        }
+        self.harness = Some(harness);
+        true
+    }
+
     /// Remember a pick (zeron `saveDefaults({ harness, modelByHarness })`).
     pub fn remember_model(&mut self, harness: HarnessId, id: String, label: String) {
-        self.harness = Some(harness);
+        // Every ACP instance shares `acp`, so one instance's pick would become another's model.
+        if !self.remember_harness(harness) {
+            return;
+        }
         self.model_by_harness
             .insert(harness, RememberedModel { id, label });
     }

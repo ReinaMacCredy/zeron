@@ -775,6 +775,8 @@ struct ModelRowData {
     harness_name: SharedString,
     model: Model,
     selected_only: bool,
+    /// The instance's models failed to load: the row shows why, and picking it retries.
+    failed: bool,
     /// Another listed row of the same harness shares this label, so the
     /// row shows its description to tell them apart.
     ambiguous: bool,
@@ -1878,10 +1880,7 @@ impl Pickers {
     fn row_icon(&self, harness: HarnessId, instance: Option<&str>) -> InstanceIcon {
         match instance.and_then(|id| self.instances.iter().find(|i| i.id == id)) {
             Some(instance) => InstanceIcon::of(instance),
-            None => {
-                let (mark, tint) = harness_brand_icon(harness);
-                InstanceIcon::Brand(mark, tint)
-            }
+            None => InstanceIcon::harness(harness),
         }
     }
 
@@ -1919,10 +1918,27 @@ impl Pickers {
     fn apply_instances(&mut self, instances: Vec<ProviderInstance>, cx: &mut Context<Self>) {
         let previous = std::mem::take(&mut self.instances);
         self.instance_models.retain(|id, _| {
-            instances
-                .iter()
-                .any(|i| &i.id == id && previous.contains(i))
+            instances.iter().any(|i| {
+                &i.id == id
+                    && previous
+                        .iter()
+                        .any(|p| p.id == i.id && p.driver == i.driver && p.config == i.config)
+            })
         });
+        if self
+            .config
+            .instance_id
+            .as_ref()
+            .is_some_and(|id| !instances.iter().any(|i| &i.id == id))
+        {
+            self.config.instance_id = None;
+            self.config.model = None;
+            self.config.reasoning = None;
+            self.config.model_options = None;
+            if self.config.harness == Some(HarnessId::Acp) {
+                self.config.harness = None;
+            }
+        }
         self.instances = instances;
         self.catalog_rev += 1;
         self.prefetch_models(false, cx);
@@ -1970,6 +1986,9 @@ impl Pickers {
                     && matches!(pickers.instance_models.get(&id), Some(Loadable::Ready(_)))
                 {
                     return;
+                }
+                if let Loadable::Ready(models) = &loaded {
+                    pickers.learn_labels(models, cx);
                 }
                 pickers.instance_models.insert(id, loaded);
                 pickers.catalog_rev += 1;
@@ -2236,23 +2255,22 @@ impl Pickers {
     /// The resolved harness's steering mode, from the loaded descriptor list.
     /// `None` while the catalog is loading.
     pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {
-        let harness = self.effective_harness(cx)?;
-        self.harnesses
-            .ready()
-            .and_then(|list| list.iter().find(|d| d.id == harness))
-            .map(|d| d.steering_mode)
+        self.effective_descriptor(cx).map(|d| d.steering_mode)
     }
 
     pub(crate) fn steers_mid_turn(&self, cx: &App) -> bool {
-        self.harnesses
-            .ready()
-            .and_then(|list| {
-                let selected = self.effective_harness(cx)?;
-                list.iter().find(|h| h.id == selected)
-            })
-            .is_some_and(|h| {
-                h.supports_steering && h.steering_mode == zeron_proto::SteeringMode::StepBoundary
-            })
+        self.effective_descriptor(cx).is_some_and(|h| {
+            h.supports_steering && h.steering_mode == zeron_proto::SteeringMode::StepBoundary
+        })
+    }
+
+    fn effective_descriptor(&self, cx: &App) -> Option<HarnessDescriptor> {
+        let list = self.harnesses.ready()?;
+        let harness = self.effective_harness(cx)?;
+        self.effective_instance(cx)
+            .and_then(|id| self.instances.iter().find(|i| i.id == id))
+            .and_then(|instance| Self::instance_descriptor(instance, list))
+            .or_else(|| list.iter().find(|d| d.id == harness).cloned())
     }
 
     /// The fully-resolved config the composer threads into the Run request and
@@ -2705,6 +2723,12 @@ impl Pickers {
             self.ensure_models(harness, force, cx);
         }
         for instance in self.instance_sources(cx) {
+            // Reopening the picker re-probes a failed agent, not every working one.
+            let force = force
+                && matches!(
+                    self.instance_models.get(&instance.id),
+                    Some(Loadable::Error(_))
+                );
             self.ensure_instance_models(&instance.id, force, cx);
         }
     }
@@ -2743,6 +2767,9 @@ impl Pickers {
     }
 
     fn ensure_models(&mut self, harness: HarnessId, force: bool, cx: &mut Context<Self>) {
+        if harness == HarnessId::Acp {
+            return;
+        }
         // Normal prefetches load absent/Idle slots once. Picker-open refreshes
         // also retry Ready/Error slots, while an in-flight load is always
         // reused. Ready rows stay visible until the replacement lands.
@@ -2860,6 +2887,16 @@ impl Pickers {
         self.apply_model_catalog(harness, loaded, cx);
     }
 
+    fn learn_labels(&mut self, models: &[Model], cx: &mut Context<Self>) {
+        ModelLabels::learn(cx, models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+        let fresh = self
+            .defaults
+            .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+        if fresh {
+            self.save_defaults();
+        }
+    }
+
     fn apply_model_catalog(
         &mut self,
         harness: HarnessId,
@@ -2879,13 +2916,7 @@ impl Pickers {
             return;
         }
         if let Loadable::Ready(models) = &loaded {
-            ModelLabels::learn(cx, models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-            let fresh = self
-                .defaults
-                .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-            if fresh {
-                self.save_defaults();
-            }
+            self.learn_labels(models, cx);
         }
         self.models.insert(harness, loaded);
         self.catalog_rev += 1;
@@ -3124,9 +3155,7 @@ impl Pickers {
         }
         self.config.harness = Some(harness);
         self.config.instance_id = None;
-        // D3: `acp` names no agent on its own, so it is never the default harness.
-        if self.title.is_none() && !self.detached && harness != HarnessId::Acp {
-            self.defaults.harness = Some(harness);
+        if self.title.is_none() && !self.detached && self.defaults.remember_harness(harness) {
             self.save_defaults();
         }
         self.model_scroll_base().set_offset(gpui::Point::default());
@@ -3236,9 +3265,9 @@ impl Pickers {
             if !self.detached
                 && let Some(harness) = self.effective_harness(cx)
             {
+                let instance = self.effective_instance(cx);
                 let label = self
-                    .models
-                    .get(&harness)
+                    .catalog(harness, instance.as_deref())
                     .and_then(|l| l.ready())
                     .and_then(|models| models.iter().find(|m| m.id == model_id))
                     .map(|m| m.label.clone())
@@ -3904,6 +3933,30 @@ impl Pickers {
             }
             Some(rows)
         };
+        let failed_instance_row = |instance: &ProviderInstance| {
+            let Some(Loadable::Error(message)) = self.instance_models.get(&instance.id) else {
+                return None;
+            };
+            let lowered = query.to_lowercase();
+            if !instance.label.to_lowercase().contains(&lowered) {
+                return None;
+            }
+            Some(vec![ModelRowData {
+                harness: instance.driver,
+                instance: Some(instance.id.clone()),
+                harness_name: instance.label.clone().into(),
+                selected_only: false,
+                failed: true,
+                ambiguous: false,
+                model: Model {
+                    id: String::new(),
+                    label: instance.label.clone(),
+                    description: Some(catalog_error_text(message).to_string()),
+                    reasoning_levels: vec![],
+                    options: vec![],
+                },
+            }])
+        };
         let instances = self.instance_sources(cx);
         let mut rows = match viewed_instance
             .as_deref()
@@ -3930,7 +3983,9 @@ impl Pickers {
                 );
                 if self.model_rail == ModelRail::All {
                     for instance in &instances {
-                        let Some(extra) = instance_rows(instance, ModelRail::All) else {
+                        let Some(extra) = instance_rows(instance, ModelRail::All)
+                            .or_else(|| failed_instance_row(instance))
+                        else {
                             continue;
                         };
                         let at = rows
@@ -3978,6 +4033,7 @@ impl Pickers {
                             .provider_label(harness, effective_instance.as_deref())
                             .into(),
                         selected_only: true,
+                        failed: false,
                         ambiguous: false,
                         model: Model {
                             id: id.into(),
@@ -4061,6 +4117,12 @@ impl Pickers {
             return;
         };
         if row.selected_only {
+            return;
+        }
+        if row.failed {
+            if let Some(id) = row.instance {
+                self.ensure_instance_models(&id, true, cx);
+            }
             return;
         }
         if self.effective_harness(cx) != Some(row.harness)
@@ -5931,6 +5993,12 @@ impl Pickers {
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(move |this, _, _, cx| match kind {
                         PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
+                        PickerKind::HarnessModel
+                            if this.harnesses.ready().is_some()
+                                && let Some(id) = this.rail_instance(cx) =>
+                        {
+                            this.ensure_instance_models(&id, true, cx);
+                        }
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
@@ -6602,7 +6670,8 @@ impl Pickers {
             strip = strip.child(self.instance_tab(instance, is_viewed, &theme, cx));
         }
 
-        if let Some((key, ix)) = selected_tab
+        if !compact
+            && let Some((key, ix)) = selected_tab
             && self.revealed_model_tab.as_ref() != Some(&key)
         {
             self.model_tabs_scroll.scroll_to_item(ix);
@@ -6854,7 +6923,9 @@ impl Pickers {
             .as_deref()
             .map(str::trim)
             .filter(|d| {
-                row.ambiguous && !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref())
+                (row.ambiguous || row.failed)
+                    && !d.is_empty()
+                    && !d.eq_ignore_ascii_case(harness_name.as_ref())
             })
             .map(|d| SharedString::from(d.to_owned()));
         let compact = self.model_rail == ModelRail::Harness;
@@ -8819,6 +8890,7 @@ fn scoped_model_rows<'a>(
         harness_name: SharedString::from(descriptor.name.clone()),
         model: model.clone(),
         selected_only: false,
+        failed: false,
         ambiguous: false,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
@@ -8943,15 +9015,6 @@ pub(crate) fn curated_model_label(harness: HarnessId, id: &str) -> Option<String
         .map(|m| m.label.clone())
 }
 
-/// Display-side model-list hygiene, mirroring the engine's discovery-side
-/// fold (`models_from_session`) for catalogs served by OLDER engines (the
-/// space's device may run any version): the `default` alias row drops when a
-/// real row exists, an orphan `<model>[1m]` variant presents as its base id
-/// with the Context Window trait pinned to 1M, and Claude rows adopt the
-/// curated catalog's labels so the version number always shows ("Opus 5.5",
-/// not the wire's terse "Opus" alias — user request). Idempotent over
-/// already-clean lists. The send path recomposes the advertised id from the
-/// base + trait (`pick_model_value`), so a folded pick still runs.
 fn catalog_error_text(message: &str) -> &str {
     message
         .strip_prefix("model discovery ")
@@ -8965,6 +9028,15 @@ fn catalog_error_text(message: &str) -> &str {
         .map_or(message, |(_, text)| text)
 }
 
+/// Display-side model-list hygiene, mirroring the engine's discovery-side
+/// fold (`models_from_session`) for catalogs served by OLDER engines (the
+/// space's device may run any version): the `default` alias row drops when a
+/// real row exists, an orphan `<model>[1m]` variant presents as its base id
+/// with the Context Window trait pinned to 1M, and Claude rows adopt the
+/// curated catalog's labels so the version number always shows ("Opus 5.5",
+/// not the wire's terse "Opus" alias — user request). Idempotent over
+/// already-clean lists. The send path recomposes the advertised id from the
+/// base + trait (`pick_model_value`), so a folded pick still runs.
 pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Vec<Model> {
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
@@ -14371,11 +14443,40 @@ mod tests {
                 Some(HarnessId::Codex),
                 "a bare `acp` default would start the next chat with no agent"
             );
+            assert_eq!(
+                pickers.resolved_steering_mode(cx),
+                Some(zeron_proto::SteeringMode::TurnBoundary)
+            );
+            pickers.activate_model_index(0, cx);
+            assert_eq!(pickers.config.model.as_deref(), Some("kimchi-1"));
+            assert_eq!(pickers.defaults.harness, Some(HarnessId::Codex));
+            assert!(
+                pickers.defaults.model_for(HarnessId::Acp).is_none(),
+                "another ACP instance would inherit kimchi-1"
+            );
 
             pickers.pick_harness(HarnessId::Codex, cx);
             let resolved = pickers.resolved(cx);
             assert_eq!(resolved.harness, Some(HarnessId::Codex));
             assert_eq!(resolved.instance_id, None);
+
+            pickers.instance_models.insert(
+                "acp_kimchi".into(),
+                Loadable::Error("model discovery auth_required: Kimchi isn't signed in".into()),
+            );
+            pickers.catalog_rev += 1;
+            pickers.model_rail = ModelRail::All;
+            let rows = pickers.model_rows(cx);
+            let failed = rows
+                .iter()
+                .position(|row| row.failed)
+                .expect("a failed instance keeps a row in the All list");
+            assert_eq!(
+                rows[failed].model.description.as_deref(),
+                Some("Kimchi isn't signed in")
+            );
+            pickers.activate_model_index(failed, cx);
+            assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
         });
     }
 

@@ -18,17 +18,26 @@ const FORK_COPY_MAX_GAP_MS: i64 = 1000;
 
 #[derive(Clone, Debug)]
 pub struct UsageRoots {
-    pub claude: PathBuf,
-    pub codex: PathBuf,
-    pub grok: PathBuf,
+    roots: Vec<(HarnessId, PathBuf)>,
 }
 
 impl UsageRoots {
     pub fn new(claude_config_dir: &Path, codex_home: &Path, grok_home: &Path) -> Self {
-        Self {
-            claude: claude_config_dir.join("projects"),
-            codex: codex_home.join("sessions"),
-            grok: grok_home.join("sessions"),
+        let mut roots = Self { roots: Vec::new() };
+        roots.add_home(HarnessId::ClaudeCode, claude_config_dir);
+        roots.add_home(HarnessId::Codex, codex_home);
+        roots.add_home(HarnessId::Grok, grok_home);
+        roots
+    }
+
+    pub fn add_home(&mut self, harness: HarnessId, home: &Path) {
+        let dir = match harness {
+            HarnessId::ClaudeCode => home.join("projects"),
+            HarnessId::Codex | HarnessId::Grok => home.join("sessions"),
+            _ => return,
+        };
+        if !self.roots.iter().any(|(_, known)| *known == dir) {
+            self.roots.push((harness, dir));
         }
     }
 }
@@ -62,27 +71,15 @@ pub fn summary(roots: &UsageRoots, days: u32, now: DateTime<Local>) -> UsageSumm
 
     let mut files = Vec::new();
     let is_jsonl = |path: &Path| path.extension().is_some_and(|ext| ext == "jsonl");
-    walk(
-        &roots.claude,
-        HarnessId::ClaudeCode,
-        &is_jsonl,
-        cutoff,
-        &mut files,
-    );
-    walk(
-        &roots.codex,
-        HarnessId::Codex,
-        &is_jsonl,
-        cutoff,
-        &mut files,
-    );
-    walk(
-        &roots.grok,
-        HarnessId::Grok,
-        &|path: &Path| path.file_name().is_some_and(|name| name == "updates.jsonl"),
-        cutoff,
-        &mut files,
-    );
+    let is_grok_updates =
+        |path: &Path| path.file_name().is_some_and(|name| name == "updates.jsonl");
+    for (harness, dir) in &roots.roots {
+        let keep: &dyn Fn(&Path) -> bool = match harness {
+            HarnessId::Grok => &is_grok_updates,
+            _ => &is_jsonl,
+        };
+        walk(dir, *harness, keep, cutoff, &mut files);
+    }
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut aggregate = Aggregate::new(periods, until_ms);
@@ -782,6 +779,41 @@ mod tests {
         let inputs: Vec<u64> = records.iter().map(|r| r.tokens.uncached_input).collect();
         assert_eq!(inputs, [80, 90]);
         assert_eq!(&*records[0].session, "child");
+    }
+
+    #[test]
+    fn an_added_instance_home_is_scanned_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let instance = temp.path().join("codex-work");
+        let rollout = instance.join("sessions/2026/10/14/rollout.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rollout,
+            [
+                r#"{"timestamp":"2026-10-14T00:00:00.000Z","type":"session_meta","payload":{"id":"s1"}}"#,
+                r#"{"timestamp":"2026-10-14T00:00:00.100Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+                r#"{"timestamp":"2026-10-14T00:00:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":5}}}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let now = Local.with_ymd_and_hms(2026, 10, 14, 12, 0, 0).unwrap();
+        let records = |roots: &UsageRoots| -> u64 {
+            summary(roots, 7, now)
+                .buckets
+                .iter()
+                .map(|bucket| bucket.records)
+                .sum()
+        };
+        let mut roots = UsageRoots::new(
+            &temp.path().join("claude"),
+            &temp.path().join("codex"),
+            &temp.path().join("grok"),
+        );
+        assert_eq!(records(&roots), 0);
+        roots.add_home(HarnessId::Codex, &instance);
+        roots.add_home(HarnessId::Codex, &instance);
+        assert_eq!(records(&roots), 1);
     }
 
     #[test]

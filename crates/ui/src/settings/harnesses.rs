@@ -720,8 +720,8 @@ impl HarnessesPage {
     /// Escape that reached Settings unclaimed goes to the expanded provider's
     /// accounts (an open login) first. Returns whether it was consumed.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.wizard.take().is_some() {
-            cx.notify();
+        if let Some((wizard, _)) = &self.wizard {
+            wizard.clone().update(cx, |dialog, cx| dialog.close(cx));
             return true;
         }
         let accounts: Vec<_> = self.instance_accounts.values().cloned().collect();
@@ -785,6 +785,7 @@ impl HarnessesPage {
         self.error = None;
         self.wizard = None;
         self.confirm_delete = None;
+        self.instance_write_task = None;
         self.instance_accounts.clear();
         self.instances = Loadable::Idle;
         self.harnesses = Loadable::Idle;

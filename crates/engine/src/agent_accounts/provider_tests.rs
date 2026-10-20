@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zeron_proto::{HomeDir, InstanceConfig};
 
 use super::stores::*;
 use super::usage::*;

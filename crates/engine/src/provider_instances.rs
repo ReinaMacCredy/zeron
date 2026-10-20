@@ -38,6 +38,11 @@ impl ProviderInstancesStore {
     pub fn open(data_dir: &Path) -> Result<Self, EngineError> {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join(STORE_FILE);
+        #[cfg(unix)]
+        if path.is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         let state = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<ProviderInstancesFile>(&bytes) {
                 Ok(file) if file.version == STORE_VERSION => file,
@@ -133,7 +138,19 @@ impl ProviderInstancesStore {
                     )));
                 }
                 Some(existing) => *existing = instance,
-                None => instances.push(instance),
+                // The id names directories, and a case-insensitive filesystem would share them.
+                None => match instances
+                    .iter()
+                    .find(|existing| existing.id.eq_ignore_ascii_case(&instance.id))
+                {
+                    Some(existing) => {
+                        return Err(EngineError::Other(format!(
+                            "Provider instance ID '{}' is taken by '{}'",
+                            instance.id, existing.id
+                        )));
+                    }
+                    None => instances.push(instance),
+                },
             }
             Ok(())
         })
@@ -167,15 +184,26 @@ impl ProviderInstancesStore {
     }
 
     pub(crate) fn launch_config(&self, id: &str) -> Option<InstanceConfig> {
-        let mut config = self.instance(id)?.config;
-        match &mut config {
-            InstanceConfig::Acp { icon_path, .. } => *icon_path = None,
-            InstanceConfig::Native { executable, .. } => {
-                *executable = executable.take().filter(|path| !path.trim().is_empty());
-            }
-        }
-        Some(config)
+        Some(launch_projection(&self.instance(id)?))
     }
+}
+
+fn launch_projection(instance: &ProviderInstance) -> InstanceConfig {
+    let mut config = instance.config.clone();
+    match &mut config {
+        InstanceConfig::Acp { icon_path, .. } => *icon_path = None,
+        InstanceConfig::Native { executable, .. } => {
+            *executable = executable.take().filter(|path| !path.trim().is_empty());
+        }
+    }
+    config
+}
+
+/// A generic ACP agent shows its label as the harness's name; no other driver reads it.
+pub(crate) fn same_launch(a: &ProviderInstance, b: &ProviderInstance) -> bool {
+    a.driver == b.driver
+        && launch_projection(a) == launch_projection(b)
+        && (a.driver != HarnessId::Acp || a.label == b.label)
 }
 
 // Instances name paths, env and managed homes; never overwrite a file this build cannot read.
@@ -202,10 +230,69 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn check(instance: &ProviderInstance) -> Result<(), EngineError> {
+    let name = instance.driver.display_name();
+    let reason = match (&instance.config, instance.driver) {
+        (InstanceConfig::Acp { source, .. }, HarnessId::Acp) => match source {
+            AcpSource::Local { command, .. } if command.trim().is_empty() => {
+                Some("has no command to run".to_string())
+            }
+            _ => None,
+        },
+        (InstanceConfig::Acp { .. }, _) => {
+            Some(format!("holds an ACP agent's settings, not {name}'s"))
+        }
+        (InstanceConfig::Native { .. }, HarnessId::Acp) => Some("has no ACP agent settings".into()),
+        (
+            InstanceConfig::Native {
+                executable,
+                home_dir,
+                launch_args,
+                ..
+            },
+            driver,
+        ) => match driver {
+            _ if matches!(home_dir, Some(HomeDir::Custom { path }) if path.trim().is_empty()) => {
+                Some("has an empty home directory".into())
+            }
+            HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi | HarnessId::Antigravity => {
+                None
+            }
+            HarnessId::Devin | HarnessId::Grok | HarnessId::Hermes | HarnessId::Opencode
+                if home_dir.is_some() =>
+            {
+                Some(format!("{name} instances take no home directory"))
+            }
+            HarnessId::Devin | HarnessId::Grok | HarnessId::Hermes | HarnessId::Opencode => None,
+            HarnessId::Cursor
+                if home_dir.is_some()
+                    || executable
+                        .as_deref()
+                        .is_some_and(|path| !path.trim().is_empty())
+                    || !launch_args.is_empty() =>
+            {
+                Some(format!(
+                    "{name} instances run on Zeron's managed Cursor SDK and take only environment variables"
+                ))
+            }
+            HarnessId::Cursor => None,
+            _ => Some(format!("{name} does not run as a provider instance yet")),
+        },
+    };
+    match reason {
+        Some(reason) => Err(EngineError::Other(format!(
+            "Provider instance '{}': {reason}",
+            instance.id
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn launch_overrides(
     instance: &ProviderInstance,
     data_dir: &Path,
 ) -> Result<LaunchOverrides, EngineError> {
+    check(instance)?;
     let InstanceConfig::Native {
         executable,
         home_dir,
@@ -238,6 +325,7 @@ pub(crate) fn acp_launch(
     instance: &ProviderInstance,
     data_dir: &Path,
 ) -> Result<AcpLaunch, EngineError> {
+    check(instance)?;
     let id = &instance.id;
     let InstanceConfig::Acp { source, env, .. } = &instance.config else {
         return Err(EngineError::Other(format!(
@@ -306,11 +394,7 @@ pub(crate) fn acp_harness(
         HarnessId::Antigravity => AcpHarness::antigravity(),
         _ => return Err(refuse(format!("{name} is not an ACP agent"))),
     };
-    let launch = launch_overrides(instance, data_dir)?;
-    if launch.home.is_some() && instance.driver != HarnessId::Antigravity {
-        return Err(refuse(format!("{name} instances take no home directory")));
-    }
-    Ok(builtin.with_launch(launch))
+    Ok(builtin.with_launch(launch_overrides(instance, data_dir)?))
 }
 
 pub(crate) fn provider_home(
@@ -318,20 +402,54 @@ pub(crate) fn provider_home(
     home: &HomeDir,
     data_dir: &Path,
 ) -> Result<PathBuf, EngineError> {
+    let dir = home_path(id, home, data_dir)?;
+    if *home == HomeDir::Managed {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir)?;
+    }
+    Ok(dir)
+}
+
+pub(crate) fn home_path(id: &str, home: &HomeDir, data_dir: &Path) -> Result<PathBuf, EngineError> {
     match home {
         HomeDir::Custom { path } if path.trim().is_empty() => Err(EngineError::Other(format!(
             "Provider instance '{id}' has an empty home directory"
         ))),
         HomeDir::Custom { path } => expand(path),
-        HomeDir::Managed => {
-            let dir = managed_home(id, data_dir);
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-            builder.create(&dir)?;
-            Ok(dir)
+        HomeDir::Managed => Ok(managed_home(id, data_dir)),
+    }
+}
+
+pub(crate) fn keeps_sessions(
+    before: &ProviderInstance,
+    after: &ProviderInstance,
+    data_dir: &Path,
+) -> bool {
+    let home = |instance: &ProviderInstance, home: &Option<HomeDir>| {
+        home.as_ref()
+            .map(|home| home_path(&instance.id, home, data_dir).ok())
+    };
+    match (&before.config, &after.config) {
+        (
+            InstanceConfig::Native { home_dir: was, .. },
+            InstanceConfig::Native { home_dir: now, .. },
+        ) => home(before, was) == home(after, now),
+        (InstanceConfig::Acp { source: was, .. }, InstanceConfig::Acp { source: now, .. }) => {
+            match (was, now) {
+                (
+                    AcpSource::Registry { agent_id: was, .. },
+                    AcpSource::Registry { agent_id: now, .. },
+                ) => was == now,
+                (AcpSource::Local { command: was, .. }, AcpSource::Local { command: now, .. }) => {
+                    was.trim() == now.trim()
+                }
+                _ => false,
+            }
         }
+        _ => false,
     }
 }
 
@@ -363,12 +481,14 @@ fn normalize(instance: ProviderInstance) -> Result<ProviderInstance, EngineError
         .accent
         .map(|accent| accent.trim().to_string())
         .filter(|accent| !accent.is_empty());
-    Ok(ProviderInstance {
+    let instance = ProviderInstance {
         id,
         label,
         accent,
         ..instance
-    })
+    };
+    check(&instance)?;
+    Ok(instance)
 }
 
 #[cfg(test)]
@@ -422,7 +542,26 @@ mod tests {
         assert_eq!(snapshot.instances[1].label, "Work");
         assert_eq!(snapshot.instances[1].accent, None);
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = temp.path().join(STORE_FILE);
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "instance env holds API keys");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         let reopened = ProviderInstancesStore::open(temp.path()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = temp.path().join(STORE_FILE);
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a file from an older build is tightened"
+            );
+        }
         assert_eq!(reopened.snapshot(), snapshot);
         let mut watcher = reopened.watch();
         assert_eq!(*watcher.borrow_and_update(), snapshot);
@@ -472,6 +611,12 @@ mod tests {
             Some(home)
         );
 
+        let mut relabeled = instance("codex_work", HarnessId::Codex);
+        relabeled.label = "Personal".into();
+        relabeled.accent = Some("#ff8800".into());
+        store.upsert(relabeled).unwrap();
+        assert!(Arc::ptr_eq(&work, &resolve("codex_work")));
+
         let mut edited = instance("codex_work", HarnessId::Codex);
         if let InstanceConfig::Native { launch_args, .. } = &mut edited.config {
             launch_args.push("--profile=work".into());
@@ -498,12 +643,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderInstancesStore::open(temp.path()).unwrap();
         let registry = HarnessRegistry::new();
-        store
-            .upsert(instance("grok_work", HarnessId::Grok))
-            .unwrap();
-        store
-            .upsert(instance("devin_work", HarnessId::Devin))
-            .unwrap();
+        for (driver, id) in [
+            (HarnessId::Grok, "grok_work"),
+            (HarnessId::Devin, "devin_work"),
+        ] {
+            let error = store.upsert(instance(id, driver)).err().unwrap();
+            assert!(
+                error.to_string().contains("take no home directory"),
+                "{id}: {error}"
+            );
+        }
         store
             .upsert(instance("antigravity_work", HarnessId::Antigravity))
             .unwrap();
@@ -522,7 +671,7 @@ mod tests {
             launch_args: Vec::new(),
             env: Default::default(),
         };
-        store.upsert(cursor).unwrap();
+        assert!(store.upsert(cursor).is_err());
         let mut cursor_env = instance("cursor_env", HarnessId::Cursor);
         cursor_env.config = InstanceConfig::Native {
             executable: None,
@@ -531,21 +680,6 @@ mod tests {
             env: [("CURSOR_API_KEY".into(), "key".into())].into(),
         };
         store.upsert(cursor_env).unwrap();
-        for (driver, id) in [
-            (HarnessId::Grok, "grok_work"),
-            (HarnessId::Devin, "devin_work"),
-        ] {
-            let error = store.resolve(&registry, driver, id).err().unwrap();
-            assert!(
-                error.to_string().contains("take no home directory"),
-                "{id}: {error}"
-            );
-        }
-        assert!(
-            store
-                .resolve(&registry, HarnessId::Cursor, "cursor_work")
-                .is_err()
-        );
         store
             .resolve(&registry, HarnessId::Cursor, "cursor_env")
             .unwrap();
@@ -749,6 +883,22 @@ done
         assert!(
             store
                 .upsert(instance("work", HarnessId::ClaudeCode))
+                .is_err()
+        );
+        assert!(store.upsert(instance("Work", HarnessId::Codex)).is_err());
+        let mut acp_on_codex = instance("codex_acp", HarnessId::Codex);
+        acp_on_codex.config = InstanceConfig::Acp {
+            source: AcpSource::Local {
+                command: "agent".into(),
+                args: Vec::new(),
+            },
+            env: Default::default(),
+            icon_path: None,
+        };
+        assert!(store.upsert(acp_on_codex).is_err());
+        assert!(
+            store
+                .upsert(instance("acp_native", HarnessId::Acp))
                 .is_err()
         );
         assert_eq!(ids(&store.snapshot()), ["work"]);
