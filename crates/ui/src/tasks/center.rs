@@ -1426,21 +1426,17 @@ impl TaskCenter {
             .into_any_element()
     }
 
-    pub(crate) fn markdown(key: String, text: &str, theme: &Theme, window: &Window) -> AnyElement {
+    pub(crate) fn markdown(
+        key: String,
+        text: &str,
+        theme: &Theme,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         let tree = crate::markdown::parse_full(text);
         let options = crate::markdown::render::RenderOptions {
-            tasks: None,
-            media: None,
-            row_key: key.into(),
-            veil: None,
-            cache: None,
-            now: Instant::now(),
-            copy: None,
-            link: None,
-            workspace_root: None,
-            code: None,
-            tables: None,
-            math: Default::default(),
+            math: crate::settings::math_style(cx),
+            ..crate::markdown::render::RenderOptions::settled(key.into())
         };
         crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
     }

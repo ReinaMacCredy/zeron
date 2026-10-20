@@ -573,6 +573,7 @@ impl TaskCenter {
                 &text,
                 theme,
                 window,
+                cx,
             )
         } else {
             div()
@@ -885,6 +886,7 @@ impl TaskCenter {
                     &row.step.notes,
                     theme,
                     window,
+                    cx,
                 )
             };
             let thumbs = (!row.step.images.is_empty()).then(|| {

@@ -8078,6 +8078,7 @@ impl Transcript {
             link: self.link_ui(cx),
             code: (!code.is_empty()).then_some(code),
             tables: Some(self.table_scrolls.clone()),
+            math: crate::settings::math_style(cx),
             ..RenderOptions::settled(key.clone())
         };
         let highlight = self.code_highlight_for(&key, tree, None, cx);
