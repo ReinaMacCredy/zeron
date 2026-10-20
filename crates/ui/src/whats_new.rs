@@ -2,12 +2,11 @@ use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
 use gpui::{Image, ImageFormat};
-use serde::Deserialize;
 use zeron_update::version_newer;
 
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use zeron_docs::changelog::{Entry, Feature, entries, entry_for};
 
-const SOURCE: &str = include_str!("../whats_new.toml");
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const IMAGES: &[(&str, &[u8])] = &[
     ("inbox.jpg", include_bytes!("../assets/whats_new/inbox.jpg")),
@@ -30,34 +29,6 @@ const IMAGES: &[(&str, &[u8])] = &[
     ),
 ];
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Changelog {
-    entry: Vec<Entry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Entry {
-    pub version: String,
-    pub date: String,
-    #[serde(default)]
-    pub hero: Option<String>,
-    pub features: Vec<Feature>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Feature {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub details: Option<String>,
-}
-
 pub struct Picture {
     pub image: Arc<Image>,
     pub aspect: f32,
@@ -68,37 +39,6 @@ pub enum Resolution<'a> {
     Show(&'a Entry),
     Advance,
     Noop,
-}
-
-fn parse(source: &str) -> Result<Vec<Entry>, toml::de::Error> {
-    let mut entries = toml::from_str::<Changelog>(source)?.entry;
-    entries.sort_by(|a, b| {
-        if version_newer(&a.version, &b.version) {
-            std::cmp::Ordering::Less
-        } else if version_newer(&b.version, &a.version) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
-    Ok(entries)
-}
-
-pub fn entries() -> &'static [Entry] {
-    static ENTRIES: OnceLock<Vec<Entry>> = OnceLock::new();
-    ENTRIES.get_or_init(|| {
-        parse(SOURCE).unwrap_or_else(|err| {
-            tracing::warn!(error = %err, "whats_new.toml does not parse");
-            Vec::new()
-        })
-    })
-}
-
-pub fn entry_for<'a>(entries: &'a [Entry], version: &str) -> Option<&'a Entry> {
-    let version = version.trim_start_matches('v');
-    entries
-        .iter()
-        .find(|entry| entry.version.trim_start_matches('v') == version)
 }
 
 pub fn resolve<'a>(entries: &'a [Entry], current: &str, last_seen: Option<&str>) -> Resolution<'a> {
@@ -198,14 +138,14 @@ mod tests {
 
     #[test]
     fn bundled_changelog_parses_newest_first_with_every_image() {
-        let entries = parse(SOURCE).unwrap();
+        let entries = entries();
         assert!(!entries.is_empty());
         assert!(
             entries
                 .windows(2)
                 .all(|pair| version_newer(&pair[0].version, &pair[1].version))
         );
-        for entry in &entries {
+        for entry in entries {
             assert!(
                 !entry.features.is_empty(),
                 "{} has no features",

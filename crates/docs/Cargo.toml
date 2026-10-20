@@ -1,0 +1,12 @@
+[package]
+name = "zeron-docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml = "0.8"
+tracing.workspace = true
+zeron-update.workspace = true

@@ -1,111 +1,11 @@
 use std::sync::OnceLock;
 
 use gpui::SharedString;
-use serde::Deserialize;
 
 use crate::markdown::{BlockTree, parse_full};
 use crate::shell::SettingsSection;
 
-const SOURCE: &str = include_str!("../docs/index.toml");
-
-const BODIES: &[(&str, &str)] = &[
-    ("getting-around", include_str!("../docs/getting-around.md")),
-    ("new-chat", include_str!("../docs/new-chat.md")),
-    ("composer", include_str!("../docs/composer.md")),
-    (
-        "commands-and-mentions",
-        include_str!("../docs/commands-and-mentions.md"),
-    ),
-    (
-        "models-and-effort",
-        include_str!("../docs/models-and-effort.md"),
-    ),
-    (
-        "sessions-sidebar",
-        include_str!("../docs/sessions-sidebar.md"),
-    ),
-    (
-        "command-palette",
-        include_str!("../docs/command-palette.md"),
-    ),
-    (
-        "keyboard-shortcuts",
-        include_str!("../docs/keyboard-shortcuts.md"),
-    ),
-    ("appearance", include_str!("../docs/appearance.md")),
-    ("home-widgets", include_str!("../docs/home-widgets.md")),
-    ("updates", include_str!("../docs/updates.md")),
-    ("providers", include_str!("../docs/providers.md")),
-    ("agent-profiles", include_str!("../docs/agent-profiles.md")),
-    ("delegation", include_str!("../docs/delegation.md")),
-    ("side-chat", include_str!("../docs/side-chat.md")),
-    ("handoff", include_str!("../docs/handoff.md")),
-    ("review", include_str!("../docs/review.md")),
-    ("compaction", include_str!("../docs/compaction.md")),
-    (
-        "agent-questions",
-        include_str!("../docs/agent-questions.md"),
-    ),
-    ("agent-tools", include_str!("../docs/agent-tools.md")),
-    ("projects", include_str!("../docs/projects.md")),
-    ("right-pane", include_str!("../docs/right-pane.md")),
-    ("terminal", include_str!("../docs/terminal.md")),
-    ("git", include_str!("../docs/git.md")),
-    ("pull-requests", include_str!("../docs/pull-requests.md")),
-    ("tasks", include_str!("../docs/tasks.md")),
-    (
-        "mission-control",
-        include_str!("../docs/mission-control.md"),
-    ),
-    ("supervisor", include_str!("../docs/supervisor.md")),
-    ("inbox", include_str!("../docs/inbox.md")),
-    ("usage", include_str!("../docs/usage.md")),
-    ("split-view", include_str!("../docs/split-view.md")),
-    ("computer-use", include_str!("../docs/computer-use.md")),
-    ("browser", include_str!("../docs/browser.md")),
-    ("appshots", include_str!("../docs/appshots.md")),
-    ("device-hub", include_str!("../docs/device-hub.md")),
-    ("voice", include_str!("../docs/voice.md")),
-    ("notifications", include_str!("../docs/notifications.md")),
-    ("devices", include_str!("../docs/devices.md")),
-];
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Index {
-    section: Vec<Section>,
-    #[serde(default)]
-    article: Vec<Article>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Section {
-    pub id: String,
-    pub title: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Article {
-    pub id: String,
-    pub section: String,
-    pub title: String,
-    pub icon: String,
-    pub blurb: String,
-    #[serde(default)]
-    pub actions: Vec<String>,
-    #[serde(skip)]
-    haystack: String,
-    #[serde(skip)]
-    tree: OnceLock<BlockTree>,
-}
-
-#[derive(Debug, Default)]
-pub struct Docs {
-    pub sections: Vec<Section>,
-    pub articles: Vec<Article>,
-}
+pub use zeron_docs::{Article, Docs, Section, article, docs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -119,82 +19,29 @@ pub enum Action {
     Article(&'static str),
 }
 
-fn parse(source: &str) -> Result<Docs, toml::de::Error> {
-    let Index {
-        section: sections,
-        article: mut articles,
-    } = toml::from_str(source)?;
-    articles.sort_by_key(|article| {
-        sections
-            .iter()
-            .position(|section| section.id == article.section)
-            .unwrap_or(usize::MAX)
-    });
-    for article in &mut articles {
-        article.haystack =
-            format!("{}\n{}\n{}", article.title, article.blurb, article.body()).to_lowercase();
-    }
-    Ok(Docs { sections, articles })
+pub trait ArticleExt {
+    fn tree(&self) -> &'static BlockTree;
+    fn icon_path(&self) -> SharedString;
+    fn actions(&self) -> impl Iterator<Item = Action> + '_;
 }
 
-pub fn docs() -> &'static Docs {
-    static DOCS: OnceLock<Docs> = OnceLock::new();
-    DOCS.get_or_init(|| {
-        parse(SOURCE).unwrap_or_else(|err| {
-            tracing::warn!(error = %err, "docs/index.toml does not parse");
-            Docs::default()
-        })
-    })
-}
-
-pub fn article(id: &str) -> Option<&'static Article> {
-    docs().articles.iter().find(|article| article.id == id)
-}
-
-impl Docs {
-    pub fn section(&self, id: &str) -> Option<&Section> {
-        self.sections.iter().find(|section| section.id == id)
+impl ArticleExt for Article {
+    fn tree(&self) -> &'static BlockTree {
+        static TREES: OnceLock<Vec<OnceLock<BlockTree>>> = OnceLock::new();
+        static EMPTY: OnceLock<BlockTree> = OnceLock::new();
+        let trees =
+            TREES.get_or_init(|| zeron_docs::BODIES.iter().map(|_| OnceLock::new()).collect());
+        match zeron_docs::BODIES.iter().position(|(id, _)| *id == self.id) {
+            Some(ix) => trees[ix].get_or_init(|| parse_full(self.body())),
+            None => EMPTY.get_or_init(|| parse_full("")),
+        }
     }
 
-    pub fn in_section<'a>(&'a self, section: &'a Section) -> impl Iterator<Item = &'a Article> {
-        self.articles
-            .iter()
-            .filter(move |article| article.section == section.id)
-    }
-
-    pub fn neighbors(&self, id: &str) -> (Option<&Article>, Option<&Article>) {
-        let Some(ix) = self.articles.iter().position(|article| article.id == id) else {
-            return (None, None);
-        };
-        (
-            ix.checked_sub(1).and_then(|ix| self.articles.get(ix)),
-            self.articles.get(ix + 1),
-        )
-    }
-}
-
-impl Article {
-    pub fn body(&self) -> &'static str {
-        BODIES
-            .iter()
-            .find(|(id, _)| *id == self.id)
-            .map_or("", |(_, body)| body)
-    }
-
-    pub fn tree(&self) -> &BlockTree {
-        self.tree.get_or_init(|| parse_full(self.body()))
-    }
-
-    pub fn icon_path(&self) -> SharedString {
+    fn icon_path(&self) -> SharedString {
         format!("icons/{}.svg", self.icon).into()
     }
 
-    pub fn matches(&self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        query.is_empty() || self.haystack.contains(&query)
-    }
-
-    pub fn actions(&self) -> impl Iterator<Item = Action> + '_ {
+    fn actions(&self) -> impl Iterator<Item = Action> + '_ {
         self.actions
             .iter()
             .filter_map(|target| Action::parse(target))
@@ -272,17 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn bundled_index_parses_with_every_body_icon_action_link_and_image() {
-        let docs = parse(SOURCE).unwrap();
-        assert!(!docs.sections.is_empty());
-        for (ix, article) in docs.articles.iter().enumerate() {
+    fn every_article_icon_action_link_and_image_resolves() {
+        let docs = docs();
+        assert!(!docs.articles.is_empty());
+        for article in &docs.articles {
             let id = article.id.as_str();
-            assert!(docs.section(&article.section).is_some(), "{id}: no section");
-            assert!(
-                docs.articles[..ix].iter().all(|other| other.id != id),
-                "{id} is listed twice"
-            );
-            assert!(!article.body().trim().is_empty(), "{id} has no body");
             assert!(
                 crate::icons::Assets
                     .load(&article.icon_path())
@@ -318,35 +159,5 @@ mod tests {
                 }
             }
         }
-        for (id, _) in BODIES {
-            assert!(
-                docs.articles.iter().any(|article| article.id == *id),
-                "{id}.md is not in the index"
-            );
-        }
-        for section in &docs.sections {
-            assert!(
-                docs.in_section(section).next().is_some(),
-                "{} has no articles",
-                section.id
-            );
-        }
-    }
-
-    #[test]
-    fn search_matches_title_and_body_ignoring_case() {
-        let docs = parse(SOURCE).unwrap();
-        let Some(article) = docs.articles.first() else {
-            return;
-        };
-        assert!(article.matches(""));
-        assert!(article.matches(&article.title.to_uppercase()));
-        let word = article
-            .body()
-            .split_whitespace()
-            .find(|word| word.len() > 6 && !article.title.contains(*word))
-            .unwrap();
-        assert!(article.matches(word));
-        assert!(!article.matches("no article mentions this phrase"));
     }
 }

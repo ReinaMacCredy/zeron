@@ -34,6 +34,7 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcClient, methods};
 
+mod docs;
 pub mod ui_driver;
 mod visual;
 
@@ -89,6 +90,7 @@ pub fn tool_list() -> Value {
         for (after, tool) in [
             ("html_render", visual::tool()),
             ("context_settings", compact_tool()),
+            ("compact", docs::tool()),
             ("project_actions", ui_driver::tool(ui_driver::Tool::Observe)),
             (ui_driver::TOOL, ui_driver::tool(ui_driver::Tool::Drive)),
         ] {
@@ -3283,6 +3285,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             if name == html_render::PREVIEW_TOOL {
                 return Some(ok(id, tools.html_preview(&args).await));
             }
+            if name == docs::TOOL {
+                return Some(ok(id, docs::mcp_result(&args)));
+            }
             if let Some(tool) = ui_driver::Tool::named(name) {
                 return Some(ok(
                     id,
@@ -3401,7 +3406,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 36] = [
+    const THREAD_TOOLS: [&str; 37] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -3422,6 +3427,7 @@ mod tests {
         "agent_profiles",
         "context_settings",
         "compact",
+        "docs",
         "html_preview",
         "html_render",
         "show_visual",

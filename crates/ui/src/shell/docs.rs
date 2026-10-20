@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::*;
-use crate::docs::{self, Action, Article};
+use crate::docs::{self, Action, Article, ArticleExt as _};
 use crate::markdown::parser::{Block, BlockTree, TopBlock};
 use crate::markdown::render::{self as md, LinkOutcome, LinkUi, MediaUi, RenderOptions};
 use crate::settings::widgets::{self, ActionTone};

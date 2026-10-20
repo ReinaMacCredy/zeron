@@ -95,7 +95,7 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
     ToolGroupInfo {
         group: ToolGroup::Workspace,
         title: "Questions, terminal, actions and tasks",
-        summary: "Reach the person watching, the terminal panel, the project Actions menu, the Tasks list and Zeron's own UI.",
+        summary: "Reach the person watching, the terminal panel, the project Actions menu, the Tasks list, Zeron's own UI and its Docs.",
         tools: &[
             tool(
                 "ask_user",
@@ -126,6 +126,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "compact",
                 "Compact this chat's own context once its turn ends, then optionally continue.",
+            ),
+            tool(
+                "docs",
+                "Read Zeron's own Docs and release notes to answer how Zeron works.",
             ),
         ],
     },

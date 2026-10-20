@@ -13713,6 +13713,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-docs"
+version = "0.2.114"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+ "tracing",
+ "zeron-update",
+]
+
+[[package]]
 name = "zeron-engine"
 version = "0.2.114"
 dependencies = [
@@ -13816,6 +13826,7 @@ dependencies = [
  "tokio",
  "uuid",
  "zeron-doc",
+ "zeron-docs",
  "zeron-proto",
  "zeron-rpc",
  "zeron-visual",
@@ -14069,6 +14080,7 @@ dependencies = [
  "x11rb 0.14.0",
  "zatex",
  "zeron-doc",
+ "zeron-docs",
  "zeron-engine",
  "zeron-harness",
  "zeron-markdown",

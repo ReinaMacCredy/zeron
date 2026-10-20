@@ -11,6 +11,7 @@ members = [
     "crates/proto",
     "crates/preview",
     "crates/doc",
+    "crates/docs",
     "crates/sync",
     "crates/harness",
     "crates/engine",
@@ -46,6 +47,7 @@ zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
 zeron-doc = { path = "crates/doc" }
+zeron-docs = { path = "crates/docs" }
 zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }
 zeron-engine = { path = "crates/engine" }
