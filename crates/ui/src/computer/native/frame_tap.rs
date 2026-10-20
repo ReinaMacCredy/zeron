@@ -288,6 +288,18 @@ impl<S: FrameSource> ComputerFrameTapHost for ComputerFrameTap<S> {
         self.start(&target)
     }
 
+    fn touch(&self, task: &CuaComputerTask) {
+        if let Some(active) = self
+            .inner
+            .lock()
+            .active
+            .as_mut()
+            .filter(|active| active.key.ended_by(task))
+        {
+            active.touched = Instant::now();
+        }
+    }
+
     async fn end_task(&self, task: CuaComputerTask) -> Result<(), String> {
         {
             let mut state = self.inner.lock();
@@ -521,6 +533,21 @@ mod tests {
         );
         tap.update(target("a", Some("1"), 7)).unwrap();
         assert_eq!(source.log().last().unwrap(), "start 2 42:7");
+    }
+
+    #[test]
+    fn any_call_from_the_owning_task_keeps_the_stream_alive() {
+        let (source, mut tap, events) = tap();
+        Arc::get_mut(&mut tap.inner).unwrap().idle_stop = Duration::from_millis(100);
+        tap.update(target("a", Some("1"), 7)).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        tap.touch(&task("a", Some("1")));
+        source.emit(0, StreamSignal::Frame(vec![1]));
+        assert_eq!(events.lock().unwrap().len(), 1);
+        std::thread::sleep(Duration::from_millis(150));
+        tap.touch(&task("b", Some("1")));
+        source.emit(0, StreamSignal::Frame(vec![2]));
+        assert_eq!(source.log(), vec!["start 1 42:7", "stop 1"]);
     }
 
     #[tokio::test]

@@ -3,17 +3,25 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::App;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read as _, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 use zeron_proto::ui_driver::{
     UiDriverBuild, UiDriverDescriptor, descriptor_path, run_dir, socket_path,
 };
 
+const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
+const HANGUP_POLL: Duration = Duration::from_millis(50);
+
 struct Job {
     request: Value,
     reply: std::sync::mpsc::Sender<Value>,
+    cancel: Arc<AtomicBool>,
 }
 
 pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
@@ -31,7 +39,7 @@ pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Some(job) = queue.next().await {
             cx.spawn(async move |cx| {
-                let reply = super::handle(job.request, cx).await;
+                let reply = super::handle(job.request, job.cancel, cx).await;
                 let _ = job.reply.send(reply);
             })
             .detach();
@@ -41,7 +49,11 @@ pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
     let accept = std::thread::Builder::new()
         .name("zeron-ui-driver".into())
         .spawn(move || {
-            for stream in listener.incoming().flatten() {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                };
                 let jobs = jobs.clone();
                 let _ = std::thread::Builder::new()
                     .name("zeron-ui-driver-conn".into())
@@ -107,24 +119,45 @@ fn serve(stream: UnixStream, jobs: UnboundedSender<Job>) {
     let Ok(reader) = stream.try_clone() else {
         return;
     };
+    let mut reader = BufReader::new(reader);
     let mut writer = stream;
-    for line in BufReader::new(reader).lines() {
-        let Ok(line) = line else {
+    loop {
+        let mut line = String::new();
+        match (&mut reader).take(MAX_REQUEST_BYTES).read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        if !line.ends_with('\n') && line.len() as u64 >= MAX_REQUEST_BYTES {
+            let error = format!("request is longer than {MAX_REQUEST_BYTES} bytes");
+            let _ = writeln!(writer, "{}", json!({ "id": null, "error": error }));
             return;
-        };
+        }
         if line.trim().is_empty() {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(request) => {
                 let (reply, answer) = std::sync::mpsc::channel();
-                if jobs.unbounded_send(Job { request, reply }).is_err() {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let job = Job {
+                    request,
+                    reply,
+                    cancel: cancel.clone(),
+                };
+                if jobs.unbounded_send(job).is_err() {
                     return;
                 }
-                let Ok(reply) = answer.recv() else {
-                    return;
-                };
-                reply
+                loop {
+                    match answer.recv_timeout(HANGUP_POLL) {
+                        Ok(reply) => break reply,
+                        Err(RecvTimeoutError::Timeout) if hung_up(&writer) => {
+                            cancel.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
             }
             Err(error) => json!({ "id": null, "error": format!("request is not JSON: {error}") }),
         };
@@ -132,6 +165,26 @@ fn serve(stream: UnixStream, jobs: UnboundedSender<Job>) {
             return;
         }
     }
+}
+
+fn hung_up(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd as _;
+    let mut byte = 0u8;
+    // SAFETY: a one-byte peek into a live local buffer on a socket this function borrows.
+    let read = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&raw mut byte).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    read == 0
+        || (read < 0
+            && !matches!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ))
 }
 
 #[cfg(test)]
@@ -187,5 +240,18 @@ mod tests {
         drop(queue);
         writeln!(writer, "{{\"id\":8,\"action\":\"state\"}}").unwrap();
         served.join().unwrap();
+    }
+
+    #[test]
+    fn a_client_that_hangs_up_mid_request_cancels_its_job() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (jobs, mut queue) = unbounded::<Job>();
+        let served = std::thread::spawn(move || serve(server, jobs));
+        writeln!(&client, "{{\"id\":1,\"action\":\"click\",\"x\":1,\"y\":2}}").unwrap();
+        let job = futures::executor::block_on(queue.next()).unwrap();
+        assert!(!job.cancel.load(Ordering::SeqCst));
+        drop(client);
+        served.join().unwrap();
+        assert!(job.cancel.load(Ordering::SeqCst));
     }
 }

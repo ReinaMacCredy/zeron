@@ -16,20 +16,22 @@ Download the latest release for your platform from [GitHub Releases](https://git
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
-No account or network connection is needed; sessions stay on your device. The app updates itself.
+No account or network connection is needed; sessions stay on your device. The app checks for updates and offers them in the sidebar; set `ZERON_AUTO_UPDATE=1` to download them in the background and install on quit.
 
-Fork builds are not code-signed. On macOS, the first launch is blocked by Gatekeeper: right-click Zeron in Applications and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zeron.app`. On Windows, SmartScreen warns about an unknown publisher: choose **More info**, then **Run anyway**.
+Fork builds are not Developer ID signed or notarized. On macOS, the first launch is blocked by Gatekeeper: right-click Zeron in Applications and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zeron.app`. Each update carries a new ad-hoc signature, so macOS asks for Screen Recording and Accessibility again after updating. On Windows, SmartScreen warns about an unknown publisher: choose **More info**, then **Run anyway**.
 
 ## Headless (CLI)
 
-For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only:
+For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only: download `zeron-<version>-linux-<arch>.tar.gz` from [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest), then run:
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+tar -xzf zeron-<version>-linux-<arch>.tar.gz
+zeron-<version>-linux-<arch>/install.sh
+zeron daemon install
 zeron status
 ```
 
-The installer starts the engine as a background service that survives reboots.
+`zeron daemon install` starts the engine as a background service that survives reboots.
 
 ```bash
 zeron status      # local/synced mode and engine status

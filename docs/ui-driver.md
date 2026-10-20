@@ -31,6 +31,10 @@ What each level exposes:
 - Observe reads what the app's windows show, text field values included (a key typed into
   the Add provider form is in `tree` and in a `snapshot`), to any chat that has the `ui_driver`
   tool on. Turn the tool off in Settings > Tools to withhold it.
+- Observe changes no app state, so `ui_driver` is annotated read-only, but it has local
+  effects: `snapshot` writes a PNG under `~/.zeron/run/shots` that nothing prunes, `frames` and
+  `track` turn on the frame trace while they record, and a tree read keeps the window's
+  accessibility tree on for 60 s.
 - Drive in a Dev bundle goes around the chat permission gates of that bundle: an agent can click
   Approve on a pending request there, or type into its terminal panel. Keep Dev bundles on test
   data.
@@ -39,10 +43,10 @@ What each level exposes:
   and the raw socket have no such check: an agent with a shell can still reach its own app.
   Turn `ui_driver_drive` off in Settings > Tools to keep reading without driving; turning
   `ui_driver` off turns both off.
-- `ui_driver_drive` carries a destructive hint, so Codex would ask before every call. Zeron's
-  Codex thread config pre-approves it, as it does `device_close`
-  (`mcp_servers.zeron.tools.<tool>.approval_mode = "approve"`), so a Codex chat drives without
-  a prompt in Ask, Auto and Full alike.
+- `ui_driver_drive` carries a destructive hint, so Codex asks before every call, and Zeron
+  declines that request. A Codex chat at Full gets the tool pre-approved in its thread config
+  (`mcp_servers.zeron.tools.ui_driver_drive.approval_mode = "approve"`), so only a Full chat
+  drives. `device_close` is pre-approved in every mode.
 
 ## Reaching a target
 
@@ -88,8 +92,12 @@ The wire format is newline-delimited JSON over the socket: request
 `{"id":1,"action":"state","window"?:<id>,...}`, reply `{"id":1,"ok":<value>}` or
 `{"id":1,"error":"<msg>"}`. The client sends one request per connection and waits for the
 longest the request can take plus 10 s, and at least 30 s. That estimate adds the largest of
-`timeoutMs`, `ms` and `quietMs` (at most 60000), `holdMs`, 100 ms per drag step or typed
-character, and the same for a nested `during`.
+`timeoutMs`, `ms` and `quietMs` (at most 60000), `holdMs` (at most 60000), 100 ms per click,
+drag step, keystroke or typed character, and the same for a nested `during`. A drive takes at
+most 600 clicks (`count`), drag `steps`, keystrokes or typed characters, and `holdMs` up to
+60000; the app refuses more. Closing the connection, including shutting down its write side,
+stops a drive at its next step and releases a held drag button. A drive waits up to 5 s for
+another drive in the same app to finish, then fails with `another drive is still running`.
 
 ## Launching a Dev bundle to drive
 
@@ -160,7 +168,7 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 | `audit` | none | `{counts{nodes,interactive,tabStops,unlabeledInteractive},issues[{ref,rule,role,label?,bounds?,view?,source?}]}` |
 
 `route.kind` is one of `newChat`, `chat`, `pullRequests`, `usage`, `inbox`, `settings` (with
-`section`, such as `"General"`), `terminal`, `tasks`, `taskCenter`, `docs`.
+`section`, such as `"General"`), `terminal`, `tasks`, `taskCenter`, `supervisor`, `docs`.
 
 ```sh
 zui state
@@ -188,7 +196,7 @@ zui audit
 | `drag` | `from`, `to` (each `[x,y]`, `{x,y}`, `{ref}` or `{select,nth}`), `steps` (12), `holdMs` (0), `modifiers` | `{frame}` |
 | `scroll` | target, `dx`, `dy` (pixels, 0), `trackpad` (false) | `{frame}` |
 | `key` | `keys`: an array of strokes, or one string of space-separated strokes | `{frame,handled[bool per stroke]}` |
-| `type` | `text`, optional target | `{frame}` |
+| `type` | `text`, optional target | `{frame,unhandled?}`: `unhandled` counts characters no handler took, such as with nothing focused |
 | `press` | `ref` or `select`+`nth`, `do` (`click`), `value` (for `setValue`) | `{frame,ref}` |
 | `action` | `name` (gpui action), `args` | `{frame}` |
 | `set` | `theme` (`light`, `dark`, `system`), `size` (`{w,h}` or `[w,h]`), `motionScale` | `{frame,size,motionScale,theme}` |
@@ -477,15 +485,17 @@ of these keys:
 
 | Step | Effect |
 |---|---|
-| `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. |
+| `{"engine": "<RPC method>", "params"?: {...}, "first"?: bool, "save"?: "n"}` | Calls the target's engine at `ws://127.0.0.1:<ipcPort>` over one connection per run. With `first`, it subscribes and keeps the first item, e.g. `WatchDocMessages {chatId}` returns `{reset: [entries]}`. A scenario with an engine step refuses a release-build target. |
 | `{"ui": "<driver action>", ...args, "save"?: "n"}` | Sends one driver request, as `zeron ui <action>` would. |
 | `{"assert": {"select": "Role \"label\"", "nth"?: n, "exists"?: bool}}` | `true` waits for a match (`wait for:select`); `false` waits for none (`wait for:gone`, which ignores `nth`). |
 | `{"assert": {"text": "substring", "exists"?: bool}}` | `true` waits for a label, value or description that contains it; `false` waits until none does (`wait for:gone` with `text`). |
 | `{"assert": {"saved": "n.path", "equals": json}}` | Compares a saved value. `"contains": "s"` searches its text instead (a JSON value is searched as compact JSON). |
 | `{"snapshot": "label"}` | Writes `shots/NN-label.png`. |
-| `{"sleep": ms}` | Waits. |
+| `{"sleep": ms}` | Waits, up to 60000 ms. |
 
-- `select` and `text` asserts take `timeoutMs` (default 3000).
+- `select` and `text` asserts take `timeoutMs` (default 3000). An assert takes exactly one of
+  `select`, `text` or `saved`, and no other keys than the ones above.
+- A `save` name has no dots and is not `env`, `target` or `run`.
 - Any step may set `"name"` for the report, and `"continueOnFail": true`. Without it, the first
   failure skips the remaining steps.
 - Strings in `params`, args and asserts may hold `${n.path.0.field}`: a saved result, `target`
@@ -585,10 +595,10 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `no element matches ...; near:` | Read the near list or `tree` with `query`; the element may lack a node. |
 | `... is outside the WxH window; scroll it into view first` | Scroll its container (`scroll` with `select` on the scroll area), then retry. |
 | `timed out after N ms; last seen: ...` / `not idle after ...` | The UI never reached the state, or an animation or spinner keeps drawing. Read the last-seen part, raise `timeoutMs`, or wait on an element instead of `idle`. |
-| `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. |
+| `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. The timed-out drive stops when the app sees the connection close, so a retry does not repeat it. |
 | `` `timeoutMs` must be at most 60000 ms `` | Waits are capped at 60 s. Wait on an element or for `idle` in steps instead of one long wait. |
 | `` `text` must not be empty `` | A `text` or `gone` wait (or a scenario `text` assert) got `""`, which every node contains. Pass the text to wait for. |
-| `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The chat runs on a Zeron build from before the pre-approval. Rebuild, or switch the chat to Full. |
+| `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The chat is at Ask or Auto, where Zeron declines Codex's approval request. Drive from a chat at Full. |
 | `the window drew no frame after the accessibility tree was enabled` | The window is minimized or fully hidden, so gpui does not draw. Bring it back on screen and retry. |
 | `give one of ref, select, or x and y` | The request mixed target kinds, or gave `x` without `y` or `nth` without `select`. |
 | `` `path` must end in .png `` / `is not a regular file` | Snapshot paths are absolute `.png` files; pick a new file name, not a link or folder. |

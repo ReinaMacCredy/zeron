@@ -12019,18 +12019,30 @@ fn agent_message_display(text: &str) -> String {
     format!("Message from {name}\n\n{body}")
 }
 
-/// Plain paragraphs return `None` so prose keeps the text path's exact spacing.
+/// `__init__`, `# comment` lines and indented code are plain developer text, so they stay text.
 fn user_markdown(text: &str) -> Option<Arc<BlockTree>> {
     let attribution = text
         .strip_prefix("Message from ")
         .and_then(|rest| rest.split_once("\n\n"));
     let body = attribution.map_or(text, |(_, body)| body);
     let mut tree = crate::markdown::parser::parse_full_line_breaks(body);
-    let plain = tree.blocks.iter().all(|top| match &top.block {
-        Block::Paragraph { runs } => runs.iter().all(|run| run.style == InlineStyle::default()),
-        _ => false,
+    let typed = |runs: &[InlineRun]| {
+        runs.iter()
+            .any(|run| run.style.code || run.style.math || run.style.link.is_some())
+    };
+    let structured = tree.blocks.iter().any(|top| match &top.block {
+        Block::List { .. }
+        | Block::Table { .. }
+        | Block::BlockQuote { .. }
+        | Block::Math { .. } => true,
+        Block::CodeBlock { .. } => body
+            .get(top.range.clone())
+            .map(|source| source.trim_start_matches(' '))
+            .is_some_and(|source| source.starts_with("```") || source.starts_with("~~~")),
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => typed(runs),
+        Block::Rule => false,
     });
-    if plain {
+    if !structured {
         return None;
     }
     if let Some((name, _)) = attribution {
@@ -21258,6 +21270,24 @@ mod tests {
             (mentions.len(), markdown.clone())
         };
         assert_eq!(markdown_of("plain prose\nsecond line\n\nnext"), (0, None));
+        for typed_as_text in [
+            "fix __init__.py imports",
+            "def f(x):\n    # compute\n    return x * 2\n\n# usage\nprint(f(2))",
+            "    indented first line\n    second",
+            "**not** a structure on its own\n---",
+        ] {
+            assert_eq!(markdown_of(typed_as_text), (0, None), "{typed_as_text}");
+        }
+        let (_, Some(fenced)) = markdown_of("run this:\n\n```sh\n# usage\nls\n```") else {
+            panic!("a fenced block is typed structure");
+        };
+        assert!(
+            fenced
+                .blocks
+                .iter()
+                .any(|top| matches!(top.block, Block::CodeBlock { .. }))
+        );
+        assert!(markdown_of("see `__init__.py`").1.is_some());
         assert_eq!(
             markdown_of("## Look\n- at [composer.rs](zeron-file:crates/ui/src/composer.rs)"),
             (1, None),

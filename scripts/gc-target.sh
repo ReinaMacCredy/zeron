@@ -14,9 +14,10 @@ if [ ! -d "$DEBUG/deps" ]; then
   exit 0
 fi
 
+pkgs=$(cargo metadata --no-deps --format-version 1 |
+  python3 -c 'import json, sys; print("\n".join(p["name"] for p in json.load(sys.stdin)["packages"]))')
 over=()
-for pkg in $(cargo metadata --no-deps --format-version 1 |
-  python3 -c 'import json, sys; print("\n".join(p["name"] for p in json.load(sys.stdin)["packages"]))'); do
+for pkg in $pkgs; do
   crate="${pkg//-/_}"
   files=("$DEBUG/deps/$crate"-* "$DEBUG/deps/lib$crate"-* "$DEBUG/incremental/$crate"-*)
   [ "${#files[@]}" -gt 0 ] || continue

@@ -2796,6 +2796,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
         _ => "application/octet-stream",
     }
 }

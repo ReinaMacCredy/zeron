@@ -1,6 +1,6 @@
 use super::selector::Element;
 use super::tree::{self, Bounds};
-use super::{Drive, Windowed, epoch, frame_count, target_window};
+use super::{Cancel, Drive, Windowed, epoch, frame_count, target_window};
 use gpui::{AnyWindowHandle, AsyncApp};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -150,13 +150,18 @@ fn jump_px() -> f64 {
 
 type During = Option<gpui::Task<Result<Value, String>>>;
 
-fn start_during(window: Option<u64>, during: Option<Windowed<Drive>>, cx: &mut AsyncApp) -> During {
+fn start_during(
+    window: Option<u64>,
+    during: Option<Windowed<Drive>>,
+    cancel: Cancel,
+    cx: &mut AsyncApp,
+) -> During {
     let Windowed {
         window: own,
         action,
     } = during?;
     let window = own.or(window);
-    Some(cx.spawn(async move |cx| super::drive(window, action, cx).await))
+    Some(cx.spawn(async move |cx| super::drive(window, action, cancel, cx).await))
 }
 
 async fn finish_during(during: During, reply: &mut Value) -> Result<(), String> {
@@ -178,6 +183,7 @@ fn check_ms(ms: u64, max: u64) -> Result<Duration, String> {
 pub(super) async fn frames(
     window: Option<u64>,
     request: Frames,
+    cancel: Cancel,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let span = check_ms(request.ms, FRAMES_MAX_MS)?;
@@ -185,7 +191,7 @@ pub(super) async fn frames(
     let recorder = Recorder::start();
     let mut draws = DrawTimes::start();
     let t0 = now_us();
-    let during = start_during(window, request.during, cx);
+    let during = start_during(window, request.during, cancel, cx);
     cx.background_executor().timer(span).await;
     let times = recorder.times();
     let draw = draws.take(handle.window_id());
@@ -198,6 +204,7 @@ pub(super) async fn frames(
 pub(super) async fn track(
     window: Option<u64>,
     request: Track,
+    cancel: Cancel,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let span = check_ms(request.ms, TRACK_MAX_MS)?;
@@ -212,14 +219,27 @@ pub(super) async fn track(
     let start_ref = start.map(|node| node.id.clone());
     let start_line = start.map(tree::line);
     let (t0, mark, started) = (now_us(), frame_count(), Instant::now());
-    let during = start_during(window, request.during, cx);
+    let during = start_during(window, request.during, cancel, cx);
     let mut sampler = Sampler::new(start_ref.clone(), first.frame);
     let mut read_ms = Vec::new();
     let mut seen = mark;
-    while let Some((tree, cost)) = next_tree(handle, &mut seen, started + span, cx).await? {
-        let at_ms = LAST_US.load(Ordering::Relaxed).saturating_sub(t0) as f64 / 1000.0;
-        read_ms.push(cost);
-        sampler.add(&tree, &request.element, at_ms);
+    let sampled = loop {
+        match next_tree(handle, &mut seen, started + span, cx).await {
+            Ok(Some((tree, cost))) => {
+                let at_ms = LAST_US.load(Ordering::Relaxed).saturating_sub(t0) as f64 / 1000.0;
+                read_ms.push(cost);
+                sampler.add(&tree, &request.element, at_ms);
+            }
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        }
+    };
+    if let Err(error) = sampled {
+        // Dropping the task would cancel a drag between its press and release.
+        if let Some(task) = during {
+            let _ = task.await;
+        }
+        return Err(error);
     }
     let mut reply = sampler.report(request.jump_px);
     reply["ref"] = json!(start_ref.or_else(|| sampler.last_ref.clone()));

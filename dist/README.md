@@ -71,7 +71,7 @@ installed builds can update into Zeron. CI runs this on tags
 ## Windows
 
 ```powershell
-./scripts/package-windows.ps1 -ReleasesUrl https://github.com/zeronsh/zeron/releases/latest/download
+./scripts/package-windows.ps1 -ReleasesUrl https://github.com/ReinaMacCredy/zeron/releases/latest/download
 ```
 
 Produces, under `target/package/`:

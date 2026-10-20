@@ -607,6 +607,7 @@ impl ToolCall {
 
     pub fn skill_path(&self) -> Option<&str> {
         self.skill_input("path")
+            .filter(|path| path.ends_with("/SKILL.md"))
     }
 
     fn skill_input(&self, key: &str) -> Option<&str> {
@@ -1218,6 +1219,19 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn a_skill_chip_opens_only_a_skill_file() {
+        let skill = |path: &str| ToolCall::Unknown {
+            name: "Skill".into(),
+            input: Some(serde_json::json!({ "skill": "review", "path": path })),
+        };
+        assert_eq!(
+            skill("/home/u/.claude/skills/review/SKILL.md").skill_path(),
+            Some("/home/u/.claude/skills/review/SKILL.md")
+        );
+        assert_eq!(skill("/home/u/.ssh/config").skill_path(), None);
     }
 
     /// Drivers spell the key differently; the chip must not care which one

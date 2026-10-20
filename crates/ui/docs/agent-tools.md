@@ -46,7 +46,7 @@ The threads tools are described from your side in [Agents and other threads](zer
 
 - Project actions only touch the project of the chat that calls them.
 - The UI driving tool only drives Zeron Dev builds, and never the app that serves the agent's own chat. Reading the UI works in every build and includes text typed into fields. Turning the reading tool off turns the driving tool off too.
-- In a Codex chat, driving the UI and closing a device run without asking for approval, whatever the chat's permission mode.
+- In a Codex chat, closing a device runs without asking for approval. Driving the UI runs only when the chat is at **Full access**; at Ask or Auto, Codex's approval request for it is declined.
 - An agent's actions toward other chats (messages, new chats, interrupts, answers) are capped at 16 per turn.
 - An agent can answer another chat's permission request only when its own chat runs at **Full access**.
 - A child agent, or a profile an agent applies, never gets a higher permission mode than the chat that started it.

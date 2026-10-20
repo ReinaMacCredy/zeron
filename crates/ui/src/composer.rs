@@ -3944,6 +3944,10 @@ impl ComposerInput {
                 && !from_composer
                 && text.chars().count() >= crate::attachments::PASTED_TEXT_MIN_CHARS
                 && zeron_proto::attachment_mentions::attachment_mentions(&text).is_empty()
+                && !zeron_proto::invocation::leading_command(
+                    &zeron_proto::invocation::invocation_prompt(self.text()),
+                )
+                .is_some_and(|(name, _)| zeron_proto::invocation::valid_skill_command_name(name))
             {
                 cx.emit(ComposerInputEvent::PastedLongText(text));
                 return;
@@ -8432,9 +8436,17 @@ impl Composer {
             return;
         }
         let key = self.current_key.clone();
-        self.adopt_staged_attachments(key, vec![attachments::stage_pasted_text(text)], cx);
-        self.focus_pending = true;
-        self.sync_draft(cx);
+        match attachments::stage_pasted_text(text) {
+            Ok(staged) => {
+                self.adopt_staged_attachments(key, vec![staged], cx);
+                self.focus_pending = true;
+                self.sync_draft(cx);
+            }
+            Err(message) => {
+                self.failure = Some(message.into());
+                self.failure_key = Some(key);
+            }
+        }
         cx.notify();
     }
 

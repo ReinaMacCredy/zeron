@@ -425,12 +425,15 @@ pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
 
 pub const PASTED_TEXT_MIN_CHARS: usize = 5_000;
 
-pub fn stage_pasted_text(text: String) -> StagedAttachment {
+pub fn stage_pasted_text(text: String) -> Result<StagedAttachment, String> {
+    if text.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err("The pasted text is too large (24 MB max).".into());
+    }
     // A placeholder number: adopting it into a draft renames it to its chip's.
-    StagedAttachment::from_file(
+    Ok(StagedAttachment::from_file(
         &zeron_proto::attachment_mentions::pasted_text_label(1),
         text.into_bytes(),
-    )
+    ))
 }
 
 /// Windows screenshots are BMP, but no agent harness inlines BMP and the

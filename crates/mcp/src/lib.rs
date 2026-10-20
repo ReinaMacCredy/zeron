@@ -13,7 +13,7 @@
 
 #![recursion_limit = "256"]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -67,6 +67,7 @@ pub struct ThreadTools {
     sends: AtomicUsize,
     run_secret: Option<String>,
     computer_calls: Mutex<HashSet<String>>,
+    ui_driver_calls: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
     ipc_port: Option<u16>,
 }
 
@@ -675,6 +676,7 @@ impl ThreadTools {
                 .ok()
                 .filter(|secret| !secret.is_empty()),
             computer_calls: Mutex::new(HashSet::new()),
+            ui_driver_calls: Mutex::new(HashMap::new()),
             ipc_port: None,
         }
     }
@@ -690,6 +692,10 @@ impl ThreadTools {
     }
 
     async fn disabled_tools(&self) -> HashSet<String> {
+        self.tool_settings().await.unwrap_or_default()
+    }
+
+    async fn tool_settings(&self) -> Option<HashSet<String>> {
         self.client
             .call(
                 methods::GET_TOOL_SETTINGS,
@@ -699,7 +705,26 @@ impl ThreadTools {
             .ok()
             .and_then(|state| serde_json::from_value::<ToolSettingsState>(state).ok())
             .map(|state| state.disabled.into_iter().collect())
-            .unwrap_or_default()
+    }
+
+    async fn ui_driver_call(
+        &self,
+        tool: ui_driver::Tool,
+        args: &Value,
+        request_id: &Value,
+    ) -> Option<Value> {
+        let key = request_id.to_string();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        self.ui_driver_calls
+            .lock()
+            .unwrap()
+            .insert(key.clone(), cancel);
+        let result = tokio::select! {
+            result = ui_driver::mcp_result(tool, args, self.ipc_port) => Some(result),
+            _ = cancelled => None,
+        };
+        self.ui_driver_calls.lock().unwrap().remove(&key);
+        result
     }
 
     async fn tools(&self) -> Value {
@@ -3249,6 +3274,14 @@ where
 async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
     let params = &request["params"];
     if request["method"] == "notifications/cancelled" {
+        let ui_driver_call = tools
+            .ui_driver_calls
+            .lock()
+            .unwrap()
+            .remove(&params["requestId"].to_string());
+        if let Some(cancel) = ui_driver_call {
+            let _ = cancel.send(());
+        }
         tools.cancel_computer_action(&params["requestId"]).await;
         return None;
     }
@@ -3276,7 +3309,11 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 let result = tools.computer_action(secret, name, args, &id).await;
                 return Some(ok(id, result));
             }
-            if tools.disabled_tools().await.contains(name) {
+            let disabled = tools.tool_settings().await;
+            if disabled
+                .as_ref()
+                .is_some_and(|disabled| disabled.contains(name))
+            {
                 return Some(ok(id, turned_off(name)));
             }
             if name == "device_screenshot" {
@@ -3289,10 +3326,18 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 return Some(ok(id, docs::mcp_result(&args)));
             }
             if let Some(tool) = ui_driver::Tool::named(name) {
-                return Some(ok(
-                    id,
-                    ui_driver::mcp_result(tool, &args, tools.ipc_port).await,
-                ));
+                if disabled.is_none() {
+                    let text = format!(
+                        "{name} stays off while Zeron's tool settings cannot be read; retry in a moment."
+                    );
+                    let result =
+                        json!({ "content": [{ "type": "text", "text": text }], "isError": true });
+                    return Some(ok(id, result));
+                }
+                return tools
+                    .ui_driver_call(tool, &args, &id)
+                    .await
+                    .map(|result| ok(id, result));
             }
             let (text, is_error) = match tools.call(name, &args).await {
                 Ok(value) => (
@@ -5902,6 +5947,23 @@ mod tests {
         }
         assert!(logged(&fake, methods::COMPUTER_ACTION).is_empty());
         assert!(logged(&fake, methods::DEVICE_TOOL_SCREENSHOT).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_ui_driver_stays_off_while_tool_settings_cannot_be_read() {
+        let tools = ThreadTools::new(memory_client(Arc::new(fixture())), "unknown-chat");
+        let mut pipe = Pipe::open(tools);
+        for name in [ui_driver::TOOL, ui_driver::DRIVE_TOOL] {
+            let reply = pipe.call(json!(3), name, json!({ "action": "list" })).await;
+            assert_eq!(reply["result"]["isError"], true, "{name}");
+            assert!(
+                reply["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{name} stays off")),
+                "{reply}"
+            );
+        }
     }
 
     #[tokio::test]

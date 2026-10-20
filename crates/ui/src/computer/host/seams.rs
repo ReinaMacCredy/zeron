@@ -87,6 +87,7 @@ pub struct ComputerShieldEngagement {
 #[async_trait(?Send)]
 pub trait ComputerFrameTapHost: Send + Sync {
     fn update(&self, target: CuaPreviewTarget) -> Result<(), String>;
+    fn touch(&self, task: &CuaComputerTask);
     async fn end_task(&self, task: CuaComputerTask) -> Result<(), String>;
     async fn stop(&self) -> Result<(), String>;
     async fn dispose(&self) -> Result<(), String>;

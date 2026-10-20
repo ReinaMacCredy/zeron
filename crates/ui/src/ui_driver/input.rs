@@ -1,4 +1,4 @@
-use super::{frame_count, frames, next_frame, selector, target_window, tree};
+use super::{Cancel, frame_count, frames, next_frame, selector, target_window, tree};
 use gpui::accesskit::{Action as AxAction, ActionData, NodeId};
 use gpui::{
     AnyWindowHandle, AppContext as _, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
@@ -7,7 +7,9 @@ use gpui::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+use zeron_proto::ui_driver::{MAX_DRIVE_STEPS, MAX_WAIT_MS};
 
 const STEP_CAP: Duration = Duration::from_millis(zeron_proto::ui_driver::STEP_CAP_MS);
 const SETTLE_CAP: Duration = Duration::from_millis(500);
@@ -15,6 +17,10 @@ const TRACKPAD_STEPS: u32 = 6;
 const STILL_CAP: Duration = Duration::from_millis(1000);
 const STILL_QUIET: Duration = Duration::from_millis(50);
 const STILL_PT: f64 = 0.5;
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+const LOCK_POLL: Duration = Duration::from_millis(20);
+const HOLD_SLICE: Duration = Duration::from_millis(50);
+const CANCELLED: &str = "the client went away, so the drive stopped";
 
 static DRIVING: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
 
@@ -89,42 +95,81 @@ fn drag_steps() -> u32 {
     zeron_proto::ui_driver::DRAG_STEPS
 }
 
+impl Drive {
+    fn check(&self) -> Result<(), String> {
+        let limits: Vec<(&str, u64, u64)> = match self {
+            Drive::Click { count, .. } => vec![("count", *count as u64, MAX_DRIVE_STEPS)],
+            Drive::Drag { steps, hold_ms, .. } => vec![
+                ("steps", u64::from(*steps), MAX_DRIVE_STEPS),
+                ("holdMs", *hold_ms, MAX_WAIT_MS),
+            ],
+            Drive::Key { keys } => vec![("keys", keys.strokes().len() as u64, MAX_DRIVE_STEPS)],
+            Drive::Type { text, .. } => {
+                vec![("text", text.chars().count() as u64, MAX_DRIVE_STEPS)]
+            }
+            _ => Vec::new(),
+        };
+        match limits.into_iter().find(|&(_, value, max)| value > max) {
+            Some((name, value, max)) => Err(format!("`{name}` must be at most {max}, not {value}")),
+            None => Ok(()),
+        }
+    }
+}
+
 pub(super) async fn run(
     window: Option<u64>,
     drive: Drive,
+    cancel: Cancel,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let _driving = DRIVING.lock().await;
+    drive.check()?;
+    let deadline = Instant::now() + LOCK_WAIT;
+    let _driving = loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CANCELLED.into());
+        }
+        if let Some(guard) = DRIVING.try_lock() {
+            break guard;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "another drive is still running in this app after {} s; retry when it finishes",
+                LOCK_WAIT.as_secs()
+            ));
+        }
+        cx.background_executor().timer(LOCK_POLL).await;
+    };
+    let driver = Driver::open(window, cancel, cx)?;
     match drive {
-        Drive::Set(set) => self::set(window, set, cx).await,
+        Drive::Set(set) => self::set(driver, set, cx).await,
         Drive::Click {
             at,
             button,
             count,
             modifiers,
-        } => click(window, at, button, count, &modifiers, cx).await,
-        Drive::Move { at } => hover(window, at, cx).await,
+        } => click(driver, at, button, count, &modifiers, cx).await,
+        Drive::Move { at } => hover(driver, at, cx).await,
         Drive::Drag {
             from,
             to,
             steps,
             hold_ms,
             modifiers,
-        } => drag(window, from, to, steps, hold_ms, &modifiers, cx).await,
+        } => drag(driver, from, to, steps, hold_ms, &modifiers, cx).await,
         Drive::Scroll {
             at,
             dx,
             dy,
             trackpad,
-        } => scroll(window, at, dx, dy, trackpad, cx).await,
-        Drive::Key { keys } => self::keys(window, keys, cx).await,
-        Drive::Type { text, into } => type_text(window, &text, into, cx).await,
+        } => scroll(driver, at, dx, dy, trackpad, cx).await,
+        Drive::Key { keys } => self::keys(driver, keys, cx).await,
+        Drive::Type { text, into } => type_text(driver, &text, into, cx).await,
         Drive::Press {
             element,
             perform,
             value,
-        } => press(window, element, perform, value, cx).await,
-        Drive::Action { name, args } => action(window, &name, args, cx).await,
+        } => press(driver, element, perform, value, cx).await,
+        Drive::Action { name, args } => action(driver, &name, args, cx).await,
     }
 }
 
@@ -333,16 +378,34 @@ struct Driver {
     window: AnyWindowHandle,
     mark: u64,
     unsettled: bool,
+    cancel: Cancel,
 }
 
 impl Driver {
-    fn open(window: Option<u64>, cx: &mut AsyncApp) -> Result<Self, String> {
+    fn open(window: Option<u64>, cancel: Cancel, cx: &mut AsyncApp) -> Result<Self, String> {
         let window = cx.update(|cx| target_window(window, cx))?;
         Ok(Self {
             window,
             mark: frame_count(),
             unsettled: false,
+            cancel,
         })
+    }
+
+    fn live(&self) -> Result<(), String> {
+        match self.cancel.load(Ordering::SeqCst) {
+            true => Err(CANCELLED.into()),
+            false => Ok(()),
+        }
+    }
+
+    async fn pause(&self, length: Duration, cx: &AsyncApp) -> Result<(), String> {
+        let until = Instant::now() + length;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            self.live()?;
+            cx.background_executor().timer(left.min(HOLD_SLICE)).await;
+        }
+        self.live()
     }
 
     async fn find(
@@ -356,6 +419,15 @@ impl Driver {
     }
 
     fn apply<R>(
+        &mut self,
+        cx: &mut AsyncApp,
+        f: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
+    ) -> Result<R, String> {
+        self.live()?;
+        self.dispatch(cx, f)
+    }
+
+    fn dispatch<R>(
         &mut self,
         cx: &mut AsyncApp,
         f: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
@@ -435,14 +507,13 @@ fn mouse_press(
 }
 
 async fn click(
-    window: Option<u64>,
+    mut driver: Driver,
     at: Target,
     button: Button,
     count: usize,
     held: &[Modifier],
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let mut driver = Driver::open(window, cx)?;
     let (position, modifiers) = (at.point(&mut driver, cx).await?, modifiers(held));
     let button = match button {
         Button::Left => MouseButton::Left,
@@ -460,8 +531,7 @@ async fn click(
     driver.settle(cx).await
 }
 
-async fn hover(window: Option<u64>, at: Target, cx: &mut AsyncApp) -> Result<Value, String> {
-    let mut driver = Driver::open(window, cx)?;
+async fn hover(mut driver: Driver, at: Target, cx: &mut AsyncApp) -> Result<Value, String> {
     let position = at.point(&mut driver, cx).await?;
     driver
         .send(cx, [mouse_move(position, None, Modifiers::default())])
@@ -470,7 +540,7 @@ async fn hover(window: Option<u64>, at: Target, cx: &mut AsyncApp) -> Result<Val
 }
 
 async fn drag(
-    window: Option<u64>,
+    mut driver: Driver,
     from: Target,
     to: Target,
     steps: u32,
@@ -478,7 +548,6 @@ async fn drag(
     held: &[Modifier],
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let mut driver = Driver::open(window, cx)?;
     let modifiers = modifiers(held);
     let (from, to) = (
         from.point(&mut driver, cx).await?,
@@ -490,34 +559,34 @@ async fn drag(
         .send(cx, [mouse_move(at(0.0), None, modifiers), down])
         .await?;
     let steps = steps.max(1);
-    for step in 1..=steps {
-        let position = at(step as f32 / steps as f32);
-        driver
-            .send(
-                cx,
-                [mouse_move(position, Some(MouseButton::Left), modifiers)],
-            )
-            .await?;
+    let moved = async {
+        for step in 1..=steps {
+            let position = at(step as f32 / steps as f32);
+            driver
+                .send(
+                    cx,
+                    [mouse_move(position, Some(MouseButton::Left), modifiers)],
+                )
+                .await?;
+        }
+        driver.pause(Duration::from_millis(hold_ms), cx).await
     }
-    if hold_ms > 0 {
-        cx.background_executor()
-            .timer(Duration::from_millis(hold_ms))
-            .await;
-    }
+    .await;
     let [_, up] = mouse_press(at(1.0), MouseButton::Left, modifiers, 1);
-    driver.send(cx, [up]).await?;
+    driver.dispatch(cx, |window, cx| window.dispatch_event(up, cx))?;
+    moved?;
+    driver.step(cx).await;
     driver.settle(cx).await
 }
 
 async fn scroll(
-    window: Option<u64>,
+    mut driver: Driver,
     at: Target,
     dx: f32,
     dy: f32,
     trackpad: bool,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let mut driver = Driver::open(window, cx)?;
     let position = at.point(&mut driver, cx).await?;
     let wheel = |dx: f32, dy: f32, touch_phase| {
         PlatformInput::ScrollWheel(ScrollWheelEvent {
@@ -549,7 +618,7 @@ async fn scroll(
     driver.settle(cx).await
 }
 
-async fn keys(window: Option<u64>, keys: Keys, cx: &mut AsyncApp) -> Result<Value, String> {
+async fn keys(mut driver: Driver, keys: Keys, cx: &mut AsyncApp) -> Result<Value, String> {
     let strokes = keys
         .strokes()
         .into_iter()
@@ -560,7 +629,6 @@ async fn keys(window: Option<u64>, keys: Keys, cx: &mut AsyncApp) -> Result<Valu
     if strokes.is_empty() {
         return Err("`keys` is empty".into());
     }
-    let mut driver = Driver::open(window, cx)?;
     let mut handled = Vec::new();
     for stroke in strokes {
         handled.push(driver.apply(cx, |window, cx| window.dispatch_keystroke(stroke, cx))?);
@@ -586,12 +654,11 @@ fn typed(ch: char) -> Keystroke {
 }
 
 async fn type_text(
-    window: Option<u64>,
+    mut driver: Driver,
     text: &str,
     into: TypeAt,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let mut driver = Driver::open(window, cx)?;
     let position = match into {
         TypeAt::Focused => None,
         TypeAt::Target(Target::Element(element)) => {
@@ -620,20 +687,26 @@ async fn type_text(
             )
             .await?;
     }
+    let mut unhandled = 0;
     for ch in text.chars() {
-        driver.apply(cx, |window, cx| window.dispatch_keystroke(typed(ch), cx))?;
+        if !driver.apply(cx, |window, cx| window.dispatch_keystroke(typed(ch), cx))? {
+            unhandled += 1;
+        }
         driver.step(cx).await;
     }
-    driver.settle(cx).await
+    let mut reply = driver.settle(cx).await?;
+    if unhandled > 0 {
+        reply["unhandled"] = json!(unhandled);
+    }
+    Ok(reply)
 }
 
 async fn action(
-    window: Option<u64>,
+    mut driver: Driver,
     name: &str,
     args: Option<Value>,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let mut driver = Driver::open(window, cx)?;
     driver.apply(cx, |window, cx| {
         let action = cx
             .build_action(name, args)
@@ -678,14 +751,13 @@ fn performable(
 }
 
 async fn press(
-    window: Option<u64>,
+    mut driver: Driver,
     element: selector::Element,
     perform: Option<String>,
     value: Option<String>,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let action = ax_action(perform.as_deref().unwrap_or("click"))?;
-    let mut driver = Driver::open(window, cx)?;
     let (node, viewport) = driver.find(&element, cx).await?;
     let name = performable(&node, action, viewport)?;
     let data = match (action, value) {
@@ -729,7 +801,7 @@ pub(super) struct Set {
     motion_scale: Option<f32>,
 }
 
-async fn set(window: Option<u64>, set: Set, cx: &mut AsyncApp) -> Result<Value, String> {
+async fn set(mut driver: Driver, set: Set, cx: &mut AsyncApp) -> Result<Value, String> {
     if set.theme.is_none() && set.size.is_none() && set.motion_scale.is_none() {
         return Err("`set` needs `theme`, `size` or `motionScale`".into());
     }
@@ -744,7 +816,6 @@ async fn set(window: Option<u64>, set: Set, cx: &mut AsyncApp) -> Result<Value, 
     {
         return Err(format!("`size` must be positive points, not {w}x{h}"));
     }
-    let mut driver = Driver::open(window, cx)?;
     driver.apply(cx, |window, cx| {
         if let Some(mode) = set.theme {
             crate::appearance::set_mode(mode, cx);
@@ -806,6 +877,53 @@ mod tests {
         );
         empty.bounds = None;
         assert!(center(&empty, (800.0, 600.0)).is_err());
+    }
+
+    #[test]
+    fn a_drive_is_bounded_before_it_starts() {
+        let at = |x: f32| Target::Point { x, y: 1.0 };
+        let click = |count| Drive::Click {
+            at: at(1.0),
+            button: Button::Left,
+            count,
+            modifiers: vec![],
+        };
+        let drag = |steps, hold_ms| Drive::Drag {
+            from: at(1.0),
+            to: at(2.0),
+            steps,
+            hold_ms,
+            modifiers: vec![],
+        };
+        let typed = |len: usize| Drive::Type {
+            text: "x".repeat(len),
+            into: TypeAt::Focused,
+        };
+        let keys = |len: usize| Drive::Key {
+            keys: Keys::Many(vec!["a".into(); len]),
+        };
+        let max = MAX_DRIVE_STEPS as usize;
+        for ok in [
+            click(max),
+            drag(max as u32, MAX_WAIT_MS),
+            typed(max),
+            keys(max),
+        ] {
+            assert_eq!(ok.check(), Ok(()), "{ok:?}");
+        }
+        for (over, field) in [
+            (click(max + 1), "count"),
+            (drag(max as u32 + 1, 0), "steps"),
+            (drag(12, MAX_WAIT_MS + 1), "holdMs"),
+            (typed(max + 1), "text"),
+            (keys(max + 1), "keys"),
+        ] {
+            let error = over.check().unwrap_err();
+            assert!(
+                error.starts_with(&format!("`{field}` must be at most")),
+                "{error}"
+            );
+        }
     }
 
     #[test]
