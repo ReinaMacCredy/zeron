@@ -1250,31 +1250,21 @@ impl AddProviderDialog {
                         .child("Next"),
                 });
             }
-            Step::Identity if acp_new => {
-                let label = match (self.acp == Some(AcpFlow::Local), saving) {
-                    (_, true) => "Adding...",
-                    (true, false) => "Add instance",
-                    (false, false) => "Continue to sign-in",
-                };
-                footer = footer.child(
-                    button("add-provider-save", widgets::ActionTone::Solid)
-                        .when(saving, |el| el.opacity(0.5))
-                        .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                        .child(label),
-                );
-            }
-            Step::Identity => {
+            Step::Identity if !acp_new => {
                 footer = footer.child(
                     button("add-provider-next", widgets::ActionTone::Solid)
                         .on_click(cx.listener(|this, _, _, cx| this.go(Step::Config, cx)))
                         .child("Next"),
                 );
             }
-            Step::Config | Step::SignIn => {
+            Step::Identity | Step::Config | Step::SignIn => {
                 let label = match (self.editing.is_some(), saving) {
                     (true, true) => "Saving…",
                     (true, false) => "Save",
                     (false, true) => "Adding…",
+                    (false, false) if acp_new && self.acp != Some(AcpFlow::Local) => {
+                        "Continue to sign-in"
+                    }
                     (false, false) => "Add instance",
                 };
                 footer = footer.child(

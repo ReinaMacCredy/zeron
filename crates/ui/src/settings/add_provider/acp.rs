@@ -792,24 +792,32 @@ impl AddProviderDialog {
             .flex()
             .flex_col()
             .child(self.form_header(theme, "Local ACP command", description.into(), cx))
-            .child(setting_row(
+            .children(self.local_command_rows(theme))
+            .child(self.env_row(theme, "Set for this agent only.", cx))
+            .into_any_element()
+    }
+
+    fn local_command_rows(&self, theme: &Theme) -> [AnyElement; 2] {
+        [
+            setting_row(
                 theme,
                 "Executable",
                 "Absolute path or a command on PATH.".into(),
                 None,
                 field(theme, &self.command_input, false),
                 true,
-            ))
-            .child(setting_row(
+            )
+            .into_any_element(),
+            setting_row(
                 theme,
                 "Arguments",
                 "Passed after the executable.".into(),
                 None,
                 field(theme, &self.acp_args_input, false),
                 true,
-            ))
-            .child(self.env_row(theme, "Set for this agent only.", cx))
-            .into_any_element()
+            )
+            .into_any_element(),
+        ]
     }
 
     fn render_registry_search(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1211,25 +1219,7 @@ impl AddProviderDialog {
                         true,
                     ));
             }
-            _ => {
-                rows = rows
-                    .child(setting_row(
-                        theme,
-                        "Executable",
-                        "Absolute path or a command on PATH.".into(),
-                        None,
-                        field(theme, &self.command_input, false),
-                        true,
-                    ))
-                    .child(setting_row(
-                        theme,
-                        "Arguments",
-                        "Passed after the executable.".into(),
-                        None,
-                        field(theme, &self.acp_args_input, false),
-                        true,
-                    ));
-            }
+            _ => rows = rows.children(self.local_command_rows(theme)),
         }
         rows.child(self.env_row(theme, "Set for this agent only.", cx))
             .into_any_element()
