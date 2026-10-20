@@ -156,6 +156,17 @@ fn http() -> Result<reqwest::Client, EngineError> {
         .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let same_host = attempt
+                .previous()
+                .first()
+                .is_some_and(|first| first.host_str() == attempt.url().host_str());
+            if attempt.previous().len() < 10 && same_host && attempt.url().scheme() == "https" {
+                attempt.follow()
+            } else {
+                attempt.error("the ACP Registry redirected off its https host")
+            }
+        }))
         .build()
         .map_err(|error| EngineError::Other(format!("ACP Registry client: {error}")))
 }
@@ -182,12 +193,31 @@ async fn fetch_index(url: &str, etag: Option<&str>) -> Result<Fetched, String> {
         .get(reqwest::header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = response.bytes().await.map_err(|error| error.to_string())?;
-    if body.len() > MAX_INDEX_BYTES {
-        return Err(format!("the index is larger than {MAX_INDEX_BYTES} bytes"));
-    }
-    let body = String::from_utf8(body.to_vec()).map_err(|error| error.to_string())?;
+    let body = read_capped(response, MAX_INDEX_BYTES, "the index").await?;
+    let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok(Fetched::Body { body, etag })
+}
+
+async fn read_capped(
+    mut response: reqwest::Response,
+    max: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let too_large = || format!("{what} is larger than {max} bytes");
+    if response
+        .content_length()
+        .is_some_and(|length| length > max as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if body.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn load_index(data_dir: &Path, url: &str) -> Result<Vec<Agent>, EngineError> {
@@ -675,13 +705,7 @@ async fn fetch_icon(data_dir: &Path, agent_id: &str, url: &str) -> Result<PathBu
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|error| error.to_string())?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_ICON_BYTES as u64)
-    {
-        return Err(format!("the icon is larger than {MAX_ICON_BYTES} bytes"));
-    }
-    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    let bytes = read_capped(response, MAX_ICON_BYTES, "the icon").await?;
     save_icon(data_dir, agent_id, &bytes)
 }
 
