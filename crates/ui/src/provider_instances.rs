@@ -1,8 +1,11 @@
-use gpui::{App, Context, Task};
+use std::time::Duration;
+
+use gpui::{App, AsyncApp, Context, Task, WeakEntity};
 use serde_json::{Value, json};
 use zeron_proto::{
-    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, Chat, HarnessId,
-    InstanceConfig, ProviderInstance, ProviderInstancesSnapshot, validate_instance_id,
+    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, AgentLoginPoll,
+    AgentLoginStatus, Chat, HarnessId, InstanceConfig, ProviderInstance, ProviderInstancesSnapshot,
+    validate_instance_id,
 };
 use zeron_rpc::methods;
 
@@ -113,13 +116,12 @@ pub async fn list(
     engine: &EngineHandle,
     target: Option<Value>,
 ) -> Result<Vec<ProviderInstance>, String> {
-    let mut params = json!({});
-    if let Some(target) = target {
-        params["targetDeviceId"] = target;
-    }
     engine
         .client()
-        .call_as::<ProviderInstancesSnapshot>(methods::LIST_PROVIDER_INSTANCES, params)
+        .call_as::<ProviderInstancesSnapshot>(
+            methods::LIST_PROVIDER_INSTANCES,
+            with_target(json!({}), target),
+        )
         .await
         .map(|snapshot| snapshot.instances)
         .map_err(|err| err.to_string())
@@ -130,7 +132,7 @@ pub async fn write(
     write: ProviderInstanceWrite,
     target: Option<Value>,
 ) -> Result<Vec<ProviderInstance>, String> {
-    let (method, mut params) = match write {
+    let (method, params) = match write {
         ProviderInstanceWrite::Upsert(instance) => (
             methods::UPSERT_PROVIDER_INSTANCE,
             json!({ "instance": instance }),
@@ -140,22 +142,80 @@ pub async fn write(
             json!({ "instanceId": instance_id }),
         ),
     };
-    if let Some(target) = target {
-        params["targetDeviceId"] = target;
-    }
     engine
         .client()
-        .call_as::<ProviderInstancesSnapshot>(method, params)
+        .call_as::<ProviderInstancesSnapshot>(method, with_target(params, target))
         .await
         .map(|snapshot| snapshot.instances)
         .map_err(|err| err.to_string())
 }
 
-fn with_target(mut params: Value, target: Option<Value>) -> Value {
+pub(crate) fn with_target(mut params: Value, target: Option<Value>) -> Value {
     if let Some(target) = target {
         params["targetDeviceId"] = target;
     }
     params
+}
+
+pub(crate) enum LoginPoll {
+    Done,
+    Failed(String),
+    Pending {
+        url: Option<String>,
+        message: Option<String>,
+    },
+}
+
+pub(crate) fn fold_poll(poll: Result<AgentLoginPoll, String>) -> LoginPoll {
+    match poll {
+        Ok(poll) => match poll.status {
+            AgentLoginStatus::Done => LoginPoll::Done,
+            AgentLoginStatus::Error => LoginPoll::Failed(
+                poll.message
+                    .unwrap_or_else(|| "The sign-in failed.".to_string()),
+            ),
+            AgentLoginStatus::Pending => LoginPoll::Pending {
+                url: poll.url,
+                message: poll.message,
+            },
+        },
+        Err(error) => LoginPoll::Failed(format!("Lost track of the sign-in: {error}")),
+    }
+}
+
+/// Polls an agent login until `on_poll` returns true or its entity is gone.
+pub(crate) async fn poll_login<T: 'static>(
+    engine: &EngineHandle,
+    params: Value,
+    this: &WeakEntity<T>,
+    cx: &mut AsyncApp,
+    mut on_poll: impl FnMut(&mut T, LoginPoll, &mut Context<T>) -> bool,
+) {
+    loop {
+        cx.background_executor()
+            .timer(Duration::from_millis(1500))
+            .await;
+        let poll = engine
+            .client()
+            .call_as::<AgentLoginPoll>(methods::POLL_AGENT_LOGIN, params.clone())
+            .await
+            .map_err(|error| error.to_string());
+        let poll = fold_poll(poll);
+        match this.update(cx, |entity, cx| on_poll(entity, poll, cx)) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => break,
+        }
+    }
+}
+
+pub(crate) async fn cancel_login(engine: EngineHandle, params: Value) {
+    if let Err(error) = engine
+        .client()
+        .call(methods::CANCEL_AGENT_LOGIN, params)
+        .await
+    {
+        tracing::debug!(%error, "CancelAgentLogin failed (best-effort)");
+    }
 }
 
 pub async fn search_registry(

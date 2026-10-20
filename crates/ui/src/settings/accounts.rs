@@ -16,16 +16,15 @@ use gpui::{
     AnyElement, Context, Entity, Hsla, SharedString, Subscription, Task, Window, div, prelude::*,
     px,
 };
-use std::time::Duration;
 
 use zeron_proto::{
-    AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, HarnessId,
+    AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginStart, HarnessId,
 };
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
+use crate::provider_instances::LoginPoll;
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -1205,24 +1204,10 @@ impl AccountsPage {
         };
         let params = self.params(serde_json::json!({ "loginId": login_id }));
         self.poll_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(1500))
-                    .await;
-                let result = engine
-                    .client()
-                    .call(methods::POLL_AGENT_LOGIN, params.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|value| {
-                        serde_json::from_value::<AgentLoginPoll>(value)
-                            .map_err(|_| "malformed reply".to_string())
-                    });
-                match this.update(cx, |page, cx| page.apply_poll(attempt, result, cx)) {
-                    Ok(false) => {}
-                    Ok(true) | Err(_) => break,
-                }
-            }
+            crate::provider_instances::poll_login(&engine, params, &this, cx, |page, poll, cx| {
+                page.apply_poll(attempt, poll, cx)
+            })
+            .await;
         }));
     }
 
@@ -1230,49 +1215,33 @@ impl AccountsPage {
     /// the login landed (the list reloads and shows it), failed (the dialog
     /// says why and offers Retry), or the dialog is gone. Never a silent
     /// reset: every ending either shows the account or an error.
-    fn apply_poll(
-        &mut self,
-        attempt: u64,
-        result: Result<AgentLoginPoll, String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn apply_poll(&mut self, attempt: u64, poll: LoginPoll, cx: &mut Context<Self>) -> bool {
         let Some(flow) = self.login.as_mut().filter(|flow| flow.attempt == attempt) else {
             return true;
         };
-        let finished = match result {
-            Ok(poll) => match poll.status {
-                AgentLoginStatus::Done => {
-                    self.login = None;
-                    self.load(force_usage_for(LoadTrigger::PostLogin), cx);
-                    true
-                }
-                AgentLoginStatus::Error => {
-                    flow.step = LoginStep::Failed {
-                        message: poll
-                            .message
-                            .unwrap_or_else(|| "The sign-in failed.".to_string())
-                            .into(),
-                    };
-                    true
-                }
-                AgentLoginStatus::Pending => {
-                    // A page learned after the start (Antigravity prints its
-                    // own once its server is up): open it once.
-                    if let Some(url) = poll.url.filter(|url| flow.url.as_ref() != Some(url)) {
-                        open_login_url(&url, cx);
-                        flow.url = Some(url);
-                    }
-                    flow.step = LoginStep::Browser {
-                        message: poll.message.map(Into::into),
-                    };
-                    false
-                }
-            },
-            Err(error) => {
+        let finished = match poll {
+            LoginPoll::Done => {
+                self.login = None;
+                self.load(force_usage_for(LoadTrigger::PostLogin), cx);
+                true
+            }
+            LoginPoll::Failed(message) => {
                 flow.step = LoginStep::Failed {
-                    message: format!("Lost track of the sign-in: {error}").into(),
+                    message: message.into(),
                 };
                 true
+            }
+            LoginPoll::Pending { url, message } => {
+                // A page learned after the start (Antigravity prints its
+                // own once its server is up): open it once.
+                if let Some(url) = url.filter(|url| flow.url.as_ref() != Some(url)) {
+                    open_login_url(&url, cx);
+                    flow.url = Some(url);
+                }
+                flow.step = LoginStep::Browser {
+                    message: message.map(Into::into),
+                };
+                false
             }
         };
         cx.notify();
@@ -1293,13 +1262,7 @@ impl AccountsPage {
         if let (Some(login_id), Some(engine)) = (login_id, self.state.read(cx).engine().cloned()) {
             let params = self.params(serde_json::json!({ "loginId": login_id }));
             self.action_task = Some(cx.spawn(async move |_, _| {
-                if let Err(err) = engine
-                    .client()
-                    .call(methods::CANCEL_AGENT_LOGIN, params)
-                    .await
-                {
-                    tracing::debug!(error = %err, "CancelAgentLogin failed (best-effort)");
-                }
+                crate::provider_instances::cancel_login(engine, params).await
             }));
         }
         cx.notify();
@@ -2508,6 +2471,8 @@ mod tests {
     }
 
     use super::*;
+    use crate::provider_instances::fold_poll;
+    use zeron_proto::{AgentLoginPoll, AgentLoginStatus};
     use chrono::TimeDelta;
 
     #[test]
@@ -2759,7 +2724,7 @@ mod tests {
                 let url = "https://accounts.google.com/o/oauth2/auth?x=1";
                 assert!(!page.apply_poll(
                     1,
-                    Ok(poll(AgentLoginStatus::Pending, None, Some(url))),
+                    fold_poll(Ok(poll(AgentLoginStatus::Pending, None, Some(url)))),
                     cx
                 ));
                 let flow = page.login.as_ref().unwrap();
@@ -2769,22 +2734,30 @@ mod tests {
                     "Waiting for you to finish in the browser…"
                 );
                 // A reply for an older attempt never touches this one.
-                assert!(page.apply_poll(0, Ok(poll(AgentLoginStatus::Done, None, None)), cx));
+                assert!(page.apply_poll(
+                    0,
+                    fold_poll(Ok(poll(AgentLoginStatus::Done, None, None))),
+                    cx
+                ));
                 assert!(page.login.is_some());
                 // An already-signed-in agent finishes at once: the dialog
                 // closes and the list reloads to show the account.
-                assert!(page.apply_poll(1, Ok(poll(AgentLoginStatus::Done, None, None)), cx));
+                assert!(page.apply_poll(
+                    1,
+                    fold_poll(Ok(poll(AgentLoginStatus::Done, None, None))),
+                    cx
+                ));
                 assert!(page.login.is_none());
 
                 // A failure stays on screen, in the dialog, with Retry.
                 page.login = Some(waiting(HarnessId::Codex, 2));
                 assert!(page.apply_poll(
                     2,
-                    Ok(poll(
+                    fold_poll(Ok(poll(
                         AgentLoginStatus::Error,
                         Some("Port 1455 is in use"),
                         None
-                    )),
+                    ))),
                     cx
                 ));
                 assert_eq!(
@@ -2795,7 +2768,7 @@ mod tests {
                 );
                 // So does a lost poll or a start that never got going.
                 page.login = Some(waiting(HarnessId::Cursor, 3));
-                assert!(page.apply_poll(3, Err("engine gone".into()), cx));
+                assert!(page.apply_poll(3, fold_poll(Err("engine gone".into())), cx));
                 assert!(matches!(
                     &page.login.as_ref().unwrap().step,
                     LoginStep::Failed { message } if message.contains("engine gone")

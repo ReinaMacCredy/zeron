@@ -3,22 +3,21 @@ use std::time::Duration;
 
 use gpui::{AnyElement, Context, SharedString, Task, div, prelude::*, px};
 use zeron_proto::{
-    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, AgentLoginPoll,
-    AgentLoginStart, AgentLoginStatus, HarnessId, InstanceConfig, ProviderInstance,
+    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, AgentLoginStart,
+    HarnessId, InstanceConfig, ProviderInstance,
 };
 use zeron_rpc::methods;
 
 use super::{AddProviderDialog, Identity, Step, field, readonly_value, setting_row};
 use crate::icons::{self, icon};
 use crate::popover::Loadable;
-use crate::provider_instances::{self, InstanceIcon};
+use crate::provider_instances::{self, InstanceIcon, LoginPoll};
 use crate::settings::accounts::open_login_url;
 use crate::settings::widgets;
 use crate::theme::{Theme, ink};
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const ICON_REFRESH: Duration = Duration::from_millis(1500);
-const LOGIN_POLL: Duration = Duration::from_millis(1500);
 const NO_IN_APP_SIGN_IN: &str =
     "No in-app sign-in advertised. Follow the provider's docs to finish setup.";
 
@@ -554,17 +553,14 @@ impl AddProviderDialog {
             message: None,
         });
         let instance = sign_in.instance.clone();
-        let with_target = move |mut params: serde_json::Value| {
-            if let Some(target) = &target {
-                params["targetDeviceId"] = target.clone();
-            }
-            params
-        };
-        let start_params = with_target(serde_json::json!({
-            "harness": instance.driver,
-            "instanceId": instance.id,
-            "methodId": method_id,
-        }));
+        let start_params = provider_instances::with_target(
+            serde_json::json!({
+                "harness": instance.driver,
+                "instanceId": instance.id,
+                "methodId": method_id,
+            }),
+            target.clone(),
+        );
         sign_in.login_task = Some(cx.spawn(async move |this, cx| {
             let start = engine
                 .client()
@@ -576,20 +572,14 @@ impl AddProviderDialog {
             else {
                 return;
             };
-            let poll_params =
-                with_target(serde_json::json!({ "loginId": login_id, "instanceId": instance.id }));
-            loop {
-                cx.background_executor().timer(LOGIN_POLL).await;
-                let poll = engine
-                    .client()
-                    .call_as::<AgentLoginPoll>(methods::POLL_AGENT_LOGIN, poll_params.clone())
-                    .await
-                    .map_err(|error| error.to_string());
-                match this.update(cx, |dialog, cx| dialog.login_polled(attempt, poll, cx)) {
-                    Ok(false) => {}
-                    Ok(true) | Err(_) => break,
-                }
-            }
+            let poll_params = provider_instances::with_target(
+                serde_json::json!({ "loginId": login_id, "instanceId": instance.id }),
+                target,
+            );
+            provider_instances::poll_login(&engine, poll_params, &this, cx, |dialog, poll, cx| {
+                dialog.login_polled(attempt, poll, cx)
+            })
+            .await;
         }));
         cx.notify();
     }
@@ -621,12 +611,7 @@ impl AddProviderDialog {
         started
     }
 
-    fn login_polled(
-        &mut self,
-        attempt: u64,
-        poll: Result<AgentLoginPoll, String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn login_polled(&mut self, attempt: u64, poll: LoginPoll, cx: &mut Context<Self>) -> bool {
         let Some(sign_in) = self.sign_in.as_mut().filter(|s| s.attempt == attempt) else {
             return true;
         };
@@ -634,33 +619,23 @@ impl AddProviderDialog {
             return true;
         };
         let finished = match poll {
-            Ok(poll) => match poll.status {
-                AgentLoginStatus::Done => {
-                    sign_in.login = None;
-                    sign_in.signed_in = true;
-                    true
-                }
-                AgentLoginStatus::Error => {
-                    sign_in.login = None;
-                    sign_in.error = Some(
-                        poll.message
-                            .unwrap_or_else(|| "The sign-in failed.".to_string()),
-                    );
-                    true
-                }
-                AgentLoginStatus::Pending => {
-                    if let Some(url) = poll.url.filter(|url| login.url.as_ref() != Some(url)) {
-                        open_login_url(&url, cx);
-                        login.url = Some(url);
-                    }
-                    login.message = poll.message;
-                    false
-                }
-            },
-            Err(error) => {
+            LoginPoll::Done => {
                 sign_in.login = None;
-                sign_in.error = Some(format!("Lost track of the sign-in: {error}"));
+                sign_in.signed_in = true;
                 true
+            }
+            LoginPoll::Failed(message) => {
+                sign_in.login = None;
+                sign_in.error = Some(message);
+                true
+            }
+            LoginPoll::Pending { url, message } => {
+                if let Some(url) = url.filter(|url| login.url.as_ref() != Some(url)) {
+                    open_login_url(&url, cx);
+                    login.url = Some(url);
+                }
+                login.message = message;
+                false
             }
         };
         cx.notify();
@@ -678,21 +653,12 @@ impl AddProviderDialog {
         };
         sign_in.login_task = None;
         if let (Some(login_id), Some(engine)) = (login.login_id, engine) {
-            let mut params =
-                serde_json::json!({ "loginId": login_id, "instanceId": sign_in.instance.id });
-            if let Some(target) = target {
-                params["targetDeviceId"] = target;
-            }
-            cx.spawn(async move |_, _| {
-                if let Err(error) = engine
-                    .client()
-                    .call(methods::CANCEL_AGENT_LOGIN, params)
-                    .await
-                {
-                    tracing::debug!(%error, "CancelAgentLogin failed (best-effort)");
-                }
-            })
-            .detach();
+            let params = provider_instances::with_target(
+                serde_json::json!({ "loginId": login_id, "instanceId": sign_in.instance.id }),
+                target,
+            );
+            cx.spawn(async move |_, _| provider_instances::cancel_login(engine, params).await)
+                .detach();
         }
         cx.notify();
     }
