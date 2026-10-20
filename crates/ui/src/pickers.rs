@@ -3733,41 +3733,13 @@ impl Pickers {
         if config.harness != harness && config.instance_id == instance_id {
             config.instance_id = None;
         }
-        // Reasoning must stay concrete for whatever model the row now names —
-        // same ladder resolution as [`Self::trait_ladder`] (model levels, else
-        // the harness's advertised ladder).
-        if let Some(models) = self
-            .catalog(config.harness, config.instance_id.as_deref())
-            .and_then(|l| l.ready())
-        {
-            let mut ladder = config
-                .model
-                .as_deref()
-                .and_then(|id| models.iter().find(|m| m.id == id))
-                .map(|m| m.reasoning_levels.clone())
-                .unwrap_or_default();
-            if ladder.is_empty()
-                && let Some(descriptor) = self
-                    .harnesses
-                    .ready()
-                    .and_then(|list| list.iter().find(|d| d.id == config.harness))
-            {
-                ladder = descriptor.reasoning_levels.clone();
-            }
-            if !ladder.is_empty() {
-                config.reasoning = clamp_reasoning(config.reasoning, &ladder);
-            }
-            // Options likewise: a model switch must not carry picks the new
-            // model doesn't offer (e.g. a 1M context onto Haiku).
-            if let Some(model) = config
-                .model
-                .as_deref()
-                .and_then(|id| models.iter().find(|m| m.id == id))
-            {
-                config.model_options =
-                    offered_options(model, std::mem::take(&mut config.model_options));
-            }
-        }
+        self.fit_picks(
+            config.harness,
+            config.instance_id.as_deref(),
+            config.model.as_deref(),
+            &mut config.reasoning,
+            &mut config.model_options,
+        );
         self.state.update(cx, |state, cx| {
             state.apply_chat_config(&chat_id, config.clone());
             cx.notify();
@@ -9819,6 +9791,58 @@ impl Pickers {
                 })
             })
             .collect()
+    }
+
+    /// Reasoning must stay concrete for whatever model is named, with the
+    /// same ladder resolution as [`Self::trait_ladder`] (model levels, else the
+    /// harness's advertised ladder), and a model switch must not carry option
+    /// picks the new model doesn't offer (e.g. a 1M context onto Haiku).
+    fn fit_picks(
+        &self,
+        harness: HarnessId,
+        instance: Option<&str>,
+        model: Option<&str>,
+        reasoning: &mut Option<ReasoningLevel>,
+        options: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        let Some(models) = self.catalog(harness, instance).and_then(|l| l.ready()) else {
+            return;
+        };
+        let model = model.and_then(|id| models.iter().find(|m| m.id == id));
+        let mut ladder = model
+            .map(|m| m.reasoning_levels.clone())
+            .unwrap_or_default();
+        if ladder.is_empty()
+            && let Some(descriptor) = self
+                .harnesses
+                .ready()
+                .and_then(|list| list.iter().find(|d| d.id == harness))
+        {
+            ladder = descriptor.reasoning_levels.clone();
+        }
+        if !ladder.is_empty() {
+            *reasoning = clamp_reasoning(*reasoning, &ladder);
+        }
+        if let Some(model) = model {
+            *options = offered_options(model, std::mem::take(options));
+        }
+    }
+
+    /// What a new chat on `harness` and `model` starts with: the remembered
+    /// reasoning and option picks, fitted to that model.
+    pub(crate) fn new_thread_picks(
+        &self,
+        harness: HarnessId,
+        model: &str,
+    ) -> (Option<ReasoningLevel>, serde_json::Map<String, serde_json::Value>) {
+        let mut reasoning = self.defaults.reasoning_for(harness, Some(model));
+        let mut options = self
+            .defaults
+            .model_options_for(harness, model)
+            .cloned()
+            .unwrap_or_default();
+        self.fit_picks(harness, None, Some(model), &mut reasoning, &mut options);
+        (reasoning, options)
     }
 
     pub(crate) fn hand_off_in_place(

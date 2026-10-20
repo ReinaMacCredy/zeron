@@ -6322,8 +6322,14 @@ impl Shell {
     pub fn continue_in_new_thread(
         &mut self,
         source_chat_id: String,
-        harness: Option<HarnessId>,
-        model: Option<String>,
+        target: Option<(
+            HarnessId,
+            String,
+            (
+                Option<zeron_proto::ReasoningLevel>,
+                serde_json::Map<String, serde_json::Value>,
+            ),
+        )>,
         target_space_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -6340,10 +6346,14 @@ impl Shell {
         let mut params = serde_json::json!({
             "sourceChatId": source_chat_id,
             "chatId": uuid::Uuid::new_v4().to_string(),
-            "harness": harness,
-            "model": model,
             "targetSpaceId": target_space_id,
         });
+        if let Some((harness, model, (reasoning, options))) = target {
+            params["harness"] = serde_json::json!(harness);
+            params["model"] = model.into();
+            params["reasoning"] = serde_json::json!(reasoning);
+            params["modelOptions"] = options.into();
+        }
         if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
             object.insert("targetDeviceId".into(), device.into());
         }
