@@ -393,7 +393,7 @@ impl TaskCenter {
             )
     }
 
-    fn amount(
+    pub(super) fn amount(
         &self,
         tokens: Option<u64>,
         live: bool,
@@ -955,7 +955,7 @@ impl TaskCenter {
         let movable = editable && tag != Some(Tag::Removed) && range.is_some();
         let grip = movable.then(|| {
             let payload = StepDragPayload {
-                task_id: self.task_id.clone(),
+                task_id: row.step.task_id.clone(),
                 step_id: step_id.clone(),
             };
             let selector = format!("task-center-grip-{step_id}");
@@ -1939,11 +1939,20 @@ impl TaskCenter {
                             .flex_col()
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_size(ui_rems(18.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child(SharedString::from(task.title.clone())),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(ui_rems(18.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(task.title.clone())),
+                                    )
+                                    .child(Self::kind_badge(true, theme)),
                             )
                             .child(
                                 div()
@@ -2548,10 +2557,10 @@ impl TaskCenter {
                     .on_drag_move::<StepDragPayload>(cx.listener(
                         |center, event: &DragMoveEvent<StepDragPayload>, _, cx| {
                             let drag = event.drag(cx);
-                            if drag.task_id != center.task_id {
+                            let (task_id, step_id) = (drag.task_id.clone(), drag.step_id.clone());
+                            if center.plan_id(cx).as_deref() != Some(task_id.as_str()) {
                                 return;
                             }
-                            let step_id = drag.step_id.clone();
                             center.drag_to(&step_id, f32::from(event.event.position.y), cx);
                         },
                     ))

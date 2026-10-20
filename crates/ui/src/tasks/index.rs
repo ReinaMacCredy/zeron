@@ -30,7 +30,6 @@ pub(crate) enum Kind {
 #[derive(Debug, Clone)]
 pub(crate) struct IndexRow {
     pub root: String,
-    pub task_id: Option<String>,
     pub title: String,
     pub kind: Kind,
     pub status: Status,
@@ -212,7 +211,6 @@ fn index_row(
     });
     IndexRow {
         root: chat.id.clone(),
-        task_id: task.map(|task| task.id.clone()),
         title: match task {
             Some(task) => task.title.clone(),
             None => crate::transcript::single_line(&crate::home::chat_title(chat)),
@@ -263,10 +261,8 @@ impl Filter {
 }
 
 pub(crate) enum MissionIndexEvent {
-    OpenTree {
-        root: String,
-        task_id: Option<String>,
-    },
+    OpenTree(String),
+    OpenTreeAt(String, super::Selection),
     Tree(StripTreeEvent),
 }
 
@@ -305,8 +301,15 @@ impl MissionIndex {
                 let id = root.to_string();
                 let tree =
                     cx.new(|cx| StripTree::new(state, id, false, false, TreeHost::Index, cx));
-                let events = cx.subscribe(&tree, |_, _, event: &StripTreeEvent, cx| {
-                    cx.emit(MissionIndexEvent::Tree(event.clone()))
+                let owner = root.to_string();
+                let events = cx.subscribe(&tree, move |_, _, event: &StripTreeEvent, cx| {
+                    cx.emit(match event {
+                        StripTreeEvent::Open {
+                            selection,
+                            chat_id: None,
+                        } => MissionIndexEvent::OpenTreeAt(owner.clone(), selection.clone()),
+                        event => MissionIndexEvent::Tree(event.clone()),
+                    })
                 });
                 self.trees.insert(root.to_string(), (tree.clone(), events));
                 tree
@@ -556,7 +559,7 @@ impl MissionIndex {
             Kind::Mission => "Open mission",
             Kind::Tree => "Open tree",
         };
-        let (root, task_id) = (row.root.clone(), row.task_id.clone());
+        let root = row.root.clone();
         let open_selector = format!("mission-index-open-{}", row.root);
         let openness = tree.as_ref().map_or(0.0, |tree| tree.read(cx).openness());
         let body = tree.filter(|_| band > 0.5).map(|tree| {
@@ -595,10 +598,7 @@ impl MissionIndex {
                                         .text_color(theme.text_muted),
                                 )
                                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                    cx.emit(MissionIndexEvent::OpenTree {
-                                        root: root.clone(),
-                                        task_id: task_id.clone(),
-                                    })
+                                    cx.emit(MissionIndexEvent::OpenTree(root.clone()))
                                 })),
                         ),
                 )

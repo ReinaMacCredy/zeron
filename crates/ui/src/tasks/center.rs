@@ -29,6 +29,7 @@ use crate::theme::Theme;
 use crate::transcript::Transcript;
 use crate::typography::ui_rems;
 
+mod outline;
 mod spine;
 
 const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
@@ -53,6 +54,17 @@ pub enum TaskCenterEvent {
         approve: bool,
     },
     OpenChat(String),
+    OpenNative {
+        parent_chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
+    },
+    AddPlan(String),
+    Settle {
+        chat_id: String,
+        settled: bool,
+    },
     Selected,
     Back,
 }
@@ -377,7 +389,7 @@ struct Thread {
 
 pub struct TaskCenter {
     state: Entity<AppState>,
-    task_id: String,
+    key: String,
     selected: Selection,
     draft: Draft,
     sent: Option<Draft>,
@@ -406,6 +418,7 @@ pub struct TaskCenter {
     asks: HashMap<String, Ask>,
     focus: FocusHandle,
     shimmer_since: Instant,
+    outline: Option<(String, Entity<super::StripTree>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -418,7 +431,7 @@ impl Focusable for TaskCenter {
 }
 
 impl TaskCenter {
-    pub fn new(state: Entity<AppState>, task_id: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, key: String, cx: &mut Context<Self>) -> Self {
         let add = cx.new(|cx| {
             ComposerInput::new("Add a step", cx)
                 .with_single_line()
@@ -437,7 +450,7 @@ impl TaskCenter {
             clock: None,
             asks: HashMap::new(),
             state,
-            task_id,
+            key,
             selected: Selection::Lead,
             draft: Draft::default(),
             sent: None,
@@ -462,12 +475,55 @@ impl TaskCenter {
             press: 0.0,
             focus: cx.focus_handle(),
             shimmer_since: Instant::now(),
+            outline: None,
             _subscriptions: vec![add_events, state_changes],
         }
     }
 
-    pub fn task_id(&self) -> &str {
-        &self.task_id
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The page key is a task id from before trees, or a root chat id; a key that names a
+    /// task keeps that task even once it is done.
+    pub(crate) fn resolve<'a>(
+        &self,
+        state: &'a AppState,
+    ) -> (Option<&'a str>, Option<&'a zeron_proto::Task>) {
+        match state
+            .tasks
+            .iter()
+            .find(|task| task.id == self.key && !task.deleted)
+        {
+            Some(task) => (task.chat_id.as_deref(), Some(task)),
+            None => (
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == self.key)
+                    .map(|chat| chat.id.as_str()),
+                super::plan_led_by(&state.tasks, &self.key),
+            ),
+        }
+    }
+
+    pub fn title(&self, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        match self.resolve(state) {
+            (_, Some(task)) => Some(task.title.clone()),
+            (Some(root), None) => state
+                .chats
+                .iter()
+                .find(|chat| chat.id == root)
+                .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat))),
+            (None, None) => None,
+        }
+    }
+
+    pub(super) fn plan_id(&self, cx: &App) -> Option<String> {
+        self.resolve(self.state.read(cx))
+            .1
+            .map(|task| task.id.clone())
     }
 
     pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
@@ -480,20 +536,26 @@ impl TaskCenter {
 
     pub fn live_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let task = state
-            .tasks
-            .iter()
-            .find(|task| task.id == self.task_id && !task.deleted)?;
-        if let Selection::Step(id) = &self.selected
-            && let Some(chat) = state
-                .task_steps
-                .iter()
-                .find(|step| &step.id == id && !step.deleted)
-                .and_then(|step| step_chat(&state.chats, step))
-        {
-            return Some(chat.id.clone());
+        let (root, _) = self.resolve(state);
+        match &self.selected {
+            Selection::Step(id) => {
+                if let Some(chat) = state
+                    .task_steps
+                    .iter()
+                    .find(|step| &step.id == id && !step.deleted)
+                    .and_then(|step| step_chat(&state.chats, step))
+                {
+                    return Some(chat.id.clone());
+                }
+            }
+            Selection::Node(id) => {
+                if let Some(chat) = state.chats.iter().find(|chat| &chat.id == id) {
+                    return Some(chat.id.clone());
+                }
+            }
+            Selection::Lead => {}
         }
-        linked_chat(&state.chats, task).map(|chat| chat.id.clone())
+        root.map(str::to_owned)
     }
 
     pub fn live_chat_id(&self) -> Option<&str> {
@@ -524,10 +586,8 @@ impl TaskCenter {
 
     fn task_and_plan(&self, cx: &App) -> Option<(zeron_proto::Task, Rollup)> {
         let state = self.state.read(cx);
-        state
-            .tasks
-            .iter()
-            .find(|task| task.id == self.task_id && !task.deleted)
+        self.resolve(state)
+            .1
             .map(|task| (task.clone(), rollup(state, task, Utc::now())))
     }
 
@@ -884,20 +944,20 @@ impl TaskCenter {
 
     fn send_edits(&mut self, approve: bool, cx: &mut Context<Self>) {
         self.commit_edit(cx);
-        let Some((_, plan)) = self.task_and_plan(cx) else {
+        let Some((task, plan)) = self.task_and_plan(cx) else {
             return;
         };
         self.draft.retain_live(&plan);
         if self.draft.count() == 0 {
             if approve {
-                cx.emit(TaskCenterEvent::ApprovePlan(self.task_id.clone()));
+                cx.emit(TaskCenterEvent::ApprovePlan(task.id.clone()));
             }
             return;
         }
         let edit = self.draft.edit(&plan);
         self.sent = Some(std::mem::take(&mut self.draft));
         cx.emit(TaskCenterEvent::EditPlan {
-            task_id: self.task_id.clone(),
+            task_id: task.id.clone(),
             edit,
             approve,
         });
@@ -1286,17 +1346,19 @@ impl TaskCenter {
             .gap(px(12.0))
             .text_size(ui_rems(13.0))
             .text_color(theme.text_muted)
-            .child("This task is gone. It was deleted, or it has not synced yet.")
+            .child("This tree is gone. It was deleted, or it has not synced yet.")
             .child(
-                widgets::text_action(theme, widgets::ActionTone::Filled, "Back to Tasks")
-                    .id("task-center-missing-back")
-                    .debug_selector(|| "task-center-missing-back".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Back to Tasks")
-                    .rounded_full()
-                    .on_click(
-                        cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)),
-                    ),
+                widgets::text_action(
+                    theme,
+                    widgets::ActionTone::Filled,
+                    "Back to Mission Control",
+                )
+                .id("task-center-missing-back")
+                .debug_selector(|| "task-center-missing-back".into())
+                .role(gpui::Role::Button)
+                .aria_label("Back to Mission Control")
+                .rounded_full()
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back))),
             )
             .into_any_element()
     }
@@ -2081,16 +2143,13 @@ impl TaskCenter {
 impl Render for TaskCenter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let found = {
-            let state = self.state.read(cx);
-            state
-                .tasks
-                .iter()
-                .find(|task| task.id == self.task_id && !task.deleted)
-                .map(|task| (task.clone(), rollup(state, task, Utc::now())))
-        };
+        let found = self.task_and_plan(cx);
         let Some((task, plan)) = found else {
-            return self.render_missing(&theme, cx);
+            let root = self.resolve(self.state.read(cx)).0.map(str::to_owned);
+            return match root {
+                Some(root) => self.render_tree_page(&root, &theme, window, cx),
+                None => self.render_missing(&theme, cx),
+            };
         };
         self.draft.retain_live(&plan);
         let editable = task.completed_at.is_none() && plan.lead.is_some();

@@ -272,7 +272,13 @@ impl Shell {
         let (task_id, raiser) = crate::supervisor::row_origin(row);
         match self.route {
             Route::Supervisor => true,
-            Route::TaskCenter => task_id.is_some() && self.task_center_task.as_deref() == task_id,
+            Route::TaskCenter => {
+                let state = self.state.read(cx);
+                task_id.is_some_and(|task_id| {
+                    self.task_center_task.as_deref()
+                        == Some(super::task_actions::tree_key(state, task_id).as_str())
+                })
+            }
             Route::Chat => self.state.read(cx).selected_chat.as_deref() == Some(raiser),
             _ => false,
         }

@@ -55,6 +55,7 @@ pub(crate) enum TreeHost {
     Supervisor,
     Intro,
     Index,
+    Center,
 }
 
 pub(crate) struct SampleRow {
@@ -117,6 +118,7 @@ pub(crate) struct StripTree {
     menu: Popup<RowMenu>,
     compact: bool,
     lit: bool,
+    picked: Option<String>,
     _state: Subscription,
 }
 
@@ -152,6 +154,7 @@ impl StripTree {
             menu: Popup::default(),
             compact: false,
             lit: false,
+            picked: None,
         }
     }
 
@@ -190,6 +193,13 @@ impl StripTree {
     pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
         if self.compact != compact {
             self.compact = compact;
+            cx.notify();
+        }
+    }
+
+    pub fn set_picked(&mut self, picked: Option<String>, cx: &mut Context<Self>) {
+        if self.picked != picked {
+            self.picked = picked;
             cx.notify();
         }
     }
@@ -441,7 +451,7 @@ impl Render for StripTree {
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
             TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),
-            TreeHost::Supervisor | TreeHost::Index => Theme::of(cx).clone(),
+            TreeHost::Supervisor | TreeHost::Index | TreeHost::Center => Theme::of(cx).clone(),
         };
         let Some(rows) = self.rows(cx) else {
             return div().into_any_element();
@@ -743,6 +753,9 @@ impl Render for StripTree {
                     .pr(px(8.0))
                     .rounded(px(6.0))
                     .when(self.lit && row.head.is_some(), |el| el.bg(theme.wash(0.07)))
+                    .when(self.picked.as_deref() == Some(row.id.as_str()), |el| {
+                        el.bg(theme.wash(0.09))
+                    })
                     .when(opens, |el| {
                         el.cursor_pointer()
                             .hover(|s| s.bg(theme.wash(0.07)))

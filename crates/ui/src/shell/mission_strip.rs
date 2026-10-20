@@ -265,9 +265,10 @@ impl Shell {
         selection: Selection,
         cx: &mut Context<Self>,
     ) {
-        let center = self.task_center_for(task_id.clone(), cx);
+        let key = super::task_actions::tree_key(self.state.read(cx), &task_id);
+        let center = self.task_center_for(key.clone(), cx);
         center.update(cx, |center, cx| center.select(selection, cx));
-        self.open_task_center(task_id, cx);
+        self.open_task_center(key, cx);
     }
 
     pub(super) fn center_back_chat(&self, cx: &App) -> Option<String> {
@@ -285,7 +286,7 @@ impl Shell {
         if self.center_back_chat(cx).is_some() {
             self.navigate_back(cx);
         } else {
-            self.back_to_tasks(cx);
+            self.back_to_mission_control(cx);
         }
     }
 

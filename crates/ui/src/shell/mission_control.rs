@@ -39,10 +39,12 @@ impl Shell {
 
     fn on_mission_index_event(&mut self, event: &MissionIndexEvent, cx: &mut Context<Self>) {
         match event {
-            MissionIndexEvent::OpenTree { root, task_id } => match task_id {
-                Some(task_id) => self.open_task_center(task_id.clone(), cx),
-                None => self.open_chat(root.clone(), cx),
-            },
+            MissionIndexEvent::OpenTree(root) => self.open_task_center(root.clone(), cx),
+            MissionIndexEvent::OpenTreeAt(root, selection) => {
+                let center = self.task_center_for(root.clone(), cx);
+                center.update(cx, |center, cx| center.select(selection.clone(), cx));
+                self.open_task_center(root.clone(), cx);
+            }
             MissionIndexEvent::Tree(StripTreeEvent::Open {
                 chat_id: Some(chat_id),
                 ..
