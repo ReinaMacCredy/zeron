@@ -651,6 +651,12 @@ async fn install(
                 agent.distribution.npx.clone().ok_or_else(|| {
                     EngineError::Other(format!("{} has no npx package", agent.name))
                 })?;
+            if !npm_spec_ok(&package.package) {
+                return Err(EngineError::Other(format!(
+                    "{}'s npx package {} is not a pinned npm package",
+                    agent.name, package.package
+                )));
+            }
             let entry = zeron_harness::ensure_npm_tool(
                 &package.package,
                 npm_bin_name(&package.package),
@@ -687,6 +693,31 @@ async fn install(
             ))
         }
     }
+}
+
+fn npm_spec_ok(spec: &str) -> bool {
+    let Some((name, version)) = spec.get(1..).and_then(|rest| rest.rsplit_once('@')) else {
+        return false;
+    };
+    let name = format!("{}{name}", &spec[..1]);
+    let part = |part: &str| {
+        part.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && part.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_')
+            })
+    };
+    let named = match name.strip_prefix('@').map(|scoped| scoped.split_once('/')) {
+        Some(Some((scope, bare))) => part(scope) && part(bare),
+        Some(None) => false,
+        None => part(&name),
+    };
+    named
+        && version.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
 fn npm_bin_name(package: &str) -> &str {
@@ -837,6 +868,29 @@ mod tests {
             "a name prefix outranks a description hit"
         );
         assert!(rank(&agents, "nothing matches", |_| false).is_empty());
+    }
+
+    #[test]
+    fn only_pinned_npm_packages_install() {
+        for good in [
+            "@gamma/code@1.0.0",
+            "demo@1.0.0",
+            "a.b-c_d@0.1.0-beta.1+build",
+        ] {
+            assert!(npm_spec_ok(good), "{good}");
+        }
+        for bad in [
+            "demo",
+            "@gamma/code",
+            "--global@1.0.0",
+            "git+https://x/y.git@1.0.0",
+            "file:../x@1.0.0",
+            "demo@latest",
+            "@scope@1.0.0",
+            "Demo@1.0.0",
+        ] {
+            assert!(!npm_spec_ok(bad), "{bad}");
+        }
     }
 
     fn registry_instance(version: &str, distribution: AcpDistribution) -> ProviderInstance {
