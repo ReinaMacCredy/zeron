@@ -6634,7 +6634,8 @@ impl Pickers {
             strip = strip.child(self.instance_tab(instance, is_viewed, &theme, cx));
         }
 
-        if let Some((key, ix)) = selected_tab
+        if !compact
+            && let Some((key, ix)) = selected_tab
             && self.revealed_model_tab.as_ref() != Some(&key)
         {
             self.model_tabs_scroll.scroll_to_item(ix);
