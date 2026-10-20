@@ -500,6 +500,31 @@ impl TaskCard {
         if arrived {
             self.save_images(cx);
         }
+        self.adopt_stored_text(cx);
+    }
+
+    fn adopt_stored_text(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let Some(row) = state.tasks.iter().find(|task| task.id == open.task_id) else {
+            return;
+        };
+        let title = (row.title != open.saved_title
+            && open.title.read(cx).text().trim() == open.saved_title)
+            .then(|| row.title.clone());
+        let notes = (row.notes != open.saved_notes
+            && open.notes.read(cx).text() == open.saved_notes)
+            .then(|| row.notes.clone());
+        if let Some(title) = title {
+            open.saved_title = title.clone();
+            open.title.update(cx, |input, cx| input.set_text(title, cx));
+        }
+        if let Some(notes) = notes {
+            open.saved_notes = notes.clone();
+            open.notes.update(cx, |input, cx| input.set_text(notes, cx));
+        }
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
