@@ -1353,7 +1353,6 @@ impl SupervisorPage {
         )
         .role(gpui::Role::Button)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.wash(0.04)))
         .child(dim(theme, asked))
         .child(faint(theme, clip(&line)))
         .child(
