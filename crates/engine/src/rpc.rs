@@ -3580,6 +3580,7 @@ impl RpcService for EngineRpc {
             }
             methods::SEND_THREAD_MESSAGE => {
                 let p: SendThreadMessageParams = parse_params(params)?;
+                self.refuse_held_thread(&p.chat_id)?;
                 let basis = self
                     .supervisor_gate(Some(&p.from_chat_id), |s| s.message_threads, supervisor::MESSAGE_OFF)?
                     .then(|| {
@@ -4272,7 +4273,8 @@ impl RpcService for EngineRpc {
             | methods::GET_SUPERVISOR_SETTINGS
             | methods::SET_SUPERVISOR_SETTINGS
             | methods::SUPERVISOR_ACT
-            | methods::REQUEST_SUPERVISOR_CHECK => self.supervisor_rpc(method, params).await,
+            | methods::REQUEST_SUPERVISOR_CHECK
+            | methods::RESUME_SUPERVISOR_STEP => self.supervisor_rpc(method, params).await,
             methods::WATCH_TASKS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tasks())))
             }

@@ -1063,16 +1063,50 @@ impl SupervisorPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let key = format!("item:{item_id}");
-        self.replies.insert(key.clone(), Reply::Sending);
         let params = serde_json::json!({
             "op": "resolveSupervisorItem", "itemId": item_id, "choice": choice,
         });
+        self.call(
+            engine,
+            format!("item:{item_id}"),
+            methods::MUTATE,
+            params,
+            choice,
+            cx,
+        );
+    }
+
+    fn resume_step(&mut self, row_id: &str, step_id: &str, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({ "stepId": step_id });
+        let key = format!("resume:{row_id}");
+        self.call(
+            engine,
+            key,
+            methods::RESUME_SUPERVISOR_STEP,
+            params,
+            String::new(),
+            cx,
+        );
+    }
+
+    fn call(
+        &mut self,
+        engine: crate::state::EngineHandle,
+        key: String,
+        method: &'static str,
+        params: serde_json::Value,
+        sent: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.replies.insert(key.clone(), Reply::Sending);
         cx.spawn(async move |page, cx| {
-            let result = engine.client().call(methods::MUTATE, params).await;
+            let result = engine.client().call(method, params).await;
             page.update(cx, |page, cx| {
                 let reply = match result {
-                    Ok(_) => Reply::Sent(choice),
+                    Ok(_) => Reply::Sent(sent),
                     Err(err) => Reply::Failed(err.to_string()),
                 };
                 if page.replies.contains_key(&key) {
@@ -2482,6 +2516,38 @@ impl SupervisorPage {
             None => title.clone(),
         };
         let id = row.id.clone();
+        let paused = row
+            .step_ids
+            .first()
+            .filter(|_| !done && row.chips.contains(&InterventionChip::StepPaused))
+            .cloned();
+        let resume = paused.map(|step_id| {
+            let reply = format!("resume:{id}");
+            let failed = match self.replies.get(&reply) {
+                Some(Reply::Failed(error)) => Some(error.clone()),
+                _ => None,
+            };
+            let row_id = id.clone();
+            let button = div().flex().child(
+                pill_button(
+                    theme,
+                    format!("supervisor-intervention-{id}-resume"),
+                    "Resume".into(),
+                    widgets::ActionTone::Outlined,
+                )
+                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                    page.resume_step(&row_id, &step_id, cx);
+                })),
+            );
+            div()
+                .mt(px(4.0))
+                .flex()
+                .flex_col()
+                .child(settle_while(self.answering(&reply), button))
+                .children(failed.map(|error| {
+                    widgets::error_strip(theme, format!("Could not resume the step: {error}"))
+                }))
+        });
         card(
             theme,
             &done_key(key, done),
@@ -2498,7 +2564,8 @@ impl SupervisorPage {
         .child(
             card_body()
                 .child(card_title(theme, title, false))
-                .child(card_meta(theme).child(meta.join(" · "))),
+                .child(card_meta(theme).child(meta.join(" · ")))
+                .children(resume),
         )
         .children(face.map(|face| self.render_chip(key, &face, now, theme)))
         .into_any_element()

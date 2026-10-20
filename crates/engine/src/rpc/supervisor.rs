@@ -75,6 +75,14 @@ enum SupervisorAction {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ResumeStepParams {
+    step_id: String,
+    #[serde(default)]
+    from_chat_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SupervisorActParams {
     from_chat_id: String,
     #[serde(flatten)]
@@ -115,6 +123,20 @@ impl EngineRpc {
         }
     }
 
+    pub(super) fn refuse_held_thread(&self, chat_id: &str) -> Result<(), RpcError> {
+        let Some(hold) = self.doc_host.supervisor().and_then(|store| {
+            store.holds().into_iter().find(|hold| {
+                hold.resumed_at.is_none() && hold.thread_id.as_deref() == Some(chat_id)
+            })
+        }) else {
+            return Ok(());
+        };
+        Err(refused(&format!(
+            "Thread {chat_id} runs step {}, which the Supervisor paused for {}: it takes no messages until the step is resumed.",
+            hold.step_id, hold.resource
+        )))
+    }
+
     pub(super) fn supervisor_store(&self) -> Result<&SupervisorStore, RpcError> {
         self.doc_host
             .supervisor()
@@ -152,6 +174,16 @@ impl EngineRpc {
             methods::REQUEST_SUPERVISOR_CHECK => {
                 self.doc_host.request_resource_check();
                 RpcReply::value(&serde_json::json!({}))
+            }
+            methods::RESUME_SUPERVISOR_STEP => {
+                let p: ResumeStepParams = parse_params(params)?;
+                if p.from_chat_id.is_some() {
+                    return Err(refused(
+                        "Only the person resumes a step from the Supervisor page",
+                    ));
+                }
+                let reply = self.resume_step(None, &p.step_id, None, "").await?;
+                RpcReply::value(&reply)
             }
             _ => Err(RpcError::UnknownMethod(method.to_string())),
         }
@@ -324,19 +356,16 @@ impl EngineRpc {
                 resource,
                 reason,
             } => {
-                self.resume_step(from, &step_id, resource.as_deref(), &reason)
+                self.resume_step(Some(from), &step_id, resource.as_deref(), &reason)
                     .await
             }
             SupervisorAction::Check { task_id } => self.check_resources(task_id.as_deref()).await,
         }
     }
 
-    fn pause_ready(&self, reason: &str, does: &str) -> Result<(), RpcError> {
+    fn reason_ready(&self, reason: &str, does: &str) -> Result<(), RpcError> {
         if !cfg!(unix) {
             return Err(refused(UNIX_ONLY));
-        }
-        if !self.registry.supervisor_settings().pause_steps {
-            return Err(refused(PAUSE_OFF));
         }
         if reason.trim().is_empty() {
             return Err(refused(&format!(
@@ -353,7 +382,10 @@ impl EngineRpc {
         resource: &str,
         reason: &str,
     ) -> Result<serde_json::Value, RpcError> {
-        self.pause_ready(reason, "stopped")?;
+        if !self.registry.supervisor_settings().pause_steps {
+            return Err(refused(PAUSE_OFF));
+        }
+        self.reason_ready(reason, "stopped")?;
         let key = ResourceKey::parse(resource).ok_or_else(|| {
             refused("resource is port:<n>, slot:<name> or path:<path>, as the mission declared it")
         })?;
@@ -420,7 +452,7 @@ impl EngineRpc {
             (None, _) => "It has not started.".to_string(),
         };
         let text = format!(
-            "The Supervisor paused step \"{}\" (taskStepId {}) because {key} is contended with another mission.\n\nWhy: {reason}\n\n{thread} Do not run it again until the Supervisor resumes it: create_thread with this taskStepId is refused until then. Keep working on steps that do not need {key}.",
+            "The Supervisor paused step \"{}\" (taskStepId {}) because {key} is contended with another mission.\n\nWhy: {reason}\n\n{thread} Do not run it again until the Supervisor resumes it: create_thread with this taskStepId and send_message_to_thread to its thread are refused until then. Keep working on steps that do not need {key}.",
             step.title, step.id
         );
         let message_id = match self
@@ -449,12 +481,14 @@ impl EngineRpc {
 
     async fn resume_step(
         &self,
-        from: &str,
+        from: Option<&str>,
         step_id: &str,
         resource: Option<&str>,
         reason: &str,
     ) -> Result<serde_json::Value, RpcError> {
-        self.pause_ready(reason, "resumes")?;
+        if from.is_some() {
+            self.reason_ready(reason, "resumes")?;
+        }
         let store = self.supervisor_store()?;
         let hold = store
             .hold_of(step_id)
@@ -468,26 +502,43 @@ impl EngineRpc {
                 hold.resource
             )));
         }
-        let step = self.step_or_refuse(step_id)?;
+        let Some(step) = self.workspace.task_step(step_id) else {
+            store.resume_hold(&hold.row_id).map_err(failed)?;
+            return Ok(serde_json::json!({ "stepId": step_id, "removed": true }));
+        };
         let task = self.task_or_refuse(&step.task_id)?;
         let lead = self.lead_of(&task)?;
-        let basis = self.doc_host.intervention_basis(
-            InterventionKind::Resume,
-            from,
-            Some(&lead),
-            Some(step_id),
-        );
+        let basis = from.map(|from| {
+            self.doc_host.intervention_basis(
+                InterventionKind::Resume,
+                from,
+                Some(&lead),
+                Some(step_id),
+            )
+        });
         store.resume_hold(&hold.row_id).map_err(failed)?;
         let reason = reason.trim();
+        let who = if from.is_some() {
+            "The Supervisor"
+        } else {
+            "The person"
+        };
+        let why = if reason.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nWhy: {reason}")
+        };
         let text = format!(
-            "The Supervisor resumed step \"{}\" (taskStepId {}), paused for {}.\n\nWhy: {reason}\n\nStart it again with create_thread and taskStepId {} when it is next to run.",
+            "{who} resumed step \"{}\" (taskStepId {}), paused for {}.{why}\n\nStart it again with create_thread and taskStepId {} when it is next to run.",
             step.title, step.id, hold.resource, step.id
         );
         let message_id = self
-            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
+            .send_to_task_thread(&task, &lead, from, &text, Vec::new())
             .await?;
-        self.doc_host
-            .record_intervention(basis, Some(message_id.clone()), None, reason);
+        if let Some(basis) = basis {
+            self.doc_host
+                .record_intervention(basis, Some(message_id.clone()), None, reason);
+        }
         Ok(serde_json::json!({ "stepId": step.id, "leadThreadId": lead, "messageId": message_id }))
     }
 

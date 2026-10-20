@@ -14,7 +14,7 @@ It acts through the missions' leads, within the switches under **Authority**:
 
 - It messages a lead or a step's thread, and answers their questions and tool approvals.
 - It re-briefs a step: it rewrites that step's title and spec, and the lead gets one message saying what changed and why. It never changes the plan's overview and never adds or removes a step.
-- It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Resources** below): it stops the step's thread, the lead cannot run that step again until it is resumed, and the lead gets one message each time.
+- It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Resources** below): it stops the step's thread, no thread can run that step again or message its thread until it is resumed, and the lead gets one message each time. You can resume it yourself from the Pause row.
 - It starts a new mission. The new lead writes a plan that you review before any step runs.
 - It asks you. A change to a mission's goal or spend, or a decision it should not make alone, becomes a **Needs you** card.
 
@@ -76,12 +76,12 @@ The chip on the right shows only what has happened since, and changes as it happ
 
 - **Sent**: the Supervisor's message went to the thread.
 - **Lead ran a turn**: the lead answered after it.
-- **Step paused**: the step is still paused and its thread is not running.
+- **Step paused**: the step is still paused. **Resume** on the row lifts the pause yourself, and the lead is told.
 - **No effect yet**: **Sent** is still all that happened ten minutes later.
 
 The chips never judge whether the action helped; the Supervisor's own words are its judgment.
 
-An intervention moves to **Earlier** once the work changed after it, or after 24 hours: **Plan edited on steps 2, 3** (those steps' titles or specs changed since), **Step 2 thread completed a turn**, **Resource freed** (a check after a pause found the process gone or the port closed), or the paused step was resumed. An intervention that shows **No effect yet** stays in the feed.
+An intervention moves to **Earlier** once the work changed after it, or after 24 hours: **Plan edited on steps 2, 3** (those steps' titles or specs changed since), **Step 2 thread completed a turn**, or **Resource freed** (a check after a pause found the process gone or the port closed). A pause stays in the feed while its step is paused, even after the resource is freed, which also wakes the Supervisor; it moves to **Earlier** once the step is resumed or removed. An intervention that shows **No effect yet** stays in the feed.
 
 ### Resources
 

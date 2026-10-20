@@ -153,26 +153,11 @@ fn work_effect(chip: &InterventionChip) -> bool {
     )
 }
 
-fn resumed(row: &SupervisorIntervention, rows: &[SupervisorIntervention]) -> bool {
-    row.kind == InterventionKind::Pause
-        && rows.iter().any(|other| {
-            other.kind == InterventionKind::Resume
-                && other.at >= row.at
-                && other.task_id == row.task_id
-                && other
-                    .step_ids
-                    .iter()
-                    .any(|step| row.step_ids.contains(step))
-        })
-}
-
-pub(crate) fn intervention_open(
-    row: &SupervisorIntervention,
-    rows: &[SupervisorIntervention],
-    now: DateTime<Utc>,
-) -> bool {
+pub(crate) fn intervention_open(row: &SupervisorIntervention, now: DateTime<Utc>) -> bool {
+    if row.kind == InterventionKind::Pause {
+        return row.chips.contains(&InterventionChip::StepPaused);
+    }
     !row.chips.iter().any(work_effect)
-        && !resumed(row, rows)
         && (now - row.at < Duration::hours(OPEN_HOURS) || no_effect_yet(row, now))
 }
 
@@ -181,6 +166,7 @@ pub(crate) fn next_expiry(
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     rows.iter()
+        .filter(|row| row.kind != InterventionKind::Pause)
         .map(|row| row.at + Duration::hours(OPEN_HOURS))
         .filter(|at| *at > now)
         .min()
@@ -222,7 +208,7 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
             at: intervention.at,
             entry: Entry::Intervention(intervention.clone()),
         };
-        if intervention_open(intervention, &snapshot.interventions, now) {
+        if intervention_open(intervention, now) {
             rest.push(row);
         } else {
             earlier.push(row);
@@ -536,6 +522,16 @@ mod tests {
                 intervention("resume", minutes(now, 9), InterventionKind::Resume, sent()),
                 intervention("paused", minutes(now, 10), InterventionKind::Pause, sent()),
                 intervention(
+                    "held",
+                    minutes(now, 11),
+                    InterventionKind::Pause,
+                    vec![
+                        InterventionChip::Sent,
+                        InterventionChip::StepPaused,
+                        InterventionChip::ResourceFreed,
+                    ],
+                ),
+                intervention(
                     "stale",
                     minutes(now, 25 * 60),
                     InterventionKind::Send,
@@ -570,6 +566,7 @@ mod tests {
                 "intervention:fresh",
                 "intervention:turned",
                 "intervention:resume",
+                "intervention:held",
                 "intervention:ignored",
             ]
         );
@@ -610,7 +607,7 @@ mod tests {
         }
         assert_eq!(
             next_expiry(&snapshot.interventions, now),
-            Some(minutes(now, 10) + Duration::hours(OPEN_HOURS))
+            Some(minutes(now, 9) + Duration::hours(OPEN_HOURS))
         );
     }
 

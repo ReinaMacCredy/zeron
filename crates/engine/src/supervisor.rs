@@ -1055,7 +1055,7 @@ pub(crate) fn chips(
     record: &InterventionRecord,
     plan: &[TaskStep],
     lead_target: Option<&[SessionMessageEntry]>,
-    hold: Option<(&PauseHold, bool)>,
+    hold: Option<&PauseHold>,
 ) -> Vec<InterventionChip> {
     let mut chips = Vec::new();
     let Some(message_id) = record.row.message_id.as_deref() else {
@@ -1102,8 +1102,8 @@ pub(crate) fn chips(
     if !completed.is_empty() {
         chips.push(InterventionChip::StepCompletedTurn { steps: completed });
     }
-    if let Some((hold, thread_live)) = hold {
-        if hold.resumed_at.is_none() && !thread_live {
+    if let Some(hold) = hold {
+        if hold.resumed_at.is_none() {
             chips.push(InterventionChip::StepPaused);
         }
         if hold.freed_at.is_some() {

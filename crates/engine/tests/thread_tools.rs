@@ -3606,6 +3606,17 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
             "the lead's pause message",
         )
         .await;
+        let err = refused(
+            call(
+                zeron_rpc::methods::SEND_THREAD_MESSAGE,
+                serde_json::json!({ "chatId": second, "fromChatId": "task-lead", "text": "continue" }),
+            )
+            .await,
+        );
+        assert!(
+            err.contains("takes no messages until the step is resumed"),
+            "{err}"
+        );
         drop(listener);
         act(serde_json::json!({ "action": "check" })).await.unwrap();
         let snapshot = supervisor_until(&rpc, |s| {
@@ -3617,6 +3628,32 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         .await;
         assert_eq!(snapshot.interventions[0].kind, InterventionKind::Pause);
         assert!(shared(&snapshot, ResourceState::Clear), "the port closed");
+        let freed = format!("{port} is free; step \"Write the docs\" is still paused");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !wakes(&rig).iter().any(|wake| wake.contains(&freed)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the freed wake"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let err = refused(
+            call(
+                zeron_rpc::methods::RESUME_SUPERVISOR_STEP,
+                serde_json::json!({ "stepId": steps[1].id, "fromChatId": "task-lead" }),
+            )
+            .await,
+        );
+        assert!(err.contains("Only the person"), "{err}");
+        call(
+            zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+            serde_json::json!({
+                "messageThreads": true, "rebrief": true, "pauseSteps": false,
+                "startMissions": false, "heartbeatMinutes": 0,
+            }),
+        )
+        .await
+        .unwrap();
         act(serde_json::json!({
             "action": "resume", "stepId": steps[1].id, "reason": "The port is free",
         }))

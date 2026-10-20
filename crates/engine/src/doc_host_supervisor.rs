@@ -16,9 +16,10 @@ use super::*;
 use crate::registry::HarnessRegistry;
 use crate::supervisor::fence;
 use crate::supervisor::{
-    Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
-    StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader,
-    chips, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc, wake_text,
+    Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, PauseHold, Projections, Reply,
+    Stall, StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry,
+    WakeHeader, chips, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc,
+    wake_text,
 };
 use crate::supervisor_resources::{
     CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
@@ -655,6 +656,14 @@ impl DocHost {
                 "Mission marked done".to_string(),
             ));
         }
+        for hold in store.holds() {
+            if hold.resumed_at.is_none()
+                && workspace.task_step(&hold.step_id).is_none()
+                && let Err(err) = store.resume_hold(&hold.row_id)
+            {
+                tracing::warn!(error = %err, "releasing the hold of a removed step failed");
+            }
+        }
         let supervisor = self.supervisor_chat();
         if store.take_refresh(now) {
             store.set_projections(self.projections(
@@ -801,6 +810,15 @@ impl DocHost {
 
     fn apply_resource_check(&self, store: &SupervisorStore, outcome: CheckOutcome) {
         let opened = store.resources(|resources| resources.apply(outcome.verdicts, now_ms()));
+        let freed: Vec<PauseHold> = store
+            .holds()
+            .into_iter()
+            .filter(|hold| {
+                hold.freed_at.is_none()
+                    && hold.resumed_at.is_none()
+                    && outcome.freed.contains(&hold.row_id)
+            })
+            .collect();
         if !outcome.freed.is_empty()
             && let Err(err) = store.mark_freed(&outcome.freed)
         {
@@ -809,6 +827,28 @@ impl DocHost {
         store.mark_stale();
         for (key, contention) in opened {
             self.supervisor_event(self.contention_event(&key, &contention));
+        }
+        let workspace = self.workspace();
+        for hold in freed {
+            let title = workspace
+                .and_then(|workspace| workspace.task_step(&hold.step_id))
+                .map_or_else(String::new, |step| step.title);
+            let mut event = SupervisorEvent::new(
+                Kind::Resource,
+                format!("freed:{}", hold.row_id),
+                Some(&hold.task_id),
+                format!(
+                    "{} is free; step \"{}\" is still paused",
+                    hold.resource,
+                    one_line(&title, TITLE_CHARS)
+                ),
+            );
+            event.summary.step_id = Some(hold.step_id.clone());
+            event.detail.push(format!(
+                "Resume it with the supervisor tool, action \"resume\", stepId {}, once nothing else needs {}.",
+                hold.step_id, hold.resource
+            ));
+            self.supervisor_event(event);
         }
     }
 
@@ -1048,17 +1088,7 @@ impl DocHost {
                 .clone()
                 .filter(|target| lead.as_ref() == Some(target))
                 .map(|target| read(&target));
-            let hold = holds
-                .iter()
-                .find(|hold| hold.row_id == record.row.id)
-                .map(|hold| {
-                    let running = hold
-                        .thread_id
-                        .as_deref()
-                        .and_then(|thread| sessions.session_status(thread))
-                        .is_some_and(|session| live(session.status));
-                    (hold, running)
-                });
+            let hold = holds.iter().find(|hold| hold.row_id == record.row.id);
             projections.chips.insert(
                 record.row.id.clone(),
                 chips(record, &plan, target.as_deref(), hold),
@@ -1234,6 +1264,11 @@ impl DocHost {
                 .strip_prefix("escalation:")
                 .and_then(|item| self.supervisor().map(|store| store.item_open(item)))
                 .unwrap_or(false),
+            Kind::Resource if summary.key.starts_with("freed:") => summary
+                .step_id
+                .as_deref()
+                .zip(self.supervisor())
+                .is_some_and(|(step, store)| store.hold_of(step).is_some()),
             Kind::Resource => summary
                 .key
                 .strip_prefix("res:")
