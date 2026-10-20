@@ -896,6 +896,17 @@ impl ThreadTools {
             .ok_or_else(|| format!("no thread {thread_id} on this device"))
     }
 
+    /// A peer this chat may read or change: a Zeron system chat (the Supervisor) only takes messages.
+    async fn open_peer(&self, thread_id: &str) -> Result<Chat, String> {
+        let chat = self.peer(thread_id).await?;
+        if chat.is_system() && chat.id != self.chat_id {
+            return Err(format!(
+                "thread {thread_id} is a Zeron system chat: only the person reads, stops or changes it; send it a message instead"
+            ));
+        }
+        Ok(chat)
+    }
+
     fn thread_id<'a>(args: &'a Value) -> Result<&'a str, String> {
         args["threadId"]
             .as_str()
@@ -1055,7 +1066,7 @@ impl ThreadTools {
 
     pub async fn read_thread(&self, args: &Value) -> Result<Value, String> {
         let thread_id = Self::thread_id(args)?;
-        self.peer(thread_id).await?;
+        self.open_peer(thread_id).await?;
         let limit = args["limit"]
             .as_u64()
             .map(|n| n as usize)
@@ -1670,7 +1681,7 @@ impl ThreadTools {
         if thread_id == self.chat_id {
             return Err("a thread cannot interrupt itself".into());
         }
-        self.peer(thread_id).await?;
+        self.open_peer(thread_id).await?;
         self.spend_send()?;
         let queued = self
             .call_engine(
@@ -1690,10 +1701,8 @@ impl ThreadTools {
             .ok()
             .filter(|answers: &Vec<UserInputAnswer>| !answers.is_empty())
             .ok_or("answers must be a nonempty list of {questionId, labels}")?;
-        let (caller, peers) = self.peers().await?;
-        if !peers.iter().any(|chat| chat.id == thread_id) {
-            return Err(format!("no thread {thread_id} on this device"));
-        }
+        let (caller, _) = self.peers().await?;
+        self.open_peer(thread_id).await?;
         let request_id = args["requestId"].as_str();
         let entries = self.entries_of(thread_id).await?;
         let pending = pending_input(&entries, request_id).ok_or_else(|| match request_id {
@@ -2602,7 +2611,7 @@ impl ThreadTools {
             .as_str()
             .filter(|t| !t.trim().is_empty())
             .ok_or("title is required")?;
-        self.peer(thread_id).await?;
+        self.open_peer(thread_id).await?;
         self.call_engine(
             methods::MUTATE,
             json!({ "op": "renameChat", "chatId": thread_id, "title": title }),
@@ -2620,7 +2629,7 @@ impl ThreadTools {
             return Err("threadId or threadIds is required".into());
         }
         for id in &ids {
-            self.peer(id).await?;
+            self.open_peer(id).await?;
         }
         Ok(ids)
     }
@@ -6612,6 +6621,34 @@ mod tests {
         );
         assert_eq!(queued_commands(&rig.calls).len(), 1);
         assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_peer_only_messages_the_supervisor() {
+        let mut fake = fixture();
+        fake.chats.push(chat("supervisor-1", None, false, None));
+        let rig = rig(fake);
+        let target = json!({ "threadId": "supervisor-1" });
+        let refusals = [
+            rig.tools.read_thread(&target).await,
+            rig.tools.interrupt_thread(&target).await,
+            rig.tools
+                .set_thread_title(&json!({ "threadId": "supervisor-1", "title": "Mine" }))
+                .await,
+            rig.tools
+                .set_thread_archived(&json!({ "threadId": "supervisor-1", "archived": true }))
+                .await,
+        ];
+        for refusal in refusals {
+            assert!(refusal.unwrap_err().contains("Zeron system chat"));
+        }
+        assert!(queued_commands(&rig.calls).is_empty());
+        rig.tools
+            .send_message_to_thread(
+                &json!({ "threadId": "supervisor-1", "text": "Step 2 is done" }),
+            )
+            .await
+            .expect("a lead still writes to the Supervisor");
     }
 
     #[tokio::test]

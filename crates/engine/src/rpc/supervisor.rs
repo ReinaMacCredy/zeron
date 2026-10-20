@@ -8,6 +8,8 @@ use zeron_proto::supervisor::{
 
 pub(super) const MESSAGE_OFF: &str = "Messaging leads and step threads is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 pub(super) const START_OFF: &str = "Starting missions is off in the Supervisor's Authority, and create_thread and delegate_task go with it; the person can turn it on on the Supervisor page.";
+pub(super) const PERSON_ONLY: &str =
+    "Only the person stops the Supervisor or answers its questions; send it a message instead.";
 pub(super) const NO_INTERRUPT: &str = "The Supervisor does not interrupt threads: a step that blocks a shared resource is stopped with supervisor pause, which needs a verified contention. Otherwise message the step's lead.";
 const PAUSE_OFF: &str = "Pausing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 const UNIX_ONLY: &str = "Shared resources are checked against the machine on macOS and Linux only";

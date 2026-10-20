@@ -3749,6 +3749,9 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
+                if p.from_chat_id.is_some() && zeron_proto::supervisor::is_supervisor_chat(&p.chat_id) {
+                    return Err(RpcError::Failed(supervisor::PERSON_ONLY.into()));
+                }
                 let respond = match &p.command {
                     SessionCommandPayload::Interrupt {} => {
                         supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
