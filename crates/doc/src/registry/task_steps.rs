@@ -1,5 +1,6 @@
 use super::tasks::{
-    at, check_images, check_notes, check_order_key, check_row_fits, checked_title, invalid,
+    at, check_images, check_notes, check_order_key, check_row_fits, check_step_count, checked_title,
+    invalid,
 };
 use super::*;
 use zeron_proto::{
@@ -230,13 +231,16 @@ impl RegistryDoc {
         if self.task(task_id).is_none() {
             return Err(invalid("Task no longer exists"));
         }
+        let (kept, dropped): (Vec<TaskStep>, Vec<TaskStep>) = self
+            .task_steps_of(task_id)
+            .into_iter()
+            .partition(|step| step.chat_id.is_some() || step.outcome.is_some());
+        check_step_count(kept.len() + steps.len())?;
         let task_op = self.task_patch_op(task_id, patch, now)?;
         let ops = self.new_step_ops(task_id, steps, self.last_step_key(task_id))?;
         let hlc = self.next_hlc();
-        let dropped = self
-            .task_steps_of(task_id)
+        let dropped = dropped
             .into_iter()
-            .filter(|step| step.chat_id.is_none() && step.outcome.is_none())
             .map(|step| flagged_deleted(&step.id, now, hlc.clone()));
         let mut batch: Vec<RowOp> = task_op.into_iter().chain(dropped).collect();
         batch.extend(ops);
@@ -257,6 +261,9 @@ impl RegistryDoc {
         if self.task(task_id).is_none() {
             return Err(invalid("Task no longer exists"));
         }
+        check_step_count(
+            (self.task_steps_of(task_id).len() + creates.len()).saturating_sub(deletes.len()),
+        )?;
         let mut batch: Vec<RowOp> = self
             .task_patch_op(task_id, patch, now)?
             .into_iter()

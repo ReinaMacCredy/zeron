@@ -112,6 +112,15 @@ pub fn check_images(images: &[String]) -> Result<(), DocError> {
     Ok(())
 }
 
+pub const TASK_STEPS_MAX: usize = 50;
+
+pub(super) fn check_step_count(count: usize) -> Result<(), DocError> {
+    if count > TASK_STEPS_MAX {
+        return Err(invalid("A plan holds up to 50 steps"));
+    }
+    Ok(())
+}
+
 pub const TASK_CONTEXT_MAX: usize = 5;
 
 pub fn check_context(context: &[String]) -> Result<(), DocError> {
