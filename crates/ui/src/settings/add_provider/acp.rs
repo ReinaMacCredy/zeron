@@ -48,6 +48,7 @@ pub(super) struct RegistryState {
     pub error: Option<String>,
     pub preparing: Option<String>,
     pub prepare_error: Option<String>,
+    unverified_armed: Option<String>,
     pub knob: Option<RegistryKnob>,
     generation: u64,
     search_task: Option<Task<()>>,
@@ -100,6 +101,7 @@ impl AddProviderDialog {
     pub(super) fn search_edited(&mut self, cx: &mut Context<Self>) {
         let query = self.search_input.read(cx).text().trim().to_string();
         self.registry.prepare_error = None;
+        self.registry.unverified_armed = None;
         self.registry.debounce = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             this.update(cx, |dialog, cx| {
@@ -188,7 +190,7 @@ impl AddProviderDialog {
         };
         match knob {
             RegistryKnob::Preparing => self.registry.preparing = Some(first.id),
-            RegistryKnob::Prepare => self.prepare(first, cx),
+            RegistryKnob::Prepare => self.prepare(first, false, cx),
         }
     }
 
@@ -223,7 +225,12 @@ impl AddProviderDialog {
         cx.notify();
     }
 
-    pub(super) fn prepare(&mut self, agent: AcpRegistryAgent, cx: &mut Context<Self>) {
+    pub(super) fn prepare(
+        &mut self,
+        agent: AcpRegistryAgent,
+        allow_unverified: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.registry.preparing.is_some() {
             return;
         }
@@ -234,10 +241,13 @@ impl AddProviderDialog {
         };
         self.registry.preparing = Some(agent.id.clone());
         self.registry.prepare_error = None;
+        self.registry.unverified_armed = None;
         self.acp_error = None;
         let target = self.target();
         self.registry.prepare_task = Some(cx.spawn(async move |this, cx| {
-            let result = provider_instances::prepare_agent(&engine, &agent.id, target).await;
+            let result =
+                provider_instances::prepare_agent(&engine, &agent.id, allow_unverified, target)
+                    .await;
             this.update(cx, |dialog, cx| {
                 dialog.registry.preparing = None;
                 match result {
@@ -354,8 +364,9 @@ impl AddProviderDialog {
                         icon_url: None,
                         icon_path: None,
                         installed: false,
+                        unverified: false,
                     });
-                self.prepare(agent, cx);
+                self.prepare(agent, false, cx);
             }
             Some(AcpFlow::Local) if !self.acp_selection_ok(cx) => {
                 self.acp_error = Some("Executable is required.".into());
@@ -922,8 +933,11 @@ impl AddProviderDialog {
         let preparing = self.registry.preparing.as_deref() == Some(agent.id.as_str());
         let can_add = self.registry.preparing.is_none() && !added;
         let distribution = distribution_label(agent);
+        let armed = self.registry.unverified_armed.as_deref() == Some(agent.id.as_str());
         let label = if added {
             "Added"
+        } else if armed {
+            "Add anyway"
         } else if preparing {
             if distribution == Some("binary") {
                 "Downloading"
@@ -977,6 +991,16 @@ impl AddProviderDialog {
                     .child(SharedString::from(format!("v{}", agent.version))),
             )
             .children(distribution.map(|d| badge(d.into())))
+            .when(agent.unverified, |el| {
+                el.child(
+                    div()
+                        .id(("acp-unverified", ix))
+                        .child(badge("unverified".into()))
+                        .tooltip(widgets::text_tooltip(
+                            "The ACP Registry publishes no checksum for this download",
+                        )),
+                )
+            })
             .when(agent.installed && !added, |el| {
                 el.child(
                     div()
@@ -1025,7 +1049,14 @@ impl AddProviderDialog {
         })
         .when(can_add, |el| {
             let agent = agent.clone();
-            el.on_click(cx.listener(move |this, _, _, cx| this.prepare(agent.clone(), cx)))
+            el.on_click(cx.listener(move |this, _, _, cx| {
+                if agent.unverified && !armed {
+                    this.registry.unverified_armed = Some(agent.id.clone());
+                    cx.notify();
+                } else {
+                    this.prepare(agent.clone(), agent.unverified, cx);
+                }
+            }))
         })
         .child(label);
         div()
@@ -1445,6 +1476,7 @@ mod tests {
                     icon_url: None,
                     icon_path: Some("/cache/kimchi.svg".into()),
                     installed: false,
+                    unverified: false,
                 };
                 let prepared = AcpPreparedAgent {
                     agent_id: "kimchi".into(),

@@ -569,6 +569,8 @@ struct PrepareAcpAgentParams {
     agent_id: String,
     #[serde(default)]
     distribution: Option<zeron_proto::AcpDistribution>,
+    #[serde(default)]
+    allow_unverified: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5816,10 +5818,14 @@ impl RpcService for EngineRpc {
             methods::PREPARE_ACP_AGENT => {
                 let p: PrepareAcpAgentParams = parse_params(params)?;
                 let store = self.provider_instances_store()?;
-                let prepared =
-                    crate::acp_registry::prepare(store.data_dir(), &p.agent_id, p.distribution)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let prepared = crate::acp_registry::prepare(
+                    store.data_dir(),
+                    &p.agent_id,
+                    p.distribution,
+                    p.allow_unverified,
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&prepared)
             }
             methods::LIST_PROJECT_ACTIONS => {

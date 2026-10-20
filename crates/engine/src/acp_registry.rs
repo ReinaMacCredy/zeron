@@ -14,6 +14,8 @@ const ICON_HOST: &str = "cdn.agentclientprotocol.com";
 const INDEX_MAX_AGE: Duration = Duration::from_secs(300);
 const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ICON_BYTES: usize = 64 * 1024;
+/// Agents a built-in driver installs with stronger checks than the registry offers.
+const BUILTIN_DRIVER_AGENTS: &[&str] = &["antigravity-acp"];
 
 #[derive(Debug, Clone, Deserialize)]
 struct Agent {
@@ -69,11 +71,20 @@ impl Agent {
         serde_json::from_value(target.clone()).ok()
     }
 
+    fn unhashed_binary(&self) -> bool {
+        self.binary_target()
+            .is_some_and(|target| target.sha256.is_none())
+    }
+
+    /// In the order a default pick prefers them: an unchecked download comes last.
     fn distributions(&self) -> Vec<AcpDistribution> {
+        let binary = self.binary_target().is_some();
+        let unhashed = self.unhashed_binary();
         [
-            (AcpDistribution::Binary, self.binary_target().is_some()),
+            (AcpDistribution::Binary, binary && !unhashed),
             (AcpDistribution::Npx, self.distribution.npx.is_some()),
             (AcpDistribution::Uvx, self.distribution.uvx.is_some()),
+            (AcpDistribution::Binary, unhashed),
         ]
         .into_iter()
         .filter_map(|(distribution, offered)| offered.then_some(distribution))
@@ -381,7 +392,7 @@ fn rank(
         .iter()
         .filter_map(|agent| {
             let distributions = agent.distributions();
-            if distributions.is_empty() {
+            if distributions.is_empty() || BUILTIN_DRIVER_AGENTS.contains(&agent.id.as_str()) {
                 return None;
             }
             Some((search_rank(agent, query)?, agent, distributions))
@@ -402,6 +413,8 @@ fn rank(
             description: agent.description.clone(),
             website: agent.website.clone(),
             repository: agent.repository.clone(),
+            unverified: distributions.first() == Some(&AcpDistribution::Binary)
+                && agent.unhashed_binary(),
             distributions,
             icon_url: agent.icon.as_deref().and_then(official_icon_url),
             icon_path: None,
@@ -548,12 +561,19 @@ pub(crate) async fn prepare(
     data_dir: &Path,
     agent_id: &str,
     distribution: Option<AcpDistribution>,
+    allow_unverified: bool,
 ) -> Result<AcpPreparedAgent, EngineError> {
     let agents = load_index(data_dir, INDEX_URL).await?;
     let agent = agents
         .into_iter()
         .find(|agent| agent.id == agent_id)
         .ok_or_else(|| EngineError::Other(format!("The ACP Registry has no agent '{agent_id}'")))?;
+    if BUILTIN_DRIVER_AGENTS.contains(&agent.id.as_str()) {
+        return Err(EngineError::Other(format!(
+            "Add {} with its own provider, which installs and checks it",
+            agent.name
+        )));
+    }
     let offered = agent.distributions();
     let distribution = match distribution {
         Some(distribution) if offered.contains(&distribution) => distribution,
@@ -571,6 +591,12 @@ pub(crate) async fn prepare(
             ))
         })?,
     };
+    if distribution == AcpDistribution::Binary && agent.unhashed_binary() && !allow_unverified {
+        return Err(EngineError::Other(format!(
+            "The ACP Registry publishes no checksum for {}'s download, so Zeron cannot check it",
+            agent.name
+        )));
+    }
     let record = install(&agent, distribution).await?;
     persist_json(
         &record_path(data_dir, &agent.id, &agent.version, distribution),
@@ -798,6 +824,21 @@ mod tests {
                         },
                         "uvx": {"package": "alpha==2.0.0"}
                     }
+                },
+                {
+                    "id": "antigravity-acp", "name": "Antigravity", "version": "1.4.1",
+                    "distribution": {"binary": {platform: {"archive": "https://x/agy.zip", "cmd": "./agy"}}}
+                },
+                {
+                    "id": "zeta", "name": "Zeta", "version": "1.0.0",
+                    "distribution": {
+                        "binary": {platform: {"archive": "https://x/z.tar.gz", "cmd": "./zeta"}},
+                        "npx": {"package": "zeta@1.0.0"}
+                    }
+                },
+                {
+                    "id": "omega", "name": "Omega", "version": "1.0.0",
+                    "distribution": {"binary": {platform: {"archive": "https://x/o.tar.gz", "cmd": "./omega"}}}
                 }
             ]
         })
@@ -811,13 +852,30 @@ mod tests {
         };
         let agents = parse_index(&index(platform)).unwrap();
         let ids: Vec<&str> = agents.iter().map(|agent| agent.id.as_str()).collect();
-        assert_eq!(ids, ["gamma-code", "windows-only", "alpha"]);
+        assert_eq!(
+            ids,
+            [
+                "gamma-code",
+                "windows-only",
+                "alpha",
+                "antigravity-acp",
+                "zeta",
+                "omega"
+            ]
+        );
         assert!(parse_index("{\"version\":\"1.0.0\"}").is_err());
 
         let all = rank(&agents, "", |agent| agent.id == "alpha");
-        let rows: Vec<(&str, &[AcpDistribution], bool)> = all
+        let rows: Vec<(&str, &[AcpDistribution], bool, bool)> = all
             .iter()
-            .map(|row| (row.id.as_str(), row.distributions.as_slice(), row.installed))
+            .map(|row| {
+                (
+                    row.id.as_str(),
+                    row.distributions.as_slice(),
+                    row.installed,
+                    row.unverified,
+                )
+            })
             .collect();
         assert_eq!(
             rows,
@@ -825,9 +883,17 @@ mod tests {
                 (
                     "alpha",
                     &[AcpDistribution::Binary, AcpDistribution::Uvx][..],
-                    true
+                    true,
+                    false
                 ),
-                ("gamma-code", &[AcpDistribution::Npx][..], false),
+                ("gamma-code", &[AcpDistribution::Npx][..], false, false),
+                ("omega", &[AcpDistribution::Binary][..], false, true),
+                (
+                    "zeta",
+                    &[AcpDistribution::Npx, AcpDistribution::Binary][..],
+                    false,
+                    false
+                ),
             ]
         );
         assert_eq!(
@@ -1049,7 +1115,9 @@ mod tests {
         );
 
         for (agent_id, distribution) in [("pi-acp", None), ("kimchi", None)] {
-            let prepared = prepare(&data_dir, agent_id, distribution).await.unwrap();
+            let prepared = prepare(&data_dir, agent_id, distribution, false)
+                .await
+                .unwrap();
             println!("prepared: {prepared:?}");
             let record = record_path(
                 &data_dir,

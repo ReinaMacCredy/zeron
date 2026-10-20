@@ -176,13 +176,17 @@ pub async fn search_registry(
 pub async fn prepare_agent(
     engine: &EngineHandle,
     agent_id: &str,
+    allow_unverified: bool,
     target: Option<Value>,
 ) -> Result<AcpPreparedAgent, String> {
     engine
         .client()
         .call_as(
             methods::PREPARE_ACP_AGENT,
-            with_target(json!({ "agentId": agent_id }), target),
+            with_target(
+                json!({ "agentId": agent_id, "allowUnverified": allow_unverified }),
+                target,
+            ),
         )
         .await
         .map_err(|err| err.to_string())

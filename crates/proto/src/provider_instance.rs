@@ -136,6 +136,9 @@ pub struct AcpRegistryAgent {
     pub icon_path: Option<String>,
     #[serde(default)]
     pub installed: bool,
+    /// Adding it downloads a binary the registry publishes no checksum for.
+    #[serde(default)]
+    pub unverified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
