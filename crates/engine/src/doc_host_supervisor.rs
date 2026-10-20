@@ -315,9 +315,6 @@ impl DocHost {
                 .detail
                 .push(format!("Options: {}", item.options.join(" | ")));
         }
-        event.detail.push(
-            "The person answers it on the Supervisor page; their choice goes to the lead.".into(),
-        );
         event.actor = (item.raised_by == Raiser::Supervisor).then(|| item.raiser_chat_id.clone());
         self.supervisor_event(event);
     }
@@ -423,6 +420,7 @@ impl DocHost {
                 text: text.to_string(),
                 trigger: basis.trigger,
                 chips: Vec::new(),
+                item: None,
             },
             steps: basis.steps,
         });
@@ -1280,10 +1278,16 @@ impl DocHost {
                         .last_reply(&thread)
                         .map(|text| clip(&text, WAKE_QUESTION_CHARS)),
                 });
+                let escalation = (event.summary.kind == Kind::Escalation)
+                    .then(|| event.summary.key.strip_prefix("escalation:"))
+                    .flatten()
+                    .and_then(|item| self.supervisor()?.item(item))
+                    .map(|item| item.why);
                 WakeEntry {
                     event,
                     mission,
                     reply,
+                    escalation,
                 }
             })
             .collect();

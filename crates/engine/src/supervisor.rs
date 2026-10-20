@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    InterventionChip, ItemAnswer, LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheck,
-    NextCheckKind, QuestionState, SettledBy, SupervisorEventKind, SupervisorEventSummary,
-    SupervisorIntervention, SupervisorItem, SupervisorSettings, SupervisorSnapshot,
-    SupervisorState, SupervisorWake,
+    InterventionChip, ItemAnswer, ItemWhy, LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheck,
+    NextCheckKind, QuestionState, SettledBy, SupervisorChoice, SupervisorEventKind,
+    SupervisorEventSummary, SupervisorIntervention, SupervisorItem, SupervisorSettings,
+    SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
 use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
@@ -548,7 +548,8 @@ impl SupervisorStore {
         &self,
         item_id: &str,
         choice: &str,
-    ) -> Result<SupervisorItem, EngineError> {
+        decided: Option<SupervisorChoice>,
+    ) -> Result<(SupervisorItem, Option<ItemAnswer>), EngineError> {
         let answered = {
             let mut state = lock(&self.inner.state);
             let mut file = state.file.clone();
@@ -557,16 +558,29 @@ impl SupervisorStore {
                 .iter_mut()
                 .find(|item| item.id == item_id)
                 .ok_or_else(|| EngineError::Other(format!("no Needs-you item {item_id}")))?;
-            if item.answer.is_some() {
-                return Err(EngineError::Other(format!(
-                    "item {item_id} is already answered"
-                )));
-            }
+            let previous = item.answer.clone();
+            let supervisor = match (&previous, decided) {
+                (None, decided) => decided,
+                (Some(answer), None) if answer.supervisor.is_some() => {
+                    if answer.choice == choice {
+                        return Err(EngineError::Other(format!(
+                            "item {item_id} already has {choice}"
+                        )));
+                    }
+                    answer.supervisor.clone()
+                }
+                (Some(_), _) => {
+                    return Err(EngineError::Other(format!(
+                        "item {item_id} is already answered"
+                    )));
+                }
+            };
             item.answer = Some(ItemAnswer {
                 at: Utc::now(),
                 choice: choice.to_string(),
+                supervisor,
             });
-            let answered = item.clone();
+            let answered = (item.clone(), previous);
             let answered_count = file.items.iter().filter(|i| i.answer.is_some()).count();
             let mut excess = answered_count.saturating_sub(KEPT_ANSWERED_ITEMS);
             file.items.retain(|i| {
@@ -837,6 +851,7 @@ pub(crate) struct WakeEntry<'a> {
     pub event: &'a SupervisorEvent,
     pub mission: Option<String>,
     pub reply: Option<Reply>,
+    pub escalation: Option<ItemWhy>,
 }
 
 pub(crate) struct Reply {
@@ -893,6 +908,9 @@ pub(crate) fn wake_text(
         for line in &entry.event.detail {
             text.push_str(&format!("   {line}\n"));
         }
+        if let Some(why) = entry.escalation {
+            text.push_str(&format!("   {}\n", escalation_line(why, settings)));
+        }
         if let Some(reply) = &entry.reply {
             let whose = if reply.from_lead {
                 "from the lead"
@@ -932,13 +950,37 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     } else {
         String::new()
     };
+    let mut decides = String::new();
+    if settings.decide_for_me {
+        decides.push_str("\n- decide a lead's Needs you item whose why is decision with the supervisor tool, action \"decide\" (itemId, choice, reason), and approve a plan that waits for review with action \"approve\" (taskId, reason): on");
+    }
+    let goal = if settings.goal_and_spend {
+        decides.push_str("\n- decide a lead's goal and spend items with action \"decide\", and change a mission's goal, its title and notes, with action \"goal\" (taskId, title, notes, reason): on");
+        "Anything else you should not settle alone goes to the person with the supervisor tool, action \"ask\"."
+    } else {
+        "A change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\"."
+    };
+    if settings.full_authority() {
+        decides.push_str("\nThe person sees each of these decisions with your reason and may change it, so give a reason they can check.");
+    }
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
         on(settings.rebrief),
         on(settings.start_missions),
     )
+}
+
+const PERSON_ANSWERS: &str =
+    "The person answers it on the Supervisor page; their choice goes to the lead.";
+
+fn escalation_line(why: ItemWhy, settings: SupervisorSettings) -> &'static str {
+    if settings.decides(why) {
+        "You may decide it: the supervisor tool, action \"decide\", with this itemId, one of its options as choice, and your reason. Your choice goes to the lead; the person sees it and may change it."
+    } else {
+        PERSON_ANSWERS
+    }
 }
 
 pub(crate) fn open_inputs(
@@ -1180,6 +1222,7 @@ mod tests {
         let entries = [WakeEntry {
             event: &event,
             mission: None,
+            escalation: None,
             reply: Some(Reply {
                 from_lead: false,
                 text: Some(hostile.into()),
@@ -1326,6 +1369,7 @@ mod tests {
                 text: "q1: Adyen".into(),
                 trigger: None,
                 chips: Vec::new(),
+                item: None,
             },
             steps: Vec::new(),
         };

@@ -583,8 +583,8 @@ impl EngineRpc {
                 errors.push(refused("choice is required"));
                 continue;
             }
-            match store.answer_item(&answer.item_id, choice) {
-                Ok(item) => answered.push((item, choice.to_string())),
+            match store.answer_item(&answer.item_id, choice, None) {
+                Ok((item, _)) => answered.push((item, choice.to_string())),
                 Err(error) => errors.push(failed(error)),
             }
         }
