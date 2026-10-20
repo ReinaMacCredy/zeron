@@ -369,6 +369,8 @@ pub struct TaskCenter {
     folded: bool,
     fold_turn: Tween,
     pop: Option<spine::Pop>,
+    pop_dismissed: Option<super::tree::Status>,
+    pop_pressed: bool,
     painted: Painted,
     scroll: ScrollHandle,
     menu: popover::Popup<StepMenu>,
@@ -425,6 +427,8 @@ impl TaskCenter {
             folded: false,
             fold_turn: Tween::at(0.0, Instant::now()),
             pop: None,
+            pop_dismissed: None,
+            pop_pressed: false,
             painted: Painted::default(),
             scroll: ScrollHandle::new(),
             menu: popover::Popup::default(),
@@ -1989,6 +1993,7 @@ impl TaskCenter {
 
 impl Render for TaskCenter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pop_dismissed = None;
         let theme = Theme::of(cx).clone();
         let found = {
             let state = self.state.read(cx);

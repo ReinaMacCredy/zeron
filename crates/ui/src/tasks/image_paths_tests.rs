@@ -233,3 +233,20 @@ fn dropped_and_picked_images_go_with_a_task_from_the_add_input(cx: &mut TestAppC
     );
     assert!(cx.debug_bounds("tasks-add-tray").is_none());
 }
+
+#[gpui::test]
+fn the_steps_window_button_closes_its_own_window(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let (_lab, state) = lab(cx);
+    mission(&state, cx);
+    let (_center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
+    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+    cx.run_until_parked();
+    click(cx, "task-center-pop-waiting");
+    assert!(cx.debug_bounds("task-center-pop").is_some());
+    click(cx, "task-center-pop-waiting");
+    assert!(cx.debug_bounds("task-center-pop").is_none());
+    click(cx, "task-center-pop-waiting");
+    assert!(cx.debug_bounds("task-center-pop").is_some());
+}

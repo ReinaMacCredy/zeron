@@ -1138,9 +1138,18 @@ impl TaskCenter {
                             )))
                         }),
                 )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |center, _, _, _| {
+                        let open = center.pop.as_ref().map(|pop| pop.kind);
+                        center.pop_pressed = open.or(center.pop_dismissed) == Some(kind);
+                    }),
+                )
                 .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    center.toggle_pop(kind, cx)
+                    if !std::mem::take(&mut center.pop_pressed) {
+                        center.toggle_pop(kind, cx)
+                    }
                 }))
         };
         let phase = (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, now));
@@ -1349,6 +1358,7 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|center, _, _, cx| {
+                center.pop_dismissed = center.pop.as_ref().map(|pop| pop.kind);
                 center.close_pop(cx);
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
