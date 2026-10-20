@@ -53,7 +53,7 @@ pub(super) fn handoff_lift(t: f32) -> f32 {
 }
 
 fn slides_under_center(route: Route) -> bool {
-    matches!(route, Route::Tasks | Route::Inbox)
+    matches!(route, Route::Tasks | Route::MissionControl | Route::Inbox)
 }
 
 pub(super) struct TaskCenterPane {
@@ -622,7 +622,10 @@ impl Shell {
     fn task_slide_t(&self) -> Option<f32> {
         if self.task_slide.handoff
             || self.task_slide.chat
-            || !matches!(self.route, Route::Tasks | Route::TaskCenter | Route::Inbox)
+            || !matches!(
+                self.route,
+                Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::Inbox
+            )
         {
             return None;
         }
@@ -794,6 +797,7 @@ impl Shell {
         };
         let under = match self.task_slide.under {
             Route::Inbox => self.render_inbox_page(cx),
+            Route::MissionControl => self.render_mission_control_page(cx),
             _ => self.render_tasks_page(window, cx),
         };
         let center = self.render_task_center_page(window, cx);
@@ -895,6 +899,7 @@ impl Shell {
         };
         let under = match (handoff, self.task_slide.under) {
             (Some(_), _) | (None, Route::Inbox) => self.render_session_title_bar(window, cx),
+            (None, Route::MissionControl) => self.render_mission_control_title_bar(cx),
             _ => self.render_tasks_title_bar(cx),
         };
         let center = self.render_task_center_title_bar(cx);

@@ -1906,7 +1906,7 @@ impl TaskCenter {
     }
 }
 
-fn agent_of(chat: &zeron_proto::Chat, cx: &App) -> Option<String> {
+pub(super) fn agent_of(chat: &zeron_proto::Chat, cx: &App) -> Option<String> {
     let config = chat.config.as_ref()?;
     let harness = config.harness.display_name();
     Some(match config.model.as_deref() {

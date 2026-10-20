@@ -92,6 +92,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
+mod mission_control;
 mod mission_intro;
 mod mission_strip;
 mod navigation_focus;
@@ -996,6 +997,7 @@ pub enum Route {
     Settings(SettingsSection),
     Terminal,
     Tasks,
+    MissionControl,
     TaskCenter,
     Supervisor,
     Docs,
@@ -1169,6 +1171,7 @@ pub enum NavEntry {
     Usage,
     Inbox,
     Tasks,
+    MissionControl,
     TaskCenter(String),
     Supervisor,
     Docs(Option<&'static str>),
@@ -2675,6 +2678,7 @@ pub struct Shell {
     _docs_search_sub: Subscription,
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
+    mission_index: Option<(Entity<crate::tasks::MissionIndex>, Subscription)>,
     _tasks_events: Option<gpui::Subscription>,
     task_center_task: Option<String>,
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
@@ -3207,6 +3211,7 @@ impl Shell {
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
+            Some("mission-control") => Route::MissionControl,
             Some("supervisor") => Route::Supervisor,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
@@ -3255,6 +3260,7 @@ impl Shell {
             Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
+            Route::MissionControl => NavEntry::MissionControl,
             Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
             Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
@@ -3407,6 +3413,7 @@ impl Shell {
             _docs_search_sub: docs_search_sub,
             inbox_page: None,
             tasks_page: None,
+            mission_index: None,
             _tasks_events: None,
             task_center_task: open_task.clone(),
             task_center: None,
@@ -8703,6 +8710,7 @@ impl Shell {
             NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
+            NavEntry::MissionControl => self.enter_mission_control_route(cx),
             NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
             NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
@@ -10502,13 +10510,16 @@ impl Shell {
         }
         if !matches!(
             self.route,
-            Route::Tasks | Route::TaskCenter | Route::PullRequests
+            Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::PullRequests
         ) {
             return self.render_session_title_bar(window, cx);
         }
         self.drop_hidden_chat_action_menus(cx);
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_title_bar(cx);
+        }
+        if matches!(self.route, Route::MissionControl) {
+            return self.render_mission_control_title_bar(cx);
         }
         if matches!(self.route, Route::TaskCenter) {
             return self.render_task_center_title_bar(cx);
@@ -14332,7 +14343,10 @@ impl Shell {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
             RailItem::Inbox => matches!(self.route, Route::Inbox),
-            RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
+            RailItem::Tasks => matches!(self.route, Route::Tasks),
+            RailItem::MissionControl => {
+                matches!(self.route, Route::MissionControl | Route::TaskCenter)
+            }
             RailItem::Supervisor => matches!(self.route, Route::Supervisor),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
@@ -14360,6 +14374,10 @@ impl Shell {
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
                 self.open_tasks(cx);
+            }
+            RailItem::MissionControl => {
+                self.settings_focus_pending = false;
+                self.open_mission_control(cx);
             }
             RailItem::Supervisor => {
                 self.settings_focus_pending = false;
@@ -16524,6 +16542,10 @@ impl Shell {
 
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_page(window, cx);
+        }
+
+        if matches!(self.route, Route::MissionControl) {
+            return self.render_mission_control_page(cx);
         }
 
         if matches!(self.route, Route::TaskCenter)
@@ -19574,6 +19596,7 @@ impl Render for Shell {
                     | Route::Usage
                     | Route::Inbox
                     | Route::Tasks
+                    | Route::MissionControl
                     | Route::Supervisor
                     | Route::Docs => {}
                 }),
@@ -20128,6 +20151,7 @@ impl Render for Shell {
                             | Route::Usage
                             | Route::Inbox
                             | Route::Tasks
+                            | Route::MissionControl
                             | Route::Supervisor
                             | Route::Docs
                     )

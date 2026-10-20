@@ -28,6 +28,7 @@ mod center;
 #[cfg(test)]
 mod image_paths_tests;
 mod images;
+mod index;
 
 use crate::attachments::StagedAttachment;
 use images::ImageGallery;
@@ -39,6 +40,7 @@ mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
+pub(crate) use index::{MissionIndex, MissionIndexEvent};
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
