@@ -566,6 +566,7 @@ impl TaskCenter {
             cx.new(|cx| {
                 let mut input = ComposerInput::new("Step title", cx)
                     .with_wrapping()
+                    .with_text_metrics(13.0, 18.0)
                     .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
                 input.set_text(text.title.clone(), cx);
                 input
@@ -578,6 +579,9 @@ impl TaskCenter {
         let body = cx.new(|cx| {
             let mut input =
                 ComposerInput::new(placeholder, cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
+            if matches!(target, EditTarget::Step(_)) {
+                input = input.with_text_metrics(12.5, 18.0);
+            }
             input.set_text(text.notes, cx);
             input
         });

@@ -768,13 +768,14 @@ impl TaskCenter {
         id: String,
         mark: Option<&'static str>,
         label: &'static str,
+        step: usize,
     ) -> gpui::Stateful<gpui::Div> {
         let selector = id.clone();
         div()
             .id(SharedString::from(id))
             .debug_selector(move || selector.clone())
             .role(gpui::Role::Button)
-            .aria_label(label)
+            .aria_label(format!("{label} step {step}"))
             .flex_none()
             .flex()
             .items_center()
@@ -1243,6 +1244,7 @@ impl TaskCenter {
                             format!("task-center-edit-{step_id}"),
                             Some(icons::LUCIDE_PENCIL),
                             "Edit",
+                            index + 1,
                         )
                         .on_click(cx.listener(move |center, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
@@ -1257,6 +1259,7 @@ impl TaskCenter {
                             format!("task-center-add-image-{step_id}"),
                             Some(icons::GALLERY),
                             "Add image",
+                            index + 1,
                         )
                         .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
@@ -1273,6 +1276,7 @@ impl TaskCenter {
                             format!("task-center-remove-{step_id}"),
                             None,
                             "Remove",
+                            index + 1,
                         )
                         .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
@@ -1287,6 +1291,7 @@ impl TaskCenter {
                         format!("task-center-spec-open-{step_id}"),
                         None,
                         "Open thread",
+                        index + 1,
                     )
                     .child(
                         icon(icons::LUCIDE_ARROW_UP_RIGHT)
