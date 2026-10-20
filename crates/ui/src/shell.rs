@@ -5501,6 +5501,12 @@ impl Shell {
                 }
                 crate::route_badge::RouteLink::Usage => self.open_usage(cx),
             },
+            TranscriptEvent::ApprovePlan { task_id } => {
+                self.mutate(
+                    serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+                    cx,
+                );
+            }
         }
     }
 

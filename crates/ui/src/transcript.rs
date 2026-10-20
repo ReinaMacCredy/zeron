@@ -1140,6 +1140,10 @@ enum HtmlFileState {
 
 #[derive(Clone)]
 pub enum RowKind {
+    PlanEstimate {
+        task_id: SharedString,
+        tool: Arc<ToolItem>,
+    },
     NativeRoute {
         route: zeron_proto::ChildRoute,
         title: SharedString,
@@ -1925,6 +1929,30 @@ pub fn rows_for_entry(
                     kind: ToolItemKind::Call,
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                 };
+                if let Some(task_id) = crate::plan_estimate::plan_task_id(call) {
+                    if !compact {
+                        flush_group(
+                            &mut rows,
+                            &mut pending_group,
+                            &mut group_ix,
+                            group_last_part_ix,
+                        );
+                    }
+                    rows.push(Row {
+                        id: format!("{}#{}-plan", entry.id, part.id()).into(),
+                        version: tool_fingerprint(std::slice::from_ref(&item), false),
+                        turn_start: false,
+                        kind: RowKind::PlanEstimate {
+                            task_id: task_id.into(),
+                            tool: Arc::new(item),
+                        },
+                        entry_id: entry_id.clone(),
+                        timestamp: None,
+                        copy_text: None,
+                        compact_fold: None,
+                    });
+                    continue;
+                }
                 if let Some(route) = delegate_route.clone().filter(|_| subagent_ref.is_none()) {
                     if !compact {
                         flush_group(
@@ -2379,6 +2407,7 @@ pub fn rows_for_entry(
                     RowKind::ComputerNotice { .. }
                         | RowKind::HtmlRender { .. }
                         | RowKind::NativeRoute { .. }
+                        | RowKind::PlanEstimate { .. }
                 )
             });
             for row in &mut inner {
@@ -4261,6 +4290,7 @@ pub struct Transcript {
     foreground_sent: HashSet<SharedString>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_pages: html_card::HtmlPages,
+    plan_previews: HashMap<SharedString, PlanPreview>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
     html_menu: Option<SharedString>,
@@ -4402,9 +4432,19 @@ pub enum TranscriptEvent {
     RouteLink {
         link: route_badge::RouteLink,
     },
+    ApprovePlan {
+        task_id: String,
+    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
+
+struct PlanPreview {
+    key: String,
+    preview: Option<Rc<crate::plan_estimate::Preview>>,
+    layout: Option<(usize, usize, bool, bool)>,
+    _fetch: Option<Task<()>>,
+}
 
 impl Transcript {
     fn render_native_route(
@@ -4453,6 +4493,155 @@ impl Transcript {
             cx.entity_id(),
             cx,
         )
+    }
+
+    fn render_plan_estimate(
+        &mut self,
+        row_id: &SharedString,
+        task_id: &SharedString,
+        tool: &ToolItem,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::plan_estimate as plan;
+        let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
+            RowKind::PlanEstimate { task_id: id, .. } if id == task_id => Some(&row.id),
+            _ => None,
+        });
+        let state = self.state.read(cx);
+        let task = state
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id.as_ref() && !task.deleted)
+            .filter(|_| latest == Some(row_id))
+            .cloned();
+        let Some(task) = task else {
+            return tool_chip(
+                row_id.clone(),
+                tool,
+                false,
+                false,
+                false,
+                1.0,
+                1.0,
+                1.0,
+                None,
+                theme,
+                cx.entity_id(),
+                cx,
+            );
+        };
+        let steps = plan::plan_steps(&task.id, &state.task_steps);
+        let key = plan::preview_key(&steps);
+        let roles = plan::preview_roles(&steps);
+        let lead_chat = task.chat_id.clone();
+        let stale = self
+            .plan_previews
+            .get(task_id)
+            .is_none_or(|cached| cached.key != key);
+        if stale {
+            self.fetch_plan_preview(task_id.clone(), key, lead_chat.clone(), roles, cx);
+        }
+        let state = self.state.read(cx);
+        let steps = plan::plan_steps(&task.id, &state.task_steps);
+        let lead = lead_chat
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+            .and_then(|chat| chat.config.as_ref())
+            .map(route_badge::target_of);
+        let cached = self.plan_previews.get(task_id);
+        let preview = cached.and_then(|cached| cached.preview.clone());
+        let lines = plan::plan_lines(&steps, &state.chats, lead.as_ref(), preview.as_deref(), cx);
+        let layout = (
+            lines.len(),
+            lines.iter().filter(|line| line.fallback.is_some()).count(),
+            plan::totals(&lines).raised > 0,
+            task.plan_pending,
+        );
+        if cached.is_some_and(|cached| cached.layout != Some(layout)) {
+            if let Some(cached) = self.plan_previews.get_mut(task_id) {
+                cached.layout = Some(layout);
+            }
+            let row = row_id.clone();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
+                    .ok();
+            })
+            .detach();
+        }
+        let transcript = cx.weak_entity();
+        let approve = task.id.clone();
+        plan::plan_card(
+            plan::PlanCard {
+                id: row_id.clone(),
+                task: &task,
+                lines,
+                lead,
+                on_link: self.route_links(cx),
+                on_start: Rc::new(move |_, cx| {
+                    transcript
+                        .update(cx, |_, cx| {
+                            cx.emit(TranscriptEvent::ApprovePlan {
+                                task_id: approve.clone(),
+                            })
+                        })
+                        .ok();
+                }),
+            },
+            theme,
+            cx,
+        )
+    }
+
+    fn fetch_plan_preview(
+        &mut self,
+        task_id: SharedString,
+        key: String,
+        owner: Option<String>,
+        roles: Vec<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self
+            .plan_previews
+            .get(&task_id)
+            .and_then(|cached| cached.preview.clone());
+        let engine = self.state.read(cx).engine().cloned();
+        let fetch = engine.filter(|_| !roles.is_empty()).map(|engine| {
+            let task_id = task_id.clone();
+            let params =
+                serde_json::json!({ "ownerChatId": owner, "roles": roles, "steps": true });
+            cx.spawn(async move |this, cx| {
+                let preview = engine
+                    .client()
+                    .call_as::<crate::plan_estimate::Preview>(
+                        zeron_rpc::methods::PREVIEW_ROUTES,
+                        params,
+                    )
+                    .await
+                    .ok();
+                this.update(cx, |this, cx| {
+                    if let Some(cached) = this.plan_previews.get_mut(&task_id) {
+                        cached.preview = preview.map(Rc::new);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+        let preview = if roles.is_empty() {
+            Some(Rc::new(crate::plan_estimate::Preview::default()))
+        } else {
+            previous
+        };
+        self.plan_previews.insert(
+            task_id,
+            PlanPreview {
+                key,
+                preview,
+                layout: None,
+                _fetch: fetch,
+            },
+        );
     }
 
     fn route_links(&self, cx: &Context<Self>) -> route_badge::OnRouteLink {
@@ -4898,6 +5087,7 @@ impl Transcript {
             foreground_sent: HashSet::new(),
             html_files: HashMap::new(),
             html_pages: html_card::HtmlPages::new(cx),
+            plan_previews: HashMap::new(),
             html_apps: None,
             html_apps_task: None,
             html_menu: None,
@@ -10286,6 +10476,9 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::NativeRoute { route, title } => {
                 self.render_native_route(&row.id, route, title, &theme, cx)
+            }
+            RowKind::PlanEstimate { task_id, tool } => {
+                self.render_plan_estimate(&row.id, task_id, tool, &theme, cx)
             }
             RowKind::ComputerConsent {
                 request_id,
