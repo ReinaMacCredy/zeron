@@ -4,6 +4,8 @@ Handoff moves a conversation to another agent. You can switch agents in the same
 
 Click **Hand off thread**, the arrows button in the titlebar of a chat. It is available once the chat has a finished message and the agent is not working or waiting on you.
 
+![The Hand off thread menu](handoff-menu.jpg)
+
 The menu has up to three sections:
 
 | Section | What it does |
@@ -29,5 +31,7 @@ The new thread runs in the project's folder. Instead of a text copy, it gets a l
 ## The handoff divider
 
 The new thread opens with a divider reading **Continued from** and the source title, with chips naming the agent it came from and the agent it went to. Click the divider to expand it and see **From**, **To**, **Context**, and the **Transferred context** itself.
+
+![The handoff divider](handoff-divider.jpg)
 
 > Handoff keeps the conversation, not the runtime: open files, tool output, and the old agent's prompt cache stay behind.

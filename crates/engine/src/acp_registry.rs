@@ -14,7 +14,8 @@ const ICON_HOST: &str = "cdn.agentclientprotocol.com";
 const INDEX_MAX_AGE: Duration = Duration::from_secs(300);
 const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ICON_BYTES: usize = 64 * 1024;
-const MAX_SEARCH_RESULTS: usize = 20;
+/// Agents a built-in driver installs with stronger checks than the registry offers.
+const BUILTIN_DRIVER_AGENTS: &[&str] = &["antigravity-acp"];
 
 #[derive(Debug, Clone, Deserialize)]
 struct Agent {
@@ -70,11 +71,20 @@ impl Agent {
         serde_json::from_value(target.clone()).ok()
     }
 
+    fn unhashed_binary(&self) -> bool {
+        self.binary_target()
+            .is_some_and(|target| target.sha256.is_none())
+    }
+
+    /// In the order a default pick prefers them: an unchecked download comes last.
     fn distributions(&self) -> Vec<AcpDistribution> {
+        let binary = self.binary_target().is_some();
+        let unhashed = self.unhashed_binary();
         [
-            (AcpDistribution::Binary, self.binary_target().is_some()),
+            (AcpDistribution::Binary, binary && !unhashed),
             (AcpDistribution::Npx, self.distribution.npx.is_some()),
             (AcpDistribution::Uvx, self.distribution.uvx.is_some()),
+            (AcpDistribution::Binary, unhashed),
         ]
         .into_iter()
         .filter_map(|(distribution, offered)| offered.then_some(distribution))
@@ -156,6 +166,17 @@ fn http() -> Result<reqwest::Client, EngineError> {
         .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let same_host = attempt
+                .previous()
+                .first()
+                .is_some_and(|first| first.host_str() == attempt.url().host_str());
+            if attempt.previous().len() < 10 && same_host && attempt.url().scheme() == "https" {
+                attempt.follow()
+            } else {
+                attempt.error("the ACP Registry redirected off its https host")
+            }
+        }))
         .build()
         .map_err(|error| EngineError::Other(format!("ACP Registry client: {error}")))
 }
@@ -182,12 +203,31 @@ async fn fetch_index(url: &str, etag: Option<&str>) -> Result<Fetched, String> {
         .get(reqwest::header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let body = response.bytes().await.map_err(|error| error.to_string())?;
-    if body.len() > MAX_INDEX_BYTES {
-        return Err(format!("the index is larger than {MAX_INDEX_BYTES} bytes"));
-    }
-    let body = String::from_utf8(body.to_vec()).map_err(|error| error.to_string())?;
+    let body = read_capped(response, MAX_INDEX_BYTES, "the index").await?;
+    let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok(Fetched::Body { body, etag })
+}
+
+async fn read_capped(
+    mut response: reqwest::Response,
+    max: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let too_large = || format!("{what} is larger than {max} bytes");
+    if response
+        .content_length()
+        .is_some_and(|length| length > max as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if body.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn load_index(data_dir: &Path, url: &str) -> Result<Vec<Agent>, EngineError> {
@@ -352,7 +392,7 @@ fn rank(
         .iter()
         .filter_map(|agent| {
             let distributions = agent.distributions();
-            if distributions.is_empty() {
+            if distributions.is_empty() || BUILTIN_DRIVER_AGENTS.contains(&agent.id.as_str()) {
                 return None;
             }
             Some((search_rank(agent, query)?, agent, distributions))
@@ -366,7 +406,6 @@ fn rank(
     });
     ranked
         .into_iter()
-        .take(MAX_SEARCH_RESULTS)
         .map(|(_, agent, distributions)| AcpRegistryAgent {
             id: agent.id.clone(),
             name: agent.name.clone(),
@@ -374,6 +413,8 @@ fn rank(
             description: agent.description.clone(),
             website: agent.website.clone(),
             repository: agent.repository.clone(),
+            unverified: distributions.first() == Some(&AcpDistribution::Binary)
+                && agent.unhashed_binary(),
             distributions,
             icon_url: agent.icon.as_deref().and_then(official_icon_url),
             icon_path: None,
@@ -520,12 +561,19 @@ pub(crate) async fn prepare(
     data_dir: &Path,
     agent_id: &str,
     distribution: Option<AcpDistribution>,
+    allow_unverified: bool,
 ) -> Result<AcpPreparedAgent, EngineError> {
     let agents = load_index(data_dir, INDEX_URL).await?;
     let agent = agents
         .into_iter()
         .find(|agent| agent.id == agent_id)
         .ok_or_else(|| EngineError::Other(format!("The ACP Registry has no agent '{agent_id}'")))?;
+    if BUILTIN_DRIVER_AGENTS.contains(&agent.id.as_str()) {
+        return Err(EngineError::Other(format!(
+            "Add {} with its own provider, which installs and checks it",
+            agent.name
+        )));
+    }
     let offered = agent.distributions();
     let distribution = match distribution {
         Some(distribution) if offered.contains(&distribution) => distribution,
@@ -543,6 +591,12 @@ pub(crate) async fn prepare(
             ))
         })?,
     };
+    if distribution == AcpDistribution::Binary && agent.unhashed_binary() && !allow_unverified {
+        return Err(EngineError::Other(format!(
+            "The ACP Registry publishes no checksum for {}'s download, so Zeron cannot check it",
+            agent.name
+        )));
+    }
     let record = install(&agent, distribution).await?;
     persist_json(
         &record_path(data_dir, &agent.id, &agent.version, distribution),
@@ -621,6 +675,12 @@ async fn install(
                 agent.distribution.npx.clone().ok_or_else(|| {
                     EngineError::Other(format!("{} has no npx package", agent.name))
                 })?;
+            if !npm_spec_ok(&package.package) {
+                return Err(EngineError::Other(format!(
+                    "{}'s npx package {} is not a pinned npm package",
+                    agent.name, package.package
+                )));
+            }
             let entry = zeron_harness::ensure_npm_tool(
                 &package.package,
                 npm_bin_name(&package.package),
@@ -659,6 +719,31 @@ async fn install(
     }
 }
 
+fn npm_spec_ok(spec: &str) -> bool {
+    let Some((name, version)) = spec.get(1..).and_then(|rest| rest.rsplit_once('@')) else {
+        return false;
+    };
+    let name = format!("{}{name}", &spec[..1]);
+    let part = |part: &str| {
+        part.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && part.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_')
+            })
+    };
+    let named = match name.strip_prefix('@').map(|scoped| scoped.split_once('/')) {
+        Some(Some((scope, bare))) => part(scope) && part(bare),
+        Some(None) => false,
+        None => part(&name),
+    };
+    named
+        && version.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
 fn npm_bin_name(package: &str) -> &str {
     let name = match package.rfind('@') {
         Some(at) if at > 0 => &package[..at],
@@ -675,13 +760,7 @@ async fn fetch_icon(data_dir: &Path, agent_id: &str, url: &str) -> Result<PathBu
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|error| error.to_string())?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_ICON_BYTES as u64)
-    {
-        return Err(format!("the icon is larger than {MAX_ICON_BYTES} bytes"));
-    }
-    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    let bytes = read_capped(response, MAX_ICON_BYTES, "the icon").await?;
     save_icon(data_dir, agent_id, &bytes)
 }
 
@@ -745,6 +824,21 @@ mod tests {
                         },
                         "uvx": {"package": "alpha==2.0.0"}
                     }
+                },
+                {
+                    "id": "antigravity-acp", "name": "Antigravity", "version": "1.4.1",
+                    "distribution": {"binary": {platform: {"archive": "https://x/agy.zip", "cmd": "./agy"}}}
+                },
+                {
+                    "id": "zeta", "name": "Zeta", "version": "1.0.0",
+                    "distribution": {
+                        "binary": {platform: {"archive": "https://x/z.tar.gz", "cmd": "./zeta"}},
+                        "npx": {"package": "zeta@1.0.0"}
+                    }
+                },
+                {
+                    "id": "omega", "name": "Omega", "version": "1.0.0",
+                    "distribution": {"binary": {platform: {"archive": "https://x/o.tar.gz", "cmd": "./omega"}}}
                 }
             ]
         })
@@ -758,13 +852,30 @@ mod tests {
         };
         let agents = parse_index(&index(platform)).unwrap();
         let ids: Vec<&str> = agents.iter().map(|agent| agent.id.as_str()).collect();
-        assert_eq!(ids, ["gamma-code", "windows-only", "alpha"]);
+        assert_eq!(
+            ids,
+            [
+                "gamma-code",
+                "windows-only",
+                "alpha",
+                "antigravity-acp",
+                "zeta",
+                "omega"
+            ]
+        );
         assert!(parse_index("{\"version\":\"1.0.0\"}").is_err());
 
         let all = rank(&agents, "", |agent| agent.id == "alpha");
-        let rows: Vec<(&str, &[AcpDistribution], bool)> = all
+        let rows: Vec<(&str, &[AcpDistribution], bool, bool)> = all
             .iter()
-            .map(|row| (row.id.as_str(), row.distributions.as_slice(), row.installed))
+            .map(|row| {
+                (
+                    row.id.as_str(),
+                    row.distributions.as_slice(),
+                    row.installed,
+                    row.unverified,
+                )
+            })
             .collect();
         assert_eq!(
             rows,
@@ -772,9 +883,17 @@ mod tests {
                 (
                     "alpha",
                     &[AcpDistribution::Binary, AcpDistribution::Uvx][..],
-                    true
+                    true,
+                    false
                 ),
-                ("gamma-code", &[AcpDistribution::Npx][..], false),
+                ("gamma-code", &[AcpDistribution::Npx][..], false, false),
+                ("omega", &[AcpDistribution::Binary][..], false, true),
+                (
+                    "zeta",
+                    &[AcpDistribution::Npx, AcpDistribution::Binary][..],
+                    false,
+                    false
+                ),
             ]
         );
         assert_eq!(
@@ -813,6 +932,29 @@ mod tests {
             "a name prefix outranks a description hit"
         );
         assert!(rank(&agents, "nothing matches", |_| false).is_empty());
+    }
+
+    #[test]
+    fn only_pinned_npm_packages_install() {
+        for good in [
+            "@gamma/code@1.0.0",
+            "demo@1.0.0",
+            "a.b-c_d@0.1.0-beta.1+build",
+        ] {
+            assert!(npm_spec_ok(good), "{good}");
+        }
+        for bad in [
+            "demo",
+            "@gamma/code",
+            "--global@1.0.0",
+            "git+https://x/y.git@1.0.0",
+            "file:../x@1.0.0",
+            "demo@latest",
+            "@scope@1.0.0",
+            "Demo@1.0.0",
+        ] {
+            assert!(!npm_spec_ok(bad), "{bad}");
+        }
     }
 
     fn registry_instance(version: &str, distribution: AcpDistribution) -> ProviderInstance {
@@ -973,7 +1115,9 @@ mod tests {
         );
 
         for (agent_id, distribution) in [("pi-acp", None), ("kimchi", None)] {
-            let prepared = prepare(&data_dir, agent_id, distribution).await.unwrap();
+            let prepared = prepare(&data_dir, agent_id, distribution, false)
+                .await
+                .unwrap();
             println!("prepared: {prepared:?}");
             let record = record_path(
                 &data_dir,

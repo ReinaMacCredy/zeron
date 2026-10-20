@@ -1142,7 +1142,7 @@ impl SessionHandle {
         let client = self.core.client()?;
         self.core.queue_command(
             &client.config.device_id,
-            SessionCommandPayload::Interrupt {},
+            SessionCommandPayload::Interrupt { teardown: false },
         )?;
         client.after_command(&self.core, false);
         Ok(())

@@ -11,8 +11,7 @@ use zeron_proto::change_request_assessment::{CiState, check_failed, check_status
 use zeron_proto::{
     ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
     ChangeRequestReviewDecision, Chat, ChatIndicator, GitActivity, GitActivityRequest,
-    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskMode,
-    TaskStatus,
+    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskStatus,
 };
 use zeron_rpc::methods;
 
@@ -707,58 +706,78 @@ pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionR
     let mut tasks: Vec<&zeron_proto::Task> = state
         .tasks
         .iter()
-        .filter(|task| {
-            task.mode == TaskMode::Orchestrated && !task.deleted && task.completed_at.is_none()
-        })
+        .filter(|task| task.has_plan() && !task.deleted && task.completed_at.is_none())
         .collect();
     tasks.sort_by(|a, b| {
         (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
     });
     let mut rows: Vec<MissionRow> = tasks
         .into_iter()
-        .map(|task| {
-            let plan = crate::tasks::rollup(state, task, now);
-            let phase = plan.phase(task);
-            let (word, status) = plan.label(task);
-            let label = match phase {
-                PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
-                PlanPhase::Planning => "Planning".to_owned(),
-                PlanPhase::Status(TaskStatus::NeedsYou) => plan
-                    .steps
-                    .iter()
-                    .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
-                    .map(|index| format!("Needs you · step {}", index + 1))
-                    .unwrap_or_else(|| word.to_owned()),
-                _ if plan.steps.is_empty() => word.to_owned(),
-                _ => {
-                    let counted: Vec<StepStatus> = plan
-                        .steps
-                        .iter()
-                        .map(|row| row.status)
-                        .filter(|status| *status != StepStatus::Skipped)
-                        .collect();
-                    let current = counted
-                        .iter()
-                        .position(|status| *status != StepStatus::Done)
-                        .unwrap_or(counted.len().saturating_sub(1));
-                    format!(
-                        "Step {}/{} · {word}",
-                        current + 1,
-                        plan.progress.total.max(1)
-                    )
-                }
-            };
-            MissionRow {
-                task_id: task.id.clone(),
-                title: task.title.clone(),
-                progress: plan.progress,
-                status,
-                label,
-            }
-        })
+        .map(|task| mission_row_of(state, task, now))
         .collect();
     rows.sort_by_key(|row| row.status != TaskStatus::NeedsYou);
     rows
+}
+
+pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
+    let today = now.with_timezone(&chrono::Local).date_naive();
+    let mut tasks: Vec<&zeron_proto::Task> = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.has_plan()
+                && !task.deleted
+                && task
+                    .completed_at
+                    .is_some_and(|at| at.with_timezone(&chrono::Local).date_naive() == today)
+        })
+        .collect();
+    tasks.sort_by_key(|task| std::cmp::Reverse(task.completed_at));
+    tasks
+        .into_iter()
+        .map(|task| mission_row_of(state, task, now))
+        .collect()
+}
+
+fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> MissionRow {
+    let plan = crate::tasks::rollup(state, task, now);
+    let phase = plan.phase(task);
+    let (word, status) = plan.label(task);
+    let label = match phase {
+        PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
+        PlanPhase::Planning => "Planning".to_owned(),
+        PlanPhase::Status(TaskStatus::NeedsYou) => plan
+            .steps
+            .iter()
+            .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
+            .map(|index| format!("Needs you · step {}", index + 1))
+            .unwrap_or_else(|| word.to_owned()),
+        _ if plan.steps.is_empty() => word.to_owned(),
+        _ => {
+            let counted: Vec<StepStatus> = plan
+                .steps
+                .iter()
+                .map(|row| row.status)
+                .filter(|status| *status != StepStatus::Skipped)
+                .collect();
+            let current = counted
+                .iter()
+                .position(|status| *status != StepStatus::Done)
+                .unwrap_or(counted.len().saturating_sub(1));
+            format!(
+                "Step {}/{} · {word}",
+                current + 1,
+                plan.progress.total.max(1)
+            )
+        }
+    };
+    MissionRow {
+        task_id: task.id.clone(),
+        title: task.title.clone(),
+        progress: plan.progress,
+        status,
+        label,
+    }
 }
 
 fn failing_prs(prs: &HomePrs) -> Vec<&ChangeRequestListItem> {

@@ -1014,11 +1014,16 @@ impl Host {
                 {
                     log(&format!("computer frame tap update failed: {error}"));
                 }
-            } else if name == "launch_app" {
-                let host = self.clone();
-                tokio::task::spawn_local(async move {
-                    host.prime_tap_after_launch(task, input, conn, epoch).await;
-                });
+            } else {
+                if let Some(tap) = &self.options.frame_tap {
+                    tap.touch(&task);
+                }
+                if name == "launch_app" {
+                    let host = self.clone();
+                    tokio::task::spawn_local(async move {
+                        host.prime_tap_after_launch(task, input, conn, epoch).await;
+                    });
+                }
             }
         }
         Ok(reply)

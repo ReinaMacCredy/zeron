@@ -429,9 +429,9 @@ impl Render for CompactionCard {
                     &theme,
                     if classifier { "Check from" } else { "Remind at" },
                     if classifier {
-                        "Context tokens; a chat with a smaller window is checked from 70% of it. Smaller chats are never checked."
+                        "Context a compaction could free, above what the last one left; a chat with a smaller window is checked from 70% of its free room."
                     } else {
-                        "Context tokens; a chat with a smaller window is reminded at 70% of it. Every message past it carries the reminder until the chat compacts."
+                        "Context a compaction could free, above what the last one left; a chat with a smaller window is reminded at 70% of its free room. Every message past it carries the reminder until the chat compacts."
                     },
                 ))
                 .child(widgets::segmented(
@@ -443,12 +443,13 @@ impl Render for CompactionCard {
                 ))
                 .into_any_element(),
         ];
-        let source_row = classifier.then(|| {
+        // The Jev key lives in the macOS Keychain; elsewhere it could never be stored.
+        let source_row = (classifier && cfg!(target_os = "macos")).then(|| {
             widgets::card_row(&theme, false)
                 .child(row_text(
                     &theme,
                     "Classifier",
-                    "An agent's model, or TypeSafe's Jev classifier with your API key.",
+                    "An agent's model, or TypeSafe's Jev classifier with your API key. Jev receives the recent conversation and each new message past the check.",
                 ))
                 .child(widgets::segmented(
                     &theme,
@@ -468,7 +469,7 @@ impl Render for CompactionCard {
                 .child(row_text(
                     &theme,
                     "Classifier model",
-                    "Sonnet-class by default; a small model compacted follow-ups in testing.",
+                    "Sonnet when Claude classifies, Codex's default model when Codex does; a small model compacted follow-ups in testing.",
                 ))
                 .child(self.picker.clone())
                 .into_any_element(),

@@ -1354,6 +1354,15 @@ pub enum TasksView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub enum TreeView {
+    Spine,
+    #[default]
+    Outline,
+    Timeline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub enum ChatMission {
     #[default]
     Lead,
@@ -1716,6 +1725,7 @@ pub struct UiSettings {
     /// it, or with a name this build does not know, open on General.
     pub settings_section: crate::shell::SettingsSection,
     pub tasks_view: TasksView,
+    pub tree_view: TreeView,
     pub chat_mission: ChatMission,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
@@ -1891,6 +1901,7 @@ impl Default for UiSettings {
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             tasks_view: TasksView::List,
+            tree_view: TreeView::Outline,
             chat_mission: ChatMission::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             follow_up_behavior: FollowUpBehavior::default(),
@@ -2600,6 +2611,7 @@ impl UiSettings {
             escape_stops_active_agent,
             settings_section,
             tasks_view,
+            tree_view,
             chat_mission,
             appearance,
             git_history_columns,
@@ -4084,6 +4096,7 @@ mod tests {
             escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             tasks_view: TasksView::Kanban,
+            tree_view: TreeView::Timeline,
             chat_mission: ChatMission::NewMission,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             follow_up_behavior: FollowUpBehavior::Steer,

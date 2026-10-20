@@ -3,22 +3,21 @@ use std::time::Duration;
 
 use gpui::{AnyElement, Context, SharedString, Task, div, prelude::*, px};
 use zeron_proto::{
-    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, AgentLoginPoll,
-    AgentLoginStart, AgentLoginStatus, HarnessId, InstanceConfig, ProviderInstance,
+    AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, AgentLoginStart,
+    HarnessId, InstanceConfig, ProviderInstance,
 };
 use zeron_rpc::methods;
 
 use super::{AddProviderDialog, Identity, Step, field, readonly_value, setting_row};
 use crate::icons::{self, icon};
 use crate::popover::Loadable;
-use crate::provider_instances::{self, InstanceIcon};
+use crate::provider_instances::{self, InstanceIcon, LoginPoll};
 use crate::settings::accounts::open_login_url;
 use crate::settings::widgets;
 use crate::theme::{Theme, ink};
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 const ICON_REFRESH: Duration = Duration::from_millis(1500);
-const LOGIN_POLL: Duration = Duration::from_millis(1500);
 const NO_IN_APP_SIGN_IN: &str =
     "No in-app sign-in advertised. Follow the provider's docs to finish setup.";
 
@@ -48,6 +47,7 @@ pub(super) struct RegistryState {
     pub error: Option<String>,
     pub preparing: Option<String>,
     pub prepare_error: Option<String>,
+    unverified_armed: Option<String>,
     pub knob: Option<RegistryKnob>,
     generation: u64,
     search_task: Option<Task<()>>,
@@ -100,6 +100,7 @@ impl AddProviderDialog {
     pub(super) fn search_edited(&mut self, cx: &mut Context<Self>) {
         let query = self.search_input.read(cx).text().trim().to_string();
         self.registry.prepare_error = None;
+        self.registry.unverified_armed = None;
         self.registry.debounce = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             this.update(cx, |dialog, cx| {
@@ -188,7 +189,7 @@ impl AddProviderDialog {
         };
         match knob {
             RegistryKnob::Preparing => self.registry.preparing = Some(first.id),
-            RegistryKnob::Prepare => self.prepare(first, cx),
+            RegistryKnob::Prepare => self.prepare(first, false, cx),
         }
     }
 
@@ -223,7 +224,12 @@ impl AddProviderDialog {
         cx.notify();
     }
 
-    pub(super) fn prepare(&mut self, agent: AcpRegistryAgent, cx: &mut Context<Self>) {
+    pub(super) fn prepare(
+        &mut self,
+        agent: AcpRegistryAgent,
+        allow_unverified: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.registry.preparing.is_some() {
             return;
         }
@@ -234,10 +240,13 @@ impl AddProviderDialog {
         };
         self.registry.preparing = Some(agent.id.clone());
         self.registry.prepare_error = None;
+        self.registry.unverified_armed = None;
         self.acp_error = None;
         let target = self.target();
         self.registry.prepare_task = Some(cx.spawn(async move |this, cx| {
-            let result = provider_instances::prepare_agent(&engine, &agent.id, target).await;
+            let result =
+                provider_instances::prepare_agent(&engine, &agent.id, allow_unverified, target)
+                    .await;
             this.update(cx, |dialog, cx| {
                 dialog.registry.preparing = None;
                 match result {
@@ -312,6 +321,8 @@ impl AddProviderDialog {
     }
 
     pub(super) fn back_to_search(&mut self, cx: &mut Context<Self>) {
+        self.registry.prepare_task = None;
+        self.registry.preparing = None;
         self.acp = None;
         self.selected = None;
         self.driver = self.tile;
@@ -354,8 +365,9 @@ impl AddProviderDialog {
                         icon_url: None,
                         icon_path: None,
                         installed: false,
+                        unverified: false,
                     });
-                self.prepare(agent, cx);
+                self.prepare(agent, false, cx);
             }
             Some(AcpFlow::Local) if !self.acp_selection_ok(cx) => {
                 self.acp_error = Some("Executable is required.".into());
@@ -541,17 +553,14 @@ impl AddProviderDialog {
             message: None,
         });
         let instance = sign_in.instance.clone();
-        let with_target = move |mut params: serde_json::Value| {
-            if let Some(target) = &target {
-                params["targetDeviceId"] = target.clone();
-            }
-            params
-        };
-        let start_params = with_target(serde_json::json!({
-            "harness": instance.driver,
-            "instanceId": instance.id,
-            "methodId": method_id,
-        }));
+        let start_params = provider_instances::with_target(
+            serde_json::json!({
+                "harness": instance.driver,
+                "instanceId": instance.id,
+                "methodId": method_id,
+            }),
+            target.clone(),
+        );
         sign_in.login_task = Some(cx.spawn(async move |this, cx| {
             let start = engine
                 .client()
@@ -563,20 +572,14 @@ impl AddProviderDialog {
             else {
                 return;
             };
-            let poll_params =
-                with_target(serde_json::json!({ "loginId": login_id, "instanceId": instance.id }));
-            loop {
-                cx.background_executor().timer(LOGIN_POLL).await;
-                let poll = engine
-                    .client()
-                    .call_as::<AgentLoginPoll>(methods::POLL_AGENT_LOGIN, poll_params.clone())
-                    .await
-                    .map_err(|error| error.to_string());
-                match this.update(cx, |dialog, cx| dialog.login_polled(attempt, poll, cx)) {
-                    Ok(false) => {}
-                    Ok(true) | Err(_) => break,
-                }
-            }
+            let poll_params = provider_instances::with_target(
+                serde_json::json!({ "loginId": login_id, "instanceId": instance.id }),
+                target,
+            );
+            provider_instances::poll_login(&engine, poll_params, &this, cx, |dialog, poll, cx| {
+                dialog.login_polled(attempt, poll, cx)
+            })
+            .await;
         }));
         cx.notify();
     }
@@ -608,12 +611,7 @@ impl AddProviderDialog {
         started
     }
 
-    fn login_polled(
-        &mut self,
-        attempt: u64,
-        poll: Result<AgentLoginPoll, String>,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn login_polled(&mut self, attempt: u64, poll: LoginPoll, cx: &mut Context<Self>) -> bool {
         let Some(sign_in) = self.sign_in.as_mut().filter(|s| s.attempt == attempt) else {
             return true;
         };
@@ -621,33 +619,23 @@ impl AddProviderDialog {
             return true;
         };
         let finished = match poll {
-            Ok(poll) => match poll.status {
-                AgentLoginStatus::Done => {
-                    sign_in.login = None;
-                    sign_in.signed_in = true;
-                    true
-                }
-                AgentLoginStatus::Error => {
-                    sign_in.login = None;
-                    sign_in.error = Some(
-                        poll.message
-                            .unwrap_or_else(|| "The sign-in failed.".to_string()),
-                    );
-                    true
-                }
-                AgentLoginStatus::Pending => {
-                    if let Some(url) = poll.url.filter(|url| login.url.as_ref() != Some(url)) {
-                        open_login_url(&url, cx);
-                        login.url = Some(url);
-                    }
-                    login.message = poll.message;
-                    false
-                }
-            },
-            Err(error) => {
+            LoginPoll::Done => {
                 sign_in.login = None;
-                sign_in.error = Some(format!("Lost track of the sign-in: {error}"));
+                sign_in.signed_in = true;
                 true
+            }
+            LoginPoll::Failed(message) => {
+                sign_in.login = None;
+                sign_in.error = Some(message);
+                true
+            }
+            LoginPoll::Pending { url, message } => {
+                if let Some(url) = url.filter(|url| login.url.as_ref() != Some(url)) {
+                    open_login_url(&url, cx);
+                    login.url = Some(url);
+                }
+                login.message = message;
+                false
             }
         };
         cx.notify();
@@ -665,21 +653,12 @@ impl AddProviderDialog {
         };
         sign_in.login_task = None;
         if let (Some(login_id), Some(engine)) = (login.login_id, engine) {
-            let mut params =
-                serde_json::json!({ "loginId": login_id, "instanceId": sign_in.instance.id });
-            if let Some(target) = target {
-                params["targetDeviceId"] = target;
-            }
-            cx.spawn(async move |_, _| {
-                if let Err(error) = engine
-                    .client()
-                    .call(methods::CANCEL_AGENT_LOGIN, params)
-                    .await
-                {
-                    tracing::debug!(%error, "CancelAgentLogin failed (best-effort)");
-                }
-            })
-            .detach();
+            let params = provider_instances::with_target(
+                serde_json::json!({ "loginId": login_id, "instanceId": sign_in.instance.id }),
+                target,
+            );
+            cx.spawn(async move |_, _| provider_instances::cancel_login(engine, params).await)
+                .detach();
         }
         cx.notify();
     }
@@ -779,24 +758,32 @@ impl AddProviderDialog {
             .flex()
             .flex_col()
             .child(self.form_header(theme, "Local ACP command", description.into(), cx))
-            .child(setting_row(
+            .children(self.local_command_rows(theme))
+            .child(self.env_row(theme, "Set for this agent only.", cx))
+            .into_any_element()
+    }
+
+    fn local_command_rows(&self, theme: &Theme) -> [AnyElement; 2] {
+        [
+            setting_row(
                 theme,
                 "Executable",
                 "Absolute path or a command on PATH.".into(),
                 None,
                 field(theme, &self.command_input, false),
                 true,
-            ))
-            .child(setting_row(
+            )
+            .into_any_element(),
+            setting_row(
                 theme,
                 "Arguments",
                 "Passed after the executable.".into(),
                 None,
                 field(theme, &self.acp_args_input, false),
                 true,
-            ))
-            .child(self.env_row(theme, "Set for this agent only.", cx))
-            .into_any_element()
+            )
+            .into_any_element(),
+        ]
     }
 
     fn render_registry_search(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -922,8 +909,11 @@ impl AddProviderDialog {
         let preparing = self.registry.preparing.as_deref() == Some(agent.id.as_str());
         let can_add = self.registry.preparing.is_none() && !added;
         let distribution = distribution_label(agent);
+        let armed = self.registry.unverified_armed.as_deref() == Some(agent.id.as_str());
         let label = if added {
             "Added"
+        } else if armed {
+            "Add anyway"
         } else if preparing {
             if distribution == Some("binary") {
                 "Downloading"
@@ -977,6 +967,16 @@ impl AddProviderDialog {
                     .child(SharedString::from(format!("v{}", agent.version))),
             )
             .children(distribution.map(|d| badge(d.into())))
+            .when(agent.unverified, |el| {
+                el.child(
+                    div()
+                        .id(("acp-unverified", ix))
+                        .child(badge("unverified".into()))
+                        .tooltip(widgets::text_tooltip(
+                            "The ACP Registry publishes no checksum for this download",
+                        )),
+                )
+            })
             .when(agent.installed && !added, |el| {
                 el.child(
                     div()
@@ -1025,7 +1025,14 @@ impl AddProviderDialog {
         })
         .when(can_add, |el| {
             let agent = agent.clone();
-            el.on_click(cx.listener(move |this, _, _, cx| this.prepare(agent.clone(), cx)))
+            el.on_click(cx.listener(move |this, _, _, cx| {
+                if agent.unverified && !armed {
+                    this.registry.unverified_armed = Some(agent.id.clone());
+                    cx.notify();
+                } else {
+                    this.prepare(agent.clone(), agent.unverified, cx);
+                }
+            }))
         })
         .child(label);
         div()
@@ -1178,25 +1185,7 @@ impl AddProviderDialog {
                         true,
                     ));
             }
-            _ => {
-                rows = rows
-                    .child(setting_row(
-                        theme,
-                        "Executable",
-                        "Absolute path or a command on PATH.".into(),
-                        None,
-                        field(theme, &self.command_input, false),
-                        true,
-                    ))
-                    .child(setting_row(
-                        theme,
-                        "Arguments",
-                        "Passed after the executable.".into(),
-                        None,
-                        field(theme, &self.acp_args_input, false),
-                        true,
-                    ));
-            }
+            _ => rows = rows.children(self.local_command_rows(theme)),
         }
         rows.child(self.env_row(theme, "Set for this agent only.", cx))
             .into_any_element()
@@ -1445,6 +1434,7 @@ mod tests {
                     icon_url: None,
                     icon_path: Some("/cache/kimchi.svg".into()),
                     installed: false,
+                    unverified: false,
                 };
                 let prepared = AcpPreparedAgent {
                     agent_id: "kimchi".into(),

@@ -8,24 +8,26 @@
 
 ## 桌面应用
 
-从 [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest) 下载对应平台的最新版本：
+从 [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest) 下载对应平台的最新版本：
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`，解压后运行里面的 `install.sh`
 
-不用账号，也不用联网，会话就存在这台设备上。应用会自动更新。
+不用账号，也不用联网，会话就存在这台设备上。应用会检查更新并在侧边栏提示；设置 `ZERON_AUTO_UPDATE=1` 后会在后台下载，并在退出时安装。
 
 ## 无界面运行（CLI）
 
-适用于服务器等没有显示器的机器，比如在你合上笔记本之后继续跑 agent 的 VPS。仅支持 Linux：
+适用于服务器等没有显示器的机器，比如在你合上笔记本之后继续跑 agent 的 VPS。仅支持 Linux：从 [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest) 下载 `zeron-<version>-linux-<arch>.tar.gz`，然后运行：
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+tar -xzf zeron-<version>-linux-<arch>.tar.gz
+zeron-<version>-linux-<arch>/install.sh
+zeron daemon install
 zeron status
 ```
 
-安装脚本会把引擎作为后台服务拉起来，重启之后也会自己回来。
+`zeron daemon install` 会把引擎作为后台服务拉起来，重启之后也会自己回来。
 
 ```bash
 zeron status      # 查看本地/同步模式和引擎状态

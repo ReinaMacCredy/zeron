@@ -1,3 +1,4 @@
+use zeron_proto::supervisor::PlanApproval;
 use zeron_proto::{Delegation, SessionStatus, StepTurn, StepTurnEnd, TaskStep, TaskStepPatch};
 
 use super::delegation::{agent_response, failure, handback_settle, handback_text};
@@ -112,6 +113,16 @@ impl DocHost {
             return Err(failure(
                 "plan_pending",
                 "The person has not approved the plan yet. Stop and wait for the approval message.",
+            ));
+        }
+        if self
+            .supervisor()
+            .and_then(|store| store.approval_of(&task.id))
+            .is_some_and(|(_, approval)| matches!(approval, PlanApproval::Held { .. }))
+        {
+            return Err(failure(
+                "plan_pending",
+                "The plan's approval has not reached you yet. Stop and wait for the approval message.",
             ));
         }
         if step.outcome.is_some() {

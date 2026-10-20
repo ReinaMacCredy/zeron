@@ -65,15 +65,7 @@ pub async fn stage(
         "invalid Windows release version"
     );
     let file = artifact(&manifest.version);
-    let expected = manifest
-        .files
-        .get(&file)
-        .and_then(|meta| meta.sha256.as_deref())
-        .context("Windows updates require a SHA-256 checksum")?;
-    ensure!(
-        expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
-        "invalid SHA-256 checksum"
-    );
+    let expected = super::expected_sha256(manifest, &file)?;
     let temporary = tempfile::Builder::new()
         .prefix(".zeron-update-")
         .tempdir_in(directory)?;

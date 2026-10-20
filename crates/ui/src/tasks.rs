@@ -8,9 +8,10 @@ use gpui::{
     Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
+use zeron_proto::supervisor::NeedsYouRow;
 use zeron_proto::{
-    ChatIndicator, PlanProgress, StepStatus, TaskMode, TaskPatch, TaskStatus, plan_progress,
-    step_status, task_status,
+    ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, plan_progress, step_status,
+    task_status,
 };
 
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
@@ -27,19 +28,24 @@ mod center;
 #[cfg(test)]
 mod image_paths_tests;
 pub(crate) mod images;
+mod index;
 
 use crate::attachments::StagedAttachment;
 use images::ImageGallery;
 mod logic;
 mod morph;
 mod strip_tree;
+mod thread_tree;
+pub(crate) use thread_tree::tree_rows;
 mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
+pub(crate) use index::{Kind as IndexKind, MissionIndex, MissionIndexEvent, index_rows};
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
-pub(crate) use strip_tree::{StripTree, StripTreeEvent, TreeHost};
+pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
+pub(crate) use tree::{Status as TreeStatus, glyph as tree_glyph, kind_badge, spinner};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
@@ -121,6 +127,7 @@ pub(crate) struct Rollup {
     pub steps: Vec<StepRow>,
     pub status: TaskStatus,
     pub progress: PlanProgress,
+    pub questions: usize,
 }
 
 impl Rollup {
@@ -174,7 +181,7 @@ struct Row {
 
 impl Row {
     fn orchestrated(&self) -> bool {
-        self.task.mode == TaskMode::Orchestrated && self.linked.is_some()
+        self.task.has_plan() && self.linked.is_some()
     }
 
     fn marks(&self) -> Vec<Brand> {
@@ -1442,7 +1449,7 @@ impl TasksPage {
 
 /// A deleted lead leaves the mode without a lead, so the card starts it again.
 pub(crate) fn has_lead(chats: &[zeron_proto::Chat], task: &zeron_proto::Task) -> bool {
-    task.mode == TaskMode::Orchestrated && linked_chat(chats, task).is_some()
+    task.has_plan() && linked_chat(chats, task).is_some()
 }
 
 pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {
@@ -1480,11 +1487,25 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
         })
         .collect();
     let statuses: Vec<StepStatus> = steps.iter().map(|row| row.status).collect();
+    let questions = state.supervisor.as_ref().map_or(0, |snapshot| {
+        snapshot
+            .needs_you
+            .iter()
+            .filter(|row| {
+                let task_id = match row {
+                    NeedsYouRow::Item(item) => item.task_id.as_deref(),
+                    NeedsYouRow::Input(input) => input.task_id.as_deref(),
+                };
+                task_id == Some(task.id.as_str())
+            })
+            .count()
+    });
     Rollup {
         lead,
         status: task_status(task, lead, &statuses),
         progress: plan_progress(&statuses),
         steps,
+        questions,
     }
 }
 
@@ -1518,42 +1539,26 @@ pub(crate) struct MissionThread {
     pub progress: PlanProgress,
 }
 
-fn is_mission(task: &zeron_proto::Task) -> bool {
-    task.mode == TaskMode::Orchestrated && !task.deleted
-}
-
-/// A chat can lead a finished mission and a newer one: the open, then the newest, wins.
-fn mission_rank(task: &zeron_proto::Task) -> (bool, DateTime<Utc>) {
-    (task.completed_at.is_none(), task.created_at)
-}
-
-pub(crate) fn lead_task<'a>(state: &'a AppState, chat_id: &str) -> Option<&'a zeron_proto::Task> {
-    state
-        .tasks
-        .iter()
-        .filter(|task| is_mission(task) && task.chat_id.as_deref() == Some(chat_id))
-        .max_by_key(|task| mission_rank(task))
-}
-
 pub(crate) fn mission_thread(
     state: &AppState,
     chat_id: &str,
     now: DateTime<Utc>,
 ) -> Option<MissionThread> {
-    let (task, step_id) = match lead_task(state, chat_id) {
+    let mission = |task: &&zeron_proto::Task| task.has_plan() && !task.deleted;
+    let (task, step_id) = match plan_led_by(&state.tasks, chat_id) {
         Some(task) => (task, None),
         None => state
             .task_steps
             .iter()
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
-            .filter_map(|step| {
+            .find_map(|step| {
                 let task = state
                     .tasks
                     .iter()
-                    .find(|task| is_mission(task) && task.id == step.task_id)?;
+                    .filter(mission)
+                    .find(|task| task.id == step.task_id)?;
                 Some((task, Some(step.id.clone())))
-            })
-            .max_by_key(|(task, _)| mission_rank(task))?,
+            })?,
     };
     let plan = rollup(state, task, now);
     let role = match step_id {
@@ -1568,6 +1573,31 @@ pub(crate) fn mission_thread(
         title: task.title.clone(),
         role,
         progress: plan.progress,
+    })
+}
+
+pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
+    state.local_device_id.as_deref() == Some(chat.device_id.as_str())
+        && !chat.archived
+        && !chat.is_system()
+        && chat.sidechat_source_chat_id.is_none()
+        && !state.is_hidden_chat(&chat.id)
+        && !state.is_draft(&chat.id)
+        && zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_none()
+}
+
+/// The open plan, else the one that finished last, so a done lead keeps its strip.
+pub(crate) fn plan_led_by<'a>(
+    tasks: &'a [zeron_proto::Task],
+    chat_id: &str,
+) -> Option<&'a zeron_proto::Task> {
+    zeron_proto::plan_of_chat(tasks, chat_id).or_else(|| {
+        tasks
+            .iter()
+            .filter(|task| {
+                !task.deleted && task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
+            })
+            .max_by_key(|task| task.completed_at)
     })
 }
 

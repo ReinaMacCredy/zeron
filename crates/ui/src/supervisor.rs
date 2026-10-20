@@ -1,6 +1,8 @@
 mod feed;
+mod inbox;
+mod rail;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -13,10 +15,10 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
     CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy,
-    LeadQuestion, NeedsYouInput, NeedsYouRow, QuestionState, Raiser, ResourceState, SettledBy,
-    SharedResource, SupervisorEventKind, SupervisorIntervention, SupervisorItem,
-    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake, WakeDelivery,
-    is_supervisor_chat,
+    LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser,
+    ResourceState, SettledBy, SharedResource, SupervisorEventKind, SupervisorIntervention,
+    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    WAKES_PER_HOUR, WakeDelivery, is_supervisor_chat,
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
@@ -25,9 +27,8 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::composer::Composer;
-use crate::home::MissionRow;
 use crate::icons::{self, icon};
-use crate::motion::{self, CubicBezier, MotionSpec, Tween};
+use crate::motion::{self, CubicBezier, Fold, MotionSpec, Tween, folded};
 use crate::pickers::Pickers;
 use crate::popover::{self, Loadable, Popup};
 use crate::settings::widgets;
@@ -37,6 +38,7 @@ use crate::theme::Theme;
 use crate::transcript::Transcript;
 use crate::typography::ui_rems;
 use feed::{Entry, Feed, Filter, Kind, Memory, Row};
+use rail::{RailMode, RailMotion, mission_tone};
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
 const PROFILE_ID: &str = "slp-supervisor";
@@ -50,19 +52,30 @@ const RECENTLY_ACTIVE: Duration = Duration::from_secs(180);
 const NO_EFFECT_AFTER_MINUTES: i64 = 10;
 const EARLIER_ROWS: usize = 50;
 const CONVERSATION_HEIGHT: f32 = 320.0;
+const PAGE_WIDTH: f32 = 760.0;
 const EASE_PAGE: CubicBezier = CubicBezier::new(0.2, 0.9, 0.3, 1.0);
 const ENTER: MotionSpec = MotionSpec::new(340, EASE_PAGE);
 const ENTER_STAGGER_MS: u64 = 45;
 const FILL: MotionSpec = MotionSpec::new(1000, EASE_PAGE);
-const ROW_FOLD: MotionSpec = MotionSpec::new(260, EASE_PAGE);
-const ARRIVE: MotionSpec = MotionSpec::new(500, EASE_PAGE);
-const GLOW: MotionSpec = MotionSpec::new(1600, motion::EASE_OUT).with_delay(150);
+const ROW_FOLD: MotionSpec = MotionSpec::new(220, EASE_PAGE);
+const ARRIVE: MotionSpec = MotionSpec::new(220, EASE_PAGE);
 const FOLD: MotionSpec = MotionSpec::new(300, EASE_PAGE);
-const MISSION_FOLD: MotionSpec = MotionSpec::new(280, EASE_PAGE);
+const MISSION_FOLD: MotionSpec = MotionSpec::new(220, EASE_PAGE);
 const CHEVRON_TURN: MotionSpec = MotionSpec::new(220, EASE_PAGE);
 const DRAWER_SLIDE: MotionSpec = MotionSpec::new(300, EASE_PAGE);
 const CHIP_FADE: MotionSpec = MotionSpec::new(300, motion::EASE);
-const COUNT_TICK: MotionSpec = MotionSpec::new(350, EASE_PAGE);
+const COUNT_TICK: MotionSpec = MotionSpec::new(220, EASE_PAGE);
+const TAB_SLIDE: MotionSpec = MotionSpec::new(200, EASE_PAGE);
+const LIST_OUT: MotionSpec = MotionSpec::new(100, motion::EASE_OUT);
+const LIST_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
+const CONFIRM: MotionSpec = motion::FADE_QUICK;
+const HOLD: Duration = Duration::from_millis(450);
+const UNDO_WINDOW: Duration = Duration::from_secs(2);
+const RAIL_OUT: MotionSpec = MotionSpec::new(100, motion::EASE_OUT);
+const RAIL_WIDTH: MotionSpec = MotionSpec::new(220, EASE_PAGE);
+const RAIL_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
+const STATUS_GROW: MotionSpec = MotionSpec::new(220, EASE_PAGE);
+const STATUS_FADE: MotionSpec = MotionSpec::new(160, motion::EASE_OUT);
 const DOT_FLASH: MotionSpec = MotionSpec::new(900, motion::EASE_OUT);
 pub(crate) const BADGE_POP: MotionSpec = MotionSpec::new(400, motion::LINEAR);
 
@@ -154,6 +167,77 @@ pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) ->
     matches!(row.chips.as_slice(), [InterventionChip::Sent]) && now > no_effect_since(row.at)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalState {
+    Held { secs: i64 },
+    Sent,
+    Started,
+    TakenBack,
+}
+
+impl ApprovalState {
+    pub(crate) fn line(self) -> String {
+        match self {
+            Self::Held { secs } => format!(
+                "Approved by the Supervisor · starts in {}:{:02}",
+                secs / 60,
+                secs % 60
+            ),
+            Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
+            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan in Mission Control or message the lead.".into(),
+            Self::TakenBack => "You took this approval back · the plan went back to review".into(),
+        }
+    }
+
+    pub(crate) fn can_take_back(self) -> bool {
+        matches!(self, Self::Held { .. } | Self::Sent)
+    }
+}
+
+pub(crate) fn approval_state(
+    row: &SupervisorIntervention,
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> Option<ApprovalState> {
+    let task_id = row.task_id.as_deref()?;
+    let started = || {
+        state.task_steps.iter().any(|step| {
+            step.task_id == task_id
+                && !step.deleted
+                && (step.chat_id.is_some() || step.outcome.is_some())
+        })
+    };
+    Some(match row.approval.as_ref()? {
+        PlanApproval::TakenBack { .. } => ApprovalState::TakenBack,
+        _ if started() => ApprovalState::Started,
+        PlanApproval::Held { starts_at } => ApprovalState::Held {
+            secs: ((*starts_at - now).num_milliseconds().max(0) + 999) / 1000,
+        },
+        PlanApproval::Sent => ApprovalState::Sent,
+    })
+}
+
+/// The Supervisor's newest approval of the mission's plan, as the person can still act on it.
+pub(crate) fn plan_approval(
+    state: &AppState,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Option<ApprovalState> {
+    let row = state
+        .supervisor
+        .as_ref()?
+        .interventions
+        .iter()
+        .find(|row| {
+            row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
+        })?;
+    approval_state(row, state, now)
+}
+
+fn take_back_key(task_id: &str) -> String {
+    format!("take-back:{task_id}")
+}
+
 fn next_effect_check(rows: &[SupervisorIntervention], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     rows.iter()
         .filter(|row| matches!(row.chips.as_slice(), [InterventionChip::Sent]))
@@ -164,16 +248,43 @@ fn next_effect_check(rows: &[SupervisorIntervention], now: DateTime<Utc>) -> Opt
 
 pub enum SupervisorEvent {
     OpenTaskCenter(String),
+    OpenMission(String, crate::tasks::Selection),
     OpenChat(String),
     WatchDoc(Option<String>),
     Discuss(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Reply {
+enum Stage {
+    Held,
     Sending,
-    Sent(String),
+    Sent(Instant),
     Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Reply {
+    choice: String,
+    flipped: Instant,
+    stage: Stage,
+}
+
+impl Reply {
+    fn failed(&self) -> bool {
+        matches!(self.stage, Stage::Failed(_))
+    }
+
+    fn holding(&self, now: Instant, reduced: bool) -> bool {
+        match self.stage {
+            Stage::Sending => true,
+            Stage::Sent(at) => !reduced && now < at + HOLD.mul_f32(motion::speed_scale()),
+            _ => false,
+        }
+    }
+
+    fn collapsing(&self, now: Instant, reduced: bool) -> bool {
+        matches!(self.stage, Stage::Sent(_)) && !self.holding(now, reduced)
+    }
 }
 
 pub struct Pane {
@@ -212,6 +323,30 @@ pub(crate) fn watch_of(
         (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
         _ if unwatched.iter().any(|id| id == task_id) => Watch::Unwatched,
         _ => Watch::Watched,
+    }
+}
+
+pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
+    let host = state
+        .chats
+        .iter()
+        .find(|chat| chat.id == root)
+        .map(|chat| chat.device_id.as_str());
+    let local = state.local_device_id.as_deref();
+    let snapshot = state.supervisor.as_ref();
+    if let Some(task) = crate::tasks::plan_led_by(&state.tasks, root) {
+        let unwatched = snapshot.map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
+        return watch_of(&task.id, host, local, unwatched);
+    }
+    match (host, local) {
+        (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
+        _ if snapshot.is_some_and(|snapshot| {
+            snapshot.watch_everything || snapshot.watched_roots.iter().any(|id| id == root)
+        }) =>
+        {
+            Watch::Watched
+        }
+        _ => Watch::Unwatched,
     }
 }
 
@@ -309,6 +444,14 @@ fn kind_word(kind: SupervisorEventKind) -> &'static str {
         SupervisorEventKind::PlanEdited => "plan edited",
         SupervisorEventKind::Resource => "resource contention",
         SupervisorEventKind::Heartbeat => "check-in",
+        SupervisorEventKind::NodeFailed => "thread failed",
+        SupervisorEventKind::NodeFinished => "delegated task ended",
+        SupervisorEventKind::QuestionWaiting => "question waiting",
+        SupervisorEventKind::Dirty => "uncommitted files",
+        SupervisorEventKind::Unmerged => "unmerged branch",
+        SupervisorEventKind::LimitIdle => "idle after limit reset",
+        SupervisorEventKind::LostWake => "lost wake",
+        SupervisorEventKind::MergeBlocked => "merge blocked",
     }
 }
 
@@ -339,6 +482,9 @@ fn intervention_kind_label(kind: InterventionKind) -> &'static str {
         InterventionKind::Start => "Start a mission",
         InterventionKind::Pause => "Pause a step",
         InterventionKind::Resume => "Resume a step",
+        InterventionKind::Decide => "Decision",
+        InterventionKind::Approve => "Approve a plan",
+        InterventionKind::Goal => "Change the goal",
     }
 }
 
@@ -407,16 +553,6 @@ fn question_state(state: &QuestionState) -> (&'static str, Option<String>) {
     }
 }
 
-fn trigger_label(trigger: &InterventionTrigger, wakes: &[SupervisorWake]) -> String {
-    match trigger {
-        InterventionTrigger::Person => "after your message".into(),
-        InterventionTrigger::Wake { wake_id } => match wakes.iter().find(|w| &w.id == wake_id) {
-            Some(wake) => format!("after the {} wake", clock(wake.at)),
-            None => "after a wake".into(),
-        },
-    }
-}
-
 fn step_name(state: &AppState, task_id: &str, step_id: &str, now: DateTime<Utc>) -> Option<String> {
     let task = state.tasks.iter().find(|task| task.id == task_id)?;
     let plan = rollup(state, task, now);
@@ -441,7 +577,7 @@ fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
     if is_supervisor_chat(chat_id) {
         return "Supervisor".into();
     }
-    if let Some(task) = crate::tasks::lead_task(state, chat_id) {
+    if let Some(task) = crate::tasks::plan_led_by(&state.tasks, chat_id) {
         return format!("Lead · {}", task.title);
     }
     if let Some(step) = state
@@ -472,6 +608,23 @@ fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> St
         input.step_id.as_deref(),
     ) {
         (InputAsker::Supervisor, _, _) => return "Supervisor".into(),
+        (InputAsker::Thread, _, _) => {
+            let name = thread_name(state, &input.chat_id, now);
+            let root = state
+                .chats
+                .iter()
+                .find(|chat| chat.id == input.chat_id)
+                .and_then(|chat| {
+                    zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps)
+                        .last()
+                        .filter(|root| root.id != chat.id)
+                        .map(|root| crate::transcript::single_line(&crate::home::chat_title(root)))
+                });
+            match root {
+                Some(root) => format!("{name} · {root}"),
+                None => name,
+            }
+        }
         (InputAsker::Step, Some(task_id), Some(step_id)) => {
             step_name(state, task_id, step_id, now).unwrap_or_else(|| "A step".into())
         }
@@ -502,27 +655,179 @@ fn live_state(snapshot: Option<&SupervisorSnapshot>) -> SupervisorState {
         .map_or(SupervisorState::Off, |snapshot| snapshot.state)
 }
 
-fn status_line(snapshot: Option<&SupervisorSnapshot>, watched: usize) -> String {
-    let watching = format!(
-        "watching {watched} {}",
-        plural(watched, "mission", "missions")
-    );
-    match (live_state(snapshot), snapshot.map_or(0, |s| s.waiting)) {
-        (SupervisorState::Off, _) => "Off".into(),
-        (SupervisorState::Stopped, 0) => "Stopped · send a message to resume".into(),
-        (SupervisorState::Stopped, n) => format!(
-            "Stopped · {n} {} waiting · send a message to resume",
-            plural(n, "wake", "wakes")
-        ),
-        (SupervisorState::Asleep, _) => format!("Asleep · {watching}"),
-        (SupervisorState::Awake, _) => format!("Awake · {watching}"),
+#[derive(Debug, Clone, PartialEq)]
+enum Mode {
+    Watching,
+    Working,
+    Stopped,
+    Off,
+    Failed(String),
+}
+
+fn mode(snapshot: Option<&SupervisorSnapshot>, ensure: &Ensure) -> Mode {
+    match (live_state(snapshot), ensure) {
+        (SupervisorState::Off, Ensure::Failed(error)) => Mode::Failed(error.clone()),
+        (SupervisorState::Off, _) => Mode::Off,
+        (SupervisorState::Asleep, _) => Mode::Watching,
+        (SupervisorState::Awake, _) => Mode::Working,
+        (SupervisorState::Stopped, _) => Mode::Stopped,
     }
 }
 
-fn last_wake_line(snapshot: Option<&SupervisorSnapshot>) -> String {
-    match snapshot.and_then(|snapshot| snapshot.wakes.iter().find(|wake| wake.woke())) {
-        Some(wake) => format!("Last woke {} for {}", clock(wake.at), wake_reason(wake)),
-        None => "No wakes yet".into(),
+#[derive(Debug, Clone, PartialEq)]
+enum Part {
+    Text(String),
+    Strong(String),
+    Chip(Face),
+}
+
+fn text(value: impl Into<String>) -> Part {
+    Part::Text(value.into())
+}
+
+fn wakes_this_hour(wakes: &[SupervisorWake], now: DateTime<Utc>) -> usize {
+    wakes
+        .iter()
+        .filter(|wake| wake.woke() && now - wake.at < chrono::Duration::hours(1))
+        .count()
+}
+
+fn target_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
+    if crate::tasks::plan_led_by(&state.tasks, chat_id).is_some() {
+        return "the Lead".into();
+    }
+    let step = state
+        .task_steps
+        .iter()
+        .find(|step| step.chat_id.as_deref() == Some(chat_id) && !step.deleted);
+    let number = step.and_then(|step| {
+        let task = state.tasks.iter().find(|task| task.id == step.task_id)?;
+        let plan = rollup(state, task, now);
+        plan.steps.iter().position(|row| row.step.id == step.id)
+    });
+    match number {
+        Some(ix) => format!("step {}", ix + 1),
+        None => thread_name(state, chat_id, now),
+    }
+}
+
+fn action_text(row: &SupervisorIntervention, state: &AppState, now: DateTime<Utc>) -> String {
+    let who = row
+        .target
+        .as_deref()
+        .map_or_else(|| "a thread".into(), |id| target_name(state, id, now));
+    match row.kind {
+        InterventionKind::Send => format!("messaged {who}"),
+        InterventionKind::Respond => format!("answered {who}"),
+        InterventionKind::Rebrief => format!("re-briefed {who}"),
+        InterventionKind::Start => match mission_title(state, row.task_id.as_deref()) {
+            Some(title) => format!("started {title}"),
+            None => "started a mission".into(),
+        },
+        InterventionKind::Pause => format!("paused {who}"),
+        InterventionKind::Resume => format!("resumed {who}"),
+        InterventionKind::Decide => format!("decided for {who}"),
+        InterventionKind::Approve => format!("approved the plan of {who}"),
+        InterventionKind::Goal => format!("changed the goal of {who}"),
+    }
+}
+
+fn last_parts(snapshot: &SupervisorSnapshot, state: &AppState, now: DateTime<Utc>) -> Vec<Part> {
+    let Some(wake) = snapshot.wakes.iter().find(|wake| wake.woke()) else {
+        return vec![text("No wakes yet")];
+    };
+    let acted = snapshot.interventions.iter().find(|row| {
+        matches!(&row.trigger, Some(InterventionTrigger::Wake { wake_id }) if *wake_id == wake.id)
+    });
+    let head = format!("{} · {} →", clock(wake.at), wake_reason(wake));
+    match acted {
+        Some(row) => {
+            let mut parts = vec![text(head), text(action_text(row, state, now))];
+            if let Some(face) = chip_face(row, now) {
+                parts.push(text("·"));
+                parts.push(Part::Chip(face));
+            }
+            parts
+        }
+        None => vec![text(head), text("no action")],
+    }
+}
+
+fn next_parts(snapshot: &SupervisorSnapshot, state: &AppState) -> Vec<Part> {
+    let Some(check) = &snapshot.next_check else {
+        return vec![text("the next event from a watched mission")];
+    };
+    let at = clock(check.at);
+    let on = |what: &str, title: Option<String>, tail: String| match title {
+        Some(title) => vec![text(format!("{what} on")), Part::Strong(title), text(tail)],
+        None => vec![text(format!("{what} {tail}"))],
+    };
+    let title = mission_title(state, check.task_id.as_deref());
+    match check.kind {
+        NextCheckKind::MissionSilent => {
+            on("silence check", title, format!("at {at} if it stays quiet"))
+        }
+        NextCheckKind::LeadSilent => on(
+            "Lead check",
+            title,
+            format!("at {at} if the Lead stays silent"),
+        ),
+        NextCheckKind::Heartbeat => vec![text(format!("check-in at {at}"))],
+        NextCheckKind::HeldWake => vec![text(format!("held events wake it at {at}"))],
+        NextCheckKind::Resource => vec![text(format!("resource check at {at}"))],
+    }
+}
+
+fn current_wake<'a>(
+    snapshot: &'a SupervisorSnapshot,
+    entries: &[SessionMessageEntry],
+) -> Option<&'a SupervisorWake> {
+    let asked = entries
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::User)?;
+    snapshot.wakes.iter().find(|wake| wake.id == asked.id)
+}
+
+fn woke_parts(wake: &SupervisorWake, state: &AppState) -> Vec<Part> {
+    let head = format!("{} for {}", clock(wake.at), wake_reason(wake));
+    let title = mission_title(
+        state,
+        wake.events
+            .first()
+            .and_then(|event| event.task_id.as_deref()),
+    );
+    match title {
+        Some(title) => vec![text(head), text("on"), Part::Strong(title)],
+        None => vec![text(head)],
+    }
+}
+
+fn held_wakes(snapshot: &SupervisorSnapshot) -> Vec<&SupervisorWake> {
+    let mut held: Vec<&SupervisorWake> = snapshot
+        .wakes
+        .iter()
+        .filter(|wake| wake.delivery == WakeDelivery::HeldByStop)
+        .take(snapshot.waiting)
+        .collect();
+    held.reverse();
+    held
+}
+
+fn held_line(held: &[&SupervisorWake]) -> String {
+    let Some(first) = held.first() else {
+        return "Nothing held yet. New wakes wait here until you resume.".into();
+    };
+    let mut reasons: Vec<&str> = Vec::new();
+    for event in held.iter().flat_map(|wake| &wake.events) {
+        let word = kind_word(event.kind);
+        if !reasons.contains(&word) {
+            reasons.push(word);
+        }
+    }
+    match reasons.as_slice() {
+        [] => format!("since {}", clock(first.at)),
+        reasons => format!("{}, since {}", reasons.join(" · "), clock(first.at)),
     }
 }
 
@@ -655,15 +960,26 @@ fn profile_config(profile: &AgentProfile) -> ChatConfig {
 }
 
 struct Mission {
-    row: MissionRow,
+    key: String,
+    root: Option<String>,
+    plan: bool,
+    title: String,
+    progress: PlanProgress,
+    status: TaskStatus,
     watch: Watch,
     current: String,
+    done_at: Option<DateTime<Utc>>,
+    starts_open: bool,
 }
+
+const RAIL_OPEN_TREES: usize = 4;
 
 impl Mission {
     fn fraction(&self) -> f32 {
-        let PlanProgress { done, total } = self.row.progress;
-        if total == 0 {
+        let PlanProgress { done, total } = self.progress;
+        if self.done_at.is_some() {
+            1.0
+        } else if total == 0 {
             0.0
         } else {
             (done as f32 / total as f32).min(1.0)
@@ -676,20 +992,30 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
         .supervisor
         .as_ref()
         .map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
-    crate::home::mission_rows(state, now)
+    let active = crate::home::mission_rows(state, now)
         .into_iter()
-        .map(|row| {
-            let task = state.tasks.iter().find(|task| task.id == row.task_id);
-            let host = task
-                .and_then(|task| linked_chat(&state.chats, task))
-                .map(|chat| chat.device_id.as_str());
-            let watch = watch_of(
-                &row.task_id,
-                host,
-                state.local_device_id.as_deref(),
-                unwatched,
-            );
-            let current = task
+        .map(|row| (row, false));
+    let done = crate::home::done_today_rows(state, now)
+        .into_iter()
+        .map(|row| (row, true));
+    let plans = active.chain(done).map(|(row, done)| {
+        let task = state.tasks.iter().find(|task| task.id == row.task_id);
+        let done_at = task.and_then(|task| task.completed_at).filter(|_| done);
+        let lead = task.and_then(|task| linked_chat(&state.chats, task));
+        let watch = watch_of(
+            &row.task_id,
+            lead.map(|chat| chat.device_id.as_str()),
+            state.local_device_id.as_deref(),
+            unwatched,
+        );
+        let current = match done_at {
+            Some(at) => format!(
+                "Done · {} of {} · {}",
+                row.progress.done,
+                row.progress.total,
+                clock(at)
+            ),
+            None => task
                 .map(|task| rollup(state, task, now))
                 .and_then(|plan| {
                     let step = plan
@@ -703,14 +1029,78 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
                         step.step.title
                     ))
                 })
-                .unwrap_or_else(|| row.label.clone());
+                .unwrap_or_else(|| row.label.clone()),
+        };
+        Mission {
+            root: task.and_then(|task| task.chat_id.clone()),
+            plan: true,
+            title: row.title,
+            progress: row.progress,
+            status: row.status,
+            key: row.task_id,
+            watch,
+            current,
+            done_at,
+            starts_open: false,
+        }
+    });
+    let index = crate::tasks::index_rows(state, now);
+    let trees = index
+        .running
+        .into_iter()
+        .chain(index.done_today)
+        .filter(|row| row.kind == crate::tasks::IndexKind::Tree)
+        .filter(|row| tree_watch(state, &row.root) == Watch::Watched)
+        .map(|row| {
+            let done = row
+                .segments
+                .iter()
+                .filter(|status| **status == crate::tasks::TreeStatus::Done)
+                .count();
             Mission {
-                row,
-                watch,
-                current,
+                root: Some(row.root.clone()),
+                plan: false,
+                title: row.title,
+                progress: PlanProgress {
+                    done,
+                    total: row.segments.len(),
+                },
+                status: if row.asks {
+                    TaskStatus::NeedsYou
+                } else if row.ended.is_some() {
+                    TaskStatus::Done
+                } else if row.status.live() {
+                    TaskStatus::Working
+                } else {
+                    TaskStatus::ToDo
+                },
+                key: row.root,
+                watch: Watch::Watched,
+                current: row.line,
+                done_at: row.ended,
+                starts_open: false,
             }
-        })
-        .collect()
+        });
+    let mut all: Vec<Mission> = plans.chain(trees).collect();
+    let running = all
+        .iter()
+        .filter(|mission| mission.done_at.is_none())
+        .count();
+    for mission in &mut all {
+        mission.starts_open = mission.done_at.is_none() && running <= RAIL_OPEN_TREES;
+    }
+    all
+}
+
+fn watch_params(mission: &Mission, on: bool) -> serde_json::Value {
+    match (&mission.root, mission.plan) {
+        (Some(root), false) => serde_json::json!({
+            "op": "setTreeWatched", "rootChatId": root, "watched": on,
+        }),
+        _ => serde_json::json!({
+            "op": "setMissionSupervised", "taskId": mission.key, "supervised": on,
+        }),
+    }
 }
 
 fn model_label(chat: &Chat, cx: &App) -> Option<String> {
@@ -723,39 +1113,6 @@ fn model_label(chat: &Chat, cx: &App) -> Option<String> {
     ))
 }
 
-struct Fold {
-    tween: Tween,
-    height: Rc<Cell<f32>>,
-}
-
-impl Fold {
-    fn at(open: bool, now: Instant) -> Self {
-        Self {
-            tween: Tween::at(if open { 1.0 } else { 0.0 }, now),
-            height: Rc::new(Cell::new(0.0)),
-        }
-    }
-
-    fn set(&mut self, open: bool, spec: MotionSpec, reduced: bool, now: Instant) {
-        let to = if open { 1.0 } else { 0.0 };
-        if self.tween.target() != to {
-            self.tween.retarget(to, spec, reduced, now);
-        }
-    }
-
-    fn value(&self, now: Instant) -> f32 {
-        self.tween.value_at(now)
-    }
-
-    fn moving(&self, now: Instant) -> bool {
-        !self.tween.settled_at(now)
-    }
-
-    fn gone(&self, now: Instant) -> bool {
-        !self.moving(now) && self.tween.target() == 0.0
-    }
-}
-
 fn run(from: f32, to: f32, spec: MotionSpec, reduced: bool, now: Instant) -> Tween {
     let mut tween = Tween::at(from, now);
     tween.retarget(to, spec, reduced, now);
@@ -764,14 +1121,31 @@ fn run(from: f32, to: f32, spec: MotionSpec, reduced: bool, now: Instant) -> Twe
 
 struct Arrival {
     slide: Tween,
-    glow: Tween,
 }
 
 struct RowMotion {
     fold: Fold,
-    group: u8,
     row: Row,
     arrival: Option<Arrival>,
+}
+
+struct GroupMotion {
+    fold: Fold,
+    tick: Tick,
+}
+
+#[derive(Default)]
+struct TabProbe {
+    origin: f32,
+    rects: Vec<(f32, f32)>,
+}
+
+struct StatusMotion {
+    key: &'static str,
+    fade: Tween,
+    grow: Tween,
+    from: f32,
+    height: Rc<Cell<f32>>,
 }
 
 struct Tick {
@@ -812,19 +1186,28 @@ pub struct SupervisorPage {
     settings_error: Option<String>,
     ensure: Ensure,
     ensured: Option<String>,
-    expanded: HashSet<String>,
+    toggled: HashSet<String>,
     drawer: Option<Owner>,
     drawer_open: bool,
     drawer_slide: Tween,
     pane: Option<Pane>,
     replies: HashMap<String, Reply>,
     picks: HashMap<String, HashMap<String, Vec<String>>>,
+    sends: HashMap<String, Option<String>>,
     filter: Filter,
+    list_filter: Filter,
+    list_switch: Option<Instant>,
+    list_in: Tween,
+    tabs: Rc<RefCell<TabProbe>>,
+    underline: Option<(usize, Tween, Tween)>,
     memory: Memory,
     rows: HashMap<String, RowMotion>,
+    groups: HashMap<String, GroupMotion>,
     arrivals: HashSet<String>,
+    glows: HashMap<String, Tween>,
+    hovered: Option<String>,
     calm: Fold,
-    ticks: HashMap<Kind, Tick>,
+    ticks: HashMap<Option<Kind>, Tick>,
     chips: HashMap<String, ChipFade>,
     missions: HashMap<String, MissionMotion>,
     trees: HashMap<String, (Entity<crate::tasks::StripTree>, Subscription)>,
@@ -843,6 +1226,14 @@ pub struct SupervisorPage {
     settings_task: Option<Task<()>>,
     ensure_task: Option<Task<()>>,
     effect_task: Option<Task<()>>,
+    resuming: bool,
+    batches: HashMap<String, Task<()>>,
+    last_sheet: Option<String>,
+    focus: FocusHandle,
+    width: Rc<Cell<f32>>,
+    rail_pref: Option<bool>,
+    rail: Option<RailMotion>,
+    status: Option<StatusMotion>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -855,7 +1246,7 @@ impl SupervisorPage {
             cx.observe(&state, |page, _, cx| page.on_state(cx)),
             cx.observe(&pickers, |page, _, cx| page.try_ensure(cx)),
             cx.observe_global::<crate::agent_profiles::AgentProfilesChanged>(|page, cx| {
-                page.load_profiles(cx)
+                page.load_profiles(false, cx)
             }),
         ];
         let now = Instant::now();
@@ -867,17 +1258,26 @@ impl SupervisorPage {
             settings_error: None,
             ensure: Ensure::Idle,
             ensured: None,
-            expanded: HashSet::new(),
+            toggled: HashSet::new(),
             drawer: None,
             drawer_open: false,
             drawer_slide: Tween::at(0.0, now),
             pane: None,
             replies: HashMap::new(),
             picks: HashMap::new(),
+            sends: HashMap::new(),
             filter: Filter::All,
+            list_filter: Filter::All,
+            list_switch: None,
+            list_in: Tween::at(1.0, now),
+            tabs: Rc::default(),
+            underline: None,
             memory: Memory::default(),
             rows: HashMap::new(),
+            groups: HashMap::new(),
             arrivals: HashSet::new(),
+            glows: HashMap::new(),
+            hovered: None,
             calm: Fold::at(false, now),
             ticks: HashMap::new(),
             chips: HashMap::new(),
@@ -898,9 +1298,17 @@ impl SupervisorPage {
             settings_task: None,
             ensure_task: None,
             effect_task: None,
+            resuming: false,
+            batches: HashMap::new(),
+            last_sheet: None,
+            focus: cx.focus_handle(),
+            width: Rc::default(),
+            rail_pref: None,
+            rail: None,
+            status: None,
             _subscriptions: subscriptions,
         };
-        page.load_profiles(cx);
+        page.load_profiles(false, cx);
         page.load_settings(cx);
         page.on_state(cx);
         page
@@ -914,12 +1322,17 @@ impl SupervisorPage {
         self.entered_at = (!motion::reduced_motion(cx)).then(Instant::now);
         self.fresh = true;
         self.rows.clear();
+        self.groups.clear();
         self.arrivals.clear();
+        self.glows.clear();
         self.ticks.clear();
         self.chips.clear();
         self.missions.clear();
+        self.list_filter = self.filter;
+        self.list_switch = None;
+        self.hovered = None;
         self.load_settings(cx);
-        self.try_ensure(cx);
+        self.load_profiles(true, cx);
         self.request_check(cx);
     }
 
@@ -971,7 +1384,7 @@ impl SupervisorPage {
             self.load_settings(cx);
         }
         if matches!(self.profiles, Loadable::Idle) {
-            self.load_profiles(cx);
+            self.load_profiles(false, cx);
         }
         let known = self
             .state
@@ -985,10 +1398,8 @@ impl SupervisorPage {
         let choices: HashMap<String, String> = self
             .replies
             .iter()
-            .filter_map(|(key, reply)| match reply {
-                Reply::Sent(choice) if !choice.is_empty() => Some((key.clone(), choice.clone())),
-                _ => None,
-            })
+            .filter(|(_, reply)| matches!(reply.stage, Stage::Sending | Stage::Sent(_)))
+            .map(|(key, reply)| (key.clone(), reply.choice.clone()))
             .collect();
         let (arrived, wake) = {
             let snapshot = self.state.read(cx).supervisor.as_ref();
@@ -1006,7 +1417,21 @@ impl SupervisorPage {
             self.flash = run(0.0, 1.0, DOT_FLASH, reduced, Instant::now());
         }
         if !arrived.is_empty() {
-            self.filter = Filter::All;
+            let (reduced, now) = (motion::reduced_motion(cx), Instant::now());
+            let tasks: Vec<String> = self
+                .state
+                .read(cx)
+                .supervisor
+                .iter()
+                .flat_map(|snapshot| &snapshot.needs_you)
+                .filter(|row| arrived.contains(&row_key(row)))
+                .filter_map(|row| row_origin(row).0.map(str::to_owned))
+                .collect();
+            for task in tasks {
+                self.glows
+                    .insert(task, run(0.0, 1.0, DOT_FLASH, reduced, now));
+            }
+            self.pick_filter_to(Filter::All, cx);
             self.arrivals.extend(arrived);
         }
         let open: HashSet<String> = self
@@ -1019,8 +1444,7 @@ impl SupervisorPage {
         let rows = &self.rows;
         self.replies
             .retain(|key, _| open.contains(key) || rows.contains_key(key));
-        self.picks
-            .retain(|key, _| open.contains(key) || rows.contains_key(key));
+        self.picks.retain(|key, _| open.contains(key));
         self.schedule_effect_check(cx);
         self.try_ensure(cx);
         cx.notify();
@@ -1034,9 +1458,14 @@ impl SupervisorPage {
             .supervisor
             .as_ref()
             .and_then(|snapshot| {
+                let held = snapshot
+                    .interventions
+                    .iter()
+                    .any(|row| matches!(row.approval, Some(PlanApproval::Held { .. })));
                 [
                     next_effect_check(&snapshot.interventions, now),
                     feed::next_expiry(&snapshot.interventions, now),
+                    held.then_some(now),
                 ]
                 .into_iter()
                 .flatten()
@@ -1055,95 +1484,228 @@ impl SupervisorPage {
         });
     }
 
-    fn resolve_item(&mut self, item_id: String, choice: String, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let key = format!("item:{item_id}");
-        self.replies.insert(key.clone(), Reply::Sending);
-        let params = serde_json::json!({
-            "op": "resolveSupervisorItem", "itemId": item_id, "choice": choice,
-        });
-        cx.spawn(async move |page, cx| {
-            let result = engine.client().call(methods::MUTATE, params).await;
-            page.update(cx, |page, cx| {
-                let reply = match result {
-                    Ok(_) => Reply::Sent(choice),
-                    Err(err) => Reply::Failed(err.to_string()),
-                };
-                if page.replies.contains_key(&key) {
-                    page.replies.insert(key, reply);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
+    fn staged(&self, key: &str, question: &str) -> Vec<String> {
+        self.picks
+            .get(key)
+            .and_then(|picks| picks.get(question))
+            .cloned()
+            .unwrap_or_default()
     }
 
-    fn answer_input(
+    #[allow(clippy::too_many_arguments)]
+    fn stage(
         &mut self,
-        input: &NeedsYouInput,
-        answers: Vec<UserInputAnswer>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let key = row_key(&NeedsYouRow::Input(input.clone()));
-        let summary = answers_text(&answers);
-        self.replies.insert(key.clone(), Reply::Sending);
-        let (chat_id, request_id) = (input.chat_id.clone(), input.request_id.clone());
-        cx.spawn(async move |page, cx| {
-            let result =
-                crate::composer::respond_input(&engine, &chat_id, &request_id, answers).await;
-            page.update(cx, |page, cx| {
-                let reply = match result {
-                    Ok(()) => Reply::Sent(summary),
-                    Err(err) => Reply::Failed(err),
-                };
-                if page.replies.contains_key(&key) {
-                    page.replies.insert(key, reply);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn pick_option(
-        &mut self,
-        input: &NeedsYouInput,
-        question: &UserInputQuestion,
+        key: String,
+        group: String,
+        question: String,
         option: String,
+        multi: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if input.questions.len() == 1 && !question.multi_select {
-            let answer = UserInputAnswer {
-                question_id: question.id.clone(),
-                labels: vec![option],
-            };
-            self.answer_input(input, vec![answer], cx);
+        window.focus(&self.focus, cx);
+        if self.replies.get(&key).is_some_and(|reply| !reply.failed()) {
             return;
         }
-        let key = row_key(&NeedsYouRow::Input(input.clone()));
+        self.replies.remove(&key);
         let picked = self
             .picks
             .entry(key)
             .or_default()
-            .entry(question.id.clone())
+            .entry(question)
             .or_default();
-        if !question.multi_select {
-            picked.clear();
-            picked.push(option);
-        } else if let Some(at) = picked.iter().position(|label| *label == option) {
-            picked.remove(at);
-        } else {
-            picked.push(option);
+        match picked.iter().position(|label| *label == option) {
+            Some(at) => {
+                picked.remove(at);
+            }
+            None if multi => picked.push(option),
+            None => *picked = vec![option],
         }
+        self.last_sheet = Some(group);
+        cx.notify();
+    }
+
+    fn ready(&self, row: &NeedsYouRow) -> Option<(String, Option<Vec<UserInputAnswer>>)> {
+        match row {
+            NeedsYouRow::Item(_) => {
+                let choice = self.staged(&row_key(row), "").into_iter().next()?;
+                Some((choice, None))
+            }
+            NeedsYouRow::Input(input) => {
+                let answers = self.picked_answers(input)?;
+                Some((answers_text(&answers), Some(answers)))
+            }
+        }
+    }
+
+    fn send_sheet(&mut self, group: &str, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let ready: Vec<(String, String)> = self
+            .rows
+            .values()
+            .filter(|motion| feed::task_of(&motion.row.entry).unwrap_or_default() == group)
+            .filter_map(|motion| inbox::sheet_row(&motion.row.entry))
+            .filter(|row| {
+                self.replies
+                    .get(&row_key(row))
+                    .is_none_or(|reply| reply.failed())
+            })
+            .filter_map(|row| Some((row_key(row), self.ready(row)?.0)))
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        for (key, choice) in ready {
+            self.replies.insert(
+                key,
+                Reply {
+                    choice,
+                    flipped: now,
+                    stage: Stage::Held,
+                },
+            );
+        }
+        let key = group.to_owned();
+        self.batches.insert(
+            key.clone(),
+            cx.spawn(async move |page, cx| {
+                cx.background_executor().timer(UNDO_WINDOW).await;
+                page.update(cx, |page, cx| page.flush(&key, cx)).ok();
+            }),
+        );
+        cx.notify();
+    }
+
+    fn undo(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self
+            .replies
+            .get(key)
+            .is_some_and(|reply| reply.stage == Stage::Held)
+        {
+            self.replies.remove(key);
+            cx.notify();
+        }
+    }
+
+    fn flush(&mut self, group: &str, cx: &mut Context<Self>) {
+        self.batches.remove(group);
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let held: Vec<NeedsYouRow> = self
+            .rows
+            .values()
+            .filter(|motion| feed::task_of(&motion.row.entry).unwrap_or_default() == group)
+            .filter_map(|motion| inbox::sheet_row(&motion.row.entry).cloned())
+            .filter(|row| {
+                self.replies
+                    .get(&row_key(row))
+                    .is_some_and(|reply| reply.stage == Stage::Held)
+            })
+            .collect();
+        let mut items = Vec::new();
+        let mut inputs = Vec::new();
+        for row in &held {
+            let key = row_key(row);
+            let Some((choice, answers)) = self.ready(row) else {
+                self.replies.remove(&key);
+                continue;
+            };
+            match (row, answers) {
+                (NeedsYouRow::Item(item), _) => items.push((
+                    key.clone(),
+                    serde_json::json!({ "itemId": item.id, "choice": choice }),
+                )),
+                (NeedsYouRow::Input(input), Some(answers)) => {
+                    inputs.push((key.clone(), input.clone(), answers))
+                }
+                (NeedsYouRow::Input(_), None) => continue,
+            }
+            if let Some(reply) = self.replies.get_mut(&key) {
+                reply.stage = Stage::Sending;
+            }
+        }
+        if items.is_empty() && inputs.is_empty() {
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |page, cx| {
+            let mut results: Vec<(String, Result<(), String>)> = Vec::new();
+            if !items.is_empty() {
+                let answers: Vec<serde_json::Value> =
+                    items.iter().map(|(_, answer)| answer.clone()).collect();
+                let sent = engine
+                    .client()
+                    .call(
+                        methods::MUTATE,
+                        serde_json::json!({ "op": "resolveSupervisorItems", "answers": answers }),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string());
+                results.extend(items.into_iter().map(|(key, _)| (key, sent.clone())));
+            }
+            for (key, input, answers) in inputs {
+                let sent = crate::composer::respond_input(
+                    &engine,
+                    &input.chat_id,
+                    &input.request_id,
+                    answers,
+                )
+                .await;
+                results.push((key, sent));
+            }
+            page.update(cx, |page, cx| {
+                let now = Instant::now();
+                for (key, result) in results {
+                    if let Some(reply) = page.replies.get_mut(&key) {
+                        reply.stage = match result {
+                            Ok(()) => Stage::Sent(now),
+                            Err(error) => Stage::Failed(error),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn correct(&mut self, item_id: String, choice: String, cx: &mut Context<Self>) {
+        let params = serde_json::json!({
+            "op": "resolveSupervisorItems",
+            "answers": [{ "itemId": item_id, "choice": choice }],
+        });
+        self.send_mutation(item_id, params, cx);
+    }
+
+    fn take_back(&mut self, task_id: String, cx: &mut Context<Self>) {
+        let params = serde_json::json!({ "op": "takeBackPlanApproval", "taskId": task_id });
+        self.send_mutation(take_back_key(&task_id), params, cx);
+    }
+
+    fn send_mutation(&mut self, key: String, params: serde_json::Value, cx: &mut Context<Self>) {
+        if matches!(self.sends.get(&key), Some(None)) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.sends.insert(key.clone(), None);
+        cx.spawn(async move |page, cx| {
+            let sent = engine.client().call(methods::MUTATE, params).await;
+            page.update(cx, |page, cx| {
+                match sent {
+                    Ok(_) => page.sends.remove(&key),
+                    Err(error) => page.sends.insert(key, Some(error.to_string())),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1166,11 +1728,12 @@ impl SupervisorPage {
             .collect()
     }
 
-    fn load_profiles(&mut self, cx: &mut Context<Self>) {
+    /// A fresh load holds back ensuring: the person may have changed the Supervisor's profile since the last.
+    fn load_profiles(&mut self, fresh: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        if matches!(self.profiles, Loadable::Idle) {
+        if fresh || matches!(self.profiles, Loadable::Idle) {
             self.profiles = Loadable::Loading;
         }
         self.profiles_task = Some(cx.spawn(async move |page, cx| {
@@ -1249,17 +1812,21 @@ impl SupervisorPage {
         cx.notify();
     }
 
-    fn set_supervised(&mut self, task_id: String, supervised: bool, cx: &mut Context<Self>) {
+    fn set_watch_everything(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.send_watch(
+            serde_json::json!({ "op": "setWatchEverything", "on": on }),
+            cx,
+        );
+    }
+
+    fn send_watch(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = serde_json::json!({
-            "op": "setMissionSupervised", "taskId": task_id, "supervised": supervised,
-        });
         cx.spawn(async move |page, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 page.update(cx, |page, cx| {
-                    page.settings_error = Some(format!("Could not change the mission: {err}"));
+                    page.settings_error = Some(format!("Could not change what it watches: {err}"));
                     cx.notify();
                 })
                 .ok();
@@ -1356,10 +1923,10 @@ impl SupervisorPage {
 
     fn retry_ensure(&mut self, cx: &mut Context<Self>) {
         self.ensure = Ensure::Wanted;
-        self.load_profiles(cx);
+        self.load_profiles(true, cx);
         self.pickers
             .update(cx, |pickers, cx| pickers.ensure_harnesses(true, cx));
-        self.try_ensure(cx);
+        cx.notify();
     }
 
     fn owner_thread(&self, owner: &Owner, cx: &App) -> Option<String> {
@@ -1433,8 +2000,51 @@ impl SupervisorPage {
     }
 
     fn pick_filter(&mut self, chip: Option<Kind>, cx: &mut Context<Self>) {
-        self.filter = self.filter.pick(chip);
+        self.pick_filter_to(self.filter.pick(chip), cx);
+    }
+
+    fn pick_filter_to(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        if self.list_switch.is_none() {
+            self.list_switch = Some(Instant::now());
+        }
         cx.notify();
+    }
+
+    fn hover_task(&mut self, task: Option<String>, hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered {
+            task
+        } else if self.hovered == task {
+            None
+        } else {
+            return;
+        };
+        if self.hovered != next {
+            self.hovered = next;
+            cx.notify();
+        }
+    }
+
+    fn toggle_rail(&mut self, cx: &mut Context<Self>) {
+        let showing = self.rail.as_ref().map_or(RailMode::Full, |rail| rail.to);
+        self.rail_pref = Some(showing == RailMode::Strip);
+        cx.notify();
+    }
+
+    fn mission_open(&self, mission: &Mission) -> bool {
+        mission.starts_open != self.toggled.contains(&mission.key)
+    }
+
+    fn watched_by_everything(&self, mission: &Mission, cx: &App) -> bool {
+        let snapshot = self.state.read(cx).supervisor.as_ref();
+        mission.root.as_ref().is_some_and(|root| {
+            snapshot.is_some_and(|snapshot| {
+                snapshot.watch_everything && !snapshot.watched_roots.contains(root)
+            })
+        })
     }
 
     fn toggle_earlier(&mut self, cx: &mut Context<Self>) {
@@ -1461,65 +2071,177 @@ impl SupervisorPage {
         cx.notify();
     }
 
+    fn open_conversation(&mut self, cx: &mut Context<Self>) {
+        if !self.conversation_open {
+            self.toggle_conversation(cx);
+        }
+    }
+
+    fn resume(&mut self, held: Vec<String>, cx: &mut Context<Self>) {
+        let (Some(chat_id), Some(engine)) =
+            (self.chat_id(cx), self.state.read(cx).engine().cloned())
+        else {
+            return;
+        };
+        if self.resuming {
+            return;
+        }
+        self.resuming = true;
+        cx.notify();
+        cx.spawn(async move |page, cx| {
+            for id in held {
+                let sent = engine
+                    .client()
+                    .call(
+                        methods::STEER_QUEUED_MESSAGE_NOW,
+                        serde_json::json!({ "chatId": chat_id, "id": id }),
+                    )
+                    .await;
+                match sent {
+                    Ok(value) if value.get("sent").and_then(|v| v.as_bool()) == Some(true) => {
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(error = %err, "resuming the Supervisor failed");
+                        break;
+                    }
+                }
+            }
+            page.update(cx, |page, cx| {
+                page.resuming = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn toggle_mission(&mut self, task_id: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(task_id) {
-            self.expanded.insert(task_id.to_owned());
+        if !self.toggled.remove(task_id) {
+            self.toggled.insert(task_id.to_owned());
         }
         cx.notify();
     }
 
     fn sync_motion(&mut self, feed: &Feed, missions: &[Mission], now: Instant, reduced: bool) {
         let fresh = std::mem::take(&mut self.fresh);
+        let mut snap = reduced;
+        if self.filter != self.list_filter {
+            let out = LIST_OUT.total().mul_f32(motion::speed_scale());
+            if reduced || self.list_switch.is_none_or(|at| now >= at + out) {
+                self.list_filter = self.filter;
+                self.list_switch = None;
+                self.list_in = run(0.0, 1.0, LIST_IN, reduced, now);
+                snap = true;
+            }
+        }
         let mut seen: HashSet<String> = HashSet::new();
         let mut any_shown = false;
-        for (group, row, shown) in feed.rows(self.filter) {
-            let shown = shown && !matches!(self.replies.get(&row.key), Some(Reply::Sent(_)));
+        for (_, row, shown) in feed.rows(self.list_filter) {
+            let shown = shown
+                && !self
+                    .replies
+                    .get(&row.key)
+                    .is_some_and(|reply| reply.collapsing(now, reduced));
             any_shown |= shown;
             seen.insert(row.key.clone());
             if let Some(motion) = self.rows.get_mut(&row.key) {
-                motion.group = group;
                 motion.row = row.clone();
-                motion.fold.set(shown, ROW_FOLD, reduced, now);
+                motion.fold.set(shown, ROW_FOLD, snap, now);
                 if motion
                     .arrival
                     .as_ref()
-                    .is_some_and(|a| a.slide.settled_at(now) && a.glow.settled_at(now))
+                    .is_some_and(|arrival| arrival.slide.settled_at(now))
                 {
                     motion.arrival = None;
                 }
                 continue;
             }
-            let arriving = !fresh && !reduced && self.arrivals.contains(&row.key);
+            let arriving = !fresh && !snap && self.arrivals.contains(&row.key);
             let mut fold = Fold::at(fresh && shown, now);
-            fold.set(shown, ROW_FOLD, reduced, now);
+            fold.set(shown, if arriving { ARRIVE } else { ROW_FOLD }, snap, now);
             self.rows.insert(
                 row.key.clone(),
                 RowMotion {
                     fold,
-                    group,
                     row: row.clone(),
                     arrival: arriving.then(|| Arrival {
                         slide: run(0.0, 1.0, ARRIVE, reduced, now),
-                        glow: run(0.0, 1.0, GLOW, reduced, now),
                     }),
                 },
             );
         }
         self.arrivals.clear();
+        let replies = &self.replies;
         self.rows.retain(|key, motion| {
             if seen.contains(key) {
                 return true;
             }
-            motion.fold.set(false, ROW_FOLD, reduced, now);
+            let holding = replies
+                .get(key)
+                .is_some_and(|reply| reply.holding(now, reduced));
+            any_shown |= holding;
+            motion.fold.set(holding, ROW_FOLD, reduced, now);
             !motion.fold.gone(now)
+        });
+        let mut open_groups: HashMap<String, bool> = HashMap::new();
+        for motion in self.rows.values() {
+            let key = feed::task_of(&motion.row.entry)
+                .unwrap_or_default()
+                .to_owned();
+            *open_groups.entry(key).or_default() |= motion.fold.tween.target() > 0.0;
+        }
+        for (key, open) in &open_groups {
+            let count = feed
+                .open
+                .iter()
+                .filter(|row| {
+                    row.kind == Kind::Needs && feed::task_of(&row.entry).unwrap_or_default() == key
+                })
+                .count();
+            match self.groups.get_mut(key) {
+                Some(group) => {
+                    group.fold.set(*open, ROW_FOLD, snap, now);
+                    if group.tick.value != count {
+                        group.tick.value = count;
+                        group.tick.tween = run(0.0, 1.0, COUNT_TICK, reduced, now);
+                    }
+                }
+                None => {
+                    let mut fold = Fold::at(fresh && *open, now);
+                    fold.set(*open, ARRIVE, snap, now);
+                    self.groups.insert(
+                        key.clone(),
+                        GroupMotion {
+                            fold,
+                            tick: Tick {
+                                value: count,
+                                tween: Tween::at(1.0, now),
+                            },
+                        },
+                    );
+                }
+            }
+        }
+        self.groups.retain(|key, group| {
+            if !open_groups.contains_key(key) {
+                group.fold.set(false, ROW_FOLD, reduced, now);
+            }
+            !group.fold.gone(now) || open_groups.contains_key(key)
         });
         if fresh {
             self.calm.tween = Tween::at(if any_shown { 0.0 } else { 1.0 }, now);
         } else {
-            self.calm.set(!any_shown, FOLD, reduced, now);
+            self.calm.set(!any_shown, FOLD, snap, now);
         }
-        for kind in Kind::chips() {
-            let count = feed.count(kind);
+        let mut counts = vec![(None, feed.open.len())];
+        counts.extend(
+            Kind::chips()
+                .into_iter()
+                .map(|kind| (Some(kind), feed.count(kind))),
+        );
+        for (kind, count) in counts {
             match self.ticks.get_mut(&kind) {
                 Some(tick) if tick.value != count => {
                     tick.value = count;
@@ -1537,6 +2259,7 @@ impl SupervisorPage {
                 }
             }
         }
+        self.glows.retain(|_, tween| !tween.settled_at(now));
         let utc = Utc::now();
         for row in &feed.open {
             let Entry::Intervention(intervention) = &row.entry else {
@@ -1567,8 +2290,8 @@ impl SupervisorPage {
         let rows = &self.rows;
         self.chips.retain(|key, _| rows.contains_key(key));
         for mission in missions {
-            let id = &mission.row.task_id;
-            let (open, fill) = (self.expanded.contains(id), mission.fraction());
+            let id = &mission.key;
+            let (open, fill) = (self.mission_open(mission), mission.fraction());
             let turn = if open { 1.0 } else { 0.0 };
             match self.missions.get_mut(id) {
                 Some(motion) => {
@@ -1593,7 +2316,96 @@ impl SupervisorPage {
             }
         }
         self.missions
-            .retain(|id, _| missions.iter().any(|mission| &mission.row.task_id == id));
+            .retain(|id, _| missions.iter().any(|mission| &mission.key == id));
+    }
+
+    fn sync_rail(&mut self, now: Instant, reduced: bool) -> rail::RailFrame {
+        let mode = RailMode::auto(self.width.get(), self.rail_pref);
+        if mode == RailMode::Full {
+            self.rail_pref = None;
+        }
+        match &mut self.rail {
+            Some(rail) if rail.to != mode => {
+                let current = rail.frame(now).shown;
+                *rail = RailMotion {
+                    from: current,
+                    to: mode,
+                    at: (!reduced).then_some(now),
+                };
+            }
+            Some(_) => {}
+            None => {
+                self.rail = Some(RailMotion {
+                    from: mode,
+                    to: mode,
+                    at: None,
+                })
+            }
+        }
+        let rail = self.rail.as_mut().expect("set above");
+        let frame = rail.frame(now);
+        if !frame.moving {
+            rail.at = None;
+        }
+        frame
+    }
+
+    fn sync_status(&mut self, key: &'static str, now: Instant, reduced: bool) {
+        match &mut self.status {
+            Some(status) if status.key != key => {
+                status.key = key;
+                status.from = status.height.get();
+                status.fade = run(0.0, 1.0, STATUS_FADE, reduced, now);
+                status.grow = run(0.0, 1.0, STATUS_GROW, reduced, now);
+            }
+            Some(_) => {}
+            None => {
+                self.status = Some(StatusMotion {
+                    key,
+                    fade: Tween::at(1.0, now),
+                    grow: Tween::at(1.0, now),
+                    from: 0.0,
+                    height: Rc::default(),
+                })
+            }
+        }
+    }
+
+    fn sync_underline(&mut self, now: Instant, reduced: bool) {
+        let ix = match self.filter {
+            Filter::All => 0,
+            Filter::Only(kind) => {
+                1 + Kind::chips()
+                    .iter()
+                    .position(|chip| *chip == kind)
+                    .unwrap_or_default()
+            }
+        };
+        let probe = self.tabs.borrow();
+        let Some(&(x, w)) = probe.rects.get(ix).filter(|rect| rect.1 > 0.0) else {
+            return;
+        };
+        let x = x - probe.origin;
+        match &mut self.underline {
+            Some((at, left, width)) if *at != ix => {
+                *at = ix;
+                left.retarget(x, TAB_SLIDE, reduced, now);
+                width.retarget(w, TAB_SLIDE, reduced, now);
+            }
+            Some((_, left, width)) => {
+                if left.settled_at(now) && (left.target() != x || width.target() != w) {
+                    *left = Tween::at(x, now);
+                    *width = Tween::at(w, now);
+                }
+            }
+            None => self.underline = Some((ix, Tween::at(x, now), Tween::at(w, now))),
+        }
+    }
+
+    fn underline_rect(&self, now: Instant) -> Option<(f32, f32)> {
+        self.underline
+            .as_ref()
+            .map(|(_, left, width)| (left.value_at(now), width.value_at(now)))
     }
 
     fn enter_progress(&self, block: u64, now: Instant) -> f32 {
@@ -1610,13 +2422,36 @@ impl SupervisorPage {
 
     fn animating(&self, now: Instant) -> bool {
         let settled = |tween: &Tween| tween.settled_at(now);
+        let scale = motion::speed_scale();
+        let held = |reply: &Reply| match reply.stage {
+            Stage::Held | Stage::Sending => now < reply.flipped + CONFIRM.total().mul_f32(scale),
+            Stage::Sent(at) => now <= at + HOLD.mul_f32(scale),
+            Stage::Failed(_) => false,
+        };
         self.rows.values().any(|motion| {
             motion.fold.moving(now)
                 || motion
                     .arrival
                     .as_ref()
-                    .is_some_and(|a| !settled(&a.slide) || !settled(&a.glow))
-        }) || self.calm.moving(now)
+                    .is_some_and(|arrival| !settled(&arrival.slide))
+        }) || self.replies.values().any(held)
+            || self
+                .groups
+                .values()
+                .any(|group| group.fold.moving(now) || !settled(&group.tick.tween))
+            || self.glows.values().any(|tween| !settled(tween))
+            || self.list_switch.is_some()
+            || !settled(&self.list_in)
+            || self
+                .underline
+                .as_ref()
+                .is_some_and(|(_, left, width)| !settled(left) || !settled(width))
+            || self.rail.as_ref().is_some_and(|rail| rail.at.is_some())
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|status| !settled(&status.fade) || !settled(&status.grow))
+            || self.calm.moving(now)
             || self.ticks.values().any(|tick| !settled(&tick.tween))
             || self.chips.values().any(|fade| !settled(&fade.tween))
             || self.missions.values().any(|motion| {
@@ -1630,108 +2465,401 @@ impl SupervisorPage {
             || (0..3).any(|block| self.enter_progress(block, now) < 1.0)
     }
 
-    fn render_dot(&self, state: SupervisorState, theme: &Theme, now: Instant) -> AnyElement {
-        let amber = needs_tone(theme);
-        let base = match state {
-            SupervisorState::Awake => ok_tone(theme),
-            SupervisorState::Stopped => amber,
-            _ => theme.text_faint,
+    fn render_dot(
+        &self,
+        mode: &Mode,
+        tone: Hsla,
+        theme: &Theme,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let indicator = |el: gpui::Div, selector: &'static str| {
+            el.debug_selector(move || selector.into())
+                .flex_none()
+                .size(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
         };
-        let flash = (!self.flash.settled_at(now)).then(|| self.flash.value_at(now));
-        let live = state == SupervisorState::Awake;
-        div()
-            .debug_selector(move || {
-                if live {
-                    "supervisor-dot-live".into()
-                } else {
-                    "supervisor-dot".into()
+        let mark = |name: &'static str| icon(name).size(px(13.0)).text_color(tone);
+        let live = match mode {
+            Mode::Working => {
+                let reduced = motion::reduced_motion(cx);
+                if !reduced {
+                    motion::pulse_lease(cx.entity_id(), cx);
                 }
+                return indicator(div(), "supervisor-dot-working")
+                    .child(crate::tasks::spinner(13.0, tone, reduced))
+                    .into_any_element();
+            }
+            Mode::Stopped => {
+                return indicator(div(), "supervisor-dot-stopped")
+                    .child(mark(icons::LUCIDE_SQUARE))
+                    .into_any_element();
+            }
+            Mode::Failed(_) => {
+                return indicator(div(), "supervisor-dot-failed")
+                    .child(mark(icons::DANGER_TRIANGLE))
+                    .into_any_element();
+            }
+            Mode::Off => {
+                return indicator(div(), "supervisor-dot")
+                    .child(
+                        div()
+                            .size(px(9.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.text_faint),
+                    )
+                    .into_any_element();
+            }
+            Mode::Watching => tone,
+        };
+        let amber = needs_tone(theme);
+        let flash = (!self.flash.settled_at(now)).then(|| self.flash.value_at(now));
+        indicator(div(), "supervisor-dot-live")
+            .child(
+                div().size(px(9.0)).child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            let round =
+                                |bounds: gpui::Bounds<gpui::Pixels>| bounds.size.width / 2.0;
+                            let Some(t) = flash else {
+                                let quad = gpui::fill(bounds, live).corner_radii(round(bounds));
+                                match motion::breathing(0.35, 1.0, cx) {
+                                    Some(animation) => window.paint_animated_quad(quad, animation),
+                                    None => window.paint_quad(quad),
+                                }
+                                return;
+                            };
+                            let spread = px(12.0 * t);
+                            let ring = gpui::Bounds::new(
+                                gpui::point(bounds.origin.x - spread, bounds.origin.y - spread),
+                                gpui::size(
+                                    bounds.size.width + spread * 2.0,
+                                    bounds.size.height + spread * 2.0,
+                                ),
+                            );
+                            window.paint_quad(
+                                gpui::fill(ring, amber.opacity(0.9 * (1.0 - t)))
+                                    .corner_radii(round(ring)),
+                            );
+                            window.paint_quad(
+                                gpui::fill(bounds, motion::mix(amber, live, t))
+                                    .corner_radii(round(bounds)),
+                            );
+                        },
+                    )
+                    .size_full(),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_status(
+        &self,
+        watched: usize,
+        narrow: bool,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let utc = Utc::now();
+        let (mode, head, right, lines, turn_since, held) = {
+            let state = self.state.read(cx);
+            let snapshot = state.supervisor.as_ref();
+            let mode = mode(snapshot, &self.ensure);
+            let empty = SupervisorSnapshot::default();
+            let snap = snapshot.unwrap_or(&empty);
+            let held: Vec<String> = held_wakes(snap).iter().map(|w| w.id.clone()).collect();
+            let turn_since = self
+                .chat_id(cx)
+                .and_then(|id| state.session_for(&id))
+                .and_then(|session| session.started_at)
+                .filter(|_| mode == Mode::Working);
+            let (head, right, lines): (_, Option<String>, Vec<(&str, Vec<Part>)>) = match &mode {
+                Mode::Watching => (
+                    (
+                        "Watching",
+                        format!("{watched} {}", plural(watched, "tree", "trees")),
+                    ),
+                    Some(format!(
+                        "{} of {WAKES_PER_HOUR} wakes this hour",
+                        wakes_this_hour(&snap.wakes, utc)
+                    )),
+                    vec![
+                        ("Last", last_parts(snap, state, utc)),
+                        ("Next", next_parts(snap, state)),
+                    ],
+                ),
+                Mode::Working => {
+                    let wake = self
+                        .chat_id(cx)
+                        .and_then(|id| current_wake(snap, state.sub_transcript(&id)));
+                    (
+                        (
+                            "Working",
+                            if wake.is_some() {
+                                "on a wake"
+                            } else {
+                                "on a message"
+                            }
+                            .to_owned(),
+                        ),
+                        None,
+                        wake.map(|wake| vec![("Woke", woke_parts(wake, state))])
+                            .unwrap_or_default(),
+                    )
+                }
+                Mode::Stopped => (
+                    ("Stopped", "by you".to_owned()),
+                    (snap.waiting > 0).then(|| {
+                        format!(
+                            "{} {} waiting",
+                            snap.waiting,
+                            plural(snap.waiting, "wake", "wakes")
+                        )
+                    }),
+                    vec![("Held", vec![text(held_line(&held_wakes(snap)))])],
+                ),
+                Mode::Off => (
+                    ("Off", String::new()),
+                    None,
+                    vec![(
+                        "",
+                        vec![text(match (&self.ensure, snapshot) {
+                            (_, None) => "Waiting for the engine to report the Supervisor.",
+                            (Ensure::Running, _) => "Starting the Supervisor…",
+                            _ => "No Supervisor thread. Missions and trees run unwatched.",
+                        })],
+                    )],
+                ),
+                Mode::Failed(error) => (
+                    ("Couldn't start", "the Supervisor".to_owned()),
+                    None,
+                    vec![("", vec![text(error.clone())])],
+                ),
+            };
+            (mode, head, right, lines, turn_since, held)
+        };
+        let tone = status_tone(&mode, theme);
+        let action = matches!(mode, Mode::Stopped | Mode::Off | Mode::Failed(_));
+        let tint = |el: gpui::Div| el.when(action, |el| el.bg(tone.opacity(0.05)));
+        let line = |key: &str, parts: Vec<Part>| {
+            let row = div()
+                .pl(px(28.0))
+                .text_size(ui_rems(12.0))
+                .line_height(ui_rems(18.0))
+                .text_color(theme.text_muted);
+            if key.is_empty() {
+                return row.children(parts.into_iter().map(|part| match part {
+                    Part::Text(value) | Part::Strong(value) => value,
+                    Part::Chip(face) => face.label,
+                }));
+            }
+            row.flex()
+                .items_center()
+                .gap(px(5.0))
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(34.0))
+                        .text_color(theme.text_faint)
+                        .child(key.to_owned()),
+                )
+                .children(parts.into_iter().map(|part| {
+                    match part {
+                        Part::Text(value) => div().min_w_0().truncate().child(value),
+                        Part::Strong(value) => div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(value),
+                        Part::Chip(face) => div()
+                            .flex_none()
+                            .text_color(match face.tone {
+                                Tone::Plain => theme.text_muted,
+                                Tone::Ok => ok_tone(theme),
+                                Tone::Warn => needs_tone(theme),
+                            })
+                            .child(face.label),
+                    }
+                }))
+        };
+        let label = format!("{} {}", head.0, head.1);
+        let mut card = div()
+            .id("supervisor-status")
+            .debug_selector(|| "supervisor-status".into())
+            .role(gpui::Role::Status)
+            .aria_label(label)
+            .rounded(px(11.0))
+            .border_1()
+            .border_color(if action {
+                tone.opacity(0.35)
+            } else {
+                theme.border
             })
-            .flex_none()
-            .size(px(7.0))
+            .bg(widgets::block_fill(theme))
+            .overflow_hidden()
+            .child(
+                tint(div())
+                    .px(px(11.0))
+                    .py(px(9.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(self.render_dot(&mode, tone, theme, now, cx))
+                            .child(
+                                div()
+                                    .debug_selector(|| "supervisor-state".into())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .flex()
+                                    .gap(px(5.0))
+                                    .text_size(ui_rems(13.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(div().flex_none().text_color(tone).child(head.0))
+                                    .when(!head.1.is_empty(), |el| el.child(head.1)),
+                            )
+                            .children(right.filter(|_| !narrow).map(|right| {
+                                div()
+                                    .flex_none()
+                                    .text_size(ui_rems(11.5))
+                                    .text_color(theme.text_faint)
+                                    .child(right)
+                            }))
+                            .children(turn_since.map(|since| {
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .text_size(ui_rems(11.5))
+                                    .line_height(px(16.0))
+                                    .text_color(theme.text_faint)
+                                    .child("turn")
+                                    .child(crate::loaders::elapsed_label(
+                                        "supervisor-turn",
+                                        since,
+                                        ui_rems(11.5),
+                                        theme.text_faint,
+                                    ))
+                            })),
+                    )
+                    .children(lines.into_iter().map(|(key, parts)| line(key, parts))),
+            );
+        let actions = div().pl(px(28.0)).pt(px(5.0)).flex().gap(px(6.0));
+        let conversation = || {
+            pill_button(
+                theme,
+                "supervisor-open-conversation".into(),
+                "Open the conversation".into(),
+                widgets::ActionTone::Quiet,
+            )
+            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.open_conversation(cx)))
+        };
+        let actions = match &mode {
+            Mode::Working => Some(actions.child(conversation())),
+            Mode::Stopped => Some(
+                actions
+                    .when(!held.is_empty(), |el| {
+                        el.child(
+                            pill_button(
+                                theme,
+                                "supervisor-resume".into(),
+                                if self.resuming {
+                                    "Resuming…"
+                                } else {
+                                    "Resume"
+                                }
+                                .into(),
+                                widgets::ActionTone::Filled,
+                            )
+                            .on_click(cx.listener(
+                                move |page, _: &ClickEvent, _, cx| page.resume(held.clone(), cx),
+                            )),
+                        )
+                    })
+                    .child(conversation()),
+            ),
+            Mode::Off if !matches!(self.ensure, Ensure::Running) => Some(
+                actions.child(
+                    pill_button(
+                        theme,
+                        "supervisor-start".into(),
+                        "Start the Supervisor".into(),
+                        widgets::ActionTone::Filled,
+                    )
+                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.retry_ensure(cx))),
+                ),
+            ),
+            Mode::Failed(_) => Some(
+                actions.child(
+                    pill_button(
+                        theme,
+                        "supervisor-retry".into(),
+                        "Try again".into(),
+                        widgets::ActionTone::Filled,
+                    )
+                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.retry_ensure(cx))),
+                ),
+            ),
+            _ => None,
+        };
+        if let Some(actions) = actions {
+            card = card.child(tint(div()).px(px(11.0)).pb(px(9.0)).child(actions));
+        }
+        let Some(motion) = &self.status else {
+            return card.into_any_element();
+        };
+        let probe = motion.height.clone();
+        let inner = div()
+            .relative()
+            .w_full()
+            .opacity(motion.fade.value_at(now))
+            .child(card)
             .child(
                 canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        let round = |bounds: gpui::Bounds<gpui::Pixels>| bounds.size.width / 2.0;
-                        let Some(t) = flash else {
-                            let quad = gpui::fill(bounds, base).corner_radii(round(bounds));
-                            match live.then(|| motion::breathing(0.35, 1.0, cx)).flatten() {
-                                Some(animation) => window.paint_animated_quad(quad, animation),
-                                None => window.paint_quad(quad),
-                            }
-                            return;
-                        };
-                        let spread = px(12.0 * t);
-                        let ring = gpui::Bounds::new(
-                            gpui::point(bounds.origin.x - spread, bounds.origin.y - spread),
-                            gpui::size(
-                                bounds.size.width + spread * 2.0,
-                                bounds.size.height + spread * 2.0,
-                            ),
-                        );
-                        window.paint_quad(
-                            gpui::fill(ring, amber.opacity(0.9 * (1.0 - t)))
-                                .corner_radii(round(ring)),
-                        );
-                        window.paint_quad(
-                            gpui::fill(bounds, motion::mix(amber, base, t))
-                                .corner_radii(round(bounds)),
-                        );
-                    },
+                    move |bounds, _, _| probe.set(f32::from(bounds.size.height)),
+                    |_, _, _, _| {},
                 )
-                .size_full(),
-            )
+                .absolute()
+                .inset_0(),
+            );
+        if motion.grow.settled_at(now) || motion.from <= 0.0 {
+            return inner.into_any_element();
+        }
+        let t = motion.grow.value_at(now);
+        let height = motion.from + (motion.height.get() - motion.from) * t;
+        div()
+            .id("supervisor-status-grow")
+            .w_full()
+            .h(px(height))
+            .overflow_hidden()
+            .child(inner)
             .into_any_element()
     }
 
     fn render_header(
         &self,
         feed: &Feed,
-        watched: usize,
+        status: Option<AnyElement>,
         now: Instant,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (state, line, last) = {
-            let snapshot = self.state.read(cx).supervisor.as_ref();
-            (
-                live_state(snapshot),
-                status_line(snapshot, watched),
-                last_wake_line(snapshot),
-            )
-        };
-        let stopped = state == SupervisorState::Stopped;
-        let amber = needs_tone(theme);
-        let pill = div()
-            .id("supervisor-status")
-            .debug_selector(|| "supervisor-status".into())
-            .role(gpui::Role::Status)
-            .aria_label(line.clone())
-            .tooltip(widgets::text_tooltip(last))
-            .ml_auto()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .pl(px(8.0))
-            .pr(px(10.0))
-            .py(px(3.0))
-            .rounded_full()
-            .border_1()
-            .border_color(if stopped {
-                amber.opacity(0.45)
-            } else {
-                theme.border
-            })
-            .text_size(ui_rems(11.5))
-            .text_color(if stopped { amber } else { theme.text_muted })
-            .child(self.render_dot(state, theme, now))
-            .child(
-                div()
-                    .debug_selector(|| "supervisor-state".into())
-                    .child(line),
-            );
         let open = self.gear.get().is_some();
         let gear = div()
             .id("supervisor-gear")
@@ -1779,10 +2907,7 @@ impl SupervisorPage {
                     self.gear.closing_since(),
                 ))
             });
-        let mut chips = vec![self.render_count_chip(None, 0, now, theme, cx)];
-        for kind in Kind::chips() {
-            chips.push(self.render_count_chip(Some(kind), feed.count(kind), now, theme, cx));
-        }
+        let tabs = self.render_tabs(feed, now, cx);
         div()
             .id("supervisor-header")
             .debug_selector(|| "supervisor-header".into())
@@ -1806,96 +2931,33 @@ impl SupervisorPage {
                             .text_color(theme.text)
                             .child("Supervisor"),
                     )
-                    .child(pill)
+                    .children(self.full_authority().then(|| {
+                        div()
+                            .id("supervisor-full-authority")
+                            .debug_selector(|| "supervisor-full-authority".into())
+                            .flex_none()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .tooltip(widgets::text_tooltip(
+                                "The Supervisor decides for you; change it under Authority",
+                            ))
+                            .child("Full authority")
+                    }))
+                    .child(div().flex_1())
                     .child(gear),
             )
-            .child(
-                div()
-                    .id("supervisor-chips")
-                    .mt(px(14.0))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.0))
-                    .children(chips),
-            )
+            .children(status.map(|status| div().mt(px(14.0)).child(status)))
+            .child(tabs)
             .into_any_element()
     }
 
-    fn render_count_chip(
-        &self,
-        kind: Option<Kind>,
-        count: usize,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = match kind {
-            None => self.filter == Filter::All,
-            Some(kind) => self.filter == Filter::Only(kind),
-        };
-        let hot = kind == Some(Kind::Needs) && count > 0;
-        let amber = needs_tone(theme);
-        let label = kind.map_or("All", Kind::chip);
-        let key = format!("supervisor-chip-{}", label.to_lowercase().replace(' ', "-"));
-        let selector = key.clone();
-        let tick = kind
-            .and_then(|kind| self.ticks.get(&kind))
-            .map_or(1.0, |tick| tick.tween.value_at(now));
-        div()
-            .id(SharedString::from(key))
-            .debug_selector(move || selector.clone())
-            .role(gpui::Role::Button)
-            .aria_label(match kind {
-                None => "All".to_owned(),
-                Some(_) => format!("{label}, {count}"),
-            })
-            .aria_selected(selected)
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(match (hot, selected) {
-                (true, _) => amber.opacity(0.55),
-                (false, true) => theme.border_strong,
-                (false, false) => theme.border,
-            })
-            .when(selected, |el| {
-                el.bg(if hot {
-                    amber.opacity(0.12)
-                } else {
-                    theme.wash(0.08)
-                })
-            })
-            .cursor_pointer()
-            .text_size(ui_rems(11.5))
-            .text_color(if selected {
-                theme.text
-            } else {
-                theme.text_muted
-            })
-            .hover(|s| s.text_color(theme.text))
-            .child(label)
-            .when(kind.is_some(), |el| {
-                el.child(
-                    div()
-                        .h(ui_rems(14.0))
-                        .line_height(ui_rems(14.0))
-                        .overflow_hidden()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(
-                            div()
-                                .relative()
-                                .top(ui_rems(14.0 * (1.0 - tick)))
-                                .child(count.to_string()),
-                        ),
-                )
-            })
-            .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| page.pick_filter(kind, cx)))
-            .into_any_element()
+    fn full_authority(&self) -> bool {
+        matches!(&self.settings, Loadable::Ready(settings) if settings.full_authority())
     }
 
     fn render_gear_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1934,7 +2996,7 @@ impl SupervisorPage {
             .into_any_element()
     }
 
-    fn render_switch(
+    pub(crate) fn render_switch(
         theme: &Theme,
         key: String,
         label: SharedString,
@@ -2026,11 +3088,50 @@ impl SupervisorPage {
                 ..s
             },
         ));
+        toggles.push((
+            "supervisor-auth-decide",
+            "Decide for me",
+            settings.decide_for_me,
+            |s, on| SupervisorSettings {
+                decide_for_me: on,
+                ..s
+            },
+        ));
+        toggles.push((
+            "supervisor-auth-goal",
+            "Change a mission's goal or spend",
+            settings.goal_and_spend,
+            |s, on| SupervisorSettings {
+                goal_and_spend: on,
+                ..s
+            },
+        ));
+        let everything = self
+            .state
+            .read(cx)
+            .supervisor
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.watch_everything);
         let mut list = div()
             .id("supervisor-authority")
             .debug_selector(|| "supervisor-authority".into())
             .flex()
-            .flex_col();
+            .flex_col()
+            .child(
+                row().child("Watch everything").child(
+                    Self::render_switch(
+                        theme,
+                        "supervisor-auth-everything".into(),
+                        "Watch everything".into(),
+                        everything,
+                    )
+                    .on_click(cx.listener(
+                        move |page, _: &ClickEvent, _, cx| {
+                            page.set_watch_everything(!everything, cx)
+                        },
+                    )),
+                ),
+            );
         for (key, text, on, set) in toggles {
             list = list.child(row().child(text).child(
                 Self::render_switch(theme, key.into(), text.into(), on).on_click(cx.listener(
@@ -2040,18 +3141,6 @@ impl SupervisorPage {
         }
         let weak = cx.entity().downgrade();
         list.child(
-            row()
-                .debug_selector(|| "supervisor-auth-goal".into())
-                .child("Change a mission's goal or spend")
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child("always asks you"),
-                ),
-        )
-        .child(
             row()
                 .flex_col()
                 .items_start()
@@ -2087,419 +3176,6 @@ impl SupervisorPage {
         .into_any_element()
     }
 
-    fn answering(&self, key: &str) -> bool {
-        matches!(self.replies.get(key), Some(Reply::Sending | Reply::Sent(_)))
-    }
-
-    fn render_reply(&self, key: &str, buttons: gpui::Div, theme: &Theme) -> AnyElement {
-        match self.replies.get(key) {
-            Some(Reply::Failed(error)) => div()
-                .flex()
-                .flex_col()
-                .child(buttons)
-                .child(widgets::error_strip(
-                    theme,
-                    format!("Could not send the answer: {error}"),
-                ))
-                .into_any_element(),
-            _ => settle_while(self.answering(key), buttons),
-        }
-    }
-
-    fn render_item_card(
-        &self,
-        item: &SupervisorItem,
-        arrival: Option<&Arrival>,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let key = format!("item:{}", item.id);
-        let sel = format!("supervisor-needs-item-{}", item.id);
-        let mission = mission_title(self.state.read(cx), item.task_id.as_deref());
-        let raised = match item.raised_by {
-            Raiser::Lead => "Raised by Lead",
-            Raiser::Supervisor => "Raised by Supervisor",
-        };
-        let meta = match &mission {
-            Some(mission) => format!("{raised} · {mission}"),
-            None => raised.to_owned(),
-        };
-        let mut quote = vec![
-            format!("Needs you: {}", item.title),
-            format!("{meta} · {}", why_label(item.why)),
-        ];
-        if !item.detail.trim().is_empty() {
-            quote.push(item.detail.trim().to_owned());
-        }
-        if !item.options.is_empty() {
-            quote.push(format!("Options: {}", item.options.join(" | ")));
-        }
-        let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
-        for (ix, option) in item.options.iter().enumerate() {
-            let (id, choice) = (item.id.clone(), option.clone());
-            buttons = buttons.child(
-                pill_button(
-                    theme,
-                    format!("{sel}-option-{ix}"),
-                    option.clone(),
-                    if ix == 0 {
-                        widgets::ActionTone::Solid
-                    } else {
-                        widgets::ActionTone::Outlined
-                    },
-                )
-                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                    page.resolve_item(id.clone(), choice.clone(), cx)
-                })),
-            );
-        }
-        let quote = quote.join("\n");
-        buttons = buttons.child(
-            pill_button(
-                theme,
-                format!("{sel}-discuss"),
-                "Discuss".into(),
-                widgets::ActionTone::Outlined,
-            )
-            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                cx.emit(SupervisorEvent::Discuss(quote.clone()))
-            })),
-        );
-        let body = card_body()
-            .child(card_title(theme, item.title.clone(), true))
-            .child(
-                card_meta(theme)
-                    .child(meta)
-                    .child(tone_chip(
-                        theme,
-                        why_label(item.why),
-                        Some(needs_tone(theme)),
-                    ))
-                    .child(clock(item.at)),
-            )
-            .when(!item.detail.trim().is_empty(), |el| {
-                el.child(evidence(theme, clip(item.detail.trim())))
-            })
-            .child(
-                div()
-                    .mt(px(4.0))
-                    .child(self.render_reply(&key, buttons, theme)),
-            );
-        arrive(
-            card(
-                theme,
-                &key,
-                sel,
-                item.title.clone(),
-                gpui::Role::Group,
-                true,
-            )
-            .child(kind_tag(theme, Some(Kind::Needs)))
-            .child(body),
-            arrival,
-            theme,
-            now,
-        )
-    }
-
-    fn render_input_card(
-        &self,
-        input: &NeedsYouInput,
-        arrival: Option<&Arrival>,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let row = NeedsYouRow::Input(input.clone());
-        let key = row_key(&row);
-        let sel = format!(
-            "supervisor-needs-input-{}",
-            input.request_id.replace(':', "-")
-        );
-        let who = asker_name(input, self.state.read(cx), Utc::now());
-        let approval = input.questions.iter().any(|question| question.approval);
-        let picks = self.picks.get(&key);
-        let submit = input.questions.len() > 1 || input.questions.iter().any(|q| q.multi_select);
-        let answerable = input.questions.iter().all(|q| !q.options.is_empty());
-        let mut quote = vec![
-            format!("Needs you: {}", row_title(&row)),
-            format!("Asked by {who}"),
-        ];
-        let mut questions = div().flex().flex_col().gap(px(10.0));
-        for (qx, question) in input.questions.iter().enumerate() {
-            quote.push(match question.options.as_slice() {
-                [] => crate::transcript::single_line(&question.question),
-                options => format!(
-                    "{} Options: {}",
-                    crate::transcript::single_line(&question.question),
-                    options.join(" | ")
-                ),
-            });
-            let picked = picks.and_then(|picks| picks.get(&question.id));
-            let mut options = div().flex().flex_wrap().items_center().gap(px(6.0));
-            for (ix, option) in question.options.iter().enumerate() {
-                let chosen = picked.is_some_and(|labels| labels.contains(option));
-                let tone = match (submit, chosen, ix) {
-                    (true, true, _) => widgets::ActionTone::Solid,
-                    (true, false, _) => widgets::ActionTone::Outlined,
-                    (false, _, 0) => widgets::ActionTone::Solid,
-                    (false, _, _) => widgets::ActionTone::Outlined,
-                };
-                let (row, question, option) = (input.clone(), question.clone(), option.clone());
-                options = options.child(
-                    pill_button(
-                        theme,
-                        format!("{sel}-q{qx}-option-{ix}"),
-                        option.clone(),
-                        tone,
-                    )
-                    .when(submit, |el| el.aria_selected(chosen))
-                    .on_click(cx.listener(
-                        move |page, _: &ClickEvent, _, cx| {
-                            page.pick_option(&row, &question, option.clone(), cx)
-                        },
-                    )),
-                );
-            }
-            questions = questions.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .when(
-                        input.questions.len() > 1 && !question.header.trim().is_empty(),
-                        |el| {
-                            el.child(
-                                div()
-                                    .text_size(ui_rems(12.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(question.header.clone()),
-                            )
-                        },
-                    )
-                    .when(
-                        input.questions.len() > 1 || !question.header.trim().is_empty(),
-                        |el| el.child(evidence(theme, clip(question.question.trim()))),
-                    )
-                    .child(settle_while(self.answering(&key), options)),
-            );
-        }
-        let mut buttons = div().flex().flex_wrap().items_center().gap(px(6.0));
-        if submit && answerable {
-            let ready = self.picked_answers(input);
-            let row = input.clone();
-            buttons = buttons.child(
-                pill_button(
-                    theme,
-                    format!("{sel}-send"),
-                    "Send answers".into(),
-                    widgets::ActionTone::Solid,
-                )
-                .when(ready.is_none(), |el| el.opacity(0.5).cursor_default())
-                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                    if let Some(answers) = page.picked_answers(&row) {
-                        page.answer_input(&row, answers, cx);
-                    }
-                })),
-            );
-        }
-        if input.asker != InputAsker::Supervisor {
-            let chat_id = input.chat_id.clone();
-            buttons = buttons.child(
-                pill_button(
-                    theme,
-                    format!("{sel}-open"),
-                    "Open thread".into(),
-                    widgets::ActionTone::Outlined,
-                )
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.emit(SupervisorEvent::OpenChat(chat_id.clone()))
-                })),
-            );
-        }
-        let quote = quote.join("\n");
-        buttons = buttons.child(
-            pill_button(
-                theme,
-                format!("{sel}-discuss"),
-                "Discuss".into(),
-                widgets::ActionTone::Outlined,
-            )
-            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                cx.emit(SupervisorEvent::Discuss(quote.clone()))
-            })),
-        );
-        let title = row_title(&row);
-        let body = card_body()
-            .child(card_title(theme, title.clone(), true))
-            .child(
-                card_meta(theme)
-                    .child(format!("Asked by {who}"))
-                    .child(tone_chip(
-                        theme,
-                        if approval { "Approval" } else { "Question" },
-                        Some(needs_tone(theme)),
-                    ))
-                    .child(clock(input.at)),
-            )
-            .child(questions)
-            .when(!answerable, |el| {
-                el.child(
-                    div()
-                        .text_size(ui_rems(12.0))
-                        .text_color(theme.text_faint)
-                        .child(if input.asker == InputAsker::Supervisor {
-                            "This question takes a typed answer: answer it in the Supervisor's conversation."
-                        } else {
-                            "This question takes a typed answer: answer it in its thread."
-                        }),
-                )
-            })
-            .child(
-                div()
-                    .mt(px(4.0))
-                    .child(self.render_reply(&key, buttons, theme)),
-            );
-        arrive(
-            card(theme, &key, sel, title, gpui::Role::Group, true)
-                .child(kind_tag(theme, Some(Kind::Needs)))
-                .child(body),
-            arrival,
-            theme,
-            now,
-        )
-    }
-
-    fn render_question_card(
-        &self,
-        key: &str,
-        question: &LeadQuestion,
-        done: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let place = {
-            let state = self.state.read(cx);
-            let step = step_name(state, &question.task_id, &question.step_id, Utc::now())
-                .unwrap_or_else(|| "A step".into());
-            match mission_title(state, Some(&question.task_id)) {
-                Some(mission) => format!("{step} → Lead · {mission}"),
-                None => format!("{step} → Lead"),
-            }
-        };
-        let (label, detail) = question_state(&question.state);
-        let text = question_text(&question.questions);
-        let meta = match (done, detail) {
-            (false, _) | (true, None) => format!("{place} · {}", clock(question.at)),
-            (true, Some(detail)) => {
-                let join = if matches!(question.state, QuestionState::Dropped) {
-                    ": "
-                } else {
-                    " "
-                };
-                format!("{place} · {label}{join}{detail} · {}", clock(question.at))
-            }
-        };
-        let sel = format!(
-            "{}supervisor-question-{}",
-            if done { "earlier-" } else { "" },
-            question.request_id.replace(':', "-")
-        );
-        let chat_id = question.chat_id.clone();
-        card(
-            theme,
-            &done_key(key, done),
-            sel,
-            format!("{label}: {text}"),
-            gpui::Role::Button,
-            false,
-        )
-        .cursor_pointer()
-        .hover(|s| s.border_color(theme.border_strong))
-        .when(done, |el| el.opacity(0.55))
-        .child(kind_tag(theme, (!done).then_some(Kind::Question)))
-        .child(
-            card_body()
-                .child(card_title(theme, clip(&text), false))
-                .child(card_meta(theme).child(meta)),
-        )
-        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-            cx.emit(SupervisorEvent::OpenChat(chat_id.clone()))
-        }))
-        .into_any_element()
-    }
-
-    fn render_intervention_card(
-        &self,
-        key: &str,
-        row: &SupervisorIntervention,
-        done: bool,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let utc = Utc::now();
-        let (target, trigger) = {
-            let state = self.state.read(cx);
-            let wakes = state
-                .supervisor
-                .as_ref()
-                .map_or(&[][..], |snapshot| snapshot.wakes.as_slice());
-            (
-                row.target
-                    .as_deref()
-                    .map(|target| thread_name(state, target, utc))
-                    .or_else(|| mission_title(state, row.task_id.as_deref())),
-                row.trigger
-                    .as_ref()
-                    .map(|trigger| trigger_label(trigger, wakes)),
-            )
-        };
-        let kind = intervention_kind_label(row.kind);
-        let title = if row.text.trim().is_empty() {
-            kind.to_owned()
-        } else {
-            clip(row.text.trim())
-        };
-        let mut meta = vec![match target {
-            Some(target) => format!("{kind} → {target}"),
-            None => kind.to_owned(),
-        }];
-        meta.extend(trigger);
-        if done {
-            meta.extend(row.chips.iter().map(chip_label));
-        }
-        meta.push(clock(row.at));
-        let face = (!done).then(|| chip_face(row, utc)).flatten();
-        let label = match &face {
-            Some(face) => format!("{title} · {}", face.label),
-            None => title.clone(),
-        };
-        let id = row.id.clone();
-        card(
-            theme,
-            &done_key(key, done),
-            format!(
-                "{}supervisor-intervention-{id}",
-                if done { "earlier-" } else { "" }
-            ),
-            label,
-            gpui::Role::Group,
-            false,
-        )
-        .when(done, |el| el.opacity(0.55))
-        .child(kind_tag(theme, (!done).then_some(Kind::Intervention)))
-        .child(
-            card_body()
-                .child(card_title(theme, title, false))
-                .child(card_meta(theme).child(meta.join(" · "))),
-        )
-        .children(face.map(|face| self.render_chip(key, &face, now, theme)))
-        .into_any_element()
-    }
-
     fn render_chip(&self, key: &str, face: &Face, now: Instant, theme: &Theme) -> AnyElement {
         let fade = self.chips.get(key);
         let t = fade.map_or(1.0, |fade| fade.tween.value_at(now));
@@ -2510,25 +3186,16 @@ impl SupervisorPage {
             Tone::Warn => Some(needs_tone(theme)),
         };
         let text = |face: &Face| tone(face).unwrap_or(theme.text_muted);
-        let border = |face: &Face| tone(face).map_or(theme.border, |tone| tone.opacity(0.45));
-        let (text_color, border_color) = match from {
-            Some(old) => (
-                motion::mix(text(old), text(face), t),
-                motion::mix(border(old), border(face), t),
-            ),
-            None => (text(face), border(face)),
+        let text_color = match from {
+            Some(old) => motion::mix(text(old), text(face), t),
+            None => text(face),
         };
         let selector = format!("supervisor-chip-face-{key}");
         div()
             .debug_selector(move || selector.clone())
             .relative()
             .flex_none()
-            .mt(px(1.0))
-            .px(px(7.0))
-            .rounded_full()
-            .border_1()
-            .border_color(border_color)
-            .text_size(ui_rems(10.5))
+            .text_size(ui_rems(11.5))
             .text_color(text_color)
             .whitespace_nowrap()
             .child(
@@ -2540,322 +3207,60 @@ impl SupervisorPage {
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(7.0))
+                    .left_0()
                     .opacity(1.0 - t)
                     .child(old.label.clone())
             }))
             .into_any_element()
     }
 
-    fn render_resource_card(
-        &self,
-        key: &str,
-        resource: &SharedResource,
-        done: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (declared, held, verified, listed) = {
-            let state = self.state.read(cx);
-            let listed = state.supervisor.as_ref().is_some_and(|snapshot| {
-                snapshot
-                    .resources
-                    .iter()
-                    .any(|declared| declared.key == resource.key)
-            });
-            let title = |id: &str| {
-                state
-                    .tasks
-                    .iter()
-                    .find(|task| task.id == id)
-                    .map_or_else(|| format!("task {id}"), |task| task.title.clone())
-            };
-            let names = |ids: &[String]| {
-                ids.iter()
-                    .map(|id| title(id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (
-                names(&resource.declared_by),
-                match resource.holders.as_slice() {
-                    [] => "held by none".to_string(),
-                    holders => format!("held by {}", names(holders)),
-                },
-                verified_line(resource, &title),
-                listed,
-            )
-        };
-        let tone = match resource.state {
-            _ if !listed => theme.text_muted,
-            ResourceState::Contended => theme.danger,
-            ResourceState::Clear => ok_tone(theme),
-            _ if feed::resource_open(resource.state) => needs_tone(theme),
-            _ => theme.text_muted,
-        };
-        let state = if listed {
-            resource_label(resource.state)
-        } else {
-            "No longer shared by watched missions"
-        };
-        let name = resource.key.clone();
-        card(
-            theme,
-            &done_key(key, done),
-            format!(
-                "{}supervisor-resource-{name}",
-                if done { "earlier-" } else { "" }
-            ),
-            format!("{name} · {state}"),
-            gpui::Role::Group,
-            false,
-        )
-        .when(done, |el| el.opacity(0.55))
-        .child(kind_tag(theme, (!done).then_some(Kind::Resource)))
-        .child(
-            card_body()
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.0))
-                        .text_size(ui_rems(13.0))
-                        .line_height(ui_rems(19.0))
-                        .text_color(theme.text)
-                        .child(
-                            div()
-                                .font_family(theme.font_mono.clone())
-                                .child(resource.key.clone()),
-                        )
-                        .child(div().text_color(theme.text_faint).child("·"))
-                        .child(div().text_color(tone).child(state)),
-                )
-                .child(card_meta(theme).child(format!("Declared by {declared} · {held}")))
-                .children(verified.map(|line| card_meta(theme).child(line))),
-        )
-        .into_any_element()
-    }
-
-    fn render_answered_card(
-        &self,
-        answered: &feed::Answered,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let key = row_key(&answered.row);
-        let (task_id, _) = row_origin(&answered.row);
-        let mission = mission_title(self.state.read(cx), task_id);
-        let mut meta = vec![match &answered.choice {
-            Some(choice) => format!("Answered: {choice}"),
-            None => "Answered".to_owned(),
-        }];
-        meta.extend(mission);
-        meta.push(clock(answered.at));
-        let title = row_title(&answered.row);
-        card(
-            theme,
-            &done_key(&key, true),
-            format!("earlier-supervisor-needs-{}", key.replace(':', "-")),
-            title.clone(),
-            gpui::Role::Group,
-            false,
-        )
-        .opacity(0.55)
-        .child(kind_tag(theme, None))
-        .child(
-            card_body()
-                .child(card_title(theme, title, false))
-                .child(card_meta(theme).child(meta.join(" · "))),
-        )
-        .into_any_element()
-    }
-
-    fn render_row(
-        &self,
-        row: &Row,
-        done: bool,
-        arrival: Option<&Arrival>,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match &row.entry {
-            Entry::Needs(NeedsYouRow::Item(item)) => {
-                self.render_item_card(item, arrival, now, theme, cx)
-            }
-            Entry::Needs(NeedsYouRow::Input(input)) => {
-                self.render_input_card(input, arrival, now, theme, cx)
-            }
-            Entry::Question(question) => {
-                self.render_question_card(&row.key, question, done, theme, cx)
-            }
-            Entry::Intervention(intervention) => {
-                self.render_intervention_card(&row.key, intervention, done, now, theme, cx)
-            }
-            Entry::Resource(resource) => {
-                self.render_resource_card(&row.key, resource, done, theme, cx)
-            }
-            Entry::Answered(answered) => self.render_answered_card(answered, theme, cx),
-        }
-    }
-
-    fn render_feed(
-        &self,
-        feed: &Feed,
-        calm: String,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut rows: Vec<&RowMotion> = self
-            .rows
-            .values()
-            .filter(|motion| !motion.fold.gone(now))
-            .collect();
-        rows.sort_by(|a, b| {
-            (a.group, std::cmp::Reverse(a.row.at), &a.row.key).cmp(&(
-                b.group,
-                std::cmp::Reverse(b.row.at),
-                &b.row.key,
-            ))
-        });
-        let cards: Vec<AnyElement> = rows
-            .into_iter()
-            .map(|motion| {
-                let card =
-                    self.render_row(&motion.row, false, motion.arrival.as_ref(), now, theme, cx);
-                folded(
-                    format!("supervisor-fold-{}", motion.row.key),
-                    &motion.fold,
-                    now,
-                    div().pb(px(6.0)).child(card),
-                )
-            })
-            .collect();
-        let calm = (!self.calm.gone(now)).then(|| {
-            folded(
-                "supervisor-calm-fold".into(),
-                &self.calm,
-                now,
-                render_calm(theme, calm),
-            )
-        });
-        div()
-            .id("supervisor-feed")
-            .debug_selector(|| "supervisor-feed".into())
-            .mt(px(12.0))
-            .flex()
-            .flex_col()
-            .children(cards)
-            .children(calm)
-            .children(self.render_earlier(&feed.earlier, now, theme, cx))
-            .into_any_element()
-    }
-
-    fn render_earlier(
-        &self,
-        rows: &[Row],
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if rows.is_empty() {
-            return None;
-        }
-        let header = div()
-            .id("supervisor-earlier-toggle")
-            .debug_selector(|| "supervisor-earlier-toggle".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("Earlier, {}", rows.len()))
-            .aria_expanded(self.earlier_open)
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .mt(px(4.0))
-            .mx(px(2.0))
-            .py(px(2.0))
-            .cursor_pointer()
-            .text_size(ui_rems(11.5))
-            .text_color(theme.text_faint)
-            .hover(|s| s.text_color(theme.text_muted))
-            .child(chevron(theme, self.earlier_chevron.value_at(now) * 90.0))
-            .child(format!("Earlier · {}", rows.len()))
-            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_earlier(cx)));
-        let body = (!self.earlier.gone(now)).then(|| {
-            let hidden = rows.len().saturating_sub(EARLIER_ROWS);
-            let list = div()
-                .id("supervisor-earlier")
-                .debug_selector(|| "supervisor-earlier".into())
-                .pt(px(6.0))
-                .flex()
-                .flex_col()
-                .children(rows.iter().take(EARLIER_ROWS).map(|row| {
-                    div()
-                        .pb(px(6.0))
-                        .child(self.render_row(row, true, None, now, theme, cx))
-                }))
-                .when(hidden > 0, |el| {
-                    el.child(
-                        div()
-                            .px(px(2.0))
-                            .pb(px(6.0))
-                            .text_size(ui_rems(11.5))
-                            .text_color(theme.text_faint)
-                            .child(format!(
-                                "{hidden} older {} not shown",
-                                plural(hidden, "row", "rows")
-                            )),
-                    )
-                });
-            folded("supervisor-earlier-fold".into(), &self.earlier, now, list)
-        });
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .child(header)
-                .children(body)
-                .into_any_element(),
-        )
-    }
-
     fn sync_trees(&mut self, missions: &[Mission], now: Instant, cx: &mut Context<Self>) {
-        let open: HashSet<String> = missions
+        let open: Vec<(String, String, bool)> = missions
             .iter()
-            .map(|mission| mission.row.task_id.clone())
-            .filter(|id| {
+            .filter(|mission| {
                 self.missions
-                    .get(id)
+                    .get(&mission.key)
                     .is_some_and(|motion| !motion.fold.gone(now))
             })
+            .filter_map(|mission| Some((mission.key.clone(), mission.root.clone()?, mission.plan)))
             .collect();
-        self.trees.retain(|id, _| open.contains(id));
-        for task_id in open {
-            if self.trees.contains_key(&task_id) {
+        self.trees
+            .retain(|id, _| open.iter().any(|(key, _, _)| key == id));
+        for (key, root, plan) in open {
+            if self.trees.contains_key(&key) {
                 continue;
             }
             let state = self.state.clone();
-            let id = task_id.clone();
             let tree = cx.new(|cx| {
                 crate::tasks::StripTree::new(
                     state,
-                    id,
+                    root,
+                    true,
                     true,
                     crate::tasks::TreeHost::Supervisor,
                     cx,
                 )
             });
-            let id = task_id.clone();
+            let id = key.clone();
             let events = cx.subscribe(
                 &tree,
                 move |page, _, event: &crate::tasks::StripTreeEvent, cx| match event {
-                    crate::tasks::StripTreeEvent::Open(_) => {
-                        cx.emit(SupervisorEvent::OpenTaskCenter(id.clone()))
+                    crate::tasks::StripTreeEvent::Open {
+                        chat_id: Some(chat_id),
+                        ..
+                    } => cx.emit(SupervisorEvent::OpenChat(chat_id.clone())),
+                    crate::tasks::StripTreeEvent::Open {
+                        selection,
+                        chat_id: None,
+                    } => cx.emit(SupervisorEvent::OpenMission(id.clone(), selection.clone())),
+                    crate::tasks::StripTreeEvent::OpenNative { parent_chat_id, .. } => {
+                        cx.emit(SupervisorEvent::OpenChat(parent_chat_id.clone()))
                     }
+                    crate::tasks::StripTreeEvent::Brief(_) if !plan => {}
                     crate::tasks::StripTreeEvent::Brief(selection) => {
                         let step_id = match selection {
-                            crate::tasks::Selection::Lead => None,
                             crate::tasks::Selection::Step(step) => Some(step.clone()),
+                            _ => None,
                         };
                         page.open_drawer(
                             Owner {
@@ -2867,272 +3272,31 @@ impl SupervisorPage {
                     }
                 },
             );
-            self.trees.insert(task_id, (tree, events));
+            self.trees.insert(key, (tree, events));
         }
     }
 
-    fn render_owners(
-        &self,
-        mission: &Mission,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let task_id = mission.row.task_id.as_str();
-        let tree = self.trees.get(task_id).map(|(tree, _)| tree.clone());
-        let open_id = task_id.to_owned();
-        let open_key = format!("supervisor-open-center-{task_id}");
-        let footer = |el: gpui::Div| {
-            el.flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .pl(px(37.0))
-                .pr(px(12.0))
-                .py(px(7.0))
-                .border_t_1()
-                .border_color(widgets::row_divider(theme))
-                .text_size(ui_rems(11.5))
-                .text_color(theme.text_muted)
-        };
-        let watch = match &mission.watch {
-            Watch::Elsewhere(device) => {
-                let name = self
-                    .state
-                    .read(cx)
-                    .device_name(device)
-                    .unwrap_or("another device")
-                    .to_owned();
-                footer(div()).child(format!("on {name}, not watched"))
+    fn render_pane_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let line = match &self.ensure {
+            Ensure::Failed(_) => return None,
+            _ if self.state.read(cx).supervisor.is_none() => {
+                "Waiting for the engine to report the Supervisor."
             }
-            watch => {
-                let on = *watch == Watch::Watched;
-                let id = task_id.to_owned();
-                footer(div())
-                    .child(if on {
-                        "Watched by the Supervisor"
-                    } else {
-                        "Not watched"
-                    })
-                    .child(
-                        Self::render_switch(
-                            theme,
-                            format!("supervisor-watch-{task_id}"),
-                            format!("Watch {}", mission.row.title).into(),
-                            on,
-                        )
-                        .on_click(cx.listener(
-                            move |page, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                page.set_supervised(id.clone(), !on, cx);
-                            },
-                        )),
-                    )
-            }
+            _ => "Starting the Supervisor…",
         };
-        div()
-            .border_t_1()
-            .border_color(widgets::row_divider(theme))
-            .pt(px(4.0))
-            .flex()
-            .flex_col()
-            .children(tree)
-            .child(
-                div().pl(px(37.0)).pt(px(3.0)).pb(px(6.0)).child(
-                    div()
-                        .id(SharedString::from(open_key.clone()))
-                        .debug_selector(move || open_key.clone())
-                        .role(gpui::Role::Button)
-                        .aria_label("Open Mission Control")
-                        .cursor_pointer()
-                        .text_size(ui_rems(11.5))
-                        .text_color(theme.text_muted)
-                        .hover(|s| s.text_color(theme.text))
-                        .child("Open Mission Control ›")
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            cx.emit(SupervisorEvent::OpenTaskCenter(open_id.clone()))
-                        })),
-                ),
-            )
-            .child(watch)
-            .into_any_element()
-    }
-
-    fn render_mission(
-        &self,
-        mission: &Mission,
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let row = &mission.row;
-        let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
-        let arc = match row.status {
-            TaskStatus::NeedsYou => tone(ChatIndicator::AwaitingInput),
-            TaskStatus::Working => tone(ChatIndicator::Working),
-            _ => tone(ChatIndicator::Completed),
-        };
-        let motion = self.missions.get(&row.task_id);
-        let fill = motion.map_or(mission.fraction(), |motion| motion.fill.value_at(now));
-        let turn = motion.map_or(0.0, |motion| motion.chevron.value_at(now));
-        let expanded = self.expanded.contains(&row.task_id);
-        let unwatched = match &mission.watch {
-            Watch::Watched => None,
-            Watch::Unwatched => Some("Not watched".to_owned()),
-            Watch::Elsewhere(device) => Some(format!(
-                "on {}, not watched",
-                self.state
-                    .read(cx)
-                    .device_name(device)
-                    .unwrap_or("another device")
-            )),
-        };
-        let header_key = format!("supervisor-mission-{}", row.task_id);
-        let toggle_id = row.task_id.clone();
-        let header = div()
-            .id(SharedString::from(header_key.clone()))
-            .debug_selector(move || header_key.clone())
-            .role(gpui::Role::Button)
-            .aria_label(row.title.clone())
-            .aria_expanded(expanded)
-            .flex()
-            .items_center()
-            .gap(px(9.0))
-            .px(px(12.0))
-            .py(px(9.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.wash(0.03)))
-            .child(div().flex_none().child(crate::loaders::upload_progress_arc(
-                (fill * 100.0).round() as u8,
-                16.0,
-                theme.text_faint.opacity(0.35),
-                arc,
-            )))
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(260.0))
-                    .truncate()
-                    .text_size(ui_rems(13.0))
-                    .text_color(theme.text)
-                    .child(row.title.clone()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_rems(11.5))
-                    .text_color(theme.text_muted)
-                    .child(mission.current.clone()),
-            )
-            .children(unwatched.map(|label| {
-                div()
-                    .flex_none()
-                    .text_size(ui_rems(11.0))
-                    .text_color(theme.text_faint)
-                    .child(label)
-            }))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(64.0))
-                    .h(px(3.0))
-                    .rounded(px(2.0))
-                    .bg(theme.wash(0.1))
-                    .overflow_hidden()
-                    .child(div().h_full().w(relative(fill)).bg(arc)),
-            )
-            .child(chevron(theme, turn * 90.0))
-            .on_click(
-                cx.listener(move |page, _: &ClickEvent, _, cx| page.toggle_mission(&toggle_id, cx)),
-            );
-        let body = motion
-            .filter(|motion| !motion.fold.gone(now))
-            .map(|motion| {
-                folded(
-                    format!("supervisor-mission-fold-{}", row.task_id),
-                    &motion.fold,
-                    now,
-                    div()
-                        .opacity(motion.fold.value(now))
-                        .child(self.render_owners(mission, theme, cx)),
-                )
-            });
-        div()
-            .rounded(px(11.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(widgets::block_fill(theme))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(header)
-            .children(body)
-            .into_any_element()
-    }
-
-    fn render_missions(
-        &self,
-        missions: &[Mission],
-        now: Instant,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if missions.is_empty() {
-            return None;
-        }
         Some(
             div()
-                .id("supervisor-missions")
-                .debug_selector(|| "supervisor-missions".into())
-                .mt(px(18.0))
+                .id("supervisor-pane-status")
+                .debug_selector(|| "supervisor-pane-status".into())
                 .flex()
-                .flex_col()
-                .gap(px(7.0))
-                .child(caps_label(theme, format!("Missions · {}", missions.len())))
-                .children(
-                    missions
-                        .iter()
-                        .map(|mission| self.render_mission(mission, now, theme, cx)),
-                )
+                .items_center()
+                .gap(px(10.0))
+                .py(px(14.0))
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(line)
                 .into_any_element(),
         )
-    }
-
-    fn render_pane_status(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let body = div()
-            .id("supervisor-pane-status")
-            .debug_selector(|| "supervisor-pane-status".into())
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .py(px(14.0))
-            .text_size(ui_rems(12.5))
-            .text_color(theme.text_muted);
-        match &self.ensure {
-            Ensure::Failed(error) => body
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(format!("Could not start the Supervisor: {error}")),
-                )
-                .child(
-                    widgets::text_action(theme, widgets::ActionTone::Filled, "Try again")
-                        .id("supervisor-retry")
-                        .debug_selector(|| "supervisor-retry".into())
-                        .role(gpui::Role::Button)
-                        .aria_label("Try again")
-                        .flex_none()
-                        .rounded_full()
-                        .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.retry_ensure(cx))),
-                )
-                .into_any_element(),
-            _ if self.state.read(cx).supervisor.is_none() => body
-                .child("Waiting for the engine to report the Supervisor.")
-                .into_any_element(),
-            _ => body.child("Starting the Supervisor…").into_any_element(),
-        }
     }
 
     fn render_bottom(
@@ -3145,14 +3309,14 @@ impl SupervisorPage {
         let column = div()
             .flex_none()
             .w_full()
-            .max_w(px(820.0))
+            .max_w(px(PAGE_WIDTH))
             .mx_auto()
             .px(px(24.0))
             .flex()
             .flex_col();
         let Some(pane) = &self.pane else {
             return column
-                .child(self.render_pane_status(theme, cx))
+                .children(self.render_pane_status(theme, cx))
                 .into_any_element();
         };
         let open = self.conversation.value_at(now);
@@ -3164,40 +3328,54 @@ impl SupervisorPage {
                 .map_or(&[][..], |snapshot| snapshot.wakes.as_slice());
             self.chat_id(cx)
                 .and_then(|id| last_message(state.sub_transcript(&id), wakes))
-                .unwrap_or_else(|| "No messages yet.".into())
         };
         let height =
             (f32::from(window.viewport_size().height) * 0.4).clamp(160.0, CONVERSATION_HEIGHT);
-        let bar = div()
-            .id("supervisor-conversation-toggle")
-            .debug_selector(|| "supervisor-conversation-toggle".into())
-            .role(gpui::Role::Button)
-            .aria_label("Conversation")
-            .aria_expanded(self.conversation_open)
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .pt(px(6.0))
-            .pb(px(7.0))
-            .cursor_pointer()
-            .text_size(ui_rems(11.5))
-            .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
-            .child(chevron(theme, -90.0 + 180.0 * open))
-            .child(div().flex_none().child("Conversation"))
-            .child(
-                div()
-                    .debug_selector(|| "supervisor-conversation-preview".into())
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.text_muted)
-                    .opacity(1.0 - open)
-                    .child(preview),
-            )
-            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)));
+        let tab = preview.map(|preview| {
+            crate::queue::queue_panel_surface(theme, false)
+                .id("supervisor-conversation-toggle")
+                .debug_selector(|| "supervisor-conversation-toggle".into())
+                .role(gpui::Role::Button)
+                .aria_label("Conversation")
+                .aria_expanded(self.conversation_open)
+                .absolute()
+                .top_0()
+                .left(px(16.0))
+                .max_w(relative(0.55))
+                .rounded_t(px(10.0))
+                .px(px(8.0))
+                .pb(px(crate::composer::QUEUE_COMPOSER_OVERLAP))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.85))
+                .child(
+                    div()
+                        .h(px(24.0))
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(chevron(theme, -90.0 * open))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("Conversation"),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "supervisor-conversation-preview".into())
+                                .min_w_0()
+                                .truncate()
+                                .opacity(1.0 - open)
+                                .child(preview),
+                        ),
+                )
+                .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)))
+        });
         column
-            .child(bar)
             .when(open > 0.0, |el| {
                 el.child(
                     div()
@@ -3217,7 +3395,13 @@ impl SupervisorPage {
                         ),
                 )
             })
-            .child(div().flex_none().child(pane.composer.clone()))
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .children(tab)
+                    .child(pane.composer.clone()),
+            )
             .into_any_element()
     }
 
@@ -3510,11 +3694,21 @@ impl SupervisorPage {
     }
 }
 
+fn status_tone(mode: &Mode, theme: &Theme) -> Hsla {
+    match mode {
+        Mode::Watching => ok_tone(theme),
+        Mode::Working => crate::shell::chat_status_tone(ChatIndicator::Working, theme).2,
+        Mode::Stopped => needs_tone(theme),
+        Mode::Off => theme.text_faint,
+        Mode::Failed(_) => theme.danger,
+    }
+}
+
 fn needs_tone(theme: &Theme) -> Hsla {
     theme.warning
 }
 
-fn ok_tone(theme: &Theme) -> Hsla {
+pub(crate) fn ok_tone(theme: &Theme) -> Hsla {
     crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
 }
 
@@ -3526,18 +3720,6 @@ fn kind_tone(theme: &Theme, kind: Kind) -> Option<Hsla> {
         Kind::Intervention => Some(gpui::rgb(if dark { 0xc084fc } else { 0x9333ea }).into()),
         Kind::Resource => None,
     }
-}
-
-fn tone_chip(theme: &Theme, label: impl Into<SharedString>, tone: Option<Hsla>) -> gpui::Div {
-    div()
-        .flex_none()
-        .px(px(7.0))
-        .rounded_full()
-        .border_1()
-        .border_color(tone.map_or(theme.border, |tone| tone.opacity(0.45)))
-        .text_size(ui_rems(11.0))
-        .text_color(tone.unwrap_or(theme.text_muted))
-        .child(label.into())
 }
 
 fn pill_button(
@@ -3557,187 +3739,12 @@ fn pill_button(
         .rounded_full()
 }
 
-// An answered card keeps its controls, inert, so it folds away without first changing height.
-fn settle_while(answering: bool, controls: gpui::Div) -> AnyElement {
-    if !answering {
-        return controls.into_any_element();
-    }
-    div()
-        .relative()
-        .opacity(0.5)
-        .child(controls)
-        .child(div().absolute().inset_0().occlude())
-        .into_any_element()
-}
-
 fn done_key(key: &str, done: bool) -> String {
     if done {
         format!("earlier-{key}")
     } else {
         key.to_owned()
     }
-}
-
-fn card(
-    theme: &Theme,
-    key: &str,
-    selector: String,
-    label: String,
-    role: gpui::Role,
-    needs: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let tone = needs_tone(theme);
-    div()
-        .id(SharedString::from(format!("supervisor-card-{key}")))
-        .debug_selector(move || selector.clone())
-        .role(role)
-        .aria_label(label)
-        .relative()
-        .flex()
-        .items_start()
-        .gap(px(10.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(px(11.0))
-        .border_1()
-        .border_color(if needs {
-            tone.opacity(0.4)
-        } else {
-            theme.border
-        })
-        .bg(if needs {
-            tone.opacity(0.05)
-        } else {
-            widgets::block_fill(theme)
-        })
-}
-
-fn kind_tag(theme: &Theme, kind: Option<Kind>) -> gpui::Div {
-    let tone = kind.and_then(|kind| kind_tone(theme, kind));
-    div()
-        .flex_none()
-        .mt(px(1.0))
-        .px(px(7.0))
-        .rounded_full()
-        .text_size(ui_rems(10.5))
-        .line_height(ui_rems(17.0))
-        .bg(tone.map_or(theme.wash(0.08), |tone| tone.opacity(0.18)))
-        .text_color(match (tone, kind) {
-            (Some(tone), _) => tone,
-            (None, Some(_)) => theme.text_muted,
-            (None, None) => theme.text_faint,
-        })
-        .child(kind.map_or("Done", Kind::tag))
-}
-
-fn card_body() -> gpui::Div {
-    div().flex_1().min_w_0().flex().flex_col().gap(px(3.0))
-}
-
-fn card_title(theme: &Theme, text: String, strong: bool) -> gpui::Div {
-    div()
-        .text_size(ui_rems(13.0))
-        .line_height(ui_rems(19.0))
-        .when(strong, |el| el.font_weight(gpui::FontWeight::MEDIUM))
-        .text_color(theme.text)
-        .child(text)
-}
-
-fn card_meta(theme: &Theme) -> gpui::Div {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(6.0))
-        .text_size(ui_rems(11.5))
-        .text_color(theme.text_muted)
-}
-
-fn evidence(theme: &Theme, text: String) -> gpui::Div {
-    div()
-        .mt(px(3.0))
-        .pl(px(9.0))
-        .border_l_2()
-        .border_color(theme.border)
-        .text_size(ui_rems(11.5))
-        .line_height(ui_rems(17.0))
-        .text_color(theme.text_muted)
-        .child(text)
-}
-
-fn arrive(
-    card: gpui::Stateful<gpui::Div>,
-    arrival: Option<&Arrival>,
-    theme: &Theme,
-    now: Instant,
-) -> AnyElement {
-    let Some(arrival) = arrival else {
-        return card.into_any_element();
-    };
-    let slide = arrival.slide.value_at(now);
-    let glow = arrival.glow.value_at(now);
-    let tone = needs_tone(theme).opacity(0.5 * (1.0 - glow));
-    card.top(px(-10.0 * (1.0 - slide)))
-        .opacity(slide)
-        .when(glow < 1.0, |el| {
-            el.child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let spread = px(8.0 * glow);
-                        let ring = gpui::Bounds::new(
-                            gpui::point(bounds.origin.x - spread, bounds.origin.y - spread),
-                            gpui::size(
-                                bounds.size.width + spread * 2.0,
-                                bounds.size.height + spread * 2.0,
-                            ),
-                        );
-                        window.paint_quad(gpui::quad(
-                            ring,
-                            px(11.0) + spread,
-                            gpui::transparent_black(),
-                            spread,
-                            tone,
-                            gpui::BorderStyle::default(),
-                        ));
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
-        })
-        .into_any_element()
-}
-
-fn folded(id: String, fold: &Fold, now: Instant, body: impl IntoElement) -> AnyElement {
-    let probe = fold.height.clone();
-    let inner = div().relative().flex_none().w_full().child(body).child(
-        canvas(
-            move |bounds, _, _| {
-                let height = f32::from(bounds.size.height);
-                if (probe.get() - height).abs() > 0.5 {
-                    probe.set(height);
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .inset_0(),
-    );
-    if !fold.moving(now) {
-        return inner.into_any_element();
-    }
-    let value = fold.value(now);
-    div()
-        .id(SharedString::from(id))
-        .relative()
-        .flex_none()
-        .w_full()
-        .overflow_hidden()
-        .h(px(fold.height.get() * value))
-        .opacity(value)
-        .child(inner)
-        .into_any_element()
 }
 
 fn chevron(theme: &Theme, degrees: f32) -> gpui::Svg {
@@ -3757,83 +3764,48 @@ fn caps_label(theme: &Theme, text: String) -> gpui::Div {
         .child(text.to_uppercase())
 }
 
-fn breathing_dot(size: f32, tone: Hsla) -> AnyElement {
-    div()
-        .flex_none()
-        .size(px(size))
-        .child(
-            canvas(
-                |_, _, _| {},
-                move |bounds, _, window, cx| {
-                    let quad = gpui::fill(bounds, tone).corner_radii(bounds.size.width / 2.0);
-                    match motion::breathing(0.35, 1.0, cx) {
-                        Some(animation) => window.paint_animated_quad(quad, animation),
-                        None => window.paint_quad(quad),
-                    }
-                },
-            )
-            .size_full(),
-        )
-        .into_any_element()
-}
-
-fn render_calm(theme: &Theme, line: String) -> AnyElement {
-    div()
-        .id("supervisor-calm")
-        .debug_selector(|| "supervisor-calm".into())
-        .role(gpui::Role::Group)
-        .aria_label(format!("All quiet. {line}"))
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(7.0))
-        .pt(px(26.0))
-        .pb(px(18.0))
-        .text_size(ui_rems(12.5))
-        .text_color(theme.text_muted)
-        .child(
-            div()
-                .size(px(32.0))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(breathing_dot(9.0, ok_tone(theme))),
-        )
-        .child(div().text_color(theme.text).child("All quiet"))
-        .child(line)
-        .into_any_element()
-}
-
 fn calm_line(
     snapshot: Option<&SupervisorSnapshot>,
     feed: &Feed,
     filter: Filter,
     watched: usize,
     missions: usize,
-) -> String {
+) -> (String, String) {
+    let head = "Nothing needs you".to_owned();
     match filter {
         Filter::Only(kind) if !feed.open.is_empty() => {
-            return format!("Nothing open under {}.", kind.chip());
+            let head = match kind {
+                Kind::Needs => head,
+                kind => format!("No {}", kind.chip().to_lowercase()),
+            };
+            return (head, format!("{} open under All", feed.open.len()));
         }
         _ => {}
     }
     if snapshot.is_none() {
-        return "Waiting for the engine to report the Supervisor.".into();
+        return (
+            head,
+            "Waiting for the engine to report the Supervisor.".into(),
+        );
     }
     if live_state(snapshot) == SupervisorState::Off {
-        return "The Supervisor is off. Anything that needs you lands here once it starts.".into();
+        return (
+            head,
+            "The Supervisor is off. Anything that needs you lands here once it starts.".into(),
+        );
     }
-    match (missions, watched) {
-        (0, _) => "No missions running. Start one from Tasks or the composer.".into(),
-        (_, 0) => "No mission is watched. Turn Watched on for one below.".into(),
+    let line = match (missions, watched) {
+        (0, _) => {
+            "Nothing watched is running. Start a mission, or Watch a tree in Mission Control."
+                .into()
+        }
+        (_, 0) => "No tree is watched. Turn Watched on for one below.".into(),
         (_, n) => format!(
-            "Watching {n} {}. Anything that needs you lands here.",
-            plural(n, "mission", "missions")
+            "Watching {n} {}. A mission's open decisions arrive here as one sheet.",
+            plural(n, "tree", "trees")
         ),
-    }
+    };
+    (head, line)
 }
 
 fn chip_face(row: &SupervisorIntervention, now: DateTime<Utc>) -> Option<Face> {
@@ -3949,34 +3921,59 @@ impl Render for SupervisorPage {
         let (now, utc) = (Instant::now(), Utc::now());
         let reduced = motion::reduced_motion(cx);
         let missions = missions(self.state.read(cx), utc);
-        let watches: Vec<Watch> = missions.iter().map(|m| m.watch.clone()).collect();
+        let watches: Vec<Watch> = missions
+            .iter()
+            .filter(|m| m.done_at.is_none())
+            .map(|m| m.watch.clone())
+            .collect();
         let watched = watched_count(&watches);
         let (feed, calm) = {
             let snapshot = self.state.read(cx).supervisor.as_ref();
             let feed = snapshot
                 .map(|snapshot| feed::feed(snapshot, &self.memory, utc))
                 .unwrap_or_default();
-            let calm = calm_line(snapshot, &feed, self.filter, watched, missions.len());
+            let calm = calm_line(snapshot, &feed, self.list_filter, watched, watches.len());
             (feed, calm)
         };
         self.sync_motion(&feed, &missions, now, reduced);
         self.sync_trees(&missions, now, cx);
+        self.sync_underline(now, reduced);
+        let frame = self.sync_rail(now, reduced);
+        let mode = mode(self.state.read(cx).supervisor.as_ref(), &self.ensure);
+        self.sync_status(
+            match mode {
+                Mode::Watching => "watching",
+                Mode::Working => "working",
+                Mode::Stopped => "stopped",
+                Mode::Off => "off",
+                Mode::Failed(_) => "failed",
+            },
+            now,
+            reduced,
+        );
+        let compact = frame.shown != RailMode::Full;
+        for (id, (tree, _)) in &self.trees {
+            let lit = self.hovered.as_deref() == Some(id.as_str());
+            tree.update(cx, |tree, cx| {
+                tree.set_compact(compact, cx);
+                tree.set_lit(lit, cx);
+            });
+        }
+        let inline_status = (frame.shown == RailMode::Strip
+            && matches!(mode, Mode::Stopped | Mode::Off | Mode::Failed(_)))
+        .then(|| self.render_status(watched, false, now, &theme, cx));
         let header = enter_block(
             self.enter_progress(0, now),
-            self.render_header(&feed, watched, now, &theme, cx),
+            self.render_header(&feed, inline_status, now, &theme, cx),
         );
         let body = enter_block(
             self.enter_progress(1, now),
-            self.render_feed(&feed, calm, now, &theme, cx),
+            self.render_inbox(&feed, &missions, calm, now, cx),
         );
-        let mission_block = self
-            .render_missions(&missions, now, &theme, cx)
-            .map(|block| enter_block(self.enter_progress(2, now), block));
         let column = widgets::page_column()
-            .max_w(px(820.0))
+            .max_w(px(PAGE_WIDTH))
             .child(header)
-            .child(body)
-            .children(mission_block);
+            .child(body);
         let scroll = widgets::scroll_faded(
             "supervisor-page-scroll",
             div()
@@ -3986,6 +3983,11 @@ impl Render for SupervisorPage {
                 .child(column),
         );
         let bottom = self.render_bottom(now, &theme, window, cx);
+        let rail = enter_block(
+            self.enter_progress(2, now),
+            self.render_rail(&frame, &feed, &missions, watched, now, &theme, cx),
+        )
+        .h_full();
         let drawer = self
             .drawer
             .clone()
@@ -3993,16 +3995,52 @@ impl Render for SupervisorPage {
         if self.animating(now) {
             window.request_animation_frame();
         }
+        let probe = self.width.clone();
         div()
             .id("supervisor-page")
             .debug_selector(|| "supervisor-page".into())
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, window, cx| {
+                let keys = &event.keystroke;
+                if keys.key == "enter"
+                    && keys.modifiers.platform
+                    && page.focus.is_focused(window)
+                    && let Some(group) = page.last_sheet.clone()
+                {
+                    cx.stop_propagation();
+                    page.send_sheet(&group, cx);
+                }
+            }))
             .relative()
             .size_full()
             .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(scroll))
-            .child(bottom)
+            .flex_row()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h_0().child(scroll))
+                    .child(bottom),
+            )
+            .child(rail)
             .children(drawer)
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        let width = f32::from(bounds.size.width);
+                        if (probe.get() - width).abs() > 0.5 {
+                            probe.set(width);
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
     }
 }
 
@@ -4110,6 +4148,53 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_tree_is_watched_only_when_picked_or_everything_is_on() {
+        let chat = |id: &str, device: &str| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": id, "deviceId": device, "archived": false,
+                "createdAt": Utc::now(),
+            }))
+            .unwrap()
+        };
+        let mut state = AppState::new();
+        state.local_device_id = Some("mac".into());
+        state.chats = vec![
+            chat("picked", "mac"),
+            chat("other", "mac"),
+            chat("lead", "mac"),
+        ];
+        state.chats.push(chat("remote", "pc"));
+        state.tasks = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "t", "title": "t", "mode": "orchestrated", "chatId": "lead",
+                "createdAt": Utc::now(), "updatedAt": Utc::now(),
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(
+            tree_watch(&state, "picked"),
+            Watch::Unwatched,
+            "no Supervisor yet"
+        );
+        state.supervisor = Some(SupervisorSnapshot {
+            watched_roots: vec!["picked".into(), "remote".into()],
+            unwatched: vec!["t".into()],
+            ..Default::default()
+        });
+        assert_eq!(tree_watch(&state, "picked"), Watch::Watched);
+        assert_eq!(tree_watch(&state, "other"), Watch::Unwatched);
+        assert_eq!(tree_watch(&state, "remote"), Watch::Elsewhere("pc".into()));
+        assert_eq!(tree_watch(&state, "lead"), Watch::Unwatched);
+        state.supervisor.as_mut().unwrap().watch_everything = true;
+        assert_eq!(tree_watch(&state, "other"), Watch::Watched);
+        assert_eq!(
+            tree_watch(&state, "lead"),
+            Watch::Unwatched,
+            "a mission left off stays off under Watch everything"
+        );
+    }
+
+    #[test]
     fn needs_you_route_by_presence() {
         let secs = |n: u64| Some(Duration::from_secs(n));
         let cases = [
@@ -4174,9 +4259,11 @@ mod tests {
             target: Some("lead".into()),
             message_id: Some("m".into()),
             request_id: None,
+            item: None,
             text: "Use the mock.".into(),
             trigger: Some(InterventionTrigger::Person),
             chips,
+            approval: None,
         };
         let stale = row(11, vec![InterventionChip::Sent]);
         let fresh = row(9, vec![InterventionChip::Sent]);
@@ -4193,6 +4280,91 @@ mod tests {
             next_effect_check(&[stale, fresh.clone(), answered, unsent], now),
             Some(fresh.at + chrono::Duration::minutes(10))
         );
+    }
+
+    #[gpui::test]
+    fn a_sent_sheet_answers_its_staged_decisions_in_one_call_and_undo_keeps_one_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use std::sync::{Arc, Mutex};
+
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let calls = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let rpc = ScriptedRpc::new({
+            let calls = calls.clone();
+            move |method, params| {
+                let calls = calls.clone();
+                async move {
+                    match method.as_str() {
+                        methods::MUTATE => {
+                            calls.lock().unwrap().push(params);
+                            zeron_rpc::RpcReply::value(&serde_json::json!({ "ok": true }))
+                        }
+                        other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                    }
+                }
+            }
+        });
+        let page = cx.update(|cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            state.update(cx, |state, _| {
+                state.supervisor = Some(SupervisorSnapshot {
+                    needs_you: vec![item("a"), item("b"), item("c")],
+                    ..Default::default()
+                })
+            });
+            cx.new(|cx| SupervisorPage::new(state, cx))
+        });
+        page.update(cx, |page, cx| {
+            let feed = feed::feed(
+                page.state.read(cx).supervisor.as_ref().unwrap(),
+                &page.memory,
+                Utc::now(),
+            );
+            page.sync_motion(&feed, &[], Instant::now(), true);
+            for id in ["a", "b", "c"] {
+                page.picks
+                    .entry(format!("item:{id}"))
+                    .or_default()
+                    .insert(String::new(), vec!["Yes".into()]);
+            }
+            page.send_sheet("task", cx);
+            page.undo("item:b", cx);
+        });
+        cx.executor().advance_clock(UNDO_WINDOW);
+        let resolved = |calls: &[serde_json::Value]| -> Vec<serde_json::Value> {
+            calls
+                .iter()
+                .filter(|call| {
+                    call["op"]
+                        .as_str()
+                        .is_some_and(|op| op.starts_with("resolveSupervisorItem"))
+                })
+                .cloned()
+                .collect()
+        };
+        rpc.settle(cx, &runtime, |_| {
+            !resolved(&calls.lock().unwrap()).is_empty()
+        });
+        let sent = resolved(&calls.lock().unwrap());
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0]["op"], "resolveSupervisorItems");
+        let mut answers = sent[0]["answers"].as_array().cloned().unwrap_or_default();
+        answers.sort_by_key(|answer| answer["itemId"].to_string());
+        assert_eq!(
+            answers,
+            vec![
+                serde_json::json!({ "itemId": "a", "choice": "Yes" }),
+                serde_json::json!({ "itemId": "c", "choice": "Yes" }),
+            ]
+        );
+        page.read_with(cx, |page, _| {
+            assert!(page.replies.get("item:b").is_none());
+            assert_eq!(page.staged("item:b", ""), vec!["Yes".to_owned()]);
+        });
     }
 
     #[gpui::test]
@@ -4281,5 +4453,78 @@ mod tests {
                 assert!(matches!(ensure, Ensure::Failed(_)), "{ensure:?}");
             }
         }
+    }
+
+    #[gpui::test]
+    fn try_again_reads_the_supervisor_profile_again_before_it_starts_the_supervisor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use std::sync::{Arc, Mutex};
+
+        const OFF: &str = "Codex is turned off in Settings > Providers. Turn it on, or give the slp-supervisor profile another agent.";
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let harness = Arc::new(Mutex::new("codex"));
+        let ensured = Arc::new(Mutex::new(Vec::new()));
+        let rpc = ScriptedRpc::new({
+            let harness = harness.clone();
+            let ensured = ensured.clone();
+            move |method, params| {
+                let harness = *harness.lock().unwrap();
+                let ensured = ensured.clone();
+                async move {
+                    match method.as_str() {
+                        methods::LIST_AGENT_PROFILES => {
+                            zeron_rpc::RpcReply::value(&serde_json::json!({ "profiles": [{
+                                "id": PROFILE_ID, "name": PROFILE_ID, "harness": harness, "model": "haiku",
+                            }] }))
+                        }
+                        methods::ENSURE_SUPERVISOR if params["config"]["harness"] == "codex" => {
+                            Err(zeron_rpc::RpcError::Failed(OFF.into()))
+                        }
+                        methods::ENSURE_SUPERVISOR => {
+                            ensured.lock().unwrap().push(params["config"].clone());
+                            zeron_rpc::RpcReply::value(
+                                &serde_json::json!({ "chatId": "supervisor-1" }),
+                            )
+                        }
+                        other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                    }
+                }
+            }
+        });
+        let page = cx.update(|cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            state.update(cx, |state, _| {
+                state.supervisor = Some(SupervisorSnapshot::default())
+            });
+            cx.new(|cx| SupervisorPage::new(state, cx))
+        });
+        let settled = |cx: &mut gpui::TestAppContext| {
+            page.read_with(cx, |page, _| {
+                page.ensured.is_some() || matches!(page.ensure, Ensure::Failed(_))
+            })
+        };
+        page.update(cx, |page, cx| page.entered(cx));
+        rpc.settle(cx, &runtime, settled);
+        assert_eq!(
+            page.read_with(cx, |page, _| page.ensure.clone()),
+            Ensure::Failed(OFF.into())
+        );
+        *harness.lock().unwrap() = "claude-code";
+        page.update(cx, |page, cx| page.retry_ensure(cx));
+        rpc.settle(cx, &runtime, settled);
+        assert_eq!(
+            page.read_with(cx, |page, _| page.ensured.clone())
+                .as_deref(),
+            Some("supervisor-1"),
+            "Try again starts the Supervisor from the profile as it is now"
+        );
+        let config: ChatConfig =
+            serde_json::from_value(ensured.lock().unwrap()[0].clone()).unwrap();
+        assert_eq!(config.harness, zeron_proto::HarnessId::ClaudeCode);
+        assert_eq!(config.profile_id.as_deref(), Some(PROFILE_ID));
     }
 }

@@ -8,24 +8,26 @@
 
 ## デスクトップアプリ
 
-[GitHub Releases](https://github.com/zeronsh/zeron/releases/latest) から、お使いのプラットフォーム向けの最新版をダウンロードしてください。
+[GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest) から、お使いのプラットフォーム向けの最新版をダウンロードしてください。
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz` を展開し、中の `install.sh` を実行
 
-アカウントもネットワーク接続も不要で、セッションはお使いのデバイスに保存されます。アプリは自動でアップデートされます。
+アカウントもネットワーク接続も不要で、セッションはお使いのデバイスに保存されます。アプリはアップデートを確認してサイドバーに表示します。`ZERON_AUTO_UPDATE=1` を設定すると、バックグラウンドでダウンロードし、終了時にインストールします。
 
 ## ヘッドレス実行（CLI）
 
-サーバーなど、ディスプレイのないマシン向けです。たとえば、ノートパソコンを閉じたあともエージェントを動かし続ける VPS に使えます。Linux のみ対応しています。
+サーバーなど、ディスプレイのないマシン向けです。たとえば、ノートパソコンを閉じたあともエージェントを動かし続ける VPS に使えます。Linux のみ対応しています。[GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest) から `zeron-<version>-linux-<arch>.tar.gz` をダウンロードし、次を実行します。
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+tar -xzf zeron-<version>-linux-<arch>.tar.gz
+zeron-<version>-linux-<arch>/install.sh
+zeron daemon install
 zeron status
 ```
 
-インストーラーはエンジンをバックグラウンドサービスとして起動し、再起動後も自動的に立ち上がります。
+`zeron daemon install` はエンジンをバックグラウンドサービスとして起動し、再起動後も自動的に立ち上がります。
 
 ```bash
 zeron status      # ローカル/同期モードとエンジンの状態を確認

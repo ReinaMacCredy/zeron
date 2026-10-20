@@ -842,3 +842,53 @@ async fn moving_to_another_instance_of_the_same_driver_closes_the_session() {
         .expect("setChatConfig");
     assert_eq!(rig.session(CHAT).as_deref(), Some(""));
 }
+
+#[tokio::test]
+async fn an_instance_whose_home_changes_or_goes_away_closes_its_chats_sessions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    let upsert = |label: &str, home: serde_json::Value| {
+        let params = serde_json::json!({"instance": {
+            "id": "codex_work",
+            "driver": "codex",
+            "label": label,
+            "config": {"kind": "native", "homeDir": home, "launchArgs": [], "env": {}},
+        }});
+        let client = &rig.client;
+        async move {
+            client
+                .call(zeron_rpc::methods::UPSERT_PROVIDER_INSTANCE, params)
+                .await
+                .expect("upsert instance")
+        }
+    };
+    upsert("Work", serde_json::json!({"kind": "managed"})).await;
+    let mut config = rig.core.workspace.chat_config(CHAT).unwrap();
+    config.instance_id = Some("codex_work".into());
+    rig.core.workspace.set_chat_config(CHAT, &config).unwrap();
+    assert_eq!(rig.session(CHAT).as_deref(), Some("Old-sess"));
+
+    upsert("Renamed", serde_json::json!({"kind": "managed"})).await;
+    assert_eq!(rig.session(CHAT).as_deref(), Some("Old-sess"));
+
+    let custom = tmp.path().join("codex-home").display().to_string();
+    upsert(
+        "Renamed",
+        serde_json::json!({"kind": "custom", "path": custom}),
+    )
+    .await;
+    assert_eq!(rig.session(CHAT).as_deref(), Some(""));
+
+    rig.core
+        .workspace
+        .set_chat_harness_session(CHAT, "Old-sess", &rig.cwd);
+    rig.client
+        .call(
+            zeron_rpc::methods::DELETE_PROVIDER_INSTANCE,
+            serde_json::json!({"instanceId": "codex_work"}),
+        )
+        .await
+        .expect("delete instance");
+    assert_eq!(rig.session(CHAT).as_deref(), Some(""));
+}

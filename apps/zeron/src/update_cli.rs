@@ -72,9 +72,9 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         InstallKind::Unmanaged => {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
-                 Linux: curl -fsSL https://zeron.sh/install.sh | sh, or run install.sh from the release tarball\n\
-                 macOS: download the new Zeron.app dmg, or rebuild from source.\n\
-                 Windows: install with the Zeron setup .exe from {}, or rebuild from source.",
+                 Linux: download the release tarball from {0} and run its install.sh.\n\
+                 macOS: download the new Zeron.app dmg from {0}, or rebuild from source.\n\
+                 Windows: install with the Zeron setup .exe from {0}, or rebuild from source.",
                 zeron_update::LATEST_RELEASE_PAGE
             )
         }

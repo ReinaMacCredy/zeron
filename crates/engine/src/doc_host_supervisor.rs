@@ -2,22 +2,23 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use zeron_proto::supervisor::{
-    InputAsker, InterventionKind, InterventionTrigger, NeedsYouInput, Raiser,
-    SupervisorEventKind as Kind, SupervisorEventSummary, SupervisorIntervention, SupervisorItem,
-    SupervisorState, SupervisorWake, WakeDelivery,
+    InputAsker, InterventionKind, InterventionTrigger, NeedsYouInput, NextCheck, NextCheckKind,
+    PlanApproval, Raiser, SupervisorEventKind as Kind, SupervisorEventSummary,
+    SupervisorIntervention, SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
-    Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskMode, TaskStep,
-    UserInputQuestion,
+    Chat, DelegationDelivery, DelegationStatus, PermissionMode, Session, SessionStatus,
+    StepTurnEnd, Task, TaskPatch, TaskStep, ToolCall, UserInputQuestion,
 };
 
 use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
 use super::*;
 use crate::registry::HarnessRegistry;
 use crate::supervisor::{
-    Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
-    StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader,
-    chips, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc, wake_text,
+    Asked, Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
+    StallNode, StepSnap, StepThread, SupervisorEvent, SupervisorStore, TURN_QUIET_MS, ThreadFacts,
+    TreeStall, WakeEntry, WakeHeader, chips, escalated_item, fold_ms, lead_questions, open_inputs,
+    plan_flush, plan_stalls, stall_ms, tree_stalls, utc, wake_text,
 };
 use crate::supervisor_resources::{
     CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
@@ -50,6 +51,22 @@ fn ms(at: chrono::DateTime<chrono::Utc>) -> i64 {
     at.timestamp_millis()
 }
 
+/// The one stall discriminator: background work or live sub-agents keep a node busy, even when a Stop left it Idle.
+fn busy(sessions: &[Session], engine: Option<&SessionsEngine>, thread: &str) -> bool {
+    sessions
+        .iter()
+        .find(|session| session.chat_id == thread)
+        .is_some_and(|session| session.running_subagents > 0 || session.held_by_subagents)
+        || engine.is_some_and(|engine| engine.holds_background_work(thread))
+}
+
+fn span(ms: i64) -> String {
+    match ms {
+        60_000.. => format!("{} min", ms / 60_000),
+        _ => format!("{} s", ms.max(0) / 1000),
+    }
+}
+
 fn step_failed(step: &TaskStep) -> bool {
     step.outcome.is_none()
         && step
@@ -63,6 +80,8 @@ struct Observed {
     live: HashSet<String>,
     last_live: HashMap<String, i64>,
     open: Option<HashSet<String>>,
+    delegations: Option<HashMap<String, DelegationStatus>>,
+    quiet: HashMap<String, i64>,
 }
 
 impl Observed {
@@ -71,20 +90,45 @@ impl Observed {
         for session in sessions.iter().filter(|session| live(session.status)) {
             live_now.insert(session.chat_id.clone());
             self.last_live.insert(session.chat_id.clone(), now);
+            self.quiet.remove(&session.chat_id);
         }
         let ended: Vec<String> = self.live.difference(&live_now).cloned().collect();
         for thread in &ended {
             self.last_live.insert(thread.clone(), now);
+            let idle = sessions
+                .iter()
+                .any(|session| &session.chat_id == thread && session.status == SessionStatus::Idle);
+            if idle {
+                self.quiet.insert(thread.clone(), now);
+            }
         }
         let edges = self.live.symmetric_difference(&live_now).cloned().collect();
         self.live = live_now;
         (ended, edges)
     }
 
-    fn missions_done(&mut self, tasks: &[Task]) -> Vec<Task> {
-        let started = |task: &&Task| {
-            task.mode == TaskMode::Orchestrated && task.chat_id.is_some() && !task.deleted
+    fn finished(&mut self, chats: &[Chat]) -> Vec<String> {
+        let now: HashMap<String, DelegationStatus> = chats
+            .iter()
+            .filter_map(|chat| Some((chat.id.clone(), chat.delegation.as_ref()?.status)))
+            .collect();
+        let finished = match &self.delegations {
+            Some(before) => now
+                .iter()
+                .filter(|(id, status)| {
+                    **status != DelegationStatus::Running
+                        && before.get(*id) == Some(&DelegationStatus::Running)
+                })
+                .map(|(id, _)| id.clone())
+                .collect(),
+            None => Vec::new(),
         };
+        self.delegations = Some(now);
+        finished
+    }
+
+    fn missions_done(&mut self, tasks: &[Task]) -> Vec<Task> {
+        let started = |task: &&Task| task.has_plan() && !task.deleted;
         let open_now: HashSet<String> = tasks
             .iter()
             .filter(started)
@@ -105,12 +149,61 @@ impl Observed {
     }
 }
 
+pub(crate) struct Tree {
+    pub root: String,
+    root_hosted: bool,
+    pub task_id: Option<String>,
+}
+
+fn open_step_of<'a>(steps: &'a [TaskStep], chat_id: &str) -> Option<&'a TaskStep> {
+    steps.iter().find(|step| {
+        step.outcome.is_none() && !step.deleted && step.chat_id.as_deref() == Some(chat_id)
+    })
+}
+
+fn tree_of(chat: &Chat, chats: &[Chat], tasks: &[Task], steps: &[TaskStep], device: &str) -> Tree {
+    let path = zeron_proto::tree_path(chat, chats, tasks, steps);
+    let task_id = path.iter().find_map(|node| {
+        let stepped = open_step_of(steps, &node.id)
+            .and_then(|step| tasks.iter().find(|task| task.id == step.task_id))
+            .filter(|task| !task.deleted && task.completed_at.is_none() && task.has_plan());
+        stepped
+            .or_else(|| zeron_proto::plan_of_chat(tasks, &node.id))
+            .map(|task| task.id.clone())
+    });
+    let root = path.last().copied().unwrap_or(chat);
+    Tree {
+        root: root.id.clone(),
+        root_hosted: root.device_id == device && !root.archived && !root.is_system(),
+        task_id,
+    }
+}
+
+struct PendingPlan {
+    task_id: String,
+    lead: String,
+    steps: usize,
+    newest: i64,
+}
+
 struct Round {
     missions: HashMap<String, MissionFacts>,
+    nodes: Vec<SupervisorEvent>,
+    plans: Vec<PendingPlan>,
     done: Vec<Task>,
     step_titles: HashMap<String, String>,
     resources: Vec<ResourceMission>,
     edges: HashSet<String>,
+    stalls: Vec<TreeStall>,
+    checks: Vec<Checkout>,
+    quiet_until: Option<i64>,
+}
+
+/// A watched node whose turn ended quietly; its checkout is read off the router loop.
+struct Checkout {
+    node: StallNode,
+    cwd: std::path::PathBuf,
+    checkout_id: String,
 }
 
 /// What an intervention row needs from before the action: a re-brief's snapshot predates its own edit.
@@ -121,6 +214,8 @@ pub(crate) struct InterventionBasis {
     steps: Vec<StepSnap>,
     target: Option<String>,
     trigger: Option<InterventionTrigger>,
+    item_id: Option<String>,
+    approval: Option<PlanApproval>,
 }
 
 impl InterventionBasis {
@@ -131,6 +226,16 @@ impl InterventionBasis {
     pub(crate) fn with_task(mut self, task_id: &str, target: &str) -> Self {
         self.task_id = Some(task_id.to_string());
         self.target = Some(target.to_string());
+        self
+    }
+
+    pub(crate) fn with_item(mut self, item_id: &str) -> Self {
+        self.item_id = Some(item_id.to_string());
+        self
+    }
+
+    pub(crate) fn with_approval(mut self, approval: PlanApproval) -> Self {
+        self.approval = Some(approval);
         self
     }
 }
@@ -170,18 +275,45 @@ impl DocHost {
         if event.actor.as_deref() == Some(supervisor.id.as_str()) {
             return;
         }
-        if let Some(task_id) = event.summary.task_id.as_deref()
-            && !self.hosts_mission(workspace, task_id)
-        {
-            return;
+        let hosted = match (&event.summary.task_id, &event.summary.root_chat_id) {
+            (Some(task_id), _) => self.hosts_mission(workspace, task_id),
+            (None, Some(root)) => workspace.chat(root).ok().flatten().is_some_and(|root| {
+                root.device_id == self.device_id() && !root.archived && !root.is_system()
+            }),
+            (None, None) => true,
+        };
+        if hosted {
+            store.offer(event);
         }
-        store.offer(event);
+    }
+
+    /// Reads the rows, not the watches: a call can follow its rows' write.
+    pub(crate) fn tree_of_chat(&self, chat: &Chat) -> Result<Tree, EngineError> {
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
+        let (chats, tasks, steps) = (
+            workspace.read_chats()?,
+            workspace.read_tasks()?,
+            workspace.read_task_steps()?,
+        );
+        Ok(tree_of(chat, &chats, &tasks, &steps, self.device_id()))
+    }
+
+    pub(crate) fn tree_watched(&self, store: &SupervisorStore, tree: &Tree) -> bool {
+        match (&tree.task_id, self.workspace()) {
+            (Some(task_id), Some(workspace)) => {
+                !store.is_unwatched(task_id) && self.hosts_mission(workspace, task_id)
+            }
+            (Some(_), None) => false,
+            (None, _) => tree.root_hosted && store.watches_tree(&tree.root),
+        }
     }
 
     fn hosts_mission(&self, workspace: &WorkspaceHost, task_id: &str) -> bool {
         workspace
             .task(task_id)
-            .filter(|task| task.mode == TaskMode::Orchestrated && !task.deleted)
+            .filter(|task| task.has_plan() && !task.deleted)
             .and_then(|task| task.chat_id)
             .and_then(|lead| workspace.chat(&lead).ok().flatten())
             .is_some_and(|lead| lead.device_id == self.device_id() && !lead.archived)
@@ -224,34 +356,30 @@ impl DocHost {
         let Some(workspace) = self.workspace() else {
             return;
         };
-        let step = workspace
-            .watch_task_steps()
-            .borrow()
-            .iter()
-            .find(|step| step.outcome.is_none() && step.chat_id.as_deref() == Some(&asker.id))
-            .cloned();
-        let task_id = match &step {
-            Some(step) => step.task_id.clone(),
-            None => {
-                let led = workspace
-                    .watch_tasks()
-                    .borrow()
-                    .iter()
-                    .find(|task| {
-                        task.completed_at.is_none()
-                            && task.mode == TaskMode::Orchestrated
-                            && task.chat_id.as_deref() == Some(&asker.id)
-                    })
-                    .map(|task| task.id.clone());
-                let Some(task_id) = led else {
-                    return;
-                };
-                task_id
-            }
-        };
-        let who = match &step {
-            Some(step) => format!("Step \"{}\"", clip(&step.title, TITLE_CHARS)),
-            None => "The lead".to_string(),
+        if asker.is_system() {
+            return;
+        }
+        if let Some(store) = self.supervisor() {
+            store.note_asked(Asked {
+                chat_id: asker.id.clone(),
+                request_id: request_id.to_string(),
+                at: now_ms(),
+                approval: questions.iter().any(|q| q.approval),
+            });
+        }
+        let chats = workspace.watch_chats().borrow().clone();
+        let tasks = workspace.watch_tasks().borrow().clone();
+        let steps = workspace.watch_task_steps().borrow().clone();
+        let step = open_step_of(&steps, &asker.id).cloned();
+        let tree = tree_of(asker, &chats, &tasks, &steps, self.device_id());
+        let led = zeron_proto::plan_of_chat(&tasks, &asker.id).map(|task| task.id.clone());
+        let (who, task_id) = match (&step, led) {
+            (Some(step), _) => (
+                format!("Step \"{}\"", clip(&step.title, TITLE_CHARS)),
+                Some(step.task_id.clone()),
+            ),
+            (None, Some(task_id)) => ("The lead".to_string(), Some(task_id)),
+            (None, None) => (thread_label(asker), tree.task_id.clone()),
         };
         let what = if questions.iter().any(|q| q.approval) {
             "waits for a tool approval"
@@ -261,11 +389,12 @@ impl DocHost {
         let mut event = SupervisorEvent::new(
             Kind::NeedsYou,
             format!("input:{}:{request_id}", asker.id),
-            Some(&task_id),
+            task_id.as_deref(),
             format!("{who} {what}"),
         );
         event.summary.step_id = step.map(|step| step.id);
         event.summary.thread_id = Some(asker.id.clone());
+        event.summary.root_chat_id = Some(tree.root);
         event.request_id = Some(request_id.to_string());
         event.detail = question_lines(questions);
         event.detail.push(format!("requestId {request_id}"));
@@ -289,10 +418,15 @@ impl DocHost {
         self.supervisor_event(event);
     }
 
-    pub(crate) fn supervisor_escalated(&self, item: &SupervisorItem) {
+    /// A re-wake gets its own key: the first wake of the item is already reported.
+    pub(crate) fn supervisor_escalated(&self, item: &SupervisorItem, rewake: bool) {
+        let key = match rewake {
+            true => format!("escalation:{}:{}", item.id, now_ms()),
+            false => format!("escalation:{}", item.id),
+        };
         let mut event = SupervisorEvent::new(
             Kind::Escalation,
-            format!("escalation:{}", item.id),
+            key,
             item.task_id.as_deref(),
             "Lead escalated".to_string(),
         );
@@ -315,9 +449,6 @@ impl DocHost {
                 .detail
                 .push(format!("Options: {}", item.options.join(" | ")));
         }
-        event.detail.push(
-            "The person answers it on the Supervisor page; their choice goes to the lead.".into(),
-        );
         event.actor = (item.raised_by == Raiser::Supervisor).then(|| item.raiser_chat_id.clone());
         self.supervisor_event(event);
     }
@@ -333,12 +464,7 @@ impl DocHost {
         thread: &str,
     ) -> Option<(Task, Vec<TaskStep>)> {
         let tasks = workspace.watch_tasks().borrow().clone();
-        if let Some(task) = tasks.iter().find(|task| {
-            task.mode == TaskMode::Orchestrated
-                && !task.deleted
-                && task.completed_at.is_none()
-                && task.chat_id.as_deref() == Some(thread)
-        }) {
+        if let Some(task) = zeron_proto::plan_of_chat(&tasks, thread) {
             let steps = workspace.task_steps_of(&task.id);
             return Some((task.clone(), steps));
         }
@@ -397,6 +523,8 @@ impl DocHost {
             steps,
             target: target.map(str::to_owned),
             trigger: self.supervisor_trigger(supervisor),
+            item_id: None,
+            approval: None,
         }
     }
 
@@ -423,9 +551,89 @@ impl DocHost {
                 text: text.to_string(),
                 trigger: basis.trigger,
                 chips: Vec::new(),
+                item: None,
+                approval: basis.approval,
             },
             steps: basis.steps,
+            item_id: basis.item_id,
         });
+    }
+
+    /// A failed send marks the task, so its card says the thread missed the message.
+    pub(crate) async fn send_to_task_thread(
+        &self,
+        workspace: &WorkspaceHost,
+        task: &Task,
+        chat_id: &str,
+        from_chat_id: Option<&str>,
+        text: &str,
+        images: Vec<String>,
+    ) -> Result<String, EngineError> {
+        let (text, images) = crate::doc_host::images_here(text, images);
+        let sent = self
+            .queue_thread_message_with(chat_id, from_chat_id, &text, images)
+            .await;
+        let send_error = match &sent {
+            Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        let patch = TaskPatch {
+            send_error: Some(send_error),
+            ..Default::default()
+        };
+        workspace.update_task(&task.id, &patch)?;
+        sent
+    }
+
+    /// Sends each held Supervisor approval whose hold ran out; returns when the next one does.
+    async fn release_approvals(
+        &self,
+        store: &SupervisorStore,
+        workspace: &WorkspaceHost,
+        now: i64,
+    ) -> Option<i64> {
+        let mut next = None;
+        for (id, task_id, due, reason) in store.held_approvals() {
+            if due > now {
+                next = Some(next.map_or(due, |next: i64| next.min(due)));
+                continue;
+            }
+            let approving = store.approving();
+            let _approving = approving.lock().await;
+            let still_held = matches!(
+                store.approval_of(&task_id),
+                Some((held, PlanApproval::Held { .. })) if held == id
+            );
+            if !still_held {
+                continue;
+            }
+            let task = workspace
+                .task(&task_id)
+                .filter(|task| !task.deleted && task.completed_at.is_none() && !task.plan_pending);
+            let lead = task.as_ref().and_then(|task| task.chat_id.clone());
+            let (Some(task), Some(lead)) = (task, lead) else {
+                store.set_approval(&id, None, None);
+                continue;
+            };
+            let text = format!(
+                "The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: {}",
+                reason.trim()
+            );
+            match self
+                .send_to_task_thread(workspace, &task, &lead, None, &text, Vec::new())
+                .await
+            {
+                Ok(message_id) => {
+                    store.set_approval(&id, Some(PlanApproval::Sent), Some(message_id))
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, task = %task_id, "sending a held plan approval failed");
+                    store.set_approval(&id, Some(PlanApproval::Sent), None);
+                }
+            }
+        }
+        next
     }
 
     pub(crate) fn supervisor_replanned(
@@ -466,6 +674,7 @@ impl DocHost {
             let mut chats = workspace.watch_chats();
             let mut tasks = workspace.watch_tasks();
             let mut steps = workspace.watch_task_steps();
+            let mut limits = sessions.resume_schedule().map(|schedule| schedule.watch());
             let mut observed = Observed::default();
             let started = now_ms();
             loop {
@@ -492,6 +701,12 @@ impl DocHost {
                     changed = chats.changed() => if changed.is_err() { return },
                     changed = tasks.changed() => if changed.is_err() { return },
                     changed = steps.changed() => if changed.is_err() { return },
+                    changed = async {
+                        match limits.as_mut() {
+                            Some(limits) => limits.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => if changed.is_err() { return },
                     () = store.poked() => {}
                     () = tokio::time::sleep(nap.unwrap_or_default()), if nap.is_some() => {}
                 }
@@ -512,6 +727,12 @@ impl DocHost {
     ) -> Round {
         let (ended, edges) = observed.sessions(sessions, now);
         let done = observed.missions_done(tasks);
+        let nodes = self.node_events(observed, sessions, &ended, chats, tasks, steps);
+        let (stalls, checks, quiet_until) =
+            self.tree_facts(store, observed, now, sessions, chats, tasks, steps);
+        if !ended.is_empty() && store.watches_any_tree() {
+            store.mark_stale();
+        }
         let sessions: HashMap<&str, &Session> = sessions
             .iter()
             .map(|session| (session.chat_id.as_str(), session))
@@ -527,10 +748,11 @@ impl DocHost {
             last_live: observed.last_live.get(id).copied(),
         };
         let mut missions = HashMap::new();
+        let mut plans = Vec::new();
         let mut step_titles = HashMap::new();
         let mut resources = Vec::new();
         for task in tasks {
-            if task.mode != TaskMode::Orchestrated
+            if !task.has_plan()
                 || task.deleted
                 || task.completed_at.is_some()
                 || store.is_unwatched(&task.id)
@@ -551,6 +773,18 @@ impl DocHost {
                 .any(|thread| ended.contains(&thread.to_string()))
             {
                 store.mark_stale();
+            }
+            if task.plan_pending && !own.is_empty() {
+                plans.push(PendingPlan {
+                    task_id: task.id.clone(),
+                    lead: lead.id.clone(),
+                    steps: own.len(),
+                    newest: own
+                        .iter()
+                        .map(|step| ms(step.created_at))
+                        .max()
+                        .unwrap_or(0),
+                });
             }
             let mut facts = MissionFacts {
                 task_id: task.id.clone(),
@@ -622,11 +856,200 @@ impl DocHost {
         }
         Round {
             missions,
+            nodes,
+            plans,
             done,
             step_titles,
             resources,
             edges,
+            stalls,
+            checks,
+            quiet_until,
         }
+    }
+
+    /// Stall facts of watched nodes only, each carrying its tree so `offer` keys it by root or mission.
+    #[allow(clippy::too_many_arguments)]
+    fn tree_facts(
+        &self,
+        store: &SupervisorStore,
+        observed: &mut Observed,
+        now: i64,
+        sessions: &[Session],
+        chats: &[Chat],
+        tasks: &[Task],
+        steps: &[TaskStep],
+    ) -> (Vec<TreeStall>, Vec<Checkout>, Option<i64>) {
+        let engine = self.sessions();
+        let node = |chat: &Chat| {
+            if chat.is_system() || chat.archived || chat.device_id != self.device_id() {
+                return None;
+            }
+            let tree = tree_of(chat, chats, tasks, steps, self.device_id());
+            self.tree_watched(store, &tree).then(|| StallNode {
+                chat_id: chat.id.clone(),
+                root: tree.root,
+                task_id: tree.task_id,
+                busy: busy(sessions, engine.as_ref(), &chat.id),
+            })
+        };
+        let chat = |id: &str| chats.iter().find(|chat| chat.id == id);
+        let (open, gone): (Vec<Asked>, Vec<Asked>) = store.asked().into_iter().partition(|asked| {
+            engine
+                .as_ref()
+                .is_some_and(|engine| engine.awaits_input(&asked.chat_id, &asked.request_id))
+        });
+        store.forget_asked(&gone);
+        let mut stalls = Vec::new();
+        for asked in open {
+            let Some(node) = chat(&asked.chat_id).and_then(node) else {
+                continue;
+            };
+            stalls.push(TreeStall::QuestionWaiting {
+                node,
+                request_id: asked.request_id,
+                asked_at: asked.at,
+                approval: asked.approval,
+            });
+        }
+        let is_live = |id: &str| {
+            sessions
+                .iter()
+                .any(|session| session.chat_id == id && live(session.status))
+        };
+        let resets = engine
+            .as_ref()
+            .and_then(|engine| engine.resume_schedule())
+            .map(|schedule| schedule.past_resets(now))
+            .unwrap_or_default();
+        for (thread, resets_at) in resets {
+            let ran_since = observed
+                .last_live
+                .get(&thread)
+                .is_some_and(|at| *at > resets_at);
+            if is_live(&thread) || ran_since {
+                continue;
+            }
+            if let Some(node) = chat(&thread).and_then(node) {
+                stalls.push(TreeStall::LimitIdle { node, resets_at });
+            }
+        }
+        for child in chats {
+            let Some(d) = child.delegation.as_ref() else {
+                continue;
+            };
+            let Some(completed_at) = d.completed_at.filter(|_| {
+                d.delivery == Some(DelegationDelivery::Claimed) && !is_live(&d.delegated_by_chat_id)
+            }) else {
+                continue;
+            };
+            if let Some(node) = node(child) {
+                stalls.push(TreeStall::LostWake {
+                    node: StallNode {
+                        busy: busy(sessions, engine.as_ref(), &d.delegated_by_chat_id),
+                        ..node
+                    },
+                    owner: d.delegated_by_chat_id.clone(),
+                    completed_at: ms(completed_at),
+                });
+            }
+        }
+        let quiet_ms = stall_ms(TURN_QUIET_MS);
+        let mut checks = Vec::new();
+        let mut quiet_until: Option<i64> = None;
+        observed.quiet.retain(|thread, ended| {
+            let Some(chat) = chat(thread) else {
+                return false;
+            };
+            let cwd = chat.cwd.as_deref().map(std::path::Path::new);
+            let (Some(node), Some(cwd)) = (node(chat), cwd.filter(|cwd| cwd.is_absolute())) else {
+                return false;
+            };
+            let due = *ended + quiet_ms;
+            if due > now {
+                quiet_until = Some(quiet_until.map_or(due, |at| at.min(due)));
+                return true;
+            }
+            if node.busy {
+                return true;
+            }
+            checks.push(Checkout {
+                checkout_id: chat
+                    .checkout_id
+                    .clone()
+                    .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
+                cwd: cwd.to_path_buf(),
+                node,
+            });
+            false
+        });
+        (stalls, checks, quiet_until)
+    }
+
+    fn node_events(
+        &self,
+        observed: &mut Observed,
+        sessions: &[Session],
+        ended: &[String],
+        chats: &[Chat],
+        tasks: &[Task],
+        steps: &[TaskStep],
+    ) -> Vec<SupervisorEvent> {
+        let finished = observed.finished(chats);
+        let errored: HashSet<&str> = sessions
+            .iter()
+            .filter(|session| session.status == SessionStatus::Errored)
+            .map(|session| session.chat_id.as_str())
+            .collect();
+        let failed = ended
+            .iter()
+            .filter(|thread| errored.contains(thread.as_str()))
+            .map(|thread| (thread, Kind::NodeFailed));
+        let engine = self.sessions();
+        let mut events = Vec::new();
+        for (thread, kind) in
+            failed.chain(finished.iter().map(|thread| (thread, Kind::NodeFinished)))
+        {
+            let Some(chat) = chats.iter().find(|chat| &chat.id == thread) else {
+                continue;
+            };
+            if chat.is_system()
+                || open_step_of(steps, thread).is_some()
+                || busy(sessions, engine.as_ref(), thread)
+            {
+                continue;
+            }
+            let tree = tree_of(chat, chats, tasks, steps, self.device_id());
+            let label = match (kind, chat.delegation.as_ref()) {
+                (Kind::NodeFinished, Some(delegation)) => format!(
+                    "Delegated task \"{}\" {}",
+                    clip(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS),
+                    match delegation.status {
+                        DelegationStatus::Completed => "completed",
+                        DelegationStatus::Failed => "failed",
+                        DelegationStatus::Cancelled => "was cancelled",
+                        DelegationStatus::Interrupted => "was interrupted",
+                        DelegationStatus::Running => "ended",
+                    }
+                ),
+                (Kind::NodeFinished, None) => continue,
+                _ => format!("{} failed", thread_label(chat)),
+            };
+            let at = chat
+                .delegation
+                .as_ref()
+                .and_then(|delegation| delegation.completed_at)
+                .map_or_else(now_ms, ms);
+            let key = match kind {
+                Kind::NodeFinished => format!("node-done:{thread}:{at}"),
+                _ => format!("node-failed:{thread}:{}", now_ms()),
+            };
+            let mut event = SupervisorEvent::new(kind, key, tree.task_id.as_deref(), label);
+            event.summary.thread_id = Some(thread.clone());
+            event.summary.root_chat_id = Some(tree.root);
+            events.push(event);
+        }
+        events
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -640,6 +1063,9 @@ impl DocHost {
         now: i64,
         started: i64,
     ) -> Option<i64> {
+        for event in std::mem::take(&mut round.nodes) {
+            self.supervisor_event(event);
+        }
         for task in &round.done {
             let completed = task.completed_at.map(ms).unwrap_or(now);
             self.supervisor_event(SupervisorEvent::new(
@@ -658,25 +1084,54 @@ impl DocHost {
                 supervisor.as_ref().map(|chat| chat.id.as_str()),
             ));
         }
-        let refresh = store.refresh_at();
+        let released = self.release_approvals(store, workspace, now).await;
+        let refresh = [store.refresh_at(), released].into_iter().flatten().min();
         let Some(supervisor) = supervisor else {
             store.take_pending();
+            store.set_next_check(None);
             store.publish(None, SupervisorState::Off, 0);
             return refresh;
         };
         let missions: Vec<MissionFacts> = round.missions.values().cloned().collect();
-        let (stalls, mut next) = plan_stalls(now, &missions, |key| store.reported(key));
-        if let Some(at) = refresh {
-            next = Some(next.map_or(at, |n| n.min(at)));
-        }
+        let (stalls, stall_next) = plan_stalls(now, &missions, |key| store.reported(key));
+        let mut check = stall_next.map(|(at, stall)| stall.check(at));
+        let mut sooner = |at: i64, kind: NextCheckKind| {
+            if check.as_ref().is_none_or(|c| at < c.at.timestamp_millis()) {
+                check = Some(NextCheck {
+                    at: utc(at),
+                    kind,
+                    task_id: None,
+                });
+            }
+        };
         for stall in stalls {
             self.supervisor_event(stall_event(stall, &round.step_titles));
         }
-        let missions_held = std::mem::take(&mut round.resources);
-        if let Some(at) = self.supervise_resources(store, missions_held, &round.edges, now) {
-            next = Some(next.map_or(at, |n| n.min(at)));
+        let (tree_due, tree_next) = tree_stalls(now, std::mem::take(&mut round.stalls), |key| {
+            store.reported(key)
+        });
+        for stall in tree_due {
+            self.supervisor_event(self.tree_stall_event(workspace, stall, now));
+        }
+        for check in std::mem::take(&mut round.checks) {
+            self.spawn_checkout_check(check);
         }
         let settings = registry.supervisor_settings();
+        if settings.decide_for_me {
+            for plan in &round.plans {
+                let taken_back = matches!(
+                    store.approval_of(&plan.task_id),
+                    Some((_, PlanApproval::TakenBack { .. }))
+                );
+                if !taken_back {
+                    self.supervisor_event(plan_event(plan));
+                }
+            }
+        }
+        let missions_held = std::mem::take(&mut round.resources);
+        if let Some(at) = self.supervise_resources(store, missions_held, &round.edges, now) {
+            sooner(at, NextCheckKind::Resource);
+        }
         let interval = i64::from(settings.heartbeat_minutes) * 60_000;
         if interval > 0 && !missions.is_empty() {
             let last = store.wake_times().into_iter().max().unwrap_or(0);
@@ -689,7 +1144,7 @@ impl DocHost {
                     "Heartbeat".to_string(),
                 ));
             } else {
-                next = Some(next.map_or(due, |n| n.min(due)));
+                sooner(due, NextCheckKind::Heartbeat);
             }
         }
         let held = self
@@ -704,7 +1159,7 @@ impl DocHost {
             )
             .await;
         if let Some(until) = held {
-            next = Some(next.map_or(until, |n| n.min(until)));
+            sooner(until, NextCheckKind::HeldWake);
         }
         let (state, waiting) = match sessions.session_status(&supervisor.id) {
             Some(session) if live(session.status) => (SupervisorState::Awake, 0),
@@ -714,6 +1169,16 @@ impl DocHost {
             ),
             _ => (SupervisorState::Asleep, 0),
         };
+        let next = [
+            refresh,
+            check.as_ref().map(|c| c.at.timestamp_millis()),
+            tree_next,
+            round.quiet_until,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        store.set_next_check(check);
         store.publish(Some(supervisor.id), state, waiting);
         next
     }
@@ -897,7 +1362,11 @@ impl DocHost {
         if !sessions.turn_in_flight(thread) && !sessions.holds_background_work(thread) {
             return Ok(false);
         }
-        self.queue_command_with_transfers(thread, SessionCommandPayload::Interrupt {}, Vec::new())?;
+        self.queue_command_with_transfers(
+            thread,
+            SessionCommandPayload::Interrupt { teardown: true },
+            Vec::new(),
+        )?;
         Ok(true)
     }
 
@@ -964,6 +1433,7 @@ impl DocHost {
         };
         let tasks = workspace.watch_tasks().borrow().clone();
         let steps = workspace.watch_task_steps().borrow().clone();
+        let mut covered: HashSet<String> = supervisor.iter().map(|id| id.to_string()).collect();
         for task in tasks.iter().filter(|task| {
             task.completed_at.is_none()
                 && !store.is_unwatched(&task.id)
@@ -972,6 +1442,7 @@ impl DocHost {
             let Some(lead) = task.chat_id.as_deref() else {
                 continue;
             };
+            covered.insert(lead.to_string());
             let lead_entries = read(lead);
             projections.inputs.extend(pending(
                 lead,
@@ -984,6 +1455,7 @@ impl DocHost {
                 let Some(thread) = step.chat_id.as_deref() else {
                     continue;
                 };
+                covered.insert(thread.to_string());
                 let entries = read(thread);
                 projections.inputs.extend(pending(
                     thread,
@@ -1004,6 +1476,30 @@ impl DocHost {
                     &interventions,
                 ));
             }
+        }
+        let chats = workspace.watch_chats().borrow().clone();
+        for thread in sessions.chats_awaiting_input() {
+            if covered.contains(&thread) {
+                continue;
+            }
+            let Some(chat) = chats.iter().find(|chat| chat.id == thread) else {
+                continue;
+            };
+            if chat.is_system() || chat.archived || chat.device_id != self.device_id() {
+                continue;
+            }
+            let tree = tree_of(chat, &chats, &tasks, &steps, self.device_id());
+            if !self.tree_watched(store, &tree) {
+                continue;
+            }
+            let entries = read(&thread);
+            projections.inputs.extend(pending(
+                &thread,
+                &entries,
+                InputAsker::Thread,
+                tree.task_id.as_deref(),
+                None,
+            ));
         }
         if let Some(supervisor) = supervisor {
             let entries = read(supervisor);
@@ -1083,7 +1579,7 @@ impl DocHost {
         let (keep, dropped): (Vec<_>, Vec<_>) = store
             .take_pending()
             .into_iter()
-            .partition(|event| self.still_true(event, workspace, sessions, missions));
+            .partition(|event| self.still_true(event, workspace, sessions, missions, settings));
         let dropped: Vec<SupervisorEventSummary> =
             dropped.into_iter().map(|event| event.summary).collect();
         let permission = supervisor
@@ -1196,6 +1692,7 @@ impl DocHost {
         workspace: &WorkspaceHost,
         sessions: &SessionsEngine,
         missions: &HashMap<String, MissionFacts>,
+        settings: zeron_proto::supervisor::SupervisorSettings,
     ) -> bool {
         let summary = &event.summary;
         let mission = summary.task_id.as_deref().and_then(|id| missions.get(id));
@@ -1205,10 +1702,22 @@ impl DocHost {
                 .as_deref()
                 .and_then(|id| workspace.task_step(id))
                 .is_some_and(|step| step_failed(&step)),
-            Kind::NeedsYou => match (&summary.thread_id, &event.request_id) {
-                (Some(thread), Some(request)) => sessions.awaits_input(thread, request),
-                _ => false,
-            },
+            Kind::NeedsYou if summary.key.starts_with(PLAN_READY) => {
+                settings.decide_for_me
+                    && summary
+                        .task_id
+                        .as_deref()
+                        .and_then(|id| workspace.task(id))
+                        .is_some_and(|task| {
+                            task.plan_pending && !workspace.task_steps_of(&task.id).is_empty()
+                        })
+            }
+            Kind::NeedsYou | Kind::QuestionWaiting => {
+                match (&summary.thread_id, &event.request_id) {
+                    (Some(thread), Some(request)) => sessions.awaits_input(thread, request),
+                    _ => false,
+                }
+            }
             Kind::MissionSilent => {
                 event.since.is_some() && mission.and_then(MissionFacts::quiet_since) == event.since
             }
@@ -1219,9 +1728,7 @@ impl DocHost {
                         && mission.lead_silent_after(failed.failed_at)
                 })
             }),
-            Kind::Escalation => summary
-                .key
-                .strip_prefix("escalation:")
+            Kind::Escalation => escalated_item(&summary.key)
                 .and_then(|item| self.supervisor().map(|store| store.item_open(item)))
                 .unwrap_or(false),
             Kind::Resource => summary
@@ -1235,8 +1742,298 @@ impl DocHost {
                 .is_some_and(|((key, since), store)| {
                     store.resources(|r| r.open(&key).is_some_and(|open| open.since == since))
                 }),
-            Kind::MissionDone | Kind::PlanEdited | Kind::Heartbeat => true,
+            Kind::NodeFailed => summary
+                .thread_id
+                .as_deref()
+                .and_then(|thread| sessions.session_status(thread))
+                .is_some_and(|session| session.status == SessionStatus::Errored),
+            Kind::MissionDone | Kind::PlanEdited | Kind::Heartbeat | Kind::NodeFinished => true,
+            Kind::LostWake => summary
+                .thread_id
+                .as_deref()
+                .and_then(|thread| workspace.chat(thread).ok().flatten()?.delegation)
+                .is_some_and(|d| {
+                    d.delivery == Some(DelegationDelivery::Claimed)
+                        && !sessions.turn_in_flight(&d.delegated_by_chat_id)
+                }),
+            Kind::Dirty | Kind::Unmerged | Kind::MergeBlocked | Kind::LimitIdle => summary
+                .thread_id
+                .as_deref()
+                .is_some_and(|thread| !sessions.turn_in_flight(thread)),
         }
+    }
+
+    fn spawn_checkout_check(&self, check: Checkout) {
+        let host = self.clone();
+        self.spawn_worker(async move {
+            for event in host.checkout_stalls(check).await {
+                host.supervisor_event(event);
+            }
+        });
+    }
+
+    /// Keyed by head sha: the same uncommitted or unmerged state is reported once.
+    async fn checkout_stalls(&self, check: Checkout) -> Vec<SupervisorEvent> {
+        let Checkout {
+            node,
+            cwd,
+            checkout_id,
+        } = check;
+        let read = tokio::time::timeout(
+            crate::working_tree::READ_TIMEOUT,
+            crate::working_tree::read(&cwd, &checkout_id),
+        )
+        .await;
+        let tree = match read {
+            Ok(Ok(tree)) => tree,
+            Ok(Err(err)) => {
+                tracing::debug!(chat = %node.chat_id, error = %err, "stall check read no checkout");
+                return Vec::new();
+            }
+            Err(_) => return Vec::new(),
+        };
+        let who = self.who(&node.chat_id);
+        let head = tree.head_sha.clone().unwrap_or_else(|| "unborn".into());
+        let mut events = Vec::new();
+        if !tree.files.is_empty() {
+            let n = tree.files.len();
+            let mut event = node_event(
+                Kind::Dirty,
+                format!("dirty:{}:{head}", node.chat_id),
+                &node,
+                format!("{who} left {}", plural(n, "uncommitted file")),
+            );
+            let mut paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
+            paths.truncate(MAX_PATHS);
+            event.detail = vec![format!(
+                "In {} after its turn ended: {}{}",
+                tree.root,
+                paths.join(", "),
+                if n > MAX_PATHS { ", ..." } else { "" }
+            )];
+            events.push(event);
+        }
+        let Some(branch) = tree.branch.clone() else {
+            return events;
+        };
+        let Some(main) = crate::working_tree::main_branch(&cwd).await else {
+            return events;
+        };
+        let ahead = match branch == main {
+            true => None,
+            false => crate::working_tree::commits_ahead(&cwd, &main)
+                .await
+                .filter(|ahead| *ahead > 0),
+        };
+        if let Some(ahead) = ahead {
+            let mut event = node_event(
+                Kind::Unmerged,
+                format!("unmerged:{}:{head}", node.chat_id),
+                &node,
+                format!("{who} left branch {branch} unmerged into {main}"),
+            );
+            event.detail = vec![format!(
+                "{} on {branch} that {main} does not have, in {}.",
+                plural(ahead as usize, "commit"),
+                tree.root
+            )];
+            events.push(event);
+            let blocked = self
+                .merge_blocked(&node, &who, &cwd, &branch, &main, &head)
+                .await;
+            events.extend(blocked);
+        }
+        events
+    }
+
+    /// The branch's changes overlap paths left uncommitted in the main checkout, which a merge there would refuse.
+    async fn merge_blocked(
+        &self,
+        node: &StallNode,
+        who: &str,
+        cwd: &std::path::Path,
+        branch: &str,
+        main: &str,
+        head: &str,
+    ) -> Option<SupervisorEvent> {
+        use crate::working_tree::{READ_TIMEOUT, branch_paths, main_checkout, read, toplevel};
+        let (main_root, own) = (main_checkout(cwd).await?, toplevel(cwd).await?);
+        if canonical(&main_root) == canonical(&own) {
+            return None;
+        }
+        let root_id = main_root.to_string_lossy().into_owned();
+        let main_tree = tokio::time::timeout(READ_TIMEOUT, read(&main_root, &root_id))
+            .await
+            .ok()?
+            .ok()?;
+        let changed = branch_paths(cwd, main).await;
+        let mut overlap: Vec<String> = main_tree
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .filter(|path| changed.contains(path))
+            .collect();
+        if overlap.is_empty() {
+            return None;
+        }
+        overlap.sort();
+        overlap.dedup();
+        let digest = sha2::Sha256::digest(overlap.join("\0").as_bytes());
+        let digest: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+        let mut event = node_event(
+            Kind::MergeBlocked,
+            format!("merge-blocked:{}:{head}:{digest}", node.chat_id),
+            node,
+            format!(
+                "{who} cannot merge {branch} into {main}: the main checkout holds uncommitted changes to {}",
+                plural(overlap.len(), "file it also changed")
+            ),
+        );
+        let mut shown = overlap.clone();
+        shown.truncate(MAX_PATHS);
+        event.detail = vec![format!(
+            "Uncommitted in {}: {}{}",
+            main_root.display(),
+            shown.join(", "),
+            if overlap.len() > MAX_PATHS {
+                ", ..."
+            } else {
+                ""
+            }
+        )];
+        event.detail.push(
+            match self.last_writer(&main_root, &overlap, &node.chat_id) {
+                Some(chat) => format!(
+                    "{} (thread {}) changed them last in that checkout.",
+                    thread_label(&chat),
+                    chat.id
+                ),
+                None => "No chat on this device wrote them in that checkout.".to_string(),
+            },
+        );
+        Some(event)
+    }
+
+    /// The local chat in `root` whose transcript wrote one of `paths` most recently.
+    fn last_writer(&self, root: &std::path::Path, paths: &[String], exclude: &str) -> Option<Chat> {
+        let root = canonical(root);
+        let chats = self.workspace()?.watch_chats().borrow().clone();
+        chats
+            .into_iter()
+            .filter(|chat| {
+                chat.id != exclude
+                    && !chat.is_system()
+                    && !chat.archived
+                    && chat.device_id == self.device_id()
+            })
+            .filter_map(|chat| {
+                let cwd = canonical(std::path::Path::new(chat.cwd.as_deref()?));
+                if !cwd.starts_with(&root) {
+                    return None;
+                }
+                let wrote = |part: &MessagePart| match part {
+                    MessagePart::Tool { call, .. } => written_path(call).is_some_and(|path| {
+                        let full = canonical(&cwd.join(path));
+                        full.strip_prefix(&root)
+                            .is_ok_and(|rel| paths.iter().any(|p| std::path::Path::new(p) == rel))
+                    }),
+                    _ => false,
+                };
+                let at = self
+                    .entries_of(&chat.id)
+                    .iter()
+                    .filter(|entry| entry.parts.iter().any(wrote))
+                    .map(|entry| entry.created_at)
+                    .max()?;
+                Some((at, chat))
+            })
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, chat)| chat)
+    }
+
+    fn who(&self, chat_id: &str) -> String {
+        self.workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .map_or_else(|| format!("Thread {chat_id}"), |chat| thread_label(&chat))
+    }
+
+    fn tree_stall_event(
+        &self,
+        workspace: &WorkspaceHost,
+        stall: TreeStall,
+        now: i64,
+    ) -> SupervisorEvent {
+        let key = stall.key();
+        let node = stall.node().clone();
+        let who = self.who(&node.chat_id);
+        let mut event = match stall {
+            TreeStall::QuestionWaiting {
+                request_id,
+                asked_at,
+                approval,
+                ..
+            } => {
+                let what = if approval {
+                    "a tool approval"
+                } else {
+                    "an answer"
+                };
+                let mut event = node_event(
+                    Kind::QuestionWaiting,
+                    key,
+                    &node,
+                    format!("{who} has waited {} for {what}", span(now - asked_at)),
+                );
+                event.detail = vec![format!(
+                    "Nobody answered it since {}. requestId {request_id}",
+                    utc(asked_at).with_timezone(&chrono::Local).format("%H:%M")
+                )];
+                event.request_id = Some(request_id);
+                event.since = Some(asked_at);
+                event
+            }
+            TreeStall::LimitIdle { resets_at, .. } => {
+                let mut event = node_event(
+                    Kind::LimitIdle,
+                    key,
+                    &node,
+                    format!(
+                        "{who} is still idle {} after its usage limit reset",
+                        span(now - resets_at)
+                    ),
+                );
+                event.detail = vec![format!(
+                    "Its limit reset at {}; no auto-resume is pending and nothing has run it since.",
+                    utc(resets_at).with_timezone(&chrono::Local).format("%H:%M")
+                )];
+                event.since = Some(resets_at);
+                event
+            }
+            TreeStall::LostWake {
+                owner,
+                completed_at,
+                ..
+            } => {
+                let mut event = node_event(
+                    Kind::LostWake,
+                    key,
+                    &node,
+                    format!(
+                        "{who} finished {} ago and its owner never got the result",
+                        span(now - completed_at)
+                    ),
+                );
+                event.detail = vec![format!(
+                    "Owner thread {owner} is idle and the handback of delegated task {} is still undelivered.",
+                    node.chat_id
+                )];
+                event.since = Some(completed_at);
+                event
+            }
+        };
+        event.summary.step_id = open_step_of(&workspace.watch_task_steps().borrow(), &node.chat_id)
+            .map(|step| step.id.clone());
+        event
     }
 
     fn render_wake(
@@ -1256,9 +2053,18 @@ impl DocHost {
                     .task_id
                     .as_deref()
                     .and_then(|id| workspace.task(id));
+                let tree = || {
+                    let root = event.summary.root_chat_id.as_deref()?;
+                    let title = workspace.chat(root).ok().flatten()?.title;
+                    Some(format!(
+                        "tree \"{}\" (root thread {root})",
+                        clip(title.as_deref().unwrap_or("Untitled"), TITLE_CHARS)
+                    ))
+                };
                 let mission = task
                     .as_ref()
-                    .map(|task| format!("{} (task {})", clip(&task.title, TITLE_CHARS), task.id));
+                    .map(|task| format!("{} (task {})", clip(&task.title, TITLE_CHARS), task.id))
+                    .or_else(tree);
                 let lead = task.and_then(|task| task.chat_id);
                 let source = event.summary.thread_id.clone().or(lead.clone());
                 let reply = source.map(|thread| Reply {
@@ -1267,10 +2073,16 @@ impl DocHost {
                         .last_reply(&thread)
                         .map(|text| clip(&text, WAKE_QUESTION_CHARS)),
                 });
+                let escalation = (event.summary.kind == Kind::Escalation)
+                    .then(|| escalated_item(&event.summary.key))
+                    .flatten()
+                    .and_then(|item| self.supervisor()?.item(item))
+                    .map(|item| item.why);
                 WakeEntry {
                     event,
                     mission,
                     reply,
+                    escalation,
                 }
             })
             .collect();
@@ -1331,12 +2143,68 @@ impl DocHost {
     }
 }
 
+const MAX_PATHS: usize = 10;
+
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn written_path(call: &ToolCall) -> Option<&str> {
+    match call {
+        ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => Some(path),
+        ToolCall::ApplyPatch { path } => path.as_deref(),
+        _ => None,
+    }
+}
+
+fn plural(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        n => format!("{n} {what}s"),
+    }
+}
+
+fn node_event(kind: Kind, key: String, node: &StallNode, label: String) -> SupervisorEvent {
+    let mut event = SupervisorEvent::new(kind, key, node.task_id.as_deref(), label);
+    event.summary.thread_id = Some(node.chat_id.clone());
+    event.summary.root_chat_id = Some(node.root.clone());
+    event
+}
+
+fn thread_label(chat: &Chat) -> String {
+    format!(
+        "Thread \"{}\"",
+        clip(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS)
+    )
+}
+
 fn earliest(events: &[&SupervisorEvent], now: i64) -> i64 {
     events
         .iter()
         .map(|event| ms(event.summary.at))
         .min()
         .unwrap_or(now)
+}
+
+const PLAN_READY: &str = "plan-ready:";
+
+fn plan_event(plan: &PendingPlan) -> SupervisorEvent {
+    let mut event = SupervisorEvent::new(
+        Kind::NeedsYou,
+        format!("{PLAN_READY}{}:{}", plan.task_id, plan.newest),
+        Some(&plan.task_id),
+        "Plan ready for review".to_string(),
+    );
+    event.summary.thread_id = Some(plan.lead.clone());
+    let steps = match plan.steps {
+        1 => "1 step waits".to_string(),
+        n => format!("{n} steps wait"),
+    };
+    event.detail = vec![format!(
+        "{steps} for approval. Read the plan with the tasks tool (action \"list\", taskId {}), then approve it with the supervisor tool, action \"approve\" (taskId, reason) when it fits the mission, or message the lead what to change.",
+        plan.task_id
+    )];
+    event
 }
 
 fn stall_event(stall: Stall, step_titles: &HashMap<String, String>) -> SupervisorEvent {

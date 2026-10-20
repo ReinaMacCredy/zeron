@@ -25,6 +25,7 @@ impl ComputerFrameTapHost for NoopTap {
     fn update(&self, _target: CuaPreviewTarget) -> Result<(), String> {
         Ok(())
     }
+    fn touch(&self, _task: &CuaComputerTask) {}
     async fn end_task(&self, _task: CuaComputerTask) -> Result<(), String> {
         Ok(())
     }

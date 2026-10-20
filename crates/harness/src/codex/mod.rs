@@ -136,13 +136,17 @@ impl Default for CodexHarness {
             launch: crate::LaunchOverrides::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
-            writers: ThreadWriters::default(),
+            writers: WRITERS.clone(),
         }
     }
 }
 
 #[derive(Clone, Default)]
 struct ThreadWriters(Arc<(std::sync::Mutex<HashSet<String>>, tokio::sync::Notify)>);
+
+/// Process-wide: editing a provider instance builds a new harness while the old one's app-server still holds the thread.
+static WRITERS: std::sync::LazyLock<ThreadWriters> =
+    std::sync::LazyLock::new(ThreadWriters::default);
 
 struct WriterClaim {
     writers: ThreadWriters,
@@ -1154,7 +1158,11 @@ fn thread_params(
         // wait_threads blocks up to 30 min; Codex's own per-call ceiling
         // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
         overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
-        for tool in PREAPPROVED_ZERON_TOOLS {
+        let drive_unprompted = request.permission_mode == zeron_proto::PermissionMode::Full;
+        for tool in PREAPPROVED_ZERON_TOOLS
+            .into_iter()
+            .chain(drive_unprompted.then_some(UI_DRIVE_TOOL))
+        {
             overrides.insert(
                 format!("mcp_servers.zeron.tools.{tool}.approval_mode"),
                 "approve".into(),
@@ -2279,7 +2287,9 @@ const COMPETING_BUNDLED_PLUGINS: [&str; 4] = [
 ];
 
 // Their destructiveHint makes Codex ask on every call, and Zeron refuses non-computer elicitations.
-const PREAPPROVED_ZERON_TOOLS: [&str; 2] = ["ui_driver_drive", "device_close"];
+const PREAPPROVED_ZERON_TOOLS: [&str; 1] = ["device_close"];
+// Driving a Dev bundle can click its Approve buttons, so only a Full chat skips the ask.
+const UI_DRIVE_TOOL: &str = "ui_driver_drive";
 
 /// Compact one thread: resume it, ask the app server to compact, then read
 /// notifications until it says so. Deliberately NOT [`run_session`] — no turn
@@ -3026,12 +3036,29 @@ mod tests {
             let key = format!("plugins.{competing}.enabled");
             assert!(off["config"].get(key.as_str()).is_none());
         }
-        for params in [&on, &off] {
-            for tool in ["ui_driver_drive", "device_close"] {
-                let key = format!("mcp_servers.zeron.tools.{tool}.approval_mode");
-                assert_eq!(params["config"][key.as_str()], "approve");
-            }
+        let mut full_request = computer_request(false);
+        full_request.permission_mode = zeron_proto::PermissionMode::Full;
+        let full = thread_params(&full_request, Some(&tool_server(None)), None, "never", None);
+        let mut auto_request = computer_request(false);
+        auto_request.permission_mode = zeron_proto::PermissionMode::Auto;
+        let auto = thread_params(
+            &auto_request,
+            Some(&tool_server(None)),
+            None,
+            "on-request",
+            None,
+        );
+        let approval = |params: &serde_json::Map<String, Value>, tool: &str| {
+            params["config"][format!("mcp_servers.zeron.tools.{tool}.approval_mode").as_str()]
+                .clone()
+        };
+        for params in [&on, &off, &auto, &full] {
+            assert_eq!(approval(params, "device_close"), "approve");
         }
+        for params in [&on, &off, &auto] {
+            assert!(approval(params, "ui_driver_drive").is_null());
+        }
+        assert_eq!(approval(&full, "ui_driver_drive"), "approve");
         assert_eq!(
             off["config"]["mcp_servers.zeron.command"],
             "/opt/zeron/zeron"

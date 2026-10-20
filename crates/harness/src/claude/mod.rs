@@ -950,6 +950,13 @@ async fn load_image_blocks(paths: &[String]) -> Vec<wire::ImageBlock> {
     use base64::Engine as _;
     let mut blocks = Vec::new();
     for path in paths {
+        if tokio::fs::metadata(path)
+            .await
+            .is_ok_and(|meta| meta.len() > MAX_INLINE_IMAGE_BYTES)
+        {
+            tracing::debug!(target: "zeron_harness::claude", %path, "attachment over inline cap; path ref only");
+            continue;
+        }
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(err) => {

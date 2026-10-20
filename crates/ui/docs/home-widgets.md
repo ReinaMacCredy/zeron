@@ -4,6 +4,8 @@ Home widgets are small cards under the composer on the new chat canvas. They sho
 
 The grid appears only on the new chat canvas, below the composer. It hides once you are in a chat, and when every widget is turned off. A summary pill at the top of the grid reads something like "2 running · 1 to review · 3 commits" (or just **Home** when there is nothing to report). Click it to collapse or expand the grid; Zeron remembers which.
 
+![Home widgets under the composer](home-widgets-grid.jpg)
+
 Widgets refresh only while the grid is visible.
 
 ## The widgets
@@ -25,7 +27,7 @@ The **Pull requests** and **Git activity** widgets have a project filter. **All 
 
 Click **Customize** at the right of the grid header to switch widgets on or off, and to choose what **Running services** lists:
 
-- **By Zeron** lists servers running inside your Zeron projects and worktrees.
+- **By Zeron** (the default) lists servers running inside your Zeron projects and worktrees.
 - **All ports** adds every other listening process on this Mac.
 
 **All Home settings** at the bottom opens [Settings > Home](zeron://settings/home), which has the same switches under **Widgets** and the same port choice under **Running services** (**Show ports**). Changes save right away.

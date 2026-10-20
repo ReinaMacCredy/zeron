@@ -2574,7 +2574,9 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let mut spine = crate::settings::UiSettings::default();
+            spine.tree_view = crate::settings::TreeView::Spine;
+            crate::settings::init(spine, dir.path(), cx);
         });
         dir
     }

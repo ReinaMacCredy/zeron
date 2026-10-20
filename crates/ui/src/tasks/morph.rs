@@ -33,6 +33,7 @@ pub(super) enum Key {
     Editor,
     Lead,
     Canvas,
+    Node(String),
 }
 
 pub(super) type Rects = HashMap<Key, Bounds<Pixels>>;
@@ -43,8 +44,9 @@ pub(super) fn measure(painted: &Painted, key: Key, border: Edges<f32>) -> impl I
     let painted = painted.clone();
     gpui::canvas(
         move |bounds, window, _| {
-            let old = painted.borrow_mut().insert(key, bounds);
-            if old.map(|old| old.size) != Some(bounds.size) {
+            let previous = painted.borrow_mut().insert(key, bounds);
+            // Layout reads these sizes on the next render, so a new size must schedule one.
+            if previous.is_none_or(|previous| previous.size != bounds.size) {
                 window.request_animation_frame();
             }
         },

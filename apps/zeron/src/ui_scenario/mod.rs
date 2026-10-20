@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use zeron_proto::ui_driver::{UiDriverDescriptor, run_dir};
+use zeron_proto::ui_driver::{UiDriverBuild, UiDriverDescriptor, run_dir};
 
 use zeron_mcp::ui_driver;
 
@@ -101,6 +101,17 @@ pub async fn run(file: &Path, target: Option<&str>, out: Option<PathBuf>) -> Res
     let scenario = parse_scenario(&value)?;
     let live = ui_driver::list();
     let app = ui_driver::select(&live, target.or(scenario.target.as_deref()), None)?.clone();
+    if app.build != UiDriverBuild::Debug
+        && scenario
+            .steps
+            .iter()
+            .any(|step| matches!(step.kind, Kind::Engine { .. }))
+    {
+        return Err(format!(
+            "{} (pid {}) is a release build: a scenario with engine steps runs only against a Zeron Dev bundle, so its RPCs never reach your real workspace",
+            app.label, app.pid
+        ));
+    }
     let out = match out {
         Some(out) => out,
         None => run_dir().join("scenarios").join(format!(

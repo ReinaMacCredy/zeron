@@ -3,6 +3,7 @@ use crate::tasks::{LiveThread, TaskCenter, TaskCenterEvent};
 use zeron_proto::TaskPatch;
 
 const TASKS_VIEW_SEGMENT: f32 = 72.0;
+const TREE_VIEW_SEGMENT: f32 = 76.0;
 const TASKS_VIEW_THUMB: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_DRAWER);
 const CENTER_SLIDE_IN: motion::MotionSpec = motion::MotionSpec::new(380, motion::EASE_DRAWER);
 const CENTER_SLIDE_OUT: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_DRAWER);
@@ -53,7 +54,7 @@ pub(super) fn handoff_lift(t: f32) -> f32 {
 }
 
 fn slides_under_center(route: Route) -> bool {
-    matches!(route, Route::Tasks | Route::Inbox)
+    matches!(route, Route::Tasks | Route::MissionControl | Route::Inbox)
 }
 
 pub(super) struct TaskCenterPane {
@@ -79,6 +80,9 @@ enum TaskOrigin {
         start: crate::composer::MissionStart,
         create: serde_json::Value,
     },
+    Plan {
+        create: serde_json::Value,
+    },
 }
 
 impl TaskOrigin {
@@ -87,7 +91,7 @@ impl TaskOrigin {
             Self::Card { patch, .. } => patch.as_ref().map(
                 |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
             ),
-            Self::Mission { create, .. } => Some(create.clone()),
+            Self::Mission { create, .. } | Self::Plan { create } => Some(create.clone()),
         }
     }
 }
@@ -230,6 +234,29 @@ impl Shell {
         }
     }
 
+    pub(super) fn add_plan(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(chat) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id && crate::tasks::can_add_plan(state, chat))
+        else {
+            return;
+        };
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let title = crate::home::chat_title(chat);
+        let create = Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
+        let lead = crate::tasks::Orchestrate::default();
+        self.assign_task(
+            TaskOrigin::Plan { create },
+            &task_id,
+            chat_id,
+            true,
+            Some(lead),
+            cx,
+        );
+    }
+
     fn task_origin_failed(
         &mut self,
         origin: &TaskOrigin,
@@ -253,6 +280,11 @@ impl Shell {
                 }
                 self.composer
                     .update(cx, |composer, cx| composer.mission_failed(start, cx));
+            }
+            TaskOrigin::Plan { .. } => {
+                if !save_failed {
+                    self.delete_task(task_id, cx);
+                }
             }
         }
     }
@@ -357,6 +389,7 @@ impl Shell {
                             shell.open_task_center(task_id.clone(), cx)
                         }
                     },
+                    TaskOrigin::Plan { .. } => {}
                 })
                 .ok();
                 return;
@@ -402,6 +435,7 @@ impl Shell {
             "approvePlan": lead.is_none_or(|lead| lead.approve_plan),
             "sameAgents": lead.is_some_and(|lead| lead.same_agents),
             "planDoc": lead.is_some_and(|lead| lead.plan_doc),
+            "attachPlan": matches!(origin, TaskOrigin::Plan { .. }),
         });
         let task_id = task_id.to_string();
         cx.spawn(async move |this, cx| {
@@ -531,29 +565,31 @@ impl Shell {
         }
     }
 
-    pub(crate) fn open_task_center(&mut self, task_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_task_center(&mut self, id: String, cx: &mut Context<Self>) {
+        let key = tree_key(self.state.read(cx), &id);
         if matches!(self.route, Route::TaskCenter)
-            && self.task_center_task.as_deref() == Some(task_id.as_str())
+            && self.task_center_task.as_deref() == Some(key.as_str())
         {
             return;
         }
-        self.enter_task_center_route(task_id.clone(), cx);
-        self.nav.push(NavEntry::TaskCenter(task_id));
+        self.enter_task_center_route(key.clone(), cx);
+        self.nav.push(NavEntry::TaskCenter(key));
     }
 
-    pub(super) fn enter_task_center_route(&mut self, task_id: String, cx: &mut Context<Self>) {
+    pub(super) fn enter_task_center_route(&mut self, id: String, cx: &mut Context<Self>) {
+        let key = tree_key(self.state.read(cx), &id);
         self.set_route(Route::TaskCenter, cx);
-        self.task_center_task = Some(task_id);
+        self.task_center_task = Some(key);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }
 
-    pub(super) fn back_to_tasks(&mut self, cx: &mut Context<Self>) {
-        if self.nav.previous() == Some(&NavEntry::Tasks) {
+    pub(super) fn back_to_mission_control(&mut self, cx: &mut Context<Self>) {
+        if self.nav.previous() == Some(&NavEntry::MissionControl) {
             self.navigate_back(cx);
         } else {
-            self.open_tasks(cx);
+            self.open_mission_control(cx);
         }
     }
 
@@ -621,7 +657,10 @@ impl Shell {
     fn task_slide_t(&self) -> Option<f32> {
         if self.task_slide.handoff
             || self.task_slide.chat
-            || !matches!(self.route, Route::Tasks | Route::TaskCenter | Route::Inbox)
+            || !matches!(
+                self.route,
+                Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::Inbox
+            )
         {
             return None;
         }
@@ -793,6 +832,7 @@ impl Shell {
         };
         let under = match self.task_slide.under {
             Route::Inbox => self.render_inbox_page(cx),
+            Route::MissionControl => self.render_mission_control_page(cx),
             _ => self.render_tasks_page(window, cx),
         };
         let center = self.render_task_center_page(window, cx);
@@ -894,6 +934,7 @@ impl Shell {
         };
         let under = match (handoff, self.task_slide.under) {
             (Some(_), _) | (None, Route::Inbox) => self.render_session_title_bar(window, cx),
+            (None, Route::MissionControl) => self.render_mission_control_title_bar(cx),
             _ => self.render_tasks_title_bar(cx),
         };
         let center = self.render_task_center_title_bar(cx);
@@ -972,23 +1013,61 @@ impl Shell {
         self.task_center_pane
             .as_ref()
             .is_some_and(|pane| pane.chat_id == chat_id)
+            || self.task_center_docs.iter().any(|id| id == chat_id)
+    }
+
+    fn other_holds(&self, chat_id: &str) -> bool {
+        self.btw_tabs.contains_key(chat_id)
+            || self
+                .sidechat_tabs
+                .values()
+                .any(|tab| tab.chat_id == chat_id)
+            || self.subagent_tabs.values().any(|tab| tab.doc_id == chat_id)
+            || self.split_chat_id() == Some(chat_id)
+            || self.supervisor.holds(chat_id)
+    }
+
+    /// Native sub-agent chips come from the root's doc and each node's that reports running sub-agents.
+    fn watch_task_center_docs(&mut self, docs: Vec<String>, cx: &mut Context<Self>) {
+        if self.task_center_docs == docs {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.task_center_docs, docs.clone());
+        for id in previous.iter().filter(|id| !docs.contains(id)) {
+            let held = self.other_holds(id)
+                || self
+                    .task_center_pane
+                    .as_ref()
+                    .is_some_and(|pane| &pane.chat_id == id);
+            if !held {
+                self.state
+                    .update(cx, |state, _| state.unwatch_subagent_doc(id));
+            }
+        }
+        for id in docs.into_iter().filter(|id| !previous.contains(id)) {
+            self.state
+                .update(cx, |state, cx| state.watch_subagent_doc(id, cx));
+        }
     }
 
     fn task_center_ended(&self, cx: &App) -> bool {
         let Some((center, _)) = &self.task_center else {
             return false;
         };
-        let id = center.read(cx).task_id();
-        !self
-            .state
-            .read(cx)
-            .tasks
-            .iter()
-            .any(|task| task.id == id && !task.deleted && task.completed_at.is_none())
+        let center = center.read(cx);
+        let state = self.state.read(cx);
+        match center.resolve(state) {
+            (_, Some(task)) => task.completed_at.is_some(),
+            (Some(root), None) => {
+                crate::tasks::tree_rows(state, root, false, chrono::Utc::now()).len() <= 1
+            }
+            (None, None) => true,
+        }
     }
 
     pub(super) fn close_task_center(&mut self, cx: &mut Context<Self>) {
         self.close_task_center_pane(cx);
+        self.watch_task_center_docs(Vec::new(), cx);
         self.task_center = None;
     }
 
@@ -999,17 +1078,7 @@ impl Shell {
         if let Some((center, _)) = &self.task_center {
             center.update(cx, |center, cx| center.set_live(None, cx));
         }
-        let held = self.btw_tabs.contains_key(&pane.chat_id)
-            || self
-                .sidechat_tabs
-                .values()
-                .any(|tab| tab.chat_id == pane.chat_id)
-            || self
-                .subagent_tabs
-                .values()
-                .any(|tab| tab.doc_id == pane.chat_id)
-            || self.split_chat_id() == Some(pane.chat_id.as_str())
-            || self.supervisor.holds(&pane.chat_id);
+        let held = self.other_holds(&pane.chat_id) || self.task_center_docs.contains(&pane.chat_id);
         if !held {
             self.state
                 .update(cx, |state, _| state.unwatch_subagent_doc(&pane.chat_id));
@@ -1141,6 +1210,24 @@ impl Shell {
             return div().flex_1().into_any_element();
         };
         let center = self.task_center_for(task_id, cx);
+        let docs = {
+            let state = self.state.read(cx);
+            let now = chrono::Utc::now();
+            center
+                .read(cx)
+                .resolve(state)
+                .0
+                .map(|root| {
+                    let busy = crate::tasks::tree_rows(state, root, false, now)
+                        .into_iter()
+                        .skip(1)
+                        .filter_map(|node| node.chat_id)
+                        .filter(|id| state.running_subagents_for(id, now) > 0);
+                    std::iter::once(root.to_owned()).chain(busy).collect()
+                })
+                .unwrap_or_default()
+        };
+        self.watch_task_center_docs(docs, cx);
         let target = center.read(cx).live_target(cx);
         if target.as_deref() != center.read(cx).live_chat_id() {
             self.close_task_center_pane(cx);
@@ -1167,7 +1254,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Entity<TaskCenter> {
         if let Some((center, _)) = &self.task_center
-            && center.read(cx).task_id() == task_id
+            && center.read(cx).key() == task_id
         {
             return center.clone();
         }
@@ -1188,6 +1275,9 @@ impl Shell {
             TaskCenterEvent::ApprovePlan(task_id) => {
                 serde_json::json!({ "op": "approvePlan", "taskId": task_id })
             }
+            TaskCenterEvent::TakeBackApproval(task_id) => {
+                serde_json::json!({ "op": "takeBackPlanApproval", "taskId": task_id })
+            }
             TaskCenterEvent::RetryStep(step_id) => {
                 serde_json::json!({ "op": "retryTaskStep", "stepId": step_id })
             }
@@ -1200,7 +1290,40 @@ impl Shell {
                 approve,
             } => return self.edit_task_plan(task_id, edit, *approve, cx),
             TaskCenterEvent::OpenChat(chat_id) => return self.open_chat(chat_id.clone(), cx),
-            TaskCenterEvent::Back => return self.back_to_tasks(cx),
+            TaskCenterEvent::OpenNative {
+                parent_chat_id,
+                doc_id,
+                title,
+                frozen,
+            } => {
+                return self.open_native(
+                    parent_chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                );
+            }
+            TaskCenterEvent::AddPlan(chat_id) => return self.add_plan(chat_id, cx),
+            TaskCenterEvent::Watch {
+                task_id: Some(task_id),
+                on,
+                ..
+            } => {
+                serde_json::json!({ "op": "setMissionSupervised", "taskId": task_id, "supervised": on })
+            }
+            TaskCenterEvent::Watch {
+                root,
+                task_id: None,
+                on,
+            } => {
+                serde_json::json!({ "op": "setTreeWatched", "rootChatId": root, "watched": on })
+            }
+            TaskCenterEvent::OpenSupervisor => return self.open_supervisor(cx),
+            TaskCenterEvent::Settle { chat_id, settled } => {
+                return self.set_chat_settled(chat_id.clone(), *settled, cx);
+            }
+            TaskCenterEvent::Back => return self.back_to_mission_control(cx),
             TaskCenterEvent::Selected => return cx.notify(),
         };
         self.mutate_task_row(params, cx);
@@ -1258,13 +1381,39 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let back_chat = self.center_back_chat(cx);
+        let crumb = back_chat.is_none().then(|| {
+            let title = self
+                .task_center
+                .as_ref()
+                .and_then(|(center, _)| center.read(cx).title(cx));
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .text_size(crate::typography::ui_rems(12.5))
+                .child(
+                    icon(icons::LUCIDE_CHEVRON_RIGHT)
+                        .size(px(12.0))
+                        .text_color(theme.text_faint),
+                )
+                .children(title.map(|title| {
+                    div()
+                        .min_w_0()
+                        .max_w(px(360.0))
+                        .truncate()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(title)
+                }))
+        });
         let back = div()
             .id("task-center-back")
             .debug_selector(|| "task-center-back".into())
             .role(gpui::Role::Button)
             .aria_label(match &back_chat {
                 Some(title) => format!("Back to {title}"),
-                None => "Back to Tasks".into(),
+                None => "Back to Mission Control".into(),
             })
             .flex()
             .items_center()
@@ -1277,16 +1426,20 @@ impl Shell {
             .text_color(theme.text_muted)
             .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
             .child(
-                icon(icons::LUCIDE_ARROW_LEFT)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
+                icon(if back_chat.is_some() {
+                    icons::LUCIDE_ARROW_LEFT
+                } else {
+                    icons::MISSION_CONTROL
+                })
+                .size(px(14.0))
+                .text_color(theme.text_muted),
             )
             .child(
                 div()
                     .min_w_0()
                     .max_w(px(260.0))
                     .truncate()
-                    .child(back_chat.unwrap_or_else(|| "Tasks".into())),
+                    .child(back_chat.unwrap_or_else(|| "Mission Control".into())),
             )
             .on_click(cx.listener(|shell, _: &gpui::ClickEvent, _, cx| shell.center_back(cx)));
         let inner = div()
@@ -1296,7 +1449,10 @@ impl Shell {
             .pl(px((self.sidebar_edge() + Theme::SPACE_LG)
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-            .child(back);
+            .child(back)
+            .children(crumb)
+            .child(div().flex_1())
+            .child(self.tree_view_switch(&theme, cx));
         let bar = div()
             .relative()
             .h(px(Theme::TITLEBAR_HEIGHT))
@@ -1305,6 +1461,79 @@ impl Shell {
             .child(inner);
         self.titlebar_drag_region("task-center-titlebar", bar, cx)
             .into_any_element()
+    }
+
+    fn tree_view_switch(&self, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let current = settings::current(cx).tree_view;
+        let thumb = motion::state_t(
+            "tree-view-past-spine",
+            current != settings::TreeView::Spine,
+            TASKS_VIEW_THUMB,
+            self.reduced_motion,
+        ) + motion::state_t(
+            "tree-view-past-outline",
+            current == settings::TreeView::Timeline,
+            TASKS_VIEW_THUMB,
+            self.reduced_motion,
+        );
+        let text = theme.text;
+        div()
+            .id("tree-view-toggle")
+            .debug_selector(|| "tree-view-toggle".into())
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .rounded(px(9.0))
+            .p(px(2.0))
+            .bg(crate::theme::ink(0.04))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .bottom(px(2.0))
+                    .left(px(2.0 + TREE_VIEW_SEGMENT * thumb))
+                    .w(px(TREE_VIEW_SEGMENT))
+                    .rounded(px(7.0))
+                    .bg(theme.bg)
+                    .border_1()
+                    .border_color(theme.border.opacity(0.8)),
+            )
+            .children(
+                [
+                    (settings::TreeView::Spine, "Spine"),
+                    (settings::TreeView::Outline, "Outline"),
+                    (settings::TreeView::Timeline, "Timeline"),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (value, label))| {
+                    let chosen = value == current;
+                    div()
+                        .id(("tree-view-toggle", ix))
+                        .debug_selector(move || format!("tree-view-{label}"))
+                        .role(gpui::Role::Button)
+                        .aria_label(label)
+                        .aria_selected(chosen)
+                        .w(px(TREE_VIEW_SEGMENT))
+                        .py(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(if chosen { theme.text } else { theme.text_muted })
+                        .when(!chosen, |el| {
+                            el.cursor_pointer()
+                                .hover(move |s| s.text_color(text))
+                                .on_click(move |_, _, cx| {
+                                    settings::update(settings::SavePolicy::Debounced, cx, |s| {
+                                        s.tree_view = value
+                                    });
+                                })
+                        })
+                        .child(label)
+                }),
+            )
     }
 
     pub(super) fn render_tasks_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1384,6 +1613,16 @@ impl Shell {
         self.titlebar_drag_region("tasks-titlebar", bar, cx)
             .into_any_element()
     }
+}
+
+/// A task id maps to its lead chat, so a tree has one page whichever id opened it.
+pub(super) fn tree_key(state: &crate::state::AppState, id: &str) -> String {
+    state
+        .tasks
+        .iter()
+        .find(|task| task.id == id && !task.deleted)
+        .and_then(|task| task.chat_id.clone())
+        .unwrap_or_else(|| id.to_string())
 }
 
 #[cfg(test)]

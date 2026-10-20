@@ -15,6 +15,7 @@ const MAX_NAP: Duration = Duration::from_secs(60);
 /// A restart that never came (a failed install) must not continue old turns
 /// at some unrelated later launch.
 const RESTART_FRESH_MS: i64 = 10 * 60 * 1000;
+const RESET_KEPT_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +35,14 @@ struct Limited {
     auto: bool,
 }
 
+/// A limit whose reset passed with nothing left to resume it; gone once the chat runs again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Reset {
+    chat_id: String,
+    resets_at: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Stored {
@@ -45,6 +54,8 @@ struct Stored {
     after_restart: Vec<Continuation>,
     #[serde(default)]
     restart_recorded_at: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reset: Vec<Reset>,
 }
 
 fn enabled() -> bool {
@@ -58,6 +69,7 @@ impl Default for Stored {
             limited: Vec::new(),
             after_restart: Vec::new(),
             restart_recorded_at: 0,
+            reset: Vec::new(),
         }
     }
 }
@@ -81,21 +93,33 @@ impl Stored {
     fn take_due(&mut self, now: i64) -> (Vec<Continuation>, Option<i64>) {
         let mut due = Vec::new();
         let mut next: Option<i64> = None;
+        let mut reset = Vec::new();
         self.limited.retain(|entry| {
             let Some(resets_at) = entry.resets_at else {
                 return true;
             };
-            if !entry.auto {
-                return resets_at > now;
+            let at = match entry.auto {
+                true => resets_at + RESET_SLACK_MS,
+                false => resets_at,
+            };
+            if at > now {
+                if entry.auto {
+                    next = Some(next.map_or(at, |next| next.min(at)));
+                }
+                return true;
             }
-            let at = resets_at + RESET_SLACK_MS;
-            if at <= now {
+            if entry.auto {
                 due.push(entry.at.clone());
-                return false;
             }
-            next = Some(next.map_or(at, |next| next.min(at)));
-            true
+            reset.push(Reset {
+                chat_id: entry.at.chat_id.clone(),
+                resets_at,
+            });
+            false
         });
+        self.reset.extend(reset);
+        self.reset
+            .retain(|reset| now - reset.resets_at < RESET_KEPT_MS);
         (due, next)
     }
 }
@@ -150,6 +174,7 @@ impl ResumeSchedule {
         self.update(|stored| {
             let auto = stored.auto_resume && resets_at.is_some_and(|at| at > now);
             stored.limited.retain(|entry| entry.at.chat_id != chat_id);
+            stored.reset.retain(|reset| reset.chat_id != chat_id);
             stored.limited.push(Limited {
                 at: Continuation {
                     chat_id: chat_id.to_owned(),
@@ -188,10 +213,25 @@ impl ResumeSchedule {
 
     pub fn clear(&self, chat_id: &str) {
         self.update(|stored| {
-            let before = stored.limited.len();
+            let before = stored.limited.len() + stored.reset.len();
             stored.limited.retain(|entry| entry.at.chat_id != chat_id);
-            stored.limited.len() != before
+            stored.reset.retain(|reset| reset.chat_id != chat_id);
+            stored.limited.len() + stored.reset.len() != before
         });
+    }
+
+    /// Chats whose limit reset by `now` with no auto-resume left pending, and that have not run since.
+    pub fn past_resets(&self, now: i64) -> Vec<(String, i64)> {
+        let stored = lock(&self.inner.stored);
+        let elapsed = stored.limited.iter().filter_map(|entry| {
+            let resets_at = entry.resets_at.filter(|at| *at <= now && !entry.auto)?;
+            Some((entry.at.chat_id.clone(), resets_at))
+        });
+        let reset = stored
+            .reset
+            .iter()
+            .map(|reset| (reset.chat_id.clone(), reset.resets_at));
+        elapsed.chain(reset).collect()
     }
 
     /// Kept on disk for the next boot only; this engine never sends them.
@@ -330,6 +370,17 @@ mod tests {
             .map(|e| e.at.chat_id.as_str())
             .collect();
         assert_eq!(left, ["unknown"], "an elapsed unarmed limit expires");
+        drop(stored);
+        let mut past = schedule.past_resets(5_000 + RESET_SLACK_MS);
+        past.sort();
+        assert_eq!(
+            past,
+            [("future".to_owned(), 5_000), ("past".to_owned(), 900)],
+            "both resets stay known until their chats run again"
+        );
+        schedule.clear("past");
+        schedule.note_limit("future", Some(9_000), None, 6_000);
+        assert!(schedule.past_resets(6_000).is_empty());
     }
 
     #[test]

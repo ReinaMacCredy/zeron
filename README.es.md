@@ -8,24 +8,26 @@ Controla tus agentes de programación (Claude Code, Codex, Cursor, Devin, Grok, 
 
 ## App de escritorio
 
-Descarga la última versión para tu plataforma desde [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
+Descarga la última versión para tu plataforma desde [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest):
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz` y luego ejecuta el `install.sh` que incluye
 
-No necesitas cuenta ni conexión a internet; las sesiones se quedan en tu dispositivo. La app se actualiza sola.
+No necesitas cuenta ni conexión a internet; las sesiones se quedan en tu dispositivo. La app busca actualizaciones y las ofrece en la barra lateral; con `ZERON_AUTO_UPDATE=1` las descarga en segundo plano y las instala al salir.
 
 ## Modo headless (CLI)
 
-Para servidores y otras máquinas sin pantalla, como un VPS que mantiene los agentes en ejecución después de cerrar tu portátil. Solo Linux:
+Para servidores y otras máquinas sin pantalla, como un VPS que mantiene los agentes en ejecución después de cerrar tu portátil. Solo Linux: descarga `zeron-<version>-linux-<arch>.tar.gz` desde [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest) y ejecuta:
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+tar -xzf zeron-<version>-linux-<arch>.tar.gz
+zeron-<version>-linux-<arch>/install.sh
+zeron daemon install
 zeron status
 ```
 
-El instalador arranca el motor como un servicio en segundo plano que sobrevive a los reinicios.
+`zeron daemon install` arranca el motor como un servicio en segundo plano que sobrevive a los reinicios.
 
 ```bash
 zeron status      # modo local/sincronizado y estado del motor

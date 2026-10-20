@@ -42,6 +42,7 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod ask_pill;
+pub(crate) use ask_pill::pending_questions;
 pub(crate) mod background;
 mod chip;
 mod limit_pill;
@@ -2306,6 +2307,7 @@ pub struct ComposerInput {
     text_size: f32,
     configured_line_height: f32,
     single_line: bool,
+    wrap: bool,
     mono: bool,
     max_chars: Option<usize>,
     scroll_left: f32,
@@ -2431,6 +2433,7 @@ impl ComposerInput {
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
             single_line: false,
+            wrap: false,
             mono: false,
             max_chars: None,
             scroll_left: 0.0,
@@ -2497,6 +2500,16 @@ impl ComposerInput {
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
+    }
+
+    pub(crate) fn with_wrapping(mut self) -> Self {
+        self.single_line = true;
+        self.wrap = true;
+        self
+    }
+
+    fn one_row(&self) -> bool {
+        self.single_line && !self.wrap
     }
 
     pub(crate) fn with_mono(mut self) -> Self {
@@ -3944,6 +3957,10 @@ impl ComposerInput {
                 && !from_composer
                 && text.chars().count() >= crate::attachments::PASTED_TEXT_MIN_CHARS
                 && zeron_proto::attachment_mentions::attachment_mentions(&text).is_empty()
+                && !zeron_proto::invocation::leading_command(
+                    &zeron_proto::invocation::invocation_prompt(self.text()),
+                )
+                .is_some_and(|(name, _)| zeron_proto::invocation::valid_skill_command_name(name))
             {
                 cx.emit(ComposerInputEvent::PastedLongText(text));
                 return;
@@ -4105,6 +4122,9 @@ impl ComposerInput {
             replacement.push_str(&line[prefix.indent_start + removed..]);
             changes.push((at + prefix.indent_start, removed, added));
             at += line.len() + 1;
+        }
+        if outdent && changes.iter().all(|&(_, removed, _)| removed == 0) {
+            return false;
         }
         let remap = |offset: usize| -> usize {
             let mut result = offset as isize;
@@ -4920,7 +4940,7 @@ impl ComposerInput {
                 text.to_string().into(),
                 font_size,
                 &line_runs,
-                (!self.single_line).then_some((width - indent).max(px(20.0))),
+                (!self.one_row()).then_some((width - indent).max(px(20.0))),
                 None,
             ) {
                 let chips: Vec<_> = self.projection.mentions[self
@@ -4933,7 +4953,7 @@ impl ComposerInput {
                     .map(|(_, r)| r.start - display_at..r.end - display_at)
                     .collect();
                 for mut line in shaped {
-                    if !self.single_line {
+                    if !self.one_row() {
                         wrap_reference_chips(&mut line, &chips, (width - indent).max(px(20.0)));
                     }
                     lines.push(line);
@@ -5009,7 +5029,7 @@ impl ComposerInput {
 
     /// Keep the cursor visible when content exceeds the element height.
     fn clamp_scroll(&mut self, element_height: f32) -> bool {
-        if self.single_line {
+        if self.one_row() {
             let previous = self.scroll_left;
             let width = (self.last_width - 2.0).max(1.0);
             if let Some(cursor) = self.cursor_point() {
@@ -8465,9 +8485,17 @@ impl Composer {
             return;
         }
         let key = self.current_key.clone();
-        self.adopt_staged_attachments(key, vec![attachments::stage_pasted_text(text)], cx);
-        self.focus_pending = true;
-        self.sync_draft(cx);
+        match attachments::stage_pasted_text(text) {
+            Ok(staged) => {
+                self.adopt_staged_attachments(key, vec![staged], cx);
+                self.focus_pending = true;
+                self.sync_draft(cx);
+            }
+            Err(message) => {
+                self.failure = Some(message.into());
+                self.failure_key = Some(key);
+            }
+        }
         cx.notify();
     }
 
@@ -10570,6 +10598,10 @@ impl Composer {
         let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
             return;
         };
+        // The engine resolves the probe without an instance, so `acp` always fails and re-probes.
+        if harness == HarnessId::Acp {
+            return;
+        }
         if !self.compaction_probed.insert(harness) {
             return;
         }
@@ -15842,6 +15874,14 @@ mod tests {
             .update(cx, |composer, _, cx| {
                 assert_eq!(composer.input_text(cx), "- shop\n- cart");
                 assert!(!composer.mission, "a list line still outdents");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input_text(cx), "- shop\n- cart");
+                assert!(composer.mission, "a top-level list line toggles");
+                composer.set_mission(false, cx);
                 composer.input.update(cx, |input, cx| {
                     input.set_text("Shop frontend\nNext.js and Tailwind", cx)
                 });
@@ -19388,6 +19428,7 @@ mod tests {
                         room_gen: None,
                         sidechat_source_chat_id: None,
                         created_by_chat_id: None,
+                        forked_from_chat_id: None,
                         previous_harnesses: Vec::new(),
                         delegation: None,
                         settle: None,
@@ -19642,6 +19683,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: sidechat_of.map(str::to_string),
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -20060,6 +20102,8 @@ mod tests {
                     questions: vec![question("q", &["a"], false)],
                     resolved: false,
                     answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 },
             )
         };
@@ -20288,6 +20332,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -21442,6 +21487,8 @@ mod tests {
             questions: vec![question],
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         let entry = |parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -21468,6 +21515,8 @@ mod tests {
             questions: Vec::new(),
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         assert!(
             pending_input_request(&[entry(vec![undecodable])]).is_none(),
@@ -21566,6 +21615,8 @@ mod tests {
                     questions: vec![q],
                     resolved,
                     answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 }],
                 created_at: 0,
                 device_id: "device".into(),
@@ -21632,6 +21683,8 @@ mod tests {
             questions: vec![question("q", &["a"], false)],
             resolved: false,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -21695,6 +21748,8 @@ mod tests {
             questions: vec![],
             resolved: true,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         let t = vec![entry(
             Some(MessageStatus::Streaming),

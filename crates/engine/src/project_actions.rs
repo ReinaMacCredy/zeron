@@ -484,10 +484,11 @@ pub(crate) fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<(), E
     std::fs::create_dir_all(parent)?;
     let temp_path = parent.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
     let result = (|| -> Result<(), EngineError> {
-        let mut temp = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut temp = options.open(&temp_path)?;
         temp.write_all(&bytes)?;
         temp.sync_all()?;
         std::fs::rename(&temp_path, path)?;

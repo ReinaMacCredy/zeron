@@ -4,9 +4,9 @@
 //! sidebar update strip, and the desktop install paths).
 //!
 //! Release layout (see `.github/workflows/release.yml`): artifacts are assets on
-//! this fork's GitHub Releases, read through [`RELEASES_FEED`]. `manifest.json` carries the latest version plus a
-//! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
-//! releases published before the manifest existed.
+//! this fork's GitHub Releases, read through [`RELEASES_FEED`]. `manifest.json`
+//! carries the latest version plus a sha256 per artifact; a download without
+//! one is refused.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
@@ -46,11 +46,11 @@ pub const fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Successful checks repeat this often. The feed is a sub-kilobyte,
-/// edge-cached document, so hourly polling is free and bounds how long a
-/// long-running app can sit on a stale release.
+/// Successful checks repeat this often. The manifest is a sub-kilobyte
+/// document, so hourly polling is free and bounds how long a long-running app
+/// can sit on a stale release.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// Failed checks (offline boot, captive portal, transient edge error) back off
+/// Failed checks (offline boot, captive portal, transient server error) back off
 /// through these delays, then stay at the last one.
 const CHECK_RETRY: [Duration; 4] = [
     Duration::from_secs(60),
@@ -76,6 +76,7 @@ const STAGED_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// forever or make every local install buffer an unbounded response.
 const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+const RELEASE_ARTIFACT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Release metadata
@@ -85,8 +86,7 @@ const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
-    /// Artifact file name → metadata. Empty for pre-manifest releases resolved
-    /// via `latest.txt` — downloads then skip checksum verification (with a log).
+    /// Artifact file name → metadata.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
 }
@@ -155,8 +155,8 @@ fn parse_version(v: &str) -> Option<Vec<u64>> {
 }
 
 /// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
-/// Unparseable versions never count as newer — a garbage `latest.txt` must not
-/// trigger an update loop.
+/// Unparseable versions never count as newer — a garbage manifest version must
+/// not trigger an update loop.
 pub fn version_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
         (Some(l), Some(c)) => l > c,
@@ -164,46 +164,23 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Fetch the newest release metadata: `manifest.json`, falling back to
-/// `latest.txt` (version only, no checksums) for pre-manifest releases.
+/// Fetch the newest release metadata from `manifest.json`.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     let base = release_base(edge_url)?;
     let client = http_client()?;
     let manifest_url = format!("{base}/manifest.json");
-    match fetch_release_metadata(&client, &manifest_url).await {
-        Ok(response) if response.status.is_success() => {
-            let manifest: Manifest =
-                serde_json::from_slice(&response.body).context("parsing manifest.json")?;
-            if manifest.version.trim().is_empty() {
-                bail!("manifest.json has an empty version");
-            }
-            return Ok(manifest);
-        }
-        Ok(response) => {
-            tracing::debug!(status = %response.status, "manifest.json unavailable; trying latest.txt")
-        }
-        Err(err) => tracing::debug!(error = %err, "manifest.json fetch failed; trying latest.txt"),
-    }
-    let latest_url = format!("{base}/latest.txt");
-    let response = fetch_release_metadata(&client, &latest_url)
-        .await
-        .context("fetching latest.txt")?;
+    let response = fetch_release_metadata(&client, &manifest_url).await?;
     anyhow::ensure!(
         response.status.is_success(),
-        "fetching latest.txt: HTTP {}",
+        "fetching manifest.json: HTTP {}",
         response.status
     );
-    let version = std::str::from_utf8(&response.body)
-        .context("reading latest.txt as UTF-8")?
-        .trim()
-        .to_string();
-    if version.is_empty() {
-        bail!("latest.txt is empty");
+    let manifest: Manifest =
+        serde_json::from_slice(&response.body).context("parsing manifest.json")?;
+    if manifest.version.trim().is_empty() {
+        bail!("manifest.json has an empty version");
     }
-    Ok(Manifest {
-        version,
-        files: BTreeMap::new(),
-    })
+    Ok(manifest)
 }
 
 #[derive(Debug)]
@@ -234,9 +211,8 @@ async fn fetch_release_metadata_with_limits(
     let request = async {
         let response = client
             .get(url)
-            // Intermediaries must revalidate: the edge already bounds its own
-            // cache to a minute, and a proxy holding an old manifest for
-            // longer is exactly the "prompt appears late" failure.
+            // Intermediaries must revalidate: a proxy holding an old manifest
+            // is exactly the "prompt appears late" failure.
             .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .send()
             .await
@@ -591,23 +567,33 @@ fn bundle_short_version(plist: &str) -> Option<String> {
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Stream `{RELEASES_FEED}/<file>` to `dest`, verifying the manifest sha256 when
-/// present. Writes through a `.partial` sidecar so an interrupted download never
-/// leaves a plausible-looking artifact behind.
+/// The manifest's sha256 for `file`; an artifact without a well-formed one is
+/// never downloaded.
+pub fn expected_sha256<'a>(manifest: &'a Manifest, file: &str) -> anyhow::Result<&'a str> {
+    let expected = manifest
+        .files
+        .get(file)
+        .and_then(|meta| meta.sha256.as_deref())
+        .map(str::trim)
+        .with_context(|| format!("release metadata has no SHA-256 checksum for {file}"))?;
+    anyhow::ensure!(
+        expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
+        "release metadata has an invalid SHA-256 checksum for {file}"
+    );
+    Ok(expected)
+}
+
+/// Stream `{RELEASES_FEED}/<file>` to `dest`, verifying the manifest sha256.
+/// Writes through a `.partial` sidecar so an interrupted download never leaves
+/// a plausible-looking artifact behind.
 pub async fn download_release_file(
     edge_url: &str,
     manifest: &Manifest,
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
+    let expected = expected_sha256(manifest, file)?;
     let url = format!("{}/{file}", release_base(edge_url)?);
-    let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
-    if expected.is_none() {
-        tracing::warn!(
-            file,
-            "no checksum in release metadata; skipping verification"
-        );
-    }
     let partial = dest.with_extension("partial");
     let resp = http_client()?
         .get(&url)
@@ -620,20 +606,25 @@ pub async fn download_release_file(
         .await
         .with_context(|| format!("creating {}", partial.display()))?;
     let mut hasher = Sha256::new();
+    let mut written = 0u64;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading download stream")?;
+        written += chunk.len() as u64;
+        if written > RELEASE_ARTIFACT_MAX_BYTES {
+            drop(out);
+            tokio::fs::remove_file(&partial).await.ok();
+            bail!("{file} is larger than {RELEASE_ARTIFACT_MAX_BYTES} bytes");
+        }
         hasher.update(&chunk);
         out.write_all(&chunk).await.context("writing download")?;
     }
     out.flush().await.context("flushing download")?;
     drop(out);
-    if let Some(expected) = expected {
-        let actual = format!("{:x}", hasher.finalize());
-        if !actual.eq_ignore_ascii_case(expected.trim()) {
-            tokio::fs::remove_file(&partial).await.ok();
-            bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
-        }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        tokio::fs::remove_file(&partial).await.ok();
+        bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
     }
     tokio::fs::rename(&partial, dest)
         .await
@@ -992,8 +983,8 @@ fn auto_update_enabled() -> bool {
 }
 
 /// `ZERON_AUTO_UPDATE=1|true|yes` — the desktop app downloads in the
-/// background and installs on quit. Unset means report-only: an upstream
-/// release must never replace a fork build unasked.
+/// background and installs on quit. Unset, it only offers the update: the
+/// download and the install each wait for a click.
 pub fn desktop_auto_update_enabled() -> bool {
     auto_update_enabled()
 }
@@ -1999,6 +1990,19 @@ mod tests {
             )]
             .into(),
         };
+
+        let unlisted = Manifest {
+            version: "9.9.9".into(),
+            files: BTreeMap::new(),
+        };
+        let error = stage_headless("http://127.0.0.1:1", &unlisted, &app_root)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no SHA-256 checksum"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(std::fs::read_dir(&app_root).unwrap().count(), 0);
 
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");
         let (base, server) = serve_forever(wrong.clone()).await;

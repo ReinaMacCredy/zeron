@@ -4,6 +4,8 @@ A project is a folder on one of your devices that agents work in. Chats in a pro
 
 Click the folder button at the top of the sidebar (tooltip **New project**), press Cmd+Shift+N, or pick **New project** in the Cmd+K palette.
 
+![Adding a project](projects-add.jpg)
+
 Pick a device, a location (**Home** or a drive), then folders. Type to filter, press Enter to open a folder, and Left to go back up. With the folder you want open, click **Add project** or press Cmd+Enter.
 
 ## Rename or remove
@@ -20,9 +22,13 @@ In a git project, the checkout chip on the New chat composer offers **Current ch
 
 Worktrees go in `~/.zeron/worktrees/<repository>/` by default. To change that, open [Settings > General](zeron://settings/general), scroll to **Worktrees**, choose a **Device**, and turn on **Custom worktree location**. Each device keeps its own location, and existing worktrees stay where they are.
 
+With the switch on, click **Browse** to pick the folder; on another device you pick it from a folder list of that device, then **Use this folder**. Turning the switch off keeps the folder for next time, and the reset button (tooltip **Reset to default**) forgets it. When the `ZERON_WORKTREES_DIR` environment variable is set on a device, it decides the location there: the row reads **Set by ZERON_WORKTREES_DIR** and cannot be changed.
+
 ## Actions
 
 Actions are saved commands for a project, such as a dev server, a build, or tests. They show in the **Actions** section of the **Live state** column beside a chat, and in the Cmd+K palette.
+
+![Project actions in the Live state column](projects-actions.jpg)
 
 - Click **Add action**, then fill in **Name**, **Command**, and **Icon**, and click **Save action**.
 - Click an action to run it. It opens in a new tab of the chat's terminal, in the chat's folder, and shows **Running**, **Done**, or **Failed**.

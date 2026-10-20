@@ -24,9 +24,15 @@ The title bar has **Refresh pull request**, **Copy link**, and **Open in default
 
 ## Ask AI about a pull request
 
-Click the chat button next to the section pill (tooltip **Ask AI**), or press `/`, to open the PR chat dock. Ask about the change or hand off work. The dock header has **New chat**, **Open as thread** to move the chat into a normal session, and **Fold chat**. It also shows how long the chat has left before Zeron starts a fresh one.
+Click the chat button next to the section pill (tooltip **Ask AI**), or press `/`, to open the PR chat dock; click it again to fold the chat. The button shows a spinning ring while the agent works and a badge with the number of new replies. A dot on it means you left an unsent message in the folded chat.
 
-Set **Chat history** and **New chat when idle** in [Settings > Source Control](zeron://settings/source-control).
+Ask about the change or hand off work. Above the message box, chips show the context a new chat gets: the PR (`#123 owner/repo`), its **Diff**, its comments, and its **Checks**. Hover a chip and click its × (**Remove context**) to leave that part out. The context goes with the message that starts the chat.
+
+The dock header has **New chat**, **Open as thread** to move the chat into a normal session, and **Fold chat**. With **Chat history** set to **Keep per PR** and **New chat when idle** set to a time, it also shows how long the chat has left before Zeron starts a fresh one.
+
+Set **Chat history** and **New chat when idle** in [Settings > Source Control](zeron://settings/source-control); [Git](zeron://docs/git) explains the choices.
+
+Cmd+R (**Toggle right sidebar**) opens and closes the right pane on the Pull requests page too.
 
 ## Native view or browser
 

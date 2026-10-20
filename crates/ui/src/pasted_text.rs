@@ -15,7 +15,7 @@ const BLOCK_LINES: usize = 50;
 const BLOCK_BYTES: usize = 8 * 1024;
 const CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
-/// Whole-line blocks so a multi-megabyte paste never lays out as one text element.
+/// Line blocks, an over-long line cut into several, so a multi-megabyte paste never lays out as one text element.
 pub(crate) struct PastedText {
     pub(crate) blocks: Vec<SharedString>,
     pub(crate) lines: usize,
@@ -31,15 +31,29 @@ impl PastedText {
         let mut lines = 0;
         for line in text.lines() {
             lines += 1;
-            if in_block > 0 && (in_block == BLOCK_LINES || block.len() + line.len() > BLOCK_BYTES) {
-                blocks.push(std::mem::take(&mut block).into());
-                in_block = 0;
+            let mut rest = line;
+            loop {
+                let mut cut = rest.len().min(BLOCK_BYTES);
+                while !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let (part, tail) = rest.split_at(cut);
+                if in_block > 0
+                    && (in_block == BLOCK_LINES || block.len() + part.len() > BLOCK_BYTES)
+                {
+                    blocks.push(std::mem::take(&mut block).into());
+                    in_block = 0;
+                }
+                if in_block > 0 {
+                    block.push('\n');
+                }
+                block.push_str(part);
+                in_block += 1;
+                if tail.is_empty() {
+                    break;
+                }
+                rest = tail;
             }
-            if in_block > 0 {
-                block.push('\n');
-            }
-            block.push_str(line);
-            in_block += 1;
         }
         if in_block > 0 {
             blocks.push(block.into());
@@ -64,7 +78,11 @@ pub(crate) fn chip_preview(bytes: &[u8]) -> Option<SharedString> {
     use unicode_segmentation::UnicodeSegmentation as _;
     const PREVIEW_GRAPHEMES: usize = 20;
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4 * 1024)]);
-    let line = head.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = head
+        .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+        .map(|line| line.replace(char::is_control, " "))
+        .find(|line| !line.trim().is_empty())?;
+    let line = line.trim();
     let graphemes: Vec<&str> = line.graphemes(true).collect();
     if graphemes.len() <= PREVIEW_GRAPHEMES {
         return Some(line.to_owned().into());
@@ -348,16 +366,28 @@ mod tests {
             .join("\n");
         assert_eq!(rejoined, source.replace("\r\n", "\n").trim_end());
 
-        let long = "x".repeat(BLOCK_BYTES + 1);
+        let long = "é".repeat(BLOCK_BYTES / 2) + "x";
         let text = PastedText::decode(format!("a\n{long}\nb").as_bytes());
         assert_eq!(text.lines, 3);
         assert_eq!(
             text.blocks.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
-            ["a", long.as_str(), "b"]
+            ["a", &long[..BLOCK_BYTES], "x\nb"]
         );
 
         let text = PastedText::decode(b"ok \xff end");
         assert_eq!(text.blocks[0].as_ref(), "ok \u{fffd} end");
+    }
+
+    #[test]
+    fn chip_preview_shows_the_first_visible_line_without_control_characters() {
+        assert_eq!(
+            chip_preview(b"\r\x1b[1mfirst\rsecond").unwrap().as_ref(),
+            "[1mfirst"
+        );
+        assert_eq!(
+            chip_preview("one\u{2028}two".as_bytes()).unwrap().as_ref(),
+            "one"
+        );
     }
 
     #[test]

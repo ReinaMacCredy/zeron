@@ -260,6 +260,9 @@ pub struct Chat {
     /// link never expires. `None` for a chat a person opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_chat_id: Option<String>,
+    /// A label like `created_by_chat_id`: the source holds no authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_chat_id: Option<String>,
     /// Every harness this chat ran on before the current one, oldest first,
     /// each once (a provider switch appends the harness it left). The sidebar
     /// row and tab stack their marks ahead of the current one.
@@ -538,6 +541,108 @@ impl TaskMode {
     pub fn is_single(&self) -> bool {
         *self == Self::Single
     }
+}
+
+impl Task {
+    pub fn has_plan(&self) -> bool {
+        self.mode == TaskMode::Orchestrated && self.chat_id.is_some()
+    }
+
+    pub fn is_open_plan_of(&self, chat_id: &str) -> bool {
+        !self.deleted
+            && self.completed_at.is_none()
+            && self.has_plan()
+            && self.chat_id.as_deref() == Some(chat_id)
+    }
+}
+
+/// Rows from before the one-open-plan rule resolve to the first match.
+pub fn plan_of_chat<'a>(tasks: &'a [Task], chat_id: &str) -> Option<&'a Task> {
+    tasks.iter().find(|task| task.is_open_plan_of(chat_id))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkKind {
+    Delegated,
+    OpenedFrom,
+    ForkedFrom,
+    SidechatOf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadLink {
+    pub parent: String,
+    pub kind: LinkKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+}
+
+/// Only `Delegated` is step-like; the other kinds are labels.
+pub fn thread_link(chat: &Chat, tasks: &[Task], steps: &[TaskStep]) -> Option<ThreadLink> {
+    if chat.is_system() {
+        return None;
+    }
+    let link = |parent: &str, kind, step_id| {
+        Some(ThreadLink {
+            parent: parent.to_string(),
+            kind,
+            step_id,
+        })
+    };
+    let step_under = |parent: &str| {
+        steps
+            .iter()
+            .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
+            .filter(|step| {
+                tasks.iter().any(|task| {
+                    task.id == step.task_id
+                        && !task.deleted
+                        && task.chat_id.as_deref() == Some(parent)
+                })
+            })
+            .max_by_key(|step| step.outcome.is_none())
+            .map(|step| step.id.clone())
+    };
+    if let Some(source) = &chat.forked_from_chat_id {
+        return link(source, LinkKind::ForkedFrom, None);
+    }
+    if let Some(owner) = chat.delegated_by() {
+        return link(owner, LinkKind::Delegated, step_under(owner));
+    }
+    if let Some(creator) = &chat.created_by_chat_id {
+        return match step_under(creator) {
+            Some(step) => link(creator, LinkKind::Delegated, Some(step)),
+            None => link(creator, LinkKind::OpenedFrom, None),
+        };
+    }
+    if let Some(source) = &chat.sidechat_source_chat_id {
+        return link(source, LinkKind::SidechatOf, None);
+    }
+    None
+}
+
+/// A sidechat or a fork roots its own tree: neither link makes it a child.
+pub fn tree_path<'a>(
+    chat: &'a Chat,
+    chats: &'a [Chat],
+    tasks: &[Task],
+    steps: &[TaskStep],
+) -> Vec<&'a Chat> {
+    let mut path = vec![chat];
+    while let Some(parent) = path
+        .last()
+        .and_then(|node| thread_link(node, tasks, steps))
+        .filter(|link| matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom))
+        .and_then(|link| chats.iter().find(|chat| chat.id == link.parent))
+    {
+        if path.iter().any(|node| node.id == parent.id) {
+            break;
+        }
+        path.push(parent);
+    }
+    path
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2427,6 +2532,89 @@ mod tests {
                 "a thread taking another turn works: {end:?}"
             );
         }
+    }
+
+    #[test]
+    fn thread_link_owns_only_delegated_and_step_bound_children() {
+        let task = |id: &str, lead: Option<&str>, mode: TaskMode| {
+            let mut task: Task = serde_json::from_value(serde_json::json!({ "id": id })).unwrap();
+            task.chat_id = lead.map(str::to_string);
+            task.mode = mode;
+            task
+        };
+        let plan = task("t", Some("lead"), TaskMode::Orchestrated);
+        let other = task("o", Some("elsewhere"), TaskMode::Orchestrated);
+        let mut bound = step(Some("c"), None);
+        bound.id = "s1".into();
+        let mut foreign = step(Some("c"), None);
+        foreign.task_id = "o".into();
+        let tasks = [plan.clone(), other];
+        let link = |chat: &Chat, steps: &[TaskStep]| thread_link(chat, &tasks, steps);
+        let delegated = child(Some(DelegationStatus::Running));
+        assert_eq!(
+            link(&delegated, &[]),
+            Some(ThreadLink {
+                parent: "lead".into(),
+                kind: LinkKind::Delegated,
+                step_id: None
+            })
+        );
+        let mut opened = child(None);
+        opened.created_by_chat_id = Some("lead".into());
+        assert_eq!(
+            link(&opened, &[foreign.clone()]).map(|l| (l.parent, l.kind)),
+            Some(("lead".into(), LinkKind::OpenedFrom)),
+            "a step of a plan another chat leads does not make the creator own it"
+        );
+        assert_eq!(
+            link(&opened, std::slice::from_ref(&bound)),
+            Some(ThreadLink {
+                parent: "lead".into(),
+                kind: LinkKind::Delegated,
+                step_id: Some("s1".into())
+            }),
+            "a step thread is owned through its step"
+        );
+        let mut done = bound.clone();
+        done.id = "s0".into();
+        done.outcome = Some(StepOutcome::Done);
+        assert_eq!(
+            link(&opened, &[done, bound.clone()]).and_then(|l| l.step_id),
+            Some("s1".into()),
+            "a thread bound again after a done step fills the open one"
+        );
+        let mut gone = bound.clone();
+        gone.deleted = true;
+        assert_eq!(
+            link(&opened, &[gone]).map(|l| l.kind),
+            Some(LinkKind::OpenedFrom)
+        );
+        let mut fork = opened.clone();
+        fork.forked_from_chat_id = Some("source".into());
+        assert_eq!(
+            link(&fork, std::slice::from_ref(&bound)),
+            Some(ThreadLink {
+                parent: "source".into(),
+                kind: LinkKind::ForkedFrom,
+                step_id: None
+            }),
+            "a fork is a label even where its row says created_by"
+        );
+        let mut side = child(None);
+        side.sidechat_source_chat_id = Some("lead".into());
+        assert_eq!(link(&side, &[]).map(|l| l.kind), Some(LinkKind::SidechatOf));
+        assert_eq!(link(&child(None), &[]), None);
+        let mut supervisor = opened.clone();
+        supervisor.id = format!("{}dev", crate::supervisor::CHAT_PREFIX);
+        assert_eq!(link(&supervisor, &[]), None);
+
+        let single = task("h", Some("lead"), TaskMode::Single);
+        assert!(plan.has_plan() && !single.has_plan());
+        assert!(!task("u", None, TaskMode::Orchestrated).has_plan());
+        let mut done = plan.clone();
+        done.completed_at = Some(Utc::now());
+        assert_eq!(plan_of_chat(&[single.clone(), done], "lead"), None);
+        assert_eq!(plan_of_chat(&[single, plan.clone()], "lead"), Some(&plan));
     }
 
     #[test]

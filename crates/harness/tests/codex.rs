@@ -1598,7 +1598,8 @@ async fn a_run_after_a_retired_one_resumes_its_thread_once_the_old_server_exits(
     let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
     let req = retire_writer(&harness, temp.path()).await;
     let (controls, _steer, _token) = controls("Yes");
-    let mut stream = harness.run(req, controls).await.unwrap();
+    // A second harness object, as an edited provider instance builds.
+    let mut stream = self::harness().run(req, controls).await.unwrap();
     let started = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let AgentEvent::SessionStarted { session_id, .. } =

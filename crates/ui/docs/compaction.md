@@ -4,6 +4,8 @@ Every agent has a context window, the amount of conversation it can hold at once
 
 The ring at the right of the session footer shows how much of the context window is in use. It turns to a warning color at 75% and to danger at 90%. Click it to open **Context window**, with the tokens used and remaining. When a compaction is planned, the popover also says when: **Compacts at** a time for idle compaction, or **Compacts when this turn ends** when the agent asked.
 
+![The context window popover](compaction-popover.jpg)
+
 ## Compact by hand
 
 Click **Compact context** in that popover, or type `/compact` in the composer. You can add a focus for the summary:
@@ -12,7 +14,7 @@ Click **Compact context** in that popover, or type `/compact` in the composer. Y
 /compact keep the API design decisions
 ```
 
-Claude Code, Codex, OpenCode, Pi, and ACP agents that offer `/compact` can compact. Otherwise the button is dimmed and says why: **Compaction in progress**, **Wait for the current turn to finish**, or that the agent does not support compaction.
+Claude Code, Codex, OpenCode, Pi, and ACP agents that offer `/compact` can compact. Otherwise the button is dimmed and says why: **Compaction in progress**, **Wait for the current turn to finish**, or that the agent does not support compaction. An agent other than Claude Code restarts its process to compact, so while background work it started is still running, compaction is refused rather than ending that work.
 
 When you open a Claude Code chat of 100K tokens or more that has been quiet for 70 minutes or longer, its prompt cache has expired. A **Resume with less context** card offers **Compact**, or **Keep full history** to send as is.
 
@@ -34,14 +36,14 @@ This switch gives agents Zeron's `compact` tool. It is the same switch as **comp
 
 An agent calls the tool at a natural break, for example when a piece of work is done and verified. It can name what the summary should keep, and it can write a short note, such as "Continue with slice 3", that is sent back to it as its next message once the compaction is done, so the work goes on without you.
 
-The compaction never runs inside the turn that asks for it. The transcript shows **Compaction queued · starts when the turn settles**, and it runs as soon as the turn ends. Any message that reaches the agent first cancels it, and the agent is told. Agents that restart their process to compact refuse while background work they started is still running, and ask the agent to try again later.
+The compaction never runs inside the turn that asks for it. The transcript shows **Compaction queued · starts when the turn settles**, and it runs as soon as the turn ends. Any message that reaches the agent first cancels it, and so does **Stop**; the agent is told. Agents that restart their process to compact refuse while background work they started is still running, and ask the agent to try again later.
 
 In Reminder mode, every message past **Remind at** (see below) reminds the agent to consider compacting. In Claude Code chats past that point, a long run of tool calls also gets a reminder for every 50K tokens the context grows, in either mode.
 
 When the agent wrote a next-message note and **Compact new tasks** is **Classifier**, the note is checked before the compaction runs:
 
 - With **Agent model**, the classifier reads the note against the recent conversation. It can carry the last turns over or decline. It never compacts to the summary alone. When it declines, the agent is told why and keeps working.
-- With Jev, the note is not sent anywhere: the chat compacts and carries the last two turns over.
+- With Jev, or when no agent can run the check, the note is not sent anywhere: the chat compacts and carries the last two turns over.
 - When the context is at 85% of the window or more, the chat compacts and carries the last turns over without asking.
 
 Without a note, or in Reminder mode, the compaction runs as the agent asked.
@@ -81,6 +83,8 @@ Only a message you type yourself, before a new turn starts. These are never clas
 - the Supervisor's wakes
 - the agent's own next-message note, which is checked as described above
 - the first message after the agent compacted itself
+- the first message after the chat moved to another agent: the conversation handed over replaces the compaction
+- a message while background work is still running on an agent that restarts its process to compact, which would end that work
 
 ## Check from and Remind at
 
@@ -94,7 +98,7 @@ In Classifier mode, the **Classifier** row picks who reads your messages.
 
 **Agent model** runs the check on one of your agents, through its own account. By default that is the chat's own agent when it is Claude Code or Codex, otherwise the first of them that is turned on, using its newest Sonnet model when it offers one. The **Classifier model** row picks another agent and model. Sonnet-class is recommended: a small model compacted follow-ups in testing. Each check is a short extra request to that agent's provider.
 
-**Jev · TypeSafe** and **Jev · OpenRouter** use TypeSafe's Jev 1.14 classifier instead. It is billed to your TypeSafe or OpenRouter account. In Zeron's testing a check took under a second and cost about a hundredth of a cent. Jev needs an API key from the source you picked: the row says where to get one (console.typesafe.ai/keys or openrouter.ai/settings/keys). Copy the key and press **Paste key** to save it in the Keychain, or **Remove key** to delete it. Without a key, checks give no answer and the chat is not compacted.
+**Jev · TypeSafe** and **Jev · OpenRouter** use TypeSafe's Jev 1.14 classifier instead. It is billed to your TypeSafe or OpenRouter account. In Zeron's testing a check took under a second and cost about a hundredth of a cent. Jev is offered on macOS, where the key is kept. It needs an API key from the source you picked: the row says where to get one (console.typesafe.ai/keys or openrouter.ai/settings/keys). Copy the key and press **Paste key** to save it in the Keychain, or **Remove key** to delete it. Without a key, checks give no answer and the chat is not compacted.
 
 What leaves your Mac for each check: your last four messages, each with the agent's last written reply, every piece clipped to its last 800 characters, plus your new message. With Jev, that text is sent to TypeSafe or OpenRouter, clipped to its last 10,000 characters. Tool output and files are never sent.
 
@@ -105,6 +109,8 @@ What leaves your Mac for each check: your last four messages, each with the agen
 ## What you see in the transcript
 
 While the classifier runs on an agent model, a row reads **Classifier** with the model and **checking if this is a new task**, or **checking the agent's note**. Then a row such as **Compacting 180K before the new task** or **Compacting 180K, carrying the last turns over** shows while the chat compacts.
+
+![A classifier decision in the transcript](compaction-classifier.jpg)
 
 Afterwards a **Classifier** row stays in the transcript with its answer: **New task**, **Carry over**, **Same task**, or **No answer**. Click it to see the model, how it decided, the time taken, the context size, the tokens used, exactly what was sent, and the reply.
 

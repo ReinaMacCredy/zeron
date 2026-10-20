@@ -574,7 +574,7 @@ async fn a_stop_fences_a_queued_slash_row_and_the_next_message_does_not_revive_i
         Some(0)
     );
 
-    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
     assert!(!rig.in_flight());
     assert_eq!(rig.generation(), 1);
@@ -601,7 +601,7 @@ async fn with_settings_on_a_turn_queued_before_stop_keeps_the_catalog() {
         .doc_host
         .queue_message_with_behavior(CHAT, "queued follow-up", vec![], false)
         .unwrap();
-    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
     rig.run("c2", "unrelated", PermissionMode::Full, Some(1));
     assert!(rig.saw(2).await.computer);
@@ -623,7 +623,7 @@ async fn a_stop_before_any_dispatch_in_this_engine_lifetime_still_fences() {
         .doc()
         .set_computer_generation(3)
         .unwrap();
-    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
     assert_eq!(rig.generation(), 4);
 
@@ -758,7 +758,7 @@ async fn the_run_secret_names_only_the_live_run_and_is_revoked_by_a_stop() {
             .computer_run(CHAT, &secret[..secret.len() - 1]),
         None
     );
-    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
     assert_eq!(rig.core.sessions.computer_run(CHAT, &secret), None);
     rig.core.shutdown().await;
@@ -993,6 +993,8 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
                     questions: vec![question],
                     resolved: false,
                     answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 }],
                 created_at: 1,
                 device_id: "dev-a".into(),
@@ -1240,7 +1242,7 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     wait_for(|| rig.consent_cards().len() == 3, "the third card").await;
     let open_at_stop = rig.consent_cards()[2].0.clone();
     pending_consent(&manager, &open_at_stop).await;
-    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
     assert!(!click.await.unwrap(), "Stop cancels the open card");
     no_pending(&manager, "Stop clears the pending request").await;
@@ -1455,7 +1457,7 @@ async fn a_stop_interrupts_the_turn_without_waiting_for_the_host_teardown() {
     entered.await.unwrap();
 
     let started = tokio::time::Instant::now();
-    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -1494,6 +1496,8 @@ fn push_open_question(rig: &Rig, request_id: &str) {
                 }],
                 resolved: false,
                 answers: None,
+                asked_at_ms: None,
+                answered_at_ms: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

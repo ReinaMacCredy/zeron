@@ -569,6 +569,8 @@ struct PrepareAcpAgentParams {
     agent_id: String,
     #[serde(default)]
     distribution: Option<zeron_proto::AcpDistribution>,
+    #[serde(default)]
+    allow_unverified: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1081,6 +1083,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        attach_plan: bool,
     },
     #[serde(rename_all = "camelCase")]
     PlanSteps {
@@ -1103,6 +1107,8 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
+    TakeBackPlanApproval { task_id: String },
+    #[serde(rename_all = "camelCase")]
     RetryTaskStep { step_id: String },
     #[serde(rename_all = "camelCase")]
     EditTaskPlan {
@@ -1121,6 +1127,10 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     SetMissionSupervised { task_id: String, supervised: bool },
     #[serde(rename_all = "camelCase")]
+    SetTreeWatched { root_chat_id: String, watched: bool },
+    #[serde(rename_all = "camelCase")]
+    SetWatchEverything { on: bool },
+    #[serde(rename_all = "camelCase")]
     EscalateTask {
         task_id: String,
         #[serde(default)]
@@ -1133,6 +1143,15 @@ enum MutateParams {
     },
     #[serde(rename_all = "camelCase")]
     ResolveSupervisorItem { item_id: String, choice: String },
+    #[serde(rename_all = "camelCase")]
+    ResolveSupervisorItems { answers: Vec<ItemChoice> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ItemChoice {
+    item_id: String,
+    choice: String,
 }
 
 fn approve_plan_default() -> bool {
@@ -1140,10 +1159,13 @@ fn approve_plan_default() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlannedStep {
     title: String,
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1412,6 +1434,23 @@ impl EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
         }
         Ok(())
+    }
+
+    async fn retire_instance_sessions(&self, instance_id: &str) {
+        let local_device = self.doc_host.device_id();
+        let chats = self.workspace.watch_chats().borrow().clone();
+        for chat in chats.iter().filter(|chat| {
+            chat.device_id == local_device
+                && chat
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.instance_id.as_deref())
+                    == Some(instance_id)
+        }) {
+            if let Err(error) = self.sessions.switch_harness(&chat.id).await {
+                tracing::warn!(chat_id = %chat.id, %error, "could not close a provider instance's session");
+            }
+        }
     }
 
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
@@ -1912,6 +1951,7 @@ impl EngineRpc {
             .get("loginId")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let instance_id = params.get("instanceId").cloned();
         if method == methods::START_AGENT_LOGIN
             && let Some(object) = params.as_object_mut()
         {
@@ -1949,7 +1989,8 @@ impl EngineRpc {
                         ))
                     }
                 {
-                    self.cancel_remote_login(target, &start.login_id).await;
+                    self.cancel_remote_login(target, &start.login_id, instance_id)
+                        .await;
                     return Err(RpcError::Failed(error.to_string()));
                 }
                 reply
@@ -1975,7 +2016,8 @@ impl EngineRpc {
                                 ))
                             }
                         {
-                            self.cancel_remote_login(target, &login_id).await;
+                            self.cancel_remote_login(target, &login_id, instance_id)
+                                .await;
                             return RpcReply::value(&AgentLoginPoll {
                                 status: AgentLoginStatus::Error,
                                 message: Some(error.to_string()),
@@ -2001,8 +2043,16 @@ impl EngineRpc {
         }
     }
 
-    async fn cancel_remote_login(&self, target: &str, login_id: &str) {
-        let params = serde_json::json!({ "loginId": login_id, "targetDeviceId": target });
+    async fn cancel_remote_login(
+        &self,
+        target: &str,
+        login_id: &str,
+        instance_id: Option<serde_json::Value>,
+    ) {
+        let mut params = serde_json::json!({ "loginId": login_id, "targetDeviceId": target });
+        if let Some(instance_id) = instance_id {
+            params["instanceId"] = instance_id;
+        }
         if let Err(error) = self
             .forward(target, methods::CANCEL_AGENT_LOGIN, params)
             .await
@@ -2364,10 +2414,12 @@ impl EngineRpc {
                     || patch.images.is_some()
                     || patch.chat_id.is_some()
                 {
-                    supervisor::refuse_supervisor(
-                        from_chat_id.as_deref(),
-                        supervisor::GOAL_OR_SPEND,
-                    )?;
+                    let refusal = if self.registry.supervisor_settings().goal_and_spend {
+                        supervisor::GOAL_ACTION
+                    } else {
+                        supervisor::GOAL_OR_SPEND
+                    };
+                    supervisor::refuse_supervisor(from_chat_id.as_deref(), refusal)?;
                 }
                 self.update_task(&task_id, &patch)
             }
@@ -2395,6 +2447,7 @@ impl EngineRpc {
                     approve_plan,
                     same_agents,
                     plan_doc,
+                    attach: false,
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
@@ -2409,12 +2462,14 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                attach_plan,
             } => {
                 supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
                     plan_doc,
+                    attach: attach_plan,
                 });
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead)
                     .await
@@ -2428,7 +2483,7 @@ impl EngineRpc {
             } => {
                 let steps = steps
                     .into_iter()
-                    .map(|step| (step.title, step.notes))
+                    .map(|step| (step.title, step.notes, step.thread_id))
                     .collect();
                 self.plan_steps(
                     &task_id,
@@ -2444,7 +2499,10 @@ impl EngineRpc {
                 patch,
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
-            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await,
+            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
+            MutateParams::TakeBackPlanApproval { task_id } => {
+                self.take_back_plan_approval(&task_id).await
+            }
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
             MutateParams::EditTaskPlan {
                 task_id,
@@ -2469,6 +2527,11 @@ impl EngineRpc {
                 task_id,
                 supervised,
             } => self.set_mission_supervised(&task_id, supervised),
+            MutateParams::SetTreeWatched {
+                root_chat_id,
+                watched,
+            } => self.set_tree_watched(&root_chat_id, watched),
+            MutateParams::SetWatchEverything { on } => self.set_watch_everything(on),
             MutateParams::EscalateTask {
                 task_id,
                 from_chat_id,
@@ -2487,7 +2550,11 @@ impl EngineRpc {
                 )
                 .map(drop),
             MutateParams::ResolveSupervisorItem { item_id, choice } => {
-                self.resolve_supervisor_item(&item_id, &choice).await
+                self.resolve_supervisor_items(vec![ItemChoice { item_id, choice }])
+                    .await
+            }
+            MutateParams::ResolveSupervisorItems { answers } => {
+                self.resolve_supervisor_items(answers).await
             }
         }
     }
@@ -3334,6 +3401,14 @@ impl RpcService for EngineRpc {
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // The seen-models record is per driver; an instance's models must not mark them seen.
+                if p.instance_id.is_some() {
+                    return RpcReply::value(&zeron_proto::ModelCatalog {
+                        models,
+                        new_ids: Vec::new(),
+                        announce_ids: Vec::new(),
+                    });
+                }
                 RpcReply::value(
                     &self
                         .registry
@@ -3654,11 +3729,27 @@ impl RpcService for EngineRpc {
             methods::GET_USAGE_SUMMARY => {
                 let p: UsageSummaryParams = parse_params(params)?;
                 let config = self.agent_accounts.config();
-                let roots = crate::usage::UsageRoots::new(
+                let mut roots = crate::usage::UsageRoots::new(
                     &config.claude_config_dir,
                     &config.codex_home,
                     &config.grok_home,
                 );
+                if let Ok(store) = self.provider_instances_store() {
+                    for instance in store.snapshot().instances {
+                        if let zeron_proto::InstanceConfig::Native {
+                            home_dir: Some(home),
+                            ..
+                        } = &instance.config
+                            && let Ok(home) = crate::provider_instances::home_path(
+                                &instance.id,
+                                home,
+                                store.data_dir(),
+                            )
+                        {
+                            roots.add_home(instance.driver, &home);
+                        }
+                    }
+                }
                 let summary = tokio::task::spawn_blocking(move || {
                     crate::usage::summary(&roots, p.days, chrono::Local::now())
                 })
@@ -3738,7 +3829,7 @@ impl RpcService for EngineRpc {
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
                 let respond = match &p.command {
-                    SessionCommandPayload::Interrupt {} => {
+                    SessionCommandPayload::Interrupt { .. } => {
                         supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
                         None
                     }
@@ -3749,6 +3840,7 @@ impl RpcService for EngineRpc {
                         Some(from)
                             if self.supervisor_gate(Some(from), |s| s.message_threads, supervisor::MESSAGE_OFF)? =>
                         {
+                            self.supervisor_may_answer(from, &p.chat_id)?;
                             let text: Vec<String> = answers
                                 .iter()
                                 .map(|answer| format!("{}: {}", answer.question_id, answer.labels.join(", ")))
@@ -3863,6 +3955,8 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.created_by_chat_id = Some(created_by_chat_id);
+                chat.forked_from_chat_id = Some(source.id.clone());
+                chat.delegation = None;
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
@@ -4459,7 +4553,7 @@ impl RpcService for EngineRpc {
                 {
                     let steps = steps
                         .into_iter()
-                        .map(|step| (step.title, step.notes))
+                        .map(|step| (step.title, step.notes, step.thread_id))
                         .collect();
                     let images_moved = self.plan_steps(
                         &task_id,
@@ -4566,10 +4660,15 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let host = self.doc_host.clone();
                 let runs = tokio::task::spawn_blocking(move || {
-                    crate::today_runs::today_runs(&chats, p.since_ms, |chat| {
+                    let ids = p.chat_ids.as_deref();
+                    crate::today_runs::today_runs(&chats, p.since_ms, ids, |chat| {
                         host.open_local(&chat.id)
                             .map(|handle| {
-                                crate::today_runs::turns_since(handle.doc().doc(), p.since_ms)
+                                let doc = handle.doc().doc();
+                                (
+                                    crate::today_runs::turns_since(doc, p.since_ms),
+                                    crate::today_runs::waits_since(doc, p.since_ms),
+                                )
                             })
                             .unwrap_or_default()
                     })
@@ -5717,7 +5816,15 @@ impl RpcService for EngineRpc {
             methods::UPSERT_PROVIDER_INSTANCE => {
                 let p: UpsertProviderInstanceParams = parse_params(params)?;
                 let store = self.provider_instances_store()?;
-                let snapshot = blocking(move || store.upsert(p.instance)).await?;
+                let before = store.instance(p.instance.id.trim());
+                let writer = store.clone();
+                let snapshot = blocking(move || writer.upsert(p.instance)).await?;
+                if let Some(before) = before
+                    && let Some(after) = store.instance(&before.id)
+                    && !crate::provider_instances::keeps_sessions(&before, &after, store.data_dir())
+                {
+                    self.retire_instance_sessions(&before.id).await;
+                }
                 RpcReply::value(&snapshot)
             }
             methods::DELETE_PROVIDER_INSTANCE => {
@@ -5726,6 +5833,7 @@ impl RpcService for EngineRpc {
                 let deleted = store.instance(&p.instance_id);
                 let snapshot = blocking(move || store.delete(&p.instance_id)).await?;
                 if let Some(instance) = deleted {
+                    self.retire_instance_sessions(&instance.id).await;
                     self.agent_accounts.remove_instance(&instance).await;
                 }
                 RpcReply::value(&snapshot)
@@ -5753,10 +5861,14 @@ impl RpcService for EngineRpc {
             methods::PREPARE_ACP_AGENT => {
                 let p: PrepareAcpAgentParams = parse_params(params)?;
                 let store = self.provider_instances_store()?;
-                let prepared =
-                    crate::acp_registry::prepare(store.data_dir(), &p.agent_id, p.distribution)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let prepared = crate::acp_registry::prepare(
+                    store.data_dir(),
+                    &p.agent_id,
+                    p.distribution,
+                    p.allow_unverified,
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&prepared)
             }
             methods::LIST_PROJECT_ACTIONS => {

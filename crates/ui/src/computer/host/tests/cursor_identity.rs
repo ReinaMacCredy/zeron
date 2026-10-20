@@ -93,6 +93,7 @@ impl ComputerFrameTapHost for EndSignalTap {
     fn update(&self, _target: CuaPreviewTarget) -> Result<(), String> {
         Ok(())
     }
+    fn touch(&self, _task: &CuaComputerTask) {}
     async fn end_task(&self, _task: CuaComputerTask) -> Result<(), String> {
         self.0.resolve(());
         Ok(())
