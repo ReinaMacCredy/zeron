@@ -202,7 +202,7 @@ impl TaskCenter {
         false
     }
 
-    fn pick(&mut self, selection: Selection, cx: &mut Context<Self>) {
+    pub(super) fn pick(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.select(selection, cx);
         self.open_drawer(cx);
     }

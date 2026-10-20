@@ -58,6 +58,9 @@ pub(crate) enum TreeHost {
     Center,
 }
 
+/// Where each node row was laid out last, by row id, for views that line up with the outline.
+pub(crate) type RowRects = std::rc::Rc<std::cell::RefCell<HashMap<String, gpui::Bounds<Pixels>>>>;
+
 pub(crate) struct SampleRow {
     pub title: &'static str,
     pub status: Status,
@@ -119,6 +122,7 @@ pub(crate) struct StripTree {
     compact: bool,
     lit: bool,
     picked: Option<String>,
+    rects: RowRects,
     _state: Subscription,
 }
 
@@ -155,6 +159,7 @@ impl StripTree {
             compact: false,
             lit: false,
             picked: None,
+            rects: RowRects::default(),
         }
     }
 
@@ -195,6 +200,10 @@ impl StripTree {
             self.compact = compact;
             cx.notify();
         }
+    }
+
+    pub fn rects(&self) -> RowRects {
+        self.rects.clone()
     }
 
     pub fn set_picked(&mut self, picked: Option<String>, cx: &mut Context<Self>) {
@@ -537,6 +546,9 @@ impl Render for StripTree {
         let selected = self.state.read(cx).selected_chat.clone();
         let mut sweeping = false;
         let mut elements = Vec::new();
+        self.rects
+            .borrow_mut()
+            .retain(|id, _| rows.iter().any(|row| row.label.is_none() && row.id == *id));
         for (ix, row) in rows.iter().enumerate() {
             let Some((left, top, frame)) = &placed[ix] else {
                 continue;
@@ -729,11 +741,23 @@ impl Render for StripTree {
                 Some(head) => format!("{head} \u{b7} {}: {}", row.title, row.word),
                 None => format!("{}: {}", row.title, row.word),
             };
+            let measure = {
+                let (rects, id) = (self.rects.clone(), row.id.clone());
+                gpui::canvas(
+                    move |bounds, _, _| {
+                        rects.borrow_mut().insert(id, bounds);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+            };
             elements.push(
                 div()
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
                     .group(group)
+                    .child(measure)
                     .role(if opens {
                         gpui::Role::Button
                     } else {

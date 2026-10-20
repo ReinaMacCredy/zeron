@@ -31,6 +31,7 @@ use crate::typography::ui_rems;
 
 mod outline;
 mod spine;
+mod timeline;
 
 const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
 const EDIT_LEAVE: MotionSpec = MotionSpec::new(220, motion::EASE_DRAWER);
@@ -419,6 +420,7 @@ pub struct TaskCenter {
     focus: FocusHandle,
     shimmer_since: Instant,
     outline: Option<(String, Entity<super::StripTree>, Subscription)>,
+    runs: timeline::RunsCache,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -478,6 +480,7 @@ impl TaskCenter {
             focus: cx.focus_handle(),
             shimmer_since: Instant::now(),
             outline: None,
+            runs: Default::default(),
             _subscriptions: vec![add_events, state_changes, settings_changes],
         }
     }
@@ -2179,6 +2182,9 @@ impl Render for TaskCenter {
             .map(|root| super::tree_rows(self.state.read(cx), root, true, Utc::now()))
             .unwrap_or_default();
         let body = match root.filter(|_| view != crate::settings::TreeView::Spine) {
+            Some(root) if !nodes.is_empty() && view == crate::settings::TreeView::Timeline => {
+                self.render_timeline(&root, &nodes, &theme, cx)
+            }
             Some(root) if !nodes.is_empty() => self.render_split(&root, &nodes, &theme, cx),
             _ => {
                 let mission = spine::SpineMission {

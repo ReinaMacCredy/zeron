@@ -34,7 +34,13 @@ impl TaskCenter {
         let id = root.to_string();
         let tree = cx.new(|cx| StripTree::new(state, id, true, true, TreeHost::Center, cx));
         let events = cx.subscribe(&tree, |center, _, event: &StripTreeEvent, cx| match event {
-            StripTreeEvent::Open { selection, .. } => center.select(selection.clone(), cx),
+            StripTreeEvent::Open { selection, .. } => {
+                if crate::settings::current(cx).tree_view == crate::settings::TreeView::Timeline {
+                    center.pick(selection.clone(), cx)
+                } else {
+                    center.select(selection.clone(), cx)
+                }
+            }
             StripTreeEvent::OpenNative {
                 parent_chat_id,
                 doc_id,
@@ -789,7 +795,8 @@ impl TaskCenter {
             crate::settings::TreeView::Spine => {
                 self.render_spine_body(None, &nodes, reduced, now, theme, window, cx)
             }
-            _ => self.render_split(root, &nodes, theme, cx),
+            crate::settings::TreeView::Timeline => self.render_timeline(root, &nodes, theme, cx),
+            crate::settings::TreeView::Outline => self.render_split(root, &nodes, theme, cx),
         };
         div()
             .id("task-center")
