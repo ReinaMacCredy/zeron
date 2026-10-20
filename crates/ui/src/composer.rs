@@ -10542,6 +10542,10 @@ impl Composer {
         let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
             return;
         };
+        // The engine resolves the probe without an instance, so `acp` always fails and re-probes.
+        if harness == HarnessId::Acp {
+            return;
+        }
         if !self.compaction_probed.insert(harness) {
             return;
         }
