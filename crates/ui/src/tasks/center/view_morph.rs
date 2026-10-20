@@ -57,7 +57,6 @@ impl TaskCenter {
         rects
     }
 
-    /// Ghosts travel from the old view's rects to the new view's once the new view has painted.
     pub(super) fn advance_view_morph(&mut self, view: TreeView, reduced: bool) {
         if let Some(shown) = self.views.shown.replace(view)
             && shown != view
@@ -67,7 +66,6 @@ impl TaskCenter {
         }
     }
 
-    /// How far a column the previous view lacked has slid in, when coming from `from`.
     pub(super) fn slide_from(&self, from: TreeView) -> f32 {
         match (&self.views.morph, self.views.from_view) {
             (Some(morph), Some(view)) if view == from => {

@@ -58,7 +58,6 @@ pub(crate) enum TreeHost {
     Center,
 }
 
-/// Where each node row was laid out last, by row id, for views that line up with the outline.
 pub(crate) type RowRects = std::rc::Rc<std::cell::RefCell<HashMap<String, gpui::Bounds<Pixels>>>>;
 
 pub(crate) struct SampleRow {
