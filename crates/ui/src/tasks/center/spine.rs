@@ -2617,22 +2617,31 @@ impl TaskCenter {
                 continue;
             };
             let is_lifted = lifted.as_ref().is_some_and(|(id, _)| *id == node.id);
-            let wrapper = div()
-                .absolute()
-                .left(px(node.x))
-                .top(px(node.y))
-                .w(px(node.width))
-                .opacity(node.frame.opacity)
-                .when(is_lifted, |el| {
-                    el.rounded(px(CARD_RADIUS)).shadow(vec![gpui::BoxShadow {
-                        color: gpui::black().opacity(0.45),
-                        offset: gpui::point(px(0.0), px(12.0)),
-                        blur_radius: px(30.0),
-                        spread_radius: px(0.0),
-                        inset: false,
-                    }])
-                })
-                .child(element);
+            let morph_id = match node.id.as_str() {
+                LEAD => tree_nodes.first().map(|root| root.id.clone()),
+                GHOST | MARK => None,
+                id => Some(id.to_string()),
+            };
+            let wrapper =
+                div()
+                    .absolute()
+                    .left(px(node.x))
+                    .top(px(node.y))
+                    .w(px(node.width))
+                    .opacity(node.frame.opacity)
+                    .children(morph_id.map(|id| {
+                        morph::measure(&self.views.cards, Key::Node(id), Edges::default())
+                    }))
+                    .when(is_lifted, |el| {
+                        el.rounded(px(CARD_RADIUS)).shadow(vec![gpui::BoxShadow {
+                            color: gpui::black().opacity(0.45),
+                            offset: gpui::point(px(0.0), px(12.0)),
+                            blur_radius: px(30.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }])
+                    })
+                    .child(element);
             cards.push(if is_lifted {
                 gpui::deferred(wrapper).into_any_element()
             } else {

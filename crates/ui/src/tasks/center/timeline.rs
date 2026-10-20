@@ -572,10 +572,13 @@ impl TaskCenter {
             }
             None => Vec::new(),
         };
+        let slid = self.slide_from(crate::settings::TreeView::Outline);
         let chart = div()
             .id("task-center-timeline")
             .debug_selector(|| "task-center-timeline".into())
             .relative()
+            .left(px(super::view_morph::SLIDE * (1.0 - slid)))
+            .opacity(slid)
             .flex_1()
             .min_w_0()
             .h_full()

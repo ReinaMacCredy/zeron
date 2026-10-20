@@ -750,12 +750,23 @@ impl TaskCenter {
         let ix = self.picked(nodes);
         let outline = self.render_outline_column(root, &nodes[ix].id, theme, cx);
         let detail = self.render_detail(nodes, ix, reduced, theme, cx);
+        let slid = self.slide_from(crate::settings::TreeView::Timeline);
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .child(outline)
-            .child(detail)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .relative()
+                    .left(px(super::view_morph::SLIDE * (1.0 - slid)))
+                    .opacity(slid)
+                    .flex()
+                    .child(detail),
+            )
             .into_any_element()
     }
 
@@ -791,13 +802,16 @@ impl TaskCenter {
             motion::pulse_lease(cx.entity_id(), cx);
         }
         let header = self.render_tree_header(&chat, &nodes, reduced, now, theme, cx);
-        let body = match crate::settings::current(cx).tree_view {
+        let view = crate::settings::current(cx).tree_view;
+        self.advance_view_morph(view, reduced);
+        let body = match view {
             crate::settings::TreeView::Spine => {
                 self.render_spine_body(None, &nodes, reduced, now, theme, window, cx)
             }
             crate::settings::TreeView::Timeline => self.render_timeline(root, &nodes, theme, cx),
             crate::settings::TreeView::Outline => self.render_split(root, &nodes, theme, cx),
         };
+        let body = self.morph_body(body, &nodes, theme, window, cx);
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())
