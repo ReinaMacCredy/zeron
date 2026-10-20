@@ -11,7 +11,7 @@ pub(super) const START_OFF: &str = "Starting missions is off in the Supervisor's
 pub(super) const NO_INTERRUPT: &str = "The Supervisor does not interrupt threads: a step that blocks a shared resource is stopped with supervisor pause, which needs a verified contention. Otherwise message the step's lead.";
 const PAUSE_OFF: &str = "Pausing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 const UNIX_ONLY: &str = "Shared resources are checked against the machine on macOS and Linux only";
-pub(super) const GOAL_OR_SPEND: &str = "A task's title, notes and thread are the person's: the Supervisor cannot change them, delete the task or reassign it. Raise it with the supervisor tool, action \"ask\".";
+pub(super) const GOAL_OR_SPEND: &str = "A task is the person's: the Supervisor cannot change it, mark it done, delete it or reassign it. Raise it with the supervisor tool, action \"ask\".";
 const MAX_OPTIONS: usize = 3;
 
 #[derive(Debug, Deserialize)]

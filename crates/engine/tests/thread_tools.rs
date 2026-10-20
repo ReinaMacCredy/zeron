@@ -3142,6 +3142,17 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     let mut stranger = plan.clone();
     stranger["fromChatId"] = "lead".into();
     assert!(mutate(stranger).await.is_err(), "only the lead plans");
+    for takeover in [
+        serde_json::json!({ "op": "assignTask", "taskId": "t1", "chatId": "lead", "send": false, "fromChatId": "lead" }),
+        serde_json::json!({ "op": "updateTask", "taskId": "t1", "patch": { "chatId": null }, "fromChatId": "lead" }),
+        serde_json::json!({ "op": "updateTask", "taskId": "t1", "patch": { "completed": true }, "fromChatId": "lead" }),
+        serde_json::json!({ "op": "deleteTask", "taskId": "t1", "fromChatId": "lead" }),
+    ] {
+        assert!(mutate(takeover.clone()).await.is_err(), "{takeover}");
+    }
+    let mission = rig.core.workspace.task("t1").unwrap();
+    assert_eq!(mission.chat_id.as_deref(), Some("task-lead"));
+    assert!(mission.completed_at.is_none() && !mission.deleted);
     let mut bad = plan.clone();
     bad["resources"] = serde_json::json!(["port:0"]);
     let Err(err) = mutate(bad).await else {
@@ -3497,15 +3508,21 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     );
     assert_eq!(snapshot.interventions[0].step_ids.len(), 2);
 
-    let err = refused(
-        mutate(serde_json::json!({
-            "op": "updateTask", "taskId": "t1", "patch": { "notes": "Use the cheaper gateway" },
-            "fromChatId": supervisor,
-        }))
-        .await,
-    );
-    assert!(err.contains("the Supervisor cannot change them"), "{err}");
-    assert_eq!(rig.core.workspace.task("t1").unwrap().notes, "");
+    for patch in [
+        serde_json::json!({ "notes": "Use the cheaper gateway" }),
+        serde_json::json!({ "completed": true }),
+    ] {
+        let err = refused(
+            mutate(serde_json::json!({
+                "op": "updateTask", "taskId": "t1", "patch": patch, "fromChatId": supervisor,
+            }))
+            .await,
+        );
+        assert!(err.contains("the Supervisor cannot change it"), "{err}");
+    }
+    let mission = rig.core.workspace.task("t1").unwrap();
+    assert_eq!(mission.notes, "");
+    assert!(mission.completed_at.is_none());
     let err = refused(
         call(
             zeron_rpc::methods::QUEUE_COMMAND,

@@ -993,12 +993,17 @@ async fn a_supervisor_wake_is_never_classified() {
     }))
     .await;
     wait_for(settled(3), "the lead's brief").await;
-    mutate(serde_json::json!({
-        "op": "escalateTask", "taskId": "t1", "fromChatId": "lead-1",
-        "title": "Pay for a Stripe test account?", "why": "spend",
-        "detail": "The checkout tests need a live key.", "options": ["Pay $20", "Use the mock"],
-    }))
-    .await;
+    zeron_rpc::RpcService::handle(
+        &*core.rpc_service(),
+        zeron_rpc::methods::MUTATE,
+        serde_json::json!({
+            "op": "escalateTask", "taskId": "t1", "fromChatId": "lead-1",
+            "title": "Pay for a Stripe test account?", "why": "spend",
+            "detail": "The checkout tests need a live key.", "options": ["Pay $20", "Use the mock"],
+        }),
+    )
+    .await
+    .expect("escalate");
     wait_for(settled(4), "the Supervisor's wake").await;
     let wake = requests.lock().unwrap()[3].prompt.clone();
     assert!(wake.starts_with("Supervisor wake 1 of 12"), "{wake}");

@@ -764,6 +764,40 @@ async fn the_run_secret_names_only_the_live_run_and_is_revoked_by_a_stop() {
     rig.core.shutdown().await;
 }
 
+#[tokio::test]
+async fn only_a_connection_bound_to_a_live_run_speaks_for_its_chat() {
+    let rig = rig();
+    rig.run("c1", "plain", PermissionMode::Ask, None);
+    let secret = rig.saw(1).await.secret.expect("the run carries a secret");
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let send = |from: &str| json!({ "chatId": LEAD, "fromChatId": from, "text": "status?" });
+    let refusal = |result: Result<serde_json::Value, zeron_rpc::RpcError>| {
+        result.expect_err("refused").to_string()
+    };
+    assert!(
+        refusal(client.call(methods::SEND_THREAD_MESSAGE, send(CHAT)).await).contains("BindRun"),
+        "an unbound connection names no caller"
+    );
+    let bind = |secret: &str| json!({ "chatId": CHAT, "runSecret": secret });
+    refusal(client.call(methods::BIND_RUN, bind("forged")).await);
+    client.call(methods::BIND_RUN, bind(&secret)).await.unwrap();
+    assert!(
+        refusal(client.call(methods::SEND_THREAD_MESSAGE, send(LEAD)).await)
+            .contains("speaks for thread chat-cu only")
+    );
+    client
+        .call(methods::SEND_THREAD_MESSAGE, send(CHAT))
+        .await
+        .expect("the bound chat speaks for itself");
+    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.applied("stop").await;
+    assert!(
+        refusal(client.call(methods::SEND_THREAD_MESSAGE, send(CHAT)).await)
+            .contains("run has ended")
+    );
+    rig.core.shutdown().await;
+}
+
 async fn manager(rig: &Rig) -> Arc<zeron_engine::computer::manager::ComputerManager> {
     wait_for(
         || rig.core.computer.service().is_some(),
