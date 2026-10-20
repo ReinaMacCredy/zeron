@@ -22,6 +22,7 @@ use zeron_proto::{
 /// Answers every prompt after `step_delay`, recording what it was asked and,
 /// when steerable, what reached its mid-turn mailbox.
 struct RecordingHarness {
+    id: HarnessId,
     prompts: Arc<Mutex<Vec<String>>>,
     attachments: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     steers: Arc<Mutex<Vec<String>>>,
@@ -33,7 +34,7 @@ struct RecordingHarness {
 #[async_trait]
 impl Harness for RecordingHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Recording"
@@ -149,6 +150,7 @@ fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
     let steers = Arc::new(Mutex::new(Vec::new()));
     let attachments = Arc::new(Mutex::new(Vec::new()));
     let rig = rig_on(Arc::new(RecordingHarness {
+        id: HarnessId::Mock,
         prompts: prompts.clone(),
         attachments: attachments.clone(),
         steers: steers.clone(),
@@ -1068,6 +1070,151 @@ fn queue_interrupt(core: &EngineCore, chat_id: &str) {
         .expect("queue interrupt");
 }
 
+fn routed_rig() -> Rig {
+    let rig = rig(Duration::from_millis(5));
+    rig.core.registry.register(Arc::new(RecordingHarness {
+        id: HarnessId::ClaudeCode,
+        prompts: rig.prompts.clone(),
+        attachments: rig.attachments.clone(),
+        steers: rig.steers.clone(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: "noted",
+    }));
+    let mut routing = zeron_engine::routing::RoutingSettings::default();
+    routing.roles.insert(
+        zeron_engine::routing::Role::Worker,
+        zeron_engine::routing::RoleRoute::Target(haiku_route()),
+    );
+    routing.roles.insert(
+        zeron_engine::routing::Role::Validator,
+        zeron_engine::routing::RoleRoute::Target(haiku_route()),
+    );
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    rig
+}
+
+fn haiku_route() -> zeron_proto::RouteTarget {
+    zeron_proto::RouteTarget {
+        harness: HarnessId::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        reasoning: Some(ReasoningLevel::Low),
+    }
+}
+
+async fn delegate_rpc(rig: &Rig, params: serde_json::Value) -> zeron_proto::Chat {
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let view = client
+        .call(zeron_rpc::methods::DELEGATE_TASK, params)
+        .await
+        .expect("delegate");
+    let child = view["taskId"].as_str().expect("task id").to_string();
+    rig.core.workspace.chat(&child).unwrap().expect("child row")
+}
+
+#[tokio::test]
+async fn a_routed_role_runs_its_child_on_the_route_and_an_agent_choice_wins() {
+    let rig = routed_rig();
+    let routed = delegate_rpc(
+        &rig,
+        serde_json::json!({ "ownerChatId": "lead", "task": "write the parser", "role": "implementation" }),
+    )
+    .await;
+    let config = routed.config.clone().expect("routed config");
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
+    let route = routed.delegation.clone().unwrap().route.expect("route");
+    assert_eq!(route.source, "routed");
+    assert_eq!(route.role.as_deref(), Some("worker"));
+    assert_eq!(route.table, Some(haiku_route()));
+
+    let chosen = delegate_rpc(
+        &rig,
+        serde_json::json!({
+            "ownerChatId": "lead", "task": "write the lexer", "role": "worker",
+            "harness": "claude-code", "model": "claude-sonnet-5-5", "chosen": ["harness", "model"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        chosen.config.as_ref().unwrap().model.as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    let route = chosen.delegation.unwrap().route.expect("route");
+    assert_eq!(route.source, "chosen_by_agent");
+    assert_eq!(route.table, Some(haiku_route()));
+    assert_eq!(
+        route.reason.as_deref(),
+        Some("The lead passed harness and model")
+    );
+
+    let profiled = delegate_rpc(
+        &rig,
+        serde_json::json!({
+            "ownerChatId": "lead", "task": "check the lexer", "role": "validator",
+            "harness": "mock", "profileId": "careful", "chosen": ["profile"],
+        }),
+    )
+    .await;
+    assert_eq!(profiled.config.as_ref().unwrap().harness, HarnessId::Mock);
+    assert_eq!(
+        profiled.config.as_ref().unwrap().profile_id.as_deref(),
+        Some("careful")
+    );
+    let route = profiled.delegation.unwrap().route.expect("route");
+    assert_eq!(route.source, "chosen_by_agent");
+    assert_eq!(route.table, Some(haiku_route()));
+
+    let mut changed = rig.core.registry.routing_settings();
+    changed.roles.insert(
+        zeron_engine::routing::Role::Worker,
+        zeron_engine::routing::RoleRoute::SameAsParent,
+    );
+    rig.core.registry.set_routing_settings(changed).unwrap();
+    let after = rig.core.workspace.chat(&routed.id).unwrap().unwrap();
+    assert_eq!(
+        after.config, routed.config,
+        "routing never rewrites a live chat"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unrouted_role_inherits_the_owner_as_today() {
+    let rig = routed_rig();
+    let lead = rig.core.workspace.chat("lead").unwrap().unwrap();
+    for role in [serde_json::Value::Null, serde_json::json!("research")] {
+        let child = delegate_rpc(
+            &rig,
+            serde_json::json!({ "ownerChatId": "lead", "task": format!("look around {role}"), "role": role }),
+        )
+        .await;
+        assert_eq!(child.config, lead.config);
+        assert_eq!(child.delegation.unwrap().route, None);
+    }
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_review_child_skips_routing() {
+    let rig = routed_rig();
+    let mut params = delegate("review the diff");
+    params.role = Some("validator".into());
+    params.harness = Some(HarnessId::Mock);
+    params.client_request_id = Some("zeron-review:branch:x".into());
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .expect("delegate");
+    let row = rig.core.workspace.chat(&view.task_id).unwrap().unwrap();
+    assert_eq!(row.config.unwrap().harness, HarnessId::Mock);
+    assert_eq!(row.delegation.unwrap().route, None);
+    rig.core.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
     let rig = rig(Duration::from_millis(5));
@@ -1421,6 +1568,7 @@ const REVIEW_REPLY: &str = "Looked it over.\n\n```zeron-review\n[{\"path\":\"src
 fn review_rig() -> Rig {
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let rig = rig_on(Arc::new(RecordingHarness {
+        id: HarnessId::Mock,
         prompts: prompts.clone(),
         attachments: Arc::default(),
         steers: Arc::default(),
@@ -2227,6 +2375,7 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(RecordingHarness {
+            id: HarnessId::Mock,
             prompts: prompts.clone(),
             attachments: Arc::default(),
             steers: Arc::new(Mutex::new(Vec::new())),

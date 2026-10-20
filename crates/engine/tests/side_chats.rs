@@ -145,6 +145,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
         finding_outcomes: Default::default(),
         findings_handed: Default::default(),
         findings_announced: Default::default(),
+        route: None,
     });
     core.workspace.import_chat_row(&owned).unwrap();
     let client = zeron_rpc::memory_client(core.rpc_service());

@@ -1465,6 +1465,38 @@ impl EngineRpc {
         }
     }
 
+    fn route_delegation(
+        &self,
+        mut p: crate::doc_host::DelegateTaskParams,
+    ) -> Result<crate::doc_host::DelegateTaskParams, RpcError> {
+        let Some(role) = p.role.as_deref().and_then(crate::routing::Role::parse) else {
+            return Ok(p);
+        };
+        let owner = self
+            .workspace
+            .chat(&p.owner_chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        let resolved = crate::routing::resolve(
+            &crate::routing::Request {
+                role: Some(role),
+                chosen: &p.chosen,
+                harness: p.harness,
+                model: p.model.as_deref(),
+                reasoning: p.reasoning,
+                profile: p.profile.profile_id.is_some(),
+            },
+            owner.as_ref().and_then(|chat| chat.config.as_ref()),
+            &self.registry.routing_settings(),
+            &offered,
+        );
+        p.harness = resolved.harness;
+        p.model = resolved.model;
+        p.reasoning = resolved.reasoning;
+        p.route = resolved.route;
+        Ok(p)
+    }
+
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
         use crate::review::{PromptInput, ReviewScope, ReviewerOptions};
         let failed = |message: &str| RpcError::Failed(message.to_string());
@@ -1538,17 +1570,7 @@ impl EngineRpc {
             return Err(failed("Nothing to review"));
         }
         let settings = self.registry.review_settings();
-        let mock = std::env::var("ZERON_HARNESS").is_ok_and(|v| v.trim() == "mock");
-        let descriptors: Vec<_> = self
-            .registry
-            .descriptors()
-            .into_iter()
-            .filter(|d| {
-                d.installed
-                    && (crate::registry::descriptor_enabled(d) || (mock && d.id == HarnessId::Mock))
-                    && (mock || d.id != HarnessId::Mock)
-            })
-            .collect();
+        let descriptors = self.registry.offered();
         let options = ReviewerOptions {
             offered: descriptors.iter().map(|d| d.id).collect(),
             levels: descriptors
@@ -1605,6 +1627,8 @@ impl EngineRpc {
                     wait: false,
                     wake: Some(p.wake.unwrap_or(zeron_proto::DelegationWake::Never)),
                     client_request_id: Some(request),
+                    chosen: Vec::new(),
+                    route: None,
                 },
                 self.registry.delegation_settings(),
             )
@@ -3707,6 +3731,7 @@ impl RpcService for EngineRpc {
                     )));
                 }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
+                let p = self.route_delegation(p)?;
                 let view = self
                     .doc_host
                     .delegate_task(p, self.registry.delegation_settings())

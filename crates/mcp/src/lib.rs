@@ -599,7 +599,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "delegate_task",
-            "description": "Delegate one task to a Zeron-owned child agent/subagent of THIS chat and run it with only the supplied task prompt, without copying this chat's history. Choose harnesses and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-harness work only when they support the chosen model. Use this for any model missing from the native tool, including same-harness work, for cross-harness work, or for explicitly Zeron-owned child tasks. The childThreadId is backing storage, not an ordinary top-level thread. Harness, model, reasoning and permission mode inherit unless target overrides them; permissionMode may only narrow. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only this chat's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on a later task_status. An async child's completion wakes this chat through a message, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+            "description": "Delegate one task to a Zeron-owned child agent/subagent of THIS chat and run it with only the supplied task prompt, without copying this chat's history. Choose harnesses and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-harness work only when they support the chosen model. Use this for any model missing from the native tool, including same-harness work, for cross-harness work, or for explicitly Zeron-owned child tasks. The childThreadId is backing storage, not an ordinary top-level thread. Harness, model, reasoning and permission mode inherit unless target overrides them; a role with no target or profile runs on its Settings > Routing route when one is set, and orchestrator_capabilities lists the routes. permissionMode may only narrow. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only this chat's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on a later task_status. An async child's completion wakes this chat through a message, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -615,7 +615,7 @@ fn thread_tool_list() -> Value {
                         "additionalProperties": false
                     },
                     "title": { "type": "string", "maxLength": 512 },
-                    "role": { "type": "string", "enum": ["implementation", "research", "review", "design", "test", "general"] },
+                    "role": { "type": "string", "description": "worker | validator | research | design | general. With no target or profile, the child runs where Settings > Routing sends this role." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
@@ -1482,6 +1482,7 @@ impl ThreadTools {
         run["task"] = json!(task);
         run["title"] = json!(args["title"].as_str());
         run["role"] = json!(args["role"].as_str());
+        run["chosen"] = json!(chosen_fields(args));
         run["wait"] = json!(wait);
         run["clientRequestId"] = json!(args["clientRequestId"].as_str());
         let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
@@ -2868,6 +2869,20 @@ fn new_peer_entries(
             json!({ "id": rendered["id"], "fromChatId": rendered["fromChatId"], "text": rendered["text"] })
         })
         .collect()
+}
+
+fn chosen_fields(args: &Value) -> Vec<&'static str> {
+    let set = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
+    [
+        ("profile", &args["profile"]),
+        ("harness", &args["target"]["harness"]),
+        ("model", &args["target"]["model"]),
+        ("reasoning", &args["target"]["reasoning"]),
+    ]
+    .into_iter()
+    .filter(|(_, value)| set(value))
+    .map(|(name, _)| name)
+    .collect()
 }
 
 fn profile_target(profile: Option<&AgentProfile>, target: &Value) -> Value {

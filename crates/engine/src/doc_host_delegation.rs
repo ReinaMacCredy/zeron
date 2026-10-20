@@ -46,6 +46,10 @@ pub struct DelegateTaskParams {
     pub wake: Option<DelegationWake>,
     #[serde(default)]
     pub client_request_id: Option<String>,
+    #[serde(default)]
+    pub chosen: Vec<crate::routing::Chosen>,
+    #[serde(skip)]
+    pub route: Option<zeron_proto::ChildRoute>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -598,6 +602,7 @@ impl DocHost {
             finding_outcomes: Default::default(),
             findings_handed: Default::default(),
             findings_announced: Default::default(),
+            route: params.route.clone(),
         };
         workspace.create_delegated_chat(
             &chat_id,
@@ -1676,6 +1681,7 @@ mod tests {
             finding_outcomes: Default::default(),
             findings_handed: Default::default(),
             findings_announced: Default::default(),
+            route: None,
         }
     }
 

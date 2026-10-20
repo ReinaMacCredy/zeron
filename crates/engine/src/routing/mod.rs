@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use zeron_proto::{HarnessId, RouteTarget};
+use zeron_proto::{ChatConfig, ChildRoute, HarnessId, ReasoningLevel, RouteTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,10 +132,144 @@ pub fn check_target(target: &RouteTarget, known: impl Fn(HarnessId) -> bool) -> 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Chosen {
+    Profile,
+    Harness,
+    Model,
+    Reasoning,
+}
+
+impl Chosen {
+    fn name(self) -> &'static str {
+        match self {
+            Chosen::Profile => "profile",
+            Chosen::Harness => "harness",
+            Chosen::Model => "model",
+            Chosen::Reasoning => "reasoning",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Request<'a> {
+    pub role: Option<Role>,
+    pub chosen: &'a [Chosen],
+    pub harness: Option<HarnessId>,
+    pub model: Option<&'a str>,
+    pub reasoning: Option<ReasoningLevel>,
+    pub profile: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Resolved {
+    pub harness: Option<HarnessId>,
+    pub model: Option<String>,
+    pub reasoning: Option<ReasoningLevel>,
+    pub route: Option<ChildRoute>,
+}
+
+impl Request<'_> {
+    fn picked(&self) -> Vec<&'static str> {
+        let mut picked: Vec<&'static str> = self
+            .chosen
+            .iter()
+            .filter(|chosen| **chosen != Chosen::Reasoning)
+            .map(|chosen| chosen.name())
+            .collect();
+        if picked.is_empty() {
+            let present = [
+                (self.profile, Chosen::Profile),
+                (self.harness.is_some(), Chosen::Harness),
+                (self.model.is_some(), Chosen::Model),
+            ];
+            picked = present
+                .into_iter()
+                .filter(|(set, _)| *set)
+                .map(|(_, chosen)| chosen.name())
+                .collect();
+        }
+        picked
+    }
+
+    fn explicit(&self) -> Resolved {
+        Resolved {
+            harness: self.harness,
+            model: self.model.map(str::to_string),
+            reasoning: self.reasoning,
+            route: None,
+        }
+    }
+}
+
+pub fn resolve(
+    request: &Request,
+    owner: Option<&ChatConfig>,
+    settings: &RoutingSettings,
+    offered: &[HarnessId],
+) -> Resolved {
+    let explicit = request.explicit();
+    let Some(role) = request.role else {
+        return explicit;
+    };
+    let route = settings.route(role);
+    if *route == RoleRoute::Off {
+        return explicit;
+    }
+    let table = match route {
+        RoleRoute::Target(target) => Some(target.clone()),
+        _ => None,
+    };
+    let record = |source: &str, reason: Option<String>| {
+        Some(ChildRoute {
+            source: source.to_string(),
+            role: Some(role.name().to_string()),
+            table: table.clone(),
+            reason,
+            ..ChildRoute::default()
+        })
+    };
+    let picked = request.picked();
+    if !picked.is_empty() {
+        return Resolved {
+            route: record(
+                ChildRoute::CHOSEN_BY_AGENT,
+                Some(format!("The lead passed {}", picked.join(" and "))),
+            ),
+            ..explicit
+        };
+    }
+    let parent = |route| Resolved {
+        harness: owner.map(|config| config.harness),
+        model: owner.and_then(|config| config.model.clone()),
+        reasoning: request
+            .reasoning
+            .or(owner.and_then(|config| config.reasoning)),
+        route,
+    };
+    match route {
+        RoleRoute::Off => explicit,
+        RoleRoute::SameAsParent => parent(record(ChildRoute::ROUTED, None)),
+        RoleRoute::Target(target) if offered.contains(&target.harness) => Resolved {
+            harness: Some(target.harness),
+            model: target.model.clone(),
+            reasoning: request.reasoning.or(target.reasoning),
+            route: record(ChildRoute::ROUTED, None),
+        },
+        RoleRoute::Target(target) => parent(record(
+            ChildRoute::FELL_BACK,
+            Some(format!(
+                "{} is not available",
+                target.harness.display_name()
+            )),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::ReasoningLevel;
 
     #[test]
     fn roles_parse_their_names_and_the_old_aliases() {
@@ -204,5 +338,150 @@ mod tests {
         assert!(check_target(&target(HarnessId::Codex), |_| true).is_ok());
         assert!(check_target(&target(HarnessId::Acp), |_| true).is_err());
         assert!(check_target(&target(HarnessId::Grok), |_| false).is_err());
+    }
+
+    fn haiku() -> RouteTarget {
+        RouteTarget {
+            harness: HarnessId::ClaudeCode,
+            model: Some("claude-haiku-5-5".into()),
+            reasoning: Some(ReasoningLevel::Low),
+        }
+    }
+
+    fn owner() -> ChatConfig {
+        ChatConfig {
+            harness: HarnessId::Codex,
+            model: Some("gpt-5.6-sol".into()),
+            reasoning: Some(ReasoningLevel::High),
+            model_options: Default::default(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Ask,
+            instructions: String::new(),
+            profile_id: None,
+            instance_id: None,
+            disabled_tools: Vec::new(),
+        }
+    }
+
+    fn routed_worker() -> RoutingSettings {
+        let mut settings = RoutingSettings::default();
+        settings
+            .roles
+            .insert(Role::Worker, RoleRoute::Target(haiku()));
+        settings
+            .roles
+            .insert(Role::Validator, RoleRoute::SameAsParent);
+        settings
+    }
+
+    const OFFERED: [HarnessId; 2] = [HarnessId::ClaudeCode, HarnessId::Codex];
+
+    #[test]
+    fn a_routed_role_runs_on_its_target() {
+        let request = Request {
+            role: Role::parse("implementation"),
+            ..Request::default()
+        };
+        let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+        assert_eq!(resolved.harness, Some(HarnessId::ClaudeCode));
+        assert_eq!(resolved.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(resolved.reasoning, Some(ReasoningLevel::Low));
+        let route = resolved.route.unwrap();
+        assert_eq!(route.source, ChildRoute::ROUTED);
+        assert_eq!(route.role.as_deref(), Some("worker"));
+        assert_eq!(route.table, Some(haiku()));
+    }
+
+    #[test]
+    fn an_agent_choice_wins_over_the_route() {
+        for (chosen, model, profile, passed) in [
+            (
+                vec![Chosen::Model],
+                Some("claude-sonnet-5-5"),
+                false,
+                "model",
+            ),
+            (vec![Chosen::Profile], None, true, "profile"),
+            (vec![], Some("claude-sonnet-5-5"), false, "model"),
+        ] {
+            let request = Request {
+                role: Some(Role::Worker),
+                chosen: &chosen,
+                harness: Some(HarnessId::ClaudeCode),
+                model,
+                profile,
+                ..Request::default()
+            };
+            let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+            assert_eq!(resolved.model.as_deref(), model);
+            let route = resolved.route.unwrap();
+            assert_eq!(route.source, ChildRoute::CHOSEN_BY_AGENT);
+            assert_eq!(route.table, Some(haiku()));
+            assert!(route.reason.unwrap().contains(passed));
+        }
+    }
+
+    #[test]
+    fn reasoning_alone_keeps_the_route() {
+        let chosen = [Chosen::Reasoning];
+        let request = Request {
+            role: Some(Role::Worker),
+            chosen: &chosen,
+            reasoning: Some(ReasoningLevel::High),
+            ..Request::default()
+        };
+        let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+        assert_eq!(resolved.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(resolved.reasoning, Some(ReasoningLevel::High));
+        assert_eq!(resolved.route.unwrap().source, ChildRoute::ROUTED);
+    }
+
+    #[test]
+    fn off_and_missing_roles_resolve_as_today() {
+        for role in [None, Some(Role::Research)] {
+            let request = Request {
+                role,
+                model: Some("gpt-5.6-luna"),
+                ..Request::default()
+            };
+            let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+            assert_eq!(
+                resolved,
+                Resolved {
+                    model: Some("gpt-5.6-luna".into()),
+                    ..Resolved::default()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn same_as_parent_and_an_unavailable_target_take_the_parent() {
+        let request = Request {
+            role: Some(Role::Validator),
+            ..Request::default()
+        };
+        let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+        assert_eq!(resolved.harness, Some(HarnessId::Codex));
+        assert_eq!(resolved.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(resolved.route.unwrap().source, ChildRoute::ROUTED);
+
+        let request = Request {
+            role: Some(Role::Worker),
+            ..Request::default()
+        };
+        let resolved = resolve(
+            &request,
+            Some(&owner()),
+            &routed_worker(),
+            &[HarnessId::Codex],
+        );
+        assert_eq!(resolved.harness, Some(HarnessId::Codex));
+        let route = resolved.route.unwrap();
+        assert_eq!(route.source, ChildRoute::FELL_BACK);
+        assert_eq!(
+            route.reason.as_deref(),
+            Some("Claude Code is not available")
+        );
     }
 }

@@ -2115,6 +2115,7 @@ mod tests {
                 finding_outcomes: Default::default(),
                 findings_handed: Default::default(),
                 findings_announced: Default::default(),
+                route: None,
             });
             chat
         };

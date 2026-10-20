@@ -924,6 +924,19 @@ impl HarnessRegistry {
             .insert(instance.id.clone(), (instance, harness));
     }
 
+    /// Installed and enabled harnesses a child may run on; the mock only under `ZERON_HARNESS=mock`.
+    pub fn offered(&self) -> Vec<HarnessDescriptor> {
+        let mock = std::env::var("ZERON_HARNESS").is_ok_and(|v| v.trim() == "mock");
+        self.descriptors()
+            .into_iter()
+            .filter(|d| {
+                d.installed
+                    && (descriptor_enabled(d) || (mock && d.id == HarnessId::Mock))
+                    && (mock || d.id != HarnessId::Mock)
+            })
+            .collect()
+    }
+
     /// Catalog for `ListHarnesses` — never forces a lazy resolve.
     pub fn descriptors(&self) -> Vec<HarnessDescriptor> {
         let enabled = self.enabled_set();
