@@ -682,13 +682,23 @@ impl TaskCard {
         if self.is_starting(&task_id) {
             return;
         }
+        if let Some(open) = self.open.as_mut() {
+            open.refused = false;
+        }
+        let taken = self.take_patch(cx);
+        if self.open.as_ref().is_some_and(|open| open.refused) {
+            if let Some((task_id, patch)) = taken {
+                cx.emit(TaskCardEvent::Update { task_id, patch });
+            }
+            return;
+        }
         self.starting.insert(task_id.clone(), Instant::now());
         cx.spawn(async move |card, cx| {
             cx.background_executor().timer(START_PENDING).await;
             card.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
-        let mut patch = self.take_patch(cx).map(|(_, patch)| patch);
+        let mut patch = taken.map(|(_, patch)| patch);
         if orchestrate.is_some() && context != saved_context {
             patch.get_or_insert_default().context = Some(context);
         }
