@@ -105,7 +105,7 @@ fn generation(session: &SessionHandle, kind: &str) -> Option<Option<u64>> {
                 (SessionCommandPayload::Run { .. }, "run")
                     | (SessionCommandPayload::Steer { .. }, "steer")
                     | (SessionCommandPayload::RespondInput { .. }, "respondInput")
-                    | (SessionCommandPayload::Interrupt {}, "interrupt")
+                    | (SessionCommandPayload::Interrupt { .. }, "interrupt")
             )
         })
         .map(|command| command.computer_generation)

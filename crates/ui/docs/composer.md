@@ -51,7 +51,7 @@ With an empty composer, Cmd+Enter does the same as clicking the newest row's but
 
 ## Stopping the agent
 
-With an empty composer during a run, the send button becomes **Stop**. You can also type `/stop`. To stop with Escape, turn on **Stop agent with Escape** in Settings > General; it is off by default. Enter never stops a run.
+With an empty composer during a run, the send button becomes **Stop**. You can also type `/stop`. To stop with Escape, turn on **Stop agent with Escape** in Settings > General; it is off by default. Enter never stops a run. Stop ends the agent's current turn only: subagents and background shells it started keep running and report back when they finish. Stop those from their pill above the composer (see [Delegation and subagents](zeron://docs/delegation)).
 
 When a turn stopped short (you stopped it, or it ended with an error) and the composer is empty, the button becomes a play triangle (**Resume**). Click it to have the agent pick up where it left off.
 

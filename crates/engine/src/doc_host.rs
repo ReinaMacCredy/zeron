@@ -4901,23 +4901,31 @@ impl DocHost {
     /// Stop the active turn without treating the resulting Idle transition as
     /// permission to release the next queued message. The same lock used by
     /// drains closes the race between clicking Cancel and the status watcher.
-    /// A parked runtime still running background work is stopped too: the
-    /// idle reaper spares it, so Stop is what ends that work.
+    /// The user's Stop ends only the turn: background subagents and shells
+    /// keep running and report back. A `teardown` (the Supervisor's pause)
+    /// also ends a parked runtime still running background work, which the
+    /// idle reaper spares.
     async fn interrupt_and_pause_queue(
         &self,
         sessions: &SessionsEngine,
         handle: &Arc<ChatDocHandle>,
+        teardown: bool,
     ) -> Result<bool, EngineError> {
         let _drain = handle.drain_lock.lock().await;
         if !sessions.turn_in_flight(&handle.chat_id)
-            && !sessions.holds_background_work(&handle.chat_id)
+            && !(teardown && sessions.holds_background_work(&handle.chat_id))
         {
             return Ok(false);
         }
         handle.queue_paused.store(true, Ordering::Release);
         self.cancel_held_sends(handle);
         sessions.cancel_agent_compact(&handle.chat_id);
-        match sessions.interrupt(&handle.chat_id).await {
+        let stopped = if teardown {
+            sessions.interrupt(&handle.chat_id).await
+        } else {
+            sessions.stop_turn(&handle.chat_id).await
+        };
+        match stopped {
             Ok(true) => Ok(true),
             Ok(false) => {
                 handle.queue_paused.store(false, Ordering::Release);
@@ -5079,7 +5087,7 @@ impl DocHost {
         // Same reading of "busy" as the drain: a turn parked on a question is
         // still a turn, and it has to be stopped before this one starts.
         // The message replaces the turn, not the agent: its background work
-        // keeps running (only the user's Stop tears that down).
+        // keeps running.
         if send == QueueSend::Interrupt && sessions.turn_in_flight(chat_id) {
             sessions.stop_turn(chat_id).await?;
         }
@@ -6300,7 +6308,7 @@ impl DocHost {
                 )
                 .await
             }
-            SessionCommandPayload::Interrupt {} => {
+            SessionCommandPayload::Interrupt { teardown } => {
                 self.await_earlier_prompts(sessions, handle, &entry.id)
                     .await;
                 *lock(&handle.stopped_by) = Some(entry.id.clone());
@@ -6330,7 +6338,9 @@ impl DocHost {
                 let turn = sessions
                     .session_status(chat_id)
                     .and_then(|session| session.started_at);
-                let stopped = self.interrupt_and_pause_queue(sessions, handle).await?;
+                let stopped = self
+                    .interrupt_and_pause_queue(sessions, handle, *teardown)
+                    .await?;
                 if stopped && let Some(turn) = turn {
                     self.dispose_turn_wakes(chat_id, turn).await;
                 }

@@ -6604,7 +6604,7 @@ mod tests {
                 commands[0]["command"].clone()
             )
             .unwrap(),
-            zeron_doc::SessionCommandPayload::Interrupt {}
+            zeron_doc::SessionCommandPayload::Interrupt { teardown: false }
         );
         assert_eq!(
             rig.tools

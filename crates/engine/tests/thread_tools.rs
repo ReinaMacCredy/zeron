@@ -1056,7 +1056,7 @@ fn queue_interrupt(core: &EngineCore, chat_id: &str) {
         .doc()
         .queue_command(&SessionCommandEntry {
             id: "stop-1".into(),
-            payload: SessionCommandPayload::Interrupt {},
+            payload: SessionCommandPayload::Interrupt { teardown: false },
             issued_by: "viewer".into(),
             issued_at: chrono::Utc::now().timestamp_millis(),
             based_on: None::<CommandBasedOn>,

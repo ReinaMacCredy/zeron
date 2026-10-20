@@ -48,7 +48,10 @@ pub enum SessionCommandPayload {
         prompt: String,
         message_id: Option<String>,
     },
-    Interrupt {},
+    Interrupt {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        teardown: bool,
+    },
     #[serde(rename_all = "camelCase")]
     RespondInput {
         request_id: String,
@@ -61,7 +64,7 @@ impl SessionCommandPayload {
         match self {
             SessionCommandPayload::Run { .. } => SessionCommandKind::Run,
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
-            SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
+            SessionCommandPayload::Interrupt { .. } => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
         }
     }
@@ -285,8 +288,16 @@ mod tests {
     #[test]
     fn newer_interrupt_still_supersedes_older_interrupt() {
         let entries = vec![
-            entry("i1", SessionCommandPayload::Interrupt {}, 1_000),
-            entry("i2", SessionCommandPayload::Interrupt {}, 2_000),
+            entry(
+                "i1",
+                SessionCommandPayload::Interrupt { teardown: false },
+                1_000,
+            ),
+            entry(
+                "i2",
+                SessionCommandPayload::Interrupt { teardown: false },
+                2_000,
+            ),
         ];
         let context = cx(&entries, &NEVER, &NEVER, 3_000, None);
         assert_eq!(
@@ -301,7 +312,11 @@ mod tests {
 
     #[test]
     fn interrupt_for_past_turn_is_superseded() {
-        let mut e = entry("c1", SessionCommandPayload::Interrupt {}, 1_000);
+        let mut e = entry(
+            "c1",
+            SessionCommandPayload::Interrupt { teardown: false },
+            1_000,
+        );
         e.based_on = Some(CommandBasedOn {
             turn_id: Some("turn-1".into()),
             frontier: None,
