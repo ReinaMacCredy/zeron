@@ -785,6 +785,7 @@ impl HarnessesPage {
         self.error = None;
         self.wizard = None;
         self.confirm_delete = None;
+        self.instance_write_task = None;
         self.instance_accounts.clear();
         self.instances = Loadable::Idle;
         self.harnesses = Loadable::Idle;
