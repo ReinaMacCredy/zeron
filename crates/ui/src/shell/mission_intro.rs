@@ -1,5 +1,5 @@
 use super::*;
-use crate::tasks::{SampleRow, StripTree, TreeStatus};
+use crate::tasks::{SampleRow, StripTree, TaskCenter, TreeStatus, tree_glyph};
 use std::time::Instant;
 use zeron_proto::TaskMode;
 
@@ -29,7 +29,7 @@ const PAGES: [Page; 4] = [
     },
     Page {
         title: "A lead and a Supervisor watch",
-        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor tells you when a mission needs you.",
+        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
     },
 ];
 
@@ -345,21 +345,315 @@ fn read_chip(theme: &Theme, model: &str, title: &'static str) -> gpui::Div {
         .child(title)
 }
 
-fn plan_row(theme: &Theme, number: usize, title: &'static str) -> gpui::Div {
+fn mini_solid(theme: &Theme, label: &'static str) -> gpui::Div {
     div()
-        .h(px(24.0))
+        .flex_none()
+        .h(px(22.0))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .bg(theme.solid)
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.on_solid)
+        .child(label)
+}
+
+fn plan_card(theme: &Theme, number: usize, title: &'static str) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .pt(px(9.0))
+        .px(px(10.0))
+        .pb(px(7.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_card)
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(TaskCenter::avatar(None, theme).mt(px(1.0)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(4.0))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(format!("Step {number}")),
+                                )
+                                .child("\u{b7} Not started"),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(title),
+                        ),
+                )
+                .child(TaskCenter::chip(TreeStatus::Queued, "Planned", true, theme)),
+        )
+        .child(
+            div().mt(px(5.0)).ml(px(30.0)).flex().justify_end().child(
+                div()
+                    .h(px(20.0))
+                    .pl(px(8.0))
+                    .pr(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.text_muted)
+                    .child("Spec")
+                    .child(
+                        icons::icon(icons::LUCIDE_CHEVRON_RIGHT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    ),
+            ),
+        )
+}
+
+fn plan_visual(theme: &Theme) -> AnyElement {
+    let waiting = TreeStatus::Waiting.tone(theme);
+    let pill = div()
+        .flex_none()
+        .h(px(22.0))
+        .pl(px(7.0))
+        .pr(px(9.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded_full()
+        .bg(waiting.opacity(0.15))
+        .text_size(crate::typography::ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(waiting)
+        .child(tree_glyph(TreeStatus::Waiting, 11.0, waiting, true))
+        .child("Needs you \u{b7} plan review");
+    let track = div()
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(crate::typography::ui_rems(12.0))
+        .child(div().flex_1().flex().gap(px(3.0)).children((0..3).map(|_| {
+            div()
+                .flex_1()
+                .h(px(5.0))
+                .rounded(px(2.5))
+                .bg(theme.wash(0.10))
+        })))
         .child(
             div()
-                .w(px(12.0))
-                .text_color(theme.text_faint)
-                .child(number.to_string()),
+                .flex()
+                .gap(px(3.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("0/3"),
+                )
+                .child("done"),
+        );
+    div()
+        .size_full()
+        .px(px(12.0))
+        .pt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(9.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child("Ship the shop"),
+                )
+                .child(pill)
+                .child(mini_solid(theme, "Approve and run")),
         )
-        .child(div().flex_1().text_color(theme.text).child(title))
-        .child(div().text_color(theme.text_faint).child("Planned"))
+        .child(track)
+        .child(plan_card(theme, 1, "Scaffold the app"))
+        .child(plan_card(theme, 2, "Product grid with filters"))
+        .into_any_element()
+}
+
+fn sheet_row(
+    theme: &Theme,
+    question: &'static str,
+    options: [&'static str; 2],
+    picked: Option<usize>,
+) -> gpui::Div {
+    let segments = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .h(px(22.0))
+        .p(px(2.0))
+        .rounded(px(7.0))
+        .bg(theme.wash(0.06))
+        .border_1()
+        .border_color(theme.border)
+        .children(options.into_iter().enumerate().map(|(ix, option)| {
+            let chosen = picked == Some(ix);
+            div()
+                .h(px(16.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .rounded(px(5.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .when(chosen, |el| {
+                    el.bg(theme.solid)
+                        .text_color(theme.on_solid)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .when(!chosen, |el| el.text_color(theme.text))
+                .child(option)
+        }));
+    div()
+        .h(px(34.0))
+        .pl(px(10.0))
+        .pr(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_t_1()
+        .border_color(crate::settings::widgets::row_divider(theme))
+        .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(question),
+        )
+        .child(segments)
+}
+
+fn supervisor_visual(theme: &Theme) -> AnyElement {
+    let (_, _, watching) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
+    let (_, _, working) = chat_status_tone(zeron_proto::ChatIndicator::Working, theme);
+    let status = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text_muted)
+        .child(div().size(px(7.0)).rounded_full().bg(watching))
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(watching)
+                .child("Watching"),
+        )
+        .child("1 mission \u{b7} 2 of 12 wakes this hour");
+    let header = div()
+        .h(px(30.0))
+        .pl(px(10.0))
+        .pr(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .child(crate::loaders::upload_progress_arc(
+            50,
+            12.0,
+            theme.text_faint.opacity(0.35),
+            working,
+        ))
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child("Ship the shop"),
+        )
+        .child(div().text_color(theme.warning).child("2 to answer"));
+    let footer = div()
+        .h(px(34.0))
+        .pl(px(10.0))
+        .pr(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .border_t_1()
+        .border_color(crate::settings::widgets::row_divider(theme))
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text_faint)
+        .child(div().flex_1().child("1 of 2 picked"))
+        .child(
+            div()
+                .h(px(22.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .rounded(px(7.0))
+                .bg(theme.solid)
+                .text_color(theme.on_solid)
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child("Send 1 to the Lead"),
+        );
+    div()
+        .size_full()
+        .px(px(14.0))
+        .pt(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(status)
+        .child(
+            div()
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(crate::settings::widgets::block_fill(theme))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(sheet_row(
+                    theme,
+                    "Use a Stripe test account?",
+                    ["Approve", "Use the mock"],
+                    Some(0),
+                ))
+                .child(sheet_row(
+                    theme,
+                    "Ship on Friday?",
+                    ["Yes", "Next week"],
+                    None,
+                ))
+                .child(footer),
+        )
+        .into_any_element()
 }
 
 fn intro_visual(page: usize, theme: &Theme) -> AnyElement {
@@ -396,55 +690,8 @@ fn intro_visual(page: usize, theme: &Theme) -> AnyElement {
                     .child(read_chip(theme, "gpt-5", "Pricing research")),
             )
             .into_any_element(),
-        1 => div()
-            .w(px(330.0))
-            .p(px(12.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.wash(0.03))
-            .child(
-                div()
-                    .mb(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("Plan ready \u{b7} 3 steps"),
-                    )
-                    .child(
-                        div()
-                            .h(px(24.0))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(8.0))
-                            .bg(theme.text)
-                            .text_color(theme.on_solid)
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("Approve and run"),
-                    ),
-            )
-            .child(plan_row(theme, 1, "Scaffold the app"))
-            .child(plan_row(theme, 2, "Product grid with filters"))
-            .child(plan_row(theme, 3, "Cart with persistence"))
-            .into_any_element(),
-        _ => div()
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .child(intro_chip(theme, "Lead", None))
-            .child("\u{2192} reviews each step \u{2192}")
-            .child(intro_chip(theme, "Supervisor", Some(icons::LUCIDE_SHIELD)))
-            .into_any_element(),
+        1 => plan_visual(theme),
+        _ => supervisor_visual(theme),
     }
 }
 

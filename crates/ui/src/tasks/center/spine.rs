@@ -320,7 +320,7 @@ impl TaskCenter {
                 .is_some_and(|pop| !pop.tween.settled_at(now))
     }
 
-    fn avatar(brand: Option<(&'static str, Option<Hsla>)>, theme: &Theme) -> gpui::Div {
+    pub(crate) fn avatar(brand: Option<(&'static str, Option<Hsla>)>, theme: &Theme) -> gpui::Div {
         let slot = div()
             .flex_none()
             .size(px(22.0))
@@ -340,7 +340,12 @@ impl TaskCenter {
         }
     }
 
-    fn chip(status: Status, word: &'static str, reduced: bool, theme: &Theme) -> AnyElement {
+    pub(crate) fn chip(
+        status: Status,
+        word: &'static str,
+        reduced: bool,
+        theme: &Theme,
+    ) -> AnyElement {
         let tone = status.tone(theme);
         let (bg, fg) = if status.muted() {
             (theme.wash(0.08), theme.text_muted)
