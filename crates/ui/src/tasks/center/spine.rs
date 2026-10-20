@@ -1761,18 +1761,16 @@ impl TaskCenter {
         } else {
             top + height + 5.0
         };
-        Some(
-            div()
-                .debug_selector(|| "task-center-drop-line".into())
-                .absolute()
-                .left(px(left - drag.origin.0))
-                .w(px(width))
-                .top(px(y - drag.origin.1))
-                .h(px(2.0))
-                .rounded(px(1.0))
-                .bg(theme.accent)
-                .into_any_element(),
-        )
+        let line = div()
+            .debug_selector(|| "task-center-drop-line".into())
+            .absolute()
+            .left(px(left - drag.origin.0))
+            .w(px(width))
+            .top(px(y - drag.origin.1))
+            .h(px(2.0))
+            .rounded(px(1.0))
+            .bg(theme.accent);
+        Some(gpui::deferred(line).priority(1).into_any_element())
     }
 
     pub(super) fn render_drawer(
