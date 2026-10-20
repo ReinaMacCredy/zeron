@@ -14227,8 +14227,12 @@ impl Shell {
                                 ),
                                 Flow::Ready { version, .. } => (
                                     format!("Zeron {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
-                                        .into(),
+                                    if update.installs_on_quit() {
+                                        "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                    } else {
+                                        "Restart to finish updating. Quitting Zeron does not install it."
+                                    }
+                                    .into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
                                         UpdatePromptButton::Restart,
