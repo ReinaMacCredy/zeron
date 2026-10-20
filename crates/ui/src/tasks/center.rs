@@ -1020,7 +1020,8 @@ impl TaskCenter {
         let (top, height) = drag.rows[drag.from];
         let first = drag.rows[lo.min(drag.from)];
         let last = drag.rows[hi.max(drag.from)];
-        drag.dy = (y - drag.start).clamp(first.0 - top - 6.0, last.0 + last.1 - top - height + 6.0);
+        let (min, max) = (first.0 - top - 6.0, last.0 + last.1 - top - height + 6.0);
+        drag.dy = (y - drag.start).clamp(min.min(max), max.max(min));
         drag.over = drop_index(&drag.rows, drag.from, drag.range, drag.dy);
         cx.notify();
     }
