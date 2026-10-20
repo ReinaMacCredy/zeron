@@ -286,6 +286,11 @@ struct Editor {
     _subscriptions: Vec<Subscription>,
 }
 
+enum Ask {
+    Loading { _fetch: gpui::Task<()> },
+    Ready(Vec<String>),
+}
+
 struct Leave {
     step: String,
     from: f32,
@@ -396,6 +401,7 @@ pub struct TaskCenter {
     gallery: Entity<ImageGallery>,
     picking: Option<gpui::Task<()>>,
     clock: Option<(Instant, gpui::Task<()>)>,
+    asks: HashMap<String, Ask>,
     focus: FocusHandle,
     shimmer_since: Instant,
     _subscriptions: Vec<Subscription>,
@@ -427,6 +433,7 @@ impl TaskCenter {
             gallery,
             picking: None,
             clock: None,
+            asks: HashMap::new(),
             state,
             task_id,
             selected: Selection::Lead,
@@ -1176,19 +1183,78 @@ impl TaskCenter {
             .collect()
     }
 
-    fn step_note(row: &StepRow, thread: Option<&Thread>) -> Option<String> {
+    fn question(&self, row: &StepRow) -> Option<(&str, usize)> {
+        let chat = row.step.chat_id.as_deref()?;
+        match self.asks.get(chat)? {
+            Ask::Ready(questions) => questions
+                .first()
+                .map(|first| (first.as_str(), questions.len() - 1)),
+            Ask::Loading { .. } => None,
+        }
+    }
+
+    fn step_note(&self, row: &StepRow, thread: Option<&Thread>) -> Option<String> {
         let delegation = thread.and_then(|t| t.delegation.as_ref());
         let (status, _) = super::tree::Status::of_step(row, delegation.map(|d| d.0));
-        let preview = || thread.and_then(|t| t.preview.clone());
         match status {
             super::tree::Status::Failed => delegation
                 .filter(|(status, _)| retryable(*status))
                 .and_then(|(_, summary)| summary.clone())
-                .or_else(preview),
-            super::tree::Status::Waiting if row.indicator == Some(ChatIndicator::AwaitingInput) => {
-                preview()
-            }
+                .or_else(|| thread.and_then(|t| t.preview.clone())),
+            super::tree::Status::Waiting => self.question(row).map(|(question, more)| match more {
+                0 => question.to_string(),
+                more => format!("{question} +{more}"),
+            }),
             _ => None,
+        }
+    }
+
+    fn sync_asks(
+        &mut self,
+        shown: &[(StepRow, Option<Tag>, Option<Thread>)],
+        cx: &mut Context<Self>,
+    ) {
+        let awaiting: Vec<String> = shown
+            .iter()
+            .filter(|(row, _, thread)| {
+                thread.is_some() && row.indicator == Some(ChatIndicator::AwaitingInput)
+            })
+            .filter_map(|(row, ..)| row.step.chat_id.clone())
+            .collect();
+        self.asks.retain(|chat, _| awaiting.contains(chat));
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        for chat in awaiting {
+            if self.asks.contains_key(&chat) {
+                continue;
+            }
+            let id = chat.clone();
+            let engine = engine.clone();
+            let fetch = cx.spawn(async move |center, cx| {
+                let questions =
+                    crate::composer::pending_questions(&engine, &id, cx.background_executor())
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|question| {
+                            if question.question.trim().is_empty() {
+                                question.header
+                            } else {
+                                question.question
+                            }
+                        })
+                        .collect();
+                center
+                    .update(cx, |center, cx| {
+                        if let Some(ask) = center.asks.get_mut(&id) {
+                            *ask = Ask::Ready(questions);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+            self.asks.insert(chat, Ask::Loading { _fetch: fetch });
         }
     }
 

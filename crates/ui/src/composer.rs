@@ -42,6 +42,7 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod ask_pill;
+pub(crate) use ask_pill::pending_questions;
 pub(crate) mod background;
 mod chip;
 mod limit_pill;

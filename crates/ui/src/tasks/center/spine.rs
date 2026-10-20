@@ -990,15 +990,19 @@ impl TaskCenter {
         let line = matches!(status, Status::Waiting | Status::Failed).then(|| {
             let tone = status.tone(theme);
             let waiting = status == Status::Waiting;
-            let text = Self::step_note(row, thread)
-                .map(|text| crate::transcript::single_line(&text))
-                .unwrap_or_else(|| {
-                    if waiting {
-                        "This step is waiting for you.".into()
-                    } else {
-                        "This step stopped before it finished.".into()
-                    }
-                });
+            let (text, more) = if waiting {
+                self.question(row).map_or_else(
+                    || ("This step is waiting for you.".to_string(), 0),
+                    |(question, more)| (crate::transcript::single_line(question), more),
+                )
+            } else {
+                (
+                    self.step_note(row, thread)
+                        .map(|text| crate::transcript::single_line(&text))
+                        .unwrap_or_else(|| "This step stopped before it finished.".into()),
+                    0,
+                )
+            };
             let action = if waiting {
                 let id = step_id.clone();
                 Some(
@@ -1049,6 +1053,12 @@ impl TaskCenter {
                 .text_color(theme.text)
                 .child(tree::glyph(status, 13.0, tone, reduced))
                 .child(div().flex_1().min_w_0().line_clamp(2).child(text))
+                .children((more > 0).then(|| {
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .child(format!("+{more}"))
+                }))
                 .children(action)
         });
         let mut actions: Vec<AnyElement> = Vec::new();
@@ -2085,6 +2095,7 @@ impl TaskCenter {
         shown: &[(StepRow, Option<Tag>, Option<Thread>)],
         cx: &mut Context<Self>,
     ) -> Facts {
+        self.sync_asks(shown, cx);
         let state = self.state.clone();
         let (lead_chat, lead_agent) = {
             let state = state.read(cx);
@@ -2119,7 +2130,7 @@ impl TaskCenter {
                     .as_ref()
                     .and_then(|t| t.delegation.as_ref().map(|d| d.0)),
             );
-            let text = Self::step_note(row, thread.as_ref());
+            let text = self.step_note(row, thread.as_ref());
             BarRow {
                 id: row.step.id.clone(),
                 status,

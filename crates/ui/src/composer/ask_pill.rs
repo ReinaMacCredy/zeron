@@ -115,18 +115,7 @@ impl Composer {
         let task = cx.spawn(async move |this, cx| {
             // The status flips to AwaitingInput before the Input part commits.
             for _ in 0..FETCH_ATTEMPTS {
-                let pending = match fetch_pending(&engine, &id).await {
-                    Ok(Some(raw)) => {
-                        cx.background_executor()
-                            .spawn(async move { decode_pending(raw) })
-                            .await
-                    }
-                    Ok(None) => None,
-                    Err(err) => {
-                        tracing::debug!(chat_id = %id, error = %err, "ask snapshot failed");
-                        None
-                    }
-                };
+                let pending = pending_ask(&engine, &id, cx.background_executor()).await;
                 let landed = this.update(cx, |composer, cx| {
                     if !composer.ask.awaiting.contains(&id) {
                         return true;
@@ -726,6 +715,35 @@ fn ask_pill_body(
                     .child("· Input"),
             )
         })
+}
+
+async fn pending_ask(
+    engine: &crate::state::EngineHandle,
+    chat_id: &str,
+    executor: &gpui::BackgroundExecutor,
+) -> Option<(String, Vec<zeron_proto::UserInputQuestion>)> {
+    match fetch_pending(engine, chat_id).await {
+        Ok(Some(raw)) => executor.spawn(async move { decode_pending(raw) }).await,
+        Ok(None) => None,
+        Err(err) => {
+            tracing::debug!(chat_id = %chat_id, error = %err, "ask snapshot failed");
+            None
+        }
+    }
+}
+
+pub(crate) async fn pending_questions(
+    engine: &crate::state::EngineHandle,
+    chat_id: &str,
+    executor: &gpui::BackgroundExecutor,
+) -> Option<Vec<zeron_proto::UserInputQuestion>> {
+    for _ in 0..FETCH_ATTEMPTS {
+        if let Some((_, questions)) = pending_ask(engine, chat_id, executor).await {
+            return Some(questions);
+        }
+        executor.timer(FETCH_RETRY).await;
+    }
+    None
 }
 
 /// Dropping the scoped subscription after one frame stops the engine building the full mirror.
