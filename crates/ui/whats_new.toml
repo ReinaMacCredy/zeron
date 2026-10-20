@@ -25,7 +25,7 @@ id = "add-provider"
 title = "Add any provider, or an agent from the ACP registry"
 description = "Run several accounts of one agent side by side, or add Amp, Auggie and other ACP agents in a few clicks."
 image = "add-provider.jpg"
-details = "Each instance signs in to its own home and gets its own tab in the model picker."
+details = "Claude, Codex and Pi instances can sign in to a home of their own, and every instance gets its own tab in the model picker."
 
 [[entry.features]]
 id = "topic-compaction"
@@ -51,7 +51,7 @@ description = "Drag unstarted steps into a new order, right-click a step for its
 [[entry.features]]
 id = "mission-tree"
 title = "Follow a mission as a tree"
-description = "The lead's strip draws each step on a branch as it starts, and Mission Control lays the steps around a spine with each step's token count. Click a step to open its thread in a drawer."
+description = "The lead's strip draws each step on a branch as the plan arrives, and Mission Control lays the steps around a spine with each step's token count. Click a step to open its thread in a drawer."
 image = "mission-tree.jpg"
 details = "The Supervisor's mission cards use the same tree."
 
@@ -64,7 +64,7 @@ image = "task-card-context.jpg"
 [[entry.features]]
 id = "fold-mission-threads"
 title = "Fold a mission's threads in the sidebar"
-description = "Collapse a lead's step threads under its row; it still shows what is running and what needs you."
+description = "Collapse a lead's step threads under its row; it still shows how many steps it has and the most pressing state among them: asking you, failed, or running."
 
 [[entry.features]]
 id = "smaller-things-0-2-114"
