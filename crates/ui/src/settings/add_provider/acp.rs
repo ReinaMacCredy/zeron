@@ -322,6 +322,8 @@ impl AddProviderDialog {
     }
 
     pub(super) fn back_to_search(&mut self, cx: &mut Context<Self>) {
+        self.registry.prepare_task = None;
+        self.registry.preparing = None;
         self.acp = None;
         self.selected = None;
         self.driver = self.tile;

@@ -547,13 +547,16 @@ impl AddProviderDialog {
     }
 
     fn step_reachable(&self, step: Step, cx: &Context<Self>) -> bool {
+        if self.busy() {
+            return false;
+        }
         if self.editing.is_some() {
             return step != Step::Provider;
         }
         if self.acp.is_none() {
             return true;
         }
-        if self.sign_in.is_some() || self.registry.preparing.is_some() || self.saving {
+        if self.sign_in.is_some() {
             return false;
         }
         match step {
