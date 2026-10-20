@@ -9,7 +9,7 @@ hero = "mission-control.jpg"
 [[entry.features]]
 id = "mission-control"
 title = "Mission Control runs a task as a plan"
-description = "A lead agent breaks a task into steps and runs each one on its own thread. Approve the plan, edit its steps, and follow every step as a tree on the Mission Control page and at the top of the lead's thread."
+description = "A lead agent breaks a task into steps and runs each one on its own thread. Approve the plan, edit its steps, and follow them on the Mission Control page, where a header tracks every step at a glance and each step is a card with its agent, tokens and spec."
 image = "mission-control.jpg"
 details = "Press Shift+Tab in the composer to start a mission, or make a running chat its lead. The Missions widget on Home tracks them all."
 
@@ -18,7 +18,7 @@ id = "supervisor"
 title = "A Supervisor that watches your missions"
 description = "It wakes when a step fails, a lead asks, or two missions want the same port, and brings you only what needs you."
 image = "supervisor.jpg"
-details = "Answer from one feed, see what each nudge changed, and set what it may do on its own behind the gear."
+details = "Each mission's decisions form one sheet: pick your answers and one Send takes them all to the lead. Behind the gear, Decide for me lets it answer and approve plans for you, and a second switch lets it change a mission's goal or spend."
 
 [[entry.features]]
 id = "add-provider"
@@ -51,9 +51,9 @@ description = "Drag unstarted steps into a new order, right-click a step for its
 [[entry.features]]
 id = "mission-tree"
 title = "Follow a mission as a tree"
-description = "The lead's strip draws each step on a branch as it starts, and Mission Control lays the steps around a spine with each step's token count. Click a step to open its thread in a drawer."
+description = "The lead's strip draws each step on a branch as it starts, and Mission Control lays the steps around a spine with each step's token count. Click a row or a card to open that step's thread."
 image = "mission-tree.jpg"
-details = "The Supervisor's mission cards use the same tree."
+details = "The Supervisor's mission cards use the same tree. A step with no thread yet opens Mission Control on that step."
 
 [[entry.features]]
 id = "task-card-context"
