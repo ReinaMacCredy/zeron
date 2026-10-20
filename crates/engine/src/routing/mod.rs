@@ -1,5 +1,6 @@
 pub mod guidance;
 pub mod preview;
+pub mod quota;
 
 use std::collections::BTreeMap;
 
@@ -134,6 +135,14 @@ pub struct QuotaState {
     pub exhausted: bool,
 }
 
+pub fn target_of(config: &ChatConfig) -> RouteTarget {
+    RouteTarget {
+        harness: config.harness,
+        model: config.model.clone(),
+        reasoning: config.reasoning,
+    }
+}
+
 pub fn check_target(target: &RouteTarget, known: impl Fn(HarnessId) -> bool) -> Result<(), String> {
     if target.harness == HarnessId::Acp || !known(target.harness) {
         return Err(format!(
@@ -217,7 +226,7 @@ impl Request<'_> {
 
 pub fn resolve(
     request: &Request,
-    owner: Option<&ChatConfig>,
+    owner: Option<&RouteTarget>,
     settings: &RoutingSettings,
     offered: &[HarnessId],
 ) -> Resolved {
@@ -253,11 +262,11 @@ pub fn resolve(
         };
     }
     let parent = |route| Resolved {
-        harness: owner.map(|config| config.harness),
-        model: owner.and_then(|config| config.model.clone()),
+        harness: owner.map(|parent| parent.harness),
+        model: owner.and_then(|parent| parent.model.clone()),
         reasoning: request
             .reasoning
-            .or(owner.and_then(|config| config.reasoning)),
+            .or(owner.and_then(|parent| parent.reasoning)),
         route,
     };
     match route {
@@ -394,7 +403,12 @@ pub(crate) mod tests {
             role: Role::parse("implementation"),
             ..Request::default()
         };
-        let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+        let resolved = resolve(
+            &request,
+            Some(&target_of(&owner())),
+            &routed_worker(),
+            &OFFERED,
+        );
         assert_eq!(resolved.harness, Some(HarnessId::ClaudeCode));
         assert_eq!(resolved.model.as_deref(), Some("claude-haiku-5-5"));
         assert_eq!(resolved.reasoning, Some(ReasoningLevel::Low));
@@ -424,7 +438,12 @@ pub(crate) mod tests {
                 profile,
                 ..Request::default()
             };
-            let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+            let resolved = resolve(
+                &request,
+                Some(&target_of(&owner())),
+                &routed_worker(),
+                &OFFERED,
+            );
             assert_eq!(resolved.model.as_deref(), model);
             let route = resolved.route.unwrap();
             assert_eq!(route.source, ChildRoute::CHOSEN_BY_AGENT);
@@ -442,7 +461,12 @@ pub(crate) mod tests {
             reasoning: Some(ReasoningLevel::High),
             ..Request::default()
         };
-        let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+        let resolved = resolve(
+            &request,
+            Some(&target_of(&owner())),
+            &routed_worker(),
+            &OFFERED,
+        );
         assert_eq!(resolved.model.as_deref(), Some("claude-haiku-5-5"));
         assert_eq!(resolved.reasoning, Some(ReasoningLevel::High));
         assert_eq!(resolved.route.unwrap().source, ChildRoute::ROUTED);
@@ -456,7 +480,12 @@ pub(crate) mod tests {
                 model: Some("gpt-5.6-luna"),
                 ..Request::default()
             };
-            let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+            let resolved = resolve(
+                &request,
+                Some(&target_of(&owner())),
+                &routed_worker(),
+                &OFFERED,
+            );
             assert_eq!(
                 resolved,
                 Resolved {
@@ -473,7 +502,12 @@ pub(crate) mod tests {
             role: Some(Role::Validator),
             ..Request::default()
         };
-        let resolved = resolve(&request, Some(&owner()), &routed_worker(), &OFFERED);
+        let resolved = resolve(
+            &request,
+            Some(&target_of(&owner())),
+            &routed_worker(),
+            &OFFERED,
+        );
         assert_eq!(resolved.harness, Some(HarnessId::Codex));
         assert_eq!(resolved.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(resolved.route.unwrap().source, ChildRoute::ROUTED);
@@ -484,7 +518,7 @@ pub(crate) mod tests {
         };
         let resolved = resolve(
             &request,
-            Some(&owner()),
+            Some(&target_of(&owner())),
             &routed_worker(),
             &[HarnessId::Codex],
         );

@@ -34,6 +34,19 @@ struct Limited {
     auto: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Deferred {
+    chat_id: String,
+    at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Due {
+    Resume(Continuation),
+    Start(String),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Stored {
@@ -45,6 +58,8 @@ struct Stored {
     after_restart: Vec<Continuation>,
     #[serde(default)]
     restart_recorded_at: i64,
+    #[serde(default)]
+    deferred: Vec<Deferred>,
 }
 
 fn enabled() -> bool {
@@ -58,6 +73,7 @@ impl Default for Stored {
             limited: Vec::new(),
             after_restart: Vec::new(),
             restart_recorded_at: 0,
+            deferred: Vec::new(),
         }
     }
 }
@@ -78,9 +94,17 @@ impl Stored {
         }
     }
 
-    fn take_due(&mut self, now: i64) -> (Vec<Continuation>, Option<i64>) {
+    fn take_due(&mut self, now: i64) -> (Vec<Due>, Option<i64>) {
         let mut due = Vec::new();
         let mut next: Option<i64> = None;
+        self.deferred.retain(|entry| {
+            if entry.at <= now {
+                due.push(Due::Start(entry.chat_id.clone()));
+                return false;
+            }
+            next = Some(next.map_or(entry.at, |next| next.min(entry.at)));
+            true
+        });
         self.limited.retain(|entry| {
             let Some(resets_at) = entry.resets_at else {
                 return true;
@@ -90,7 +114,7 @@ impl Stored {
             }
             let at = resets_at + RESET_SLACK_MS;
             if at <= now {
-                due.push(entry.at.clone());
+                due.push(Due::Resume(entry.at.clone()));
                 return false;
             }
             next = Some(next.map_or(at, |next| next.min(at)));
@@ -186,6 +210,26 @@ impl ResumeSchedule {
         });
     }
 
+    /// A child held for its route's reset starts at `at`.
+    pub fn defer_start(&self, chat_id: &str, at: i64) {
+        self.update(|stored| {
+            stored.deferred.retain(|entry| entry.chat_id != chat_id);
+            stored.deferred.push(Deferred {
+                chat_id: chat_id.to_owned(),
+                at,
+            });
+            true
+        });
+    }
+
+    pub fn deferred_until(&self, chat_id: &str) -> Option<i64> {
+        lock(&self.inner.stored)
+            .deferred
+            .iter()
+            .find(|entry| entry.chat_id == chat_id)
+            .map(|entry| entry.at)
+    }
+
     pub fn clear(&self, chat_id: &str) {
         self.update(|stored| {
             let before = stored.limited.len();
@@ -226,7 +270,7 @@ impl ResumeSchedule {
 
     pub fn spawn<F, Fut>(&self, fire: F)
     where
-        F: Fn(Continuation) -> Fut + Send + Sync + 'static,
+        F: Fn(Due) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let schedule = self.clone();
@@ -236,12 +280,12 @@ impl ResumeSchedule {
                 let mut due = Vec::new();
                 let mut next = None;
                 schedule.update(|stored| {
-                    let before = stored.limited.len();
+                    let before = (stored.limited.len(), stored.deferred.len());
                     (due, next) = stored.take_due(now);
-                    stored.limited.len() != before
+                    (stored.limited.len(), stored.deferred.len()) != before
                 });
-                for continuation in due {
-                    fire(continuation).await;
+                for due in due {
+                    fire(due).await;
                 }
                 let nap = next.map_or(MAX_NAP, |at| {
                     Duration::from_millis(u64::try_from(at - now).unwrap_or(0)).min(MAX_NAP)
@@ -319,10 +363,10 @@ mod tests {
         let (due, _) = stored.take_due(5_000 + RESET_SLACK_MS);
         assert_eq!(
             due,
-            [Continuation {
+            [Due::Resume(Continuation {
                 chat_id: "future".into(),
                 after_user: Some("u1".into())
-            }]
+            })]
         );
         let left: Vec<_> = stored
             .limited
@@ -360,5 +404,16 @@ mod tests {
                 .take_restart(1_000 + RESTART_FRESH_MS + 1)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_deferred_start_fires_at_its_time_and_survives_reopen() {
+        let (dir, schedule) = schedule();
+        schedule.defer_start("child", 9_000);
+        let reopened = ResumeSchedule::open(dir.path());
+        let mut stored = lock(&reopened.inner.stored);
+        assert_eq!(stored.take_due(8_999), (vec![], Some(9_000)));
+        assert_eq!(stored.take_due(9_000).0, [Due::Start("child".into())]);
+        assert!(stored.deferred.is_empty());
     }
 }

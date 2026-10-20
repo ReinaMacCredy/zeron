@@ -3854,6 +3854,24 @@ impl DocHost {
             .map(|entry| entry.id))
     }
 
+    pub async fn start_deferred(&self, chat_id: &str) {
+        match self.open(chat_id) {
+            Ok(handle) => self.drain_queue(&handle).await,
+            Err(error) => tracing::warn!(chat = %chat_id, %error, "deferred start failed"),
+        }
+    }
+
+    /// True when the first message waits for the route's reset instead of running now.
+    fn defers(&self, chat_id: &str, route: Option<&zeron_proto::ChildRoute>) -> bool {
+        route
+            .and_then(|route| route.wait_until)
+            .filter(|at| *at > now_ms())
+            .is_some_and(|at| {
+                self.sessions()
+                    .is_some_and(|sessions| sessions.defer_start(chat_id, at))
+            })
+    }
+
     pub async fn queue_continuation(
         &self,
         continuation: &crate::resume_schedule::Continuation,
@@ -4034,7 +4052,11 @@ impl DocHost {
         profile: &ProfileParams,
         space_id: Option<&str>,
         cwd: Option<&str>,
-        step: Option<(&str, crate::registry::DelegationSettings)>,
+        step: Option<(
+            &str,
+            crate::registry::DelegationSettings,
+            Option<zeron_proto::ChildRoute>,
+        )>,
     ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
@@ -4055,10 +4077,11 @@ impl DocHost {
             Some(_) => Some(self.inner.delegation_lock.lock().await),
             None => None,
         };
-        let step = match step {
-            Some((step_id, limits)) => {
-                Some(self.runnable_step(workspace, from_chat_id, step_id, limits)?)
-            }
+        let (step, route) = match step {
+            Some((step_id, limits, route)) => (
+                Some(self.runnable_step(workspace, from_chat_id, step_id, limits)?),
+                route,
+            ),
             None => {
                 let bound = self.bound_step_threads(workspace);
                 let live = workspace
@@ -4075,7 +4098,7 @@ impl DocHost {
                         "this thread already has {live} open threads it created; archive one first"
                     )));
                 }
-                None
+                (None, None)
             }
         };
         let config = self.derived_config(&from, harness, model, reasoning, profile)?;
@@ -4106,6 +4129,7 @@ impl DocHost {
                 &zeron_proto::TaskStepPatch {
                     chat_id: Some(Some(chat_id.clone())),
                     turn: Some(None),
+                    route: Some(route.clone()),
                     ..Default::default()
                 },
             )?;
@@ -4115,8 +4139,12 @@ impl DocHost {
             sessions.bind_delegate(from_chat_id, prompt, &chat_id);
         }
         let images = step.map(|step| step.images).unwrap_or_default();
-        self.queue_thread_message_with(&chat_id, Some(from_chat_id), prompt, images)
-            .await?;
+        if self.defers(&chat_id, route.as_ref()) {
+            self.push_thread_row(&chat_id, Some(from_chat_id), prompt, Vec::new(), images)?;
+        } else {
+            self.queue_thread_message_with(&chat_id, Some(from_chat_id), prompt, images)
+                .await?;
+        }
         Ok(chat_id)
     }
 
@@ -4741,6 +4769,13 @@ impl DocHost {
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
+        if self
+            .sessions()
+            .and_then(|sessions| sessions.deferred_until(&handle.chat_id))
+            .is_some_and(|at| at > now_ms())
+        {
+            return;
+        }
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };

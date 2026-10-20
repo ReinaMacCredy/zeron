@@ -244,6 +244,7 @@ fn thread_tool_list() -> Value {
                     "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
                     "taskStepId": { "type": "string", "description": "A step id from the tasks tool: runs that step of a task this chat leads on the new thread." },
+                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: run on the next fallback (native means this chat's own model for a step) or wait for the reset." },
                     "wait": wait,
                     "timeoutSeconds": timeout
                 },
@@ -432,7 +433,8 @@ fn thread_tool_list() -> Value {
                             "properties": {
                                 "title": { "type": "string", "maxLength": 500 },
                                 "notes": { "type": "string", "maxLength": 10000 },
-                                "threadId": { "type": "string" }
+                                "threadId": { "type": "string" },
+                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step's thread runs." }
                             },
                             "required": ["title"],
                             "additionalProperties": false
@@ -619,7 +621,8 @@ fn thread_tool_list() -> Value {
                     "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
-                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] }
+                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] },
+                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: run it as your native sub-agent, on the next harness in the fallback list, or wait for the reset." }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -1213,6 +1216,8 @@ impl ThreadTools {
         run["spaceId"] = json!(space_id);
         run["cwd"] = json!(args["cwd"].as_str());
         run["taskStepId"] = json!(task_step_id);
+        run["chosen"] = json!(chosen_fields(args, args));
+        run["quotaChoice"] = json!(args["quotaChoice"].as_str());
         let created = self.call_engine(methods::CREATE_THREAD, run).await?;
         let thread_id = created["chatId"]
             .as_str()
@@ -1488,10 +1493,14 @@ impl ThreadTools {
         run["task"] = json!(task);
         run["title"] = json!(args["title"].as_str());
         run["role"] = json!(args["role"].as_str());
-        run["chosen"] = json!(chosen_fields(args));
+        run["chosen"] = json!(chosen_fields(args, &args["target"]));
+        run["quotaChoice"] = json!(args["quotaChoice"].as_str());
         run["wait"] = json!(wait);
         run["clientRequestId"] = json!(args["clientRequestId"].as_str());
         let mut view = self.call_engine(methods::DELEGATE_TASK, run).await?;
+        if view["status"] == "use_native" {
+            return Ok(view);
+        }
         if !wait {
             view["waitTimedOut"] = json!(false);
             return Ok(view);
@@ -2165,6 +2174,9 @@ impl ThreadTools {
                             "title": step["title"].as_str().unwrap_or_default(),
                             "notes": step["notes"].as_str().unwrap_or_default(),
                         });
+                        if let Some(role) = step["role"].as_str().filter(|role| !role.trim().is_empty()) {
+                            planned["role"] = json!(role);
+                        }
                         if let Some(thread) = step["threadId"].as_str().filter(|id| !id.is_empty()) {
                             planned["threadId"] = json!(thread);
                         }
@@ -2877,13 +2889,13 @@ fn new_peer_entries(
         .collect()
 }
 
-fn chosen_fields(args: &Value) -> Vec<&'static str> {
+fn chosen_fields(args: &Value, target: &Value) -> Vec<&'static str> {
     let set = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
     [
         ("profile", &args["profile"]),
-        ("harness", &args["target"]["harness"]),
-        ("model", &args["target"]["model"]),
-        ("reasoning", &args["target"]["reasoning"]),
+        ("harness", &target["harness"]),
+        ("model", &target["model"]),
+        ("reasoning", &target["reasoning"]),
     ]
     .into_iter()
     .filter(|(_, value)| set(value))

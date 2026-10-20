@@ -770,6 +770,8 @@ struct Inner {
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
     instance_launch: Option<zeron_harness::LaunchOverrides>,
     instances: Mutex<HashMap<String, (ProviderInstance, AgentAccounts)>>,
+    /// The live account keys per agent as of the last list, for [`AgentAccounts::cached_quota`].
+    active_keys: Mutex<HashMap<HarnessId, std::collections::HashSet<String>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -869,6 +871,7 @@ impl AgentAccounts {
                 flows: Mutex::new(HashMap::new()),
                 usage: Mutex::new(usage),
                 inflight_probes: Mutex::new(std::collections::HashSet::new()),
+                active_keys: Mutex::new(HashMap::new()),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
                 claude_credentials: Mutex::new(None),
                 callback_routes,
@@ -982,6 +985,21 @@ impl AgentAccounts {
     /// list is offline-fast. `force_usage` additionally re-probes — all
     /// accounts concurrently — skipping any still inside a Retry-After /
     /// backoff window or probed in the last [`FORCED_MIN_INTERVAL`].
+    /// The live account's last probed windows from memory: no detection, no probe.
+    pub fn cached_quota(&self, harness: HarnessId) -> Option<crate::routing::quota::CachedQuota> {
+        let keys = lock(&self.inner.active_keys).get(&harness).cloned()?;
+        let usage = lock(&self.inner.usage);
+        keys.iter()
+            .filter_map(|key| {
+                let entry = usage.get(&usage_key(harness, key))?;
+                Some(crate::routing::quota::CachedQuota::from_windows(
+                    &entry.usage.as_ref()?.windows,
+                    entry.fetched_at?,
+                ))
+            })
+            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
+    }
+
     pub async fn list(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
         let _ops = self.inner.ops.lock().await;
         self.list_locked(force_usage).await
@@ -1078,6 +1096,7 @@ impl AgentAccounts {
         let (hermes, hermes_active) = self.hermes_slots();
         active_keys.insert(HarnessId::Hermes, hermes_active);
         providers.push((HarnessId::Hermes, hermes));
+        *lock(&self.inner.active_keys) = active_keys.clone();
         if force_usage {
             let targets: Vec<(HarnessId, &Slot, bool)> = providers
                 .iter()
