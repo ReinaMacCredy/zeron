@@ -14640,6 +14640,13 @@ impl Shell {
                         .collect()
                 })
                 .unwrap_or_default();
+        if self
+            .rail_usage_hover
+            .harness
+            .is_some_and(|harness| !ring_accounts.iter().any(|a| a.harness == harness))
+        {
+            self.rail_usage_hover = app_rail::RingHover::default();
+        }
         if ring_accounts.is_empty() {
             return vec![
                 div()
@@ -14664,7 +14671,7 @@ impl Shell {
                 let open = self.rail_usage_menu.as_open() == Some(&harness);
                 let tooltip = app_rail::ring_tooltip(Some(&account), false);
                 let mut trigger = div()
-                    .id(("rail-usage", ix))
+                    .id(SharedString::from(format!("rail-usage-{}", harness.display_name())))
                     .debug_selector(move || format!("rail-usage-{ix}"))
                     .role(gpui::Role::Button)
                     .aria_label(tooltip)
