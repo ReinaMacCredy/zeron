@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use zeron_doc::{ClassifierRecord, ClassifierVerdict};
 
 use crate::agent_accounts::keychain;
-use crate::predictions::{head, key_account, tail, valid_api_key};
+use crate::predictions::{head, key_account, valid_api_key};
 use crate::registry::{CompactionSettings, HarnessRegistry, JevSource};
 
 const MODEL_LABEL: &str = "Jev 1.14";
@@ -113,20 +113,12 @@ pub(crate) async fn update_settings(
     Ok(settings_state(registry).await)
 }
 
-fn state(input: &str) -> String {
-    if input.chars().count() <= STATE_CHARS {
-        input.to_string()
-    } else {
-        format!("...{}", tail(input, STATE_CHARS))
-    }
-}
-
 fn request_body(source: JevSource, input: &str) -> serde_json::Value {
     let questions: serde_json::Value =
         serde_json::from_str(QUESTIONS).expect("jev_questions.json is JSON");
     serde_json::json!({
         "model": source.model(),
-        "state": state(input),
+        "state": crate::compact_boundary::clip_start(input, STATE_CHARS),
         "questions": questions,
     })
 }

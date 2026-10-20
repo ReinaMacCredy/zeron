@@ -2202,7 +2202,10 @@ impl SessionsEngine {
                 }
             };
         }
-        let focus = format!("{focus} The message: {}", last_chars(prompt.trim(), 2000));
+        let focus = format!(
+            "{focus} The message: {}",
+            crate::predictions::tail(prompt.trim(), 2000)
+        );
         match self.compact_noting(chat_id, Some(focus), note).await {
             Ok(outcome) => {
                 if outcome.compacted {
@@ -3717,7 +3720,7 @@ fn bounded_source_copy(entries: &[SessionMessageEntry], budget: usize) -> String
         };
         if !text.is_empty() {
             let separator = if selected.is_empty() { 0 } else { 2 };
-            let retained = last_chars(&text, remaining);
+            let retained = crate::predictions::tail(&text, remaining);
             remaining = remaining.saturating_sub(retained.chars().count() + separator);
             selected.push(retained);
         }
@@ -3760,16 +3763,6 @@ fn packet_conversation(packet: &str) -> &str {
         .trim()
 }
 
-/// The last `max` characters of `text` — whole scalar values, because a byte
-/// slice would panic mid-codepoint.
-fn last_chars(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    text.chars().skip(count - max).collect()
-}
-
 /// The chat's harness anchors: `live` ones a branch can cut at, `dead` ones
 /// recorded for a session that was tombstoned since (a provider switch).
 #[derive(Default)]
@@ -3778,15 +3771,15 @@ struct Anchors {
     dead: std::collections::HashSet<String>,
 }
 
-/// What a harness receives ahead of the typed message on the first turn after
-/// a provider switch: the conversation so far as text. Recorded on the user
-/// entry verbatim, so the transcript shows exactly what crossed.
 fn fresh_session_context(history: &str) -> String {
     format!(
         "<fresh_session>\nThis chat started a new session because the agent cannot compact its own context. The earlier conversation is below as plain text for reference; its tool results and file contents were not carried over.\n</fresh_session>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
     )
 }
 
+/// What a harness receives ahead of the typed message on the first turn after
+/// a provider switch: the conversation so far as text. Recorded on the user
+/// entry verbatim, so the transcript shows exactly what crossed.
 fn provider_switch_context(history: &str) -> String {
     format!(
         "<provider_switch>\nThis chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.\n</provider_switch>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
@@ -3934,7 +3927,6 @@ impl Inner {
                 .is_some_and(|workspace| workspace.mission_thread(chat_id))
     }
 
-    /// Context tokens once what a compaction could free reaches `nudgeTokens`.
     fn past_floor(&self, chat_id: &str, config: Option<&zeron_proto::ChatConfig>) -> Option<u64> {
         let nudge = self.registry.compaction_settings().nudge_tokens;
         let (tokens, baseline, window) = self.context_reading(chat_id, config)?;
