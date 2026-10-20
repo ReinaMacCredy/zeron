@@ -638,6 +638,56 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
         1,
         "the Supervisor's own item wakes nobody"
     );
+
+    let mut batch = Vec::new();
+    for title in ["Who reviews?", "Include tests?"] {
+        let RpcReply::Value(raised) = mutate(json!({
+            "op": "escalateTask", "taskId": "t1", "fromChatId": "lead-1", "title": title,
+            "why": "decision", "options": ["Yes", "No"],
+        }))
+        .await
+        .unwrap() else {
+            panic!("an item id")
+        };
+        batch.push(raised["itemId"].as_str().unwrap().to_string());
+    }
+    supervisor_snapshot(&rpc, |s| s.needs_you_count() == 2).await;
+    mutate(json!({ "op": "resolveSupervisorItems", "answers": [
+        { "itemId": batch[0], "choice": "Codex" },
+        { "itemId": batch[1], "choice": "No" },
+    ] }))
+    .await
+    .unwrap();
+    let together = "The person answered 2 Needs-you items";
+    wait_for(|| count(together) == 1, "the lead's batched answer").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        count(answered),
+        2,
+        "a batch is one message, not one per item"
+    );
+    let sent = prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|prompt| prompt.contains(together))
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        sent,
+        format!(
+            "{together}:\n- item {} \"Who reviews?\", raised by the lead: Codex\n- item {} \"Include tests?\", raised by the lead: No\n\nApply them to this mission (task id t1).",
+            batch[0], batch[1]
+        )
+    );
+    assert!(
+        mutate(json!({ "op": "resolveSupervisorItems", "answers": [
+            { "itemId": batch[0], "choice": "Yes" },
+        ] }))
+        .await
+        .is_err(),
+        "a batched item is answered once"
+    );
     let snapshot = supervisor_snapshot(&rpc, |s| s.needs_you_count() == 0).await;
     assert!(snapshot.needs_you.is_empty());
     core.shutdown().await;

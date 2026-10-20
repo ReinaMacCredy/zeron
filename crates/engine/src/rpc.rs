@@ -1147,6 +1147,15 @@ enum MutateParams {
     },
     #[serde(rename_all = "camelCase")]
     ResolveSupervisorItem { item_id: String, choice: String },
+    #[serde(rename_all = "camelCase")]
+    ResolveSupervisorItems { answers: Vec<ItemChoice> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ItemChoice {
+    item_id: String,
+    choice: String,
 }
 
 fn approve_plan_default() -> bool {
@@ -2537,7 +2546,11 @@ impl EngineRpc {
                 )
                 .map(drop),
             MutateParams::ResolveSupervisorItem { item_id, choice } => {
-                self.resolve_supervisor_item(&item_id, &choice).await
+                self.resolve_supervisor_items(vec![ItemChoice { item_id, choice }])
+                    .await
+            }
+            MutateParams::ResolveSupervisorItems { answers } => {
+                self.resolve_supervisor_items(answers).await
             }
         }
     }

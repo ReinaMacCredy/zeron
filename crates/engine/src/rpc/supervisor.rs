@@ -567,49 +567,120 @@ impl EngineRpc {
         Ok(item)
     }
 
-    pub(super) async fn resolve_supervisor_item(
+    pub(super) async fn resolve_supervisor_items(
         &self,
-        item_id: &str,
-        choice: &str,
+        answers: Vec<super::ItemChoice>,
     ) -> Result<(), RpcError> {
-        let choice = choice.trim();
-        if choice.is_empty() {
-            return Err(refused("choice is required"));
+        if answers.is_empty() {
+            return Err(refused("answers is required"));
         }
-        let item = self
-            .supervisor_store()?
-            .answer_item(item_id, choice)
-            .map_err(failed)?;
-        let raiser = match item.raised_by {
-            Raiser::Lead => "the lead",
-            Raiser::Supervisor => "the Supervisor",
-        };
-        if let Some(task) = item
-            .task_id
-            .as_deref()
-            .and_then(|id| self.workspace.task(id))
-            && let Ok(lead) = self.lead_of(&task)
+        let store = self.supervisor_store()?;
+        let mut answered: Vec<(SupervisorItem, String)> = Vec::new();
+        let mut errors: Vec<RpcError> = Vec::new();
+        for answer in answers {
+            let choice = answer.choice.trim();
+            if choice.is_empty() {
+                errors.push(refused("choice is required"));
+                continue;
+            }
+            match store.answer_item(&answer.item_id, choice) {
+                Ok(item) => answered.push((item, choice.to_string())),
+                Err(error) => errors.push(failed(error)),
+            }
+        }
+        let mut tasks: Vec<&str> = Vec::new();
+        for task_id in answered
+            .iter()
+            .filter_map(|(item, _)| item.task_id.as_deref())
         {
-            let text = format!(
-                "The person answered Needs-you item {} \"{}\", raised by {raiser}: {choice}\n\nApply it to this mission (task id {}).",
-                item.id, item.title, task.id
-            );
+            if !tasks.contains(&task_id) {
+                tasks.push(task_id);
+            }
+        }
+        for task_id in tasks {
+            let Some(task) = self.workspace.task(task_id) else {
+                continue;
+            };
+            let Ok(lead) = self.lead_of(&task) else {
+                continue;
+            };
+            let lines: Vec<String> = answered
+                .iter()
+                .filter(|(item, _)| item.task_id.as_deref() == Some(task_id))
+                .map(|(item, choice)| {
+                    let raiser = match item.raised_by {
+                        Raiser::Lead => "the lead",
+                        Raiser::Supervisor => "the Supervisor",
+                    };
+                    format!(
+                        "{} \"{}\", raised by {raiser}: {choice}",
+                        item.id, item.title
+                    )
+                })
+                .collect();
+            let text = match lines.as_slice() {
+                [one] => format!(
+                    "The person answered Needs-you item {one}\n\nApply it to this mission (task id {}).",
+                    task.id
+                ),
+                lines => format!(
+                    "The person answered {} Needs-you items:\n{}\n\nApply them to this mission (task id {}).",
+                    lines.len(),
+                    lines
+                        .iter()
+                        .map(|line| format!("- item {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    task.id
+                ),
+            };
             self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
                 .await?;
         }
-        if item.raised_by == Raiser::Supervisor
-            && self.doc_host.is_live_supervisor(&item.raiser_chat_id)
-        {
-            let text = format!(
-                "The person answered your Needs-you item {} \"{}\": {choice}",
-                item.id, item.title
-            );
+        let mut raisers: Vec<&str> = Vec::new();
+        for (item, _) in &answered {
+            if item.raised_by == Raiser::Supervisor
+                && !raisers.contains(&item.raiser_chat_id.as_str())
+                && self.doc_host.is_live_supervisor(&item.raiser_chat_id)
+            {
+                raisers.push(&item.raiser_chat_id);
+            }
+        }
+        for raiser in raisers {
+            let lines: Vec<String> = answered
+                .iter()
+                .filter(|(item, _)| {
+                    item.raised_by == Raiser::Supervisor && item.raiser_chat_id == raiser
+                })
+                .map(|(item, choice)| format!("{} \"{}\": {choice}", item.id, item.title))
+                .collect();
+            let text = match lines.as_slice() {
+                [one] => format!("The person answered your Needs-you item {one}"),
+                lines => format!(
+                    "The person answered your Needs-you items:\n{}",
+                    lines
+                        .iter()
+                        .map(|line| format!("- item {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            };
             self.doc_host
-                .queue_thread_message(&item.raiser_chat_id, None, &text)
+                .queue_thread_message(raiser, None, &text)
                 .await
                 .map_err(failed)?;
         }
-        Ok(())
+        match errors.len() {
+            0 => Ok(()),
+            1 => Err(errors.remove(0)),
+            _ => Err(RpcError::Failed(
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )),
+        }
     }
 
     pub(super) fn set_mission_supervised(
