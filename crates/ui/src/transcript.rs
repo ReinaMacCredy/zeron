@@ -11075,11 +11075,13 @@ impl Transcript {
                         ))
                         .children(tokens.map(|tokens| field("Tokens", tokens))),
                 )
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child("Sent to the classifier"),
-                )
+                .child(div().text_color(theme.text_muted).child(
+                    if matches!(record.decided_by, DecidedBy::Stage1 | DecidedBy::Stage2) {
+                        "Sent to the classifier"
+                    } else {
+                        "Not sent: decided without asking"
+                    },
+                ))
                 .child(mono_box("input", &record.input, theme.border))
                 .child(match record.stage2_reply.as_deref() {
                     None => div()

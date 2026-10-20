@@ -69,11 +69,6 @@ pub struct CompactQueued {
     pub running_subagents: u32,
 }
 
-/// Background shells and sub-agents still running for a chat's live run.
-fn background_work(session: Option<&Session>) -> (usize, u32) {
-    session.map_or((0, 0), |s| (s.background_tasks.len(), s.running_subagents))
-}
-
 /// Result of a manual context compaction — also the RPC result shape.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1061,6 +1056,25 @@ impl SessionsEngine {
             .is_some_and(|h| h.turn.background_live())
     }
 
+    /// Only Claude lists its tasks on the row; Codex counts its shells on the runtime alone.
+    fn background_work(&self, chat_id: &str) -> (usize, u32) {
+        let (tasks, subagents) = self.session_status(chat_id).map_or((0, 0), |s| {
+            (
+                s.background_tasks.len(),
+                s.running_subagents.max(u32::from(s.held_by_subagents)),
+            )
+        });
+        (
+            tasks.max(usize::from(self.holds_background_work(chat_id))),
+            subagents,
+        )
+    }
+
+    fn restart_ends_work(&self, chat_id: &str, in_place: bool) -> bool {
+        let (tasks, subagents) = self.background_work(chat_id);
+        !in_place && tasks + subagents as usize > 0
+    }
+
     /// Any run currently working or blocked on input — the auto-updater's
     /// "don't restart from under a session" gate. Background subagents count:
     /// a restart would kill them with the child.
@@ -1419,6 +1433,7 @@ impl SessionsEngine {
             }
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
+            let mut owed = Owed::default();
             let same_runtime = route.is_some();
             let reconfigure = route == Some(true);
             let accepted = if steerable && same_runtime {
@@ -1434,10 +1449,16 @@ impl SessionsEngine {
                     // must see the canonical selection before it decodes the
                     // provider command.
                     prompt: {
-                        let wrapped = self
-                            .inner
-                            .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer)
-                            .map_or_else(|| delivered.to_owned(), |wrapped| wrapped.prompt);
+                        let (wrapped, took) = self.inner.harness_prompt(
+                            chat_id,
+                            harness_id,
+                            delivered,
+                            &user_id,
+                            turn_computer,
+                        );
+                        owed = took;
+                        let wrapped =
+                            wrapped.map_or_else(|| delivered.to_owned(), |wrapped| wrapped.prompt);
                         if harness_id == HarnessId::Opencode {
                             wrapped
                         } else {
@@ -1535,6 +1556,7 @@ impl SessionsEngine {
             // Mailbox closed (runtime mid-teardown / non-steering harness) or
             // the routed run died with the message reclaimed, or the launch
             // configuration changed: replace the runtime.
+            self.inner.restore_owed(chat_id, owed);
             self.terminate(chat_id).await?;
         }
 
@@ -1817,15 +1839,16 @@ impl SessionsEngine {
             request.attachments = Vec::new();
             Box::new(request)
         });
+        let (wrapped, owed) =
+            self.inner
+                .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer);
         let message = SteerMessage {
             // Held-queue release and queued sends reach the harness through
             // here without ever entering `dispatch`, so a sidechat's wrap has
             // to happen on this path too.
             prompt: {
-                let wrapped = self
-                    .inner
-                    .harness_prompt(chat_id, harness_id, delivered, &user_id, turn_computer)
-                    .map_or_else(|| delivered.to_string(), |wrapped| wrapped.prompt);
+                let wrapped =
+                    wrapped.map_or_else(|| delivered.to_string(), |wrapped| wrapped.prompt);
                 if harness_id == HarnessId::Opencode {
                     wrapped
                 } else {
@@ -1839,6 +1862,7 @@ impl SessionsEngine {
         // Saturation is backpressure, not a dead runtime. Waiting for room
         // preserves the live process and every accepted message in a burst.
         let Ok(permit) = steer_tx.reserve().await else {
+            self.inner.restore_owed(chat_id, owed);
             return Ok(SteerOutcome::NotSteerable);
         };
         let accepted = self.inner.registry.while_update_clear(harness_id, || {
@@ -1859,6 +1883,7 @@ impl SessionsEngine {
             permit.send(message);
         });
         if accepted.is_none() {
+            self.inner.restore_owed(chat_id, owed);
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
@@ -1889,6 +1914,7 @@ impl SessionsEngine {
             ledger.len() != before
         };
         if reclaimed {
+            self.inner.restore_owed(chat_id, owed);
             return Ok(SteerOutcome::NotSteerable);
         }
         self.inner.note_message(chat_id, prompt);
@@ -2040,10 +2066,10 @@ impl SessionsEngine {
     }
 
     pub async fn compact_idle(&self, chat_id: &str) -> Result<CompactOutcome, EngineError> {
-        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE).await
+        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE)
+            .await
     }
 
-    /// Classifier mode: before a person's message starts a turn, compact if it opens a new task.
     async fn compact_at_boundary(
         &self,
         chat_id: &str,
@@ -2052,13 +2078,16 @@ impl SessionsEngine {
         message_id: Option<&str>,
     ) -> bool {
         let settings = self.inner.registry.compaction_settings();
-        if settings.mode != CompactionMode::Classifier
-            || !self.inner.auto_compacts(chat_id)
-            || zeron_proto::invocation::leading_command(prompt).is_some()
-            || self.turn_in_flight(chat_id)
-            || lock(&self.inner.compacting).contains(chat_id)
-            || lock(&self.inner.agent_compacted).contains(chat_id)
-        {
+        // After a provider switch the handoff packet is the compaction.
+        let blocked = || {
+            settings.mode != CompactionMode::Classifier
+                || !self.inner.auto_compacts(chat_id)
+                || self.turn_in_flight(chat_id)
+                || lock(&self.inner.compacting).contains(chat_id)
+                || lock(&self.inner.agent_compacted).contains(chat_id)
+                || self.inner.session_tombstoned(chat_id)
+        };
+        if zeron_proto::invocation::leading_command(prompt).is_some() || blocked() {
             return false;
         }
         if let Some(id) = message_id {
@@ -2075,6 +2104,9 @@ impl SessionsEngine {
         let Some(tokens) = self.inner.past_floor(chat_id, config.as_ref()) else {
             return false;
         };
+        if self.restart_ends_work(chat_id, self.compacts_in_place(chat_id)) {
+            return false;
+        }
         let Some(mut entries) = self
             .doc_handle(chat_id)
             .ok()
@@ -2138,6 +2170,10 @@ impl SessionsEngine {
                 return false;
             }
         };
+        // An idle or agent compaction may have run while the classifier was asked.
+        if blocked() || self.inner.past_floor(chat_id, config.as_ref()).is_none() {
+            return false;
+        }
         let carry = (verdict == ClassifierVerdict::Carry)
             .then(|| {
                 crate::compact_boundary::carry_block(
@@ -2166,7 +2202,10 @@ impl SessionsEngine {
                 }
             };
         }
-        let focus = format!("{focus} The message: {}", last_chars(prompt.trim(), 2000));
+        let focus = format!(
+            "{focus} The message: {}",
+            crate::predictions::tail(prompt.trim(), 2000)
+        );
         match self.compact_noting(chat_id, Some(focus), note).await {
             Ok(outcome) => {
                 if outcome.compacted {
@@ -2189,13 +2228,19 @@ impl SessionsEngine {
         input: String,
         agent_note: bool,
     ) -> Option<zeron_doc::ClassifierRecord> {
-        let target = crate::compact_boundary::classifier_target(
-            &self.inner.registry,
-            classifier,
-            harness_id,
-            self.inner.instance_harness(chat_id, harness_id).ok()?,
+        // The person's message waits on this, and a pending CLI update would hold the lease until it installs.
+        const TARGET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+        let target = tokio::time::timeout(
+            TARGET_TIMEOUT,
+            crate::compact_boundary::classifier_target(
+                &self.inner.registry,
+                classifier,
+                harness_id,
+                self.inner.instance_harness(chat_id, harness_id).ok()?,
+            ),
         )
-        .await?;
+        .await
+        .ok()??;
         self.inner.set_classifying(
             chat_id,
             Some(zeron_proto::Classifying {
@@ -2327,9 +2372,8 @@ impl SessionsEngine {
                 harness.display_name()
             )));
         }
-        let session = self.session_status(chat_id);
-        let (background_tasks, running_subagents) = background_work(session.as_ref());
-        if !harness.compacts_in_place() && background_tasks + running_subagents as usize > 0 {
+        let (background_tasks, running_subagents) = self.background_work(chat_id);
+        if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
             return Err(EngineError::Other(format!(
                 "{} restarts its process to compact, which would end the background work still running. Call compact again after it finishes.",
                 harness.display_name()
@@ -2364,7 +2408,6 @@ impl SessionsEngine {
         })
     }
 
-
     /// After a restart: a chat whose agent asked for a compaction that never
     /// ran has no status row yet, and auto_compact only sees settled rows.
     pub(crate) fn surface_waiting_agent_compacts(&self) {
@@ -2386,6 +2429,12 @@ impl SessionsEngine {
             owed.insert(chat_id.to_string(), reason);
         }
         unsent
+    }
+
+    /// Stop ends everything the agent runs, so its queued compaction and continueWith go too.
+    pub(crate) fn cancel_agent_compact(&self, chat_id: &str) {
+        self.inner
+            .cancel_agent_compact(chat_id, "the person pressed Stop");
     }
 
     pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {
@@ -2414,17 +2463,22 @@ impl SessionsEngine {
             // Its dispatch cancels the request and tells the agent.
             Since::Queued => false,
             Since::Newer => {
-                self.inner.drop_agent_compact(chat_id, request);
+                self.inner
+                    .drop_agent_compact(chat_id, request, "a newer message reached you");
                 tracing::info!(chat = %chat_id, "agent compaction dropped: a newer message reached the chat");
                 false
             }
         }
     }
 
-    async fn judge_agent_note(&self, chat_id: &str, note: &str) -> ClassifierVerdict {
+    async fn judge_agent_note(
+        &self,
+        chat_id: &str,
+        note: &str,
+    ) -> (ClassifierVerdict, Option<zeron_doc::ClassifierRecord>) {
         let settings = self.inner.registry.compaction_settings();
         if settings.mode != CompactionMode::Classifier {
-            return ClassifierVerdict::New;
+            return (ClassifierVerdict::New, None);
         }
         let config = self
             .inner
@@ -2435,7 +2489,7 @@ impl SessionsEngine {
             .context_reading(chat_id, config.as_ref())
             .unwrap_or_default();
         let Ok((harness_id, _)) = self.compaction_request(chat_id) else {
-            return ClassifierVerdict::Failed;
+            return (ClassifierVerdict::Failed, None);
         };
         let entries = self
             .doc_handle(chat_id)
@@ -2446,37 +2500,37 @@ impl SessionsEngine {
             &entries,
             crate::compact_boundary::NewMessage::AgentNote(note),
         );
-        let mut record = if crate::compact_boundary::at_ceiling(tokens, window) {
-            zeron_doc::ClassifierRecord {
-                verdict: ClassifierVerdict::Carry,
-                decided_by: zeron_doc::DecidedBy::Ceiling,
-                input,
-                ..Default::default()
-            }
-        } else if settings.jev.is_some() {
-            zeron_doc::ClassifierRecord {
-                verdict: ClassifierVerdict::Carry,
-                decided_by: zeron_doc::DecidedBy::AgentNote,
-                model: Some(crate::jev::MODEL_LABEL.into()),
-                input,
-                ..Default::default()
-            }
+        let at_ceiling = crate::compact_boundary::at_ceiling(tokens, window);
+        let classified = if at_ceiling || settings.jev.is_some() {
+            None
         } else {
-            match self
-                .run_classifier(chat_id, harness_id, settings.classifier, input, true)
-                .await
-            {
-                Some(mut record) => {
-                    crate::compact_boundary::cap_agent_note(&mut record);
-                    record
-                }
-                None => return ClassifierVerdict::New,
+            self.run_classifier(
+                chat_id,
+                harness_id,
+                settings.classifier,
+                input.clone(),
+                true,
+            )
+            .await
+        };
+        let mut record = match classified {
+            Some(mut record) => {
+                crate::compact_boundary::cap_agent_note(&mut record);
+                record
             }
+            None => zeron_doc::ClassifierRecord {
+                verdict: ClassifierVerdict::Carry,
+                decided_by: if at_ceiling {
+                    zeron_doc::DecidedBy::Ceiling
+                } else {
+                    zeron_doc::DecidedBy::AgentNote
+                },
+                input,
+                ..Default::default()
+            },
         };
         record.context_tokens = tokens;
-        let verdict = record.verdict;
-        self.write_classifier_record(chat_id, record);
-        verdict
+        (record.verdict, Some(record))
     }
 
     pub(crate) async fn compact_for_agent(
@@ -2489,21 +2543,21 @@ impl SessionsEngine {
         if !self.agent_compact_due(chat_id, &request).await {
             return Ok(None);
         }
-        if !self.compacts_in_place(chat_id) {
-            let (tasks, subagents) = background_work(self.session_status(chat_id).as_ref());
-            if tasks + subagents as usize > 0 {
-                let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
-                return Ok(Some((
-                    self.decline_agent_compact(chat_id, &request, reason),
-                    request,
-                )));
-            }
+        if self.restart_ends_work(chat_id, self.compacts_in_place(chat_id)) {
+            let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
+            return Ok(Some((
+                self.decline_agent_compact(chat_id, &request, reason),
+                request,
+            )));
         }
         let verdict = match &request.continue_with {
             Some(note) => {
-                let verdict = self.judge_agent_note(chat_id, note).await;
+                let (verdict, record) = self.judge_agent_note(chat_id, note).await;
                 if !self.agent_compact_due(chat_id, &request).await {
                     return Ok(None);
+                }
+                if let Some(record) = record {
+                    self.write_classifier_record(chat_id, record);
                 }
                 verdict
             }
@@ -2583,12 +2637,11 @@ impl SessionsEngine {
         self.inner
             .edit_agent_compacts(|compacts| compacts.remove(chat_id));
         self.inner.set_compact_plan(chat_id, None);
-        if let Some(text) = &request.continue_with {
-            lock(&self.inner.compact_owed).insert(
-                chat_id.to_string(),
-                format!("{reason} {}", unsent_note(text)),
-            );
-        }
+        let note = match &request.continue_with {
+            Some(text) => format!("{reason} {}", unsent_note(text)),
+            None => reason.clone(),
+        };
+        lock(&self.inner.compact_owed).insert(chat_id.to_string(), note);
         AgentCompactRun::Declined(reason)
     }
 
@@ -2693,9 +2746,23 @@ impl SessionsEngine {
                 }
             };
         }
+        if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
+            return Err(EngineError::Other(format!(
+                "{} restarts its process to compact, which would end the background work still running. Compact again after it finishes.",
+                harness.display_name()
+            )));
+        }
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
         request.resume = self.inner.resume_for(chat_id, &request.cwd);
+        if request.resume.is_none() {
+            return Ok(CompactOutcome {
+                compacted: false,
+                pre_tokens: None,
+                post_tokens: None,
+                message: Some("Nothing to compact".into()),
+            });
+        }
         self.inner.inject_branch(chat_id, &mut request);
 
         // Retire a parked warm child so the compaction owns the run slot; a
@@ -2769,6 +2836,7 @@ impl SessionsEngine {
                 pre_tokens,
                 post_tokens,
             )?;
+            lock(&self.inner.streaks).remove(handle.chat_id());
         }
         self.compaction_outcome(handle.chat_id(), drain)
     }
@@ -3652,7 +3720,7 @@ fn bounded_source_copy(entries: &[SessionMessageEntry], budget: usize) -> String
         };
         if !text.is_empty() {
             let separator = if selected.is_empty() { 0 } else { 2 };
-            let retained = last_chars(&text, remaining);
+            let retained = crate::predictions::tail(&text, remaining);
             remaining = remaining.saturating_sub(retained.chars().count() + separator);
             selected.push(retained);
         }
@@ -3695,16 +3763,6 @@ fn packet_conversation(packet: &str) -> &str {
         .trim()
 }
 
-/// The last `max` characters of `text` — whole scalar values, because a byte
-/// slice would panic mid-codepoint.
-fn last_chars(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    text.chars().skip(count - max).collect()
-}
-
 /// The chat's harness anchors: `live` ones a branch can cut at, `dead` ones
 /// recorded for a session that was tombstoned since (a provider switch).
 #[derive(Default)]
@@ -3713,15 +3771,15 @@ struct Anchors {
     dead: std::collections::HashSet<String>,
 }
 
-/// What a harness receives ahead of the typed message on the first turn after
-/// a provider switch: the conversation so far as text. Recorded on the user
-/// entry verbatim, so the transcript shows exactly what crossed.
 fn fresh_session_context(history: &str) -> String {
     format!(
         "<fresh_session>\nThis chat started a new session because the agent cannot compact its own context. The earlier conversation is below as plain text for reference; its tool results and file contents were not carried over.\n</fresh_session>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
     )
 }
 
+/// What a harness receives ahead of the typed message on the first turn after
+/// a provider switch: the conversation so far as text. Recorded on the user
+/// entry verbatim, so the transcript shows exactly what crossed.
 fn provider_switch_context(history: &str) -> String {
     format!(
         "<provider_switch>\nThis chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.\n</provider_switch>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
@@ -3753,6 +3811,13 @@ struct HarnessPrompt {
     handoff: Option<String>,
 }
 
+/// What a prompt took from the chat's owed state: put back when the prompt never reaches the agent.
+#[derive(Default)]
+struct Owed {
+    carry: Option<String>,
+    note: Option<String>,
+}
+
 #[derive(Default)]
 struct SidechatContext {
     completed_assistant: Option<usize>,
@@ -3774,12 +3839,15 @@ impl Inner {
         typed: &str,
         user_entry_id: &str,
         computer: bool,
-    ) -> Option<HarnessPrompt> {
+    ) -> (Option<HarnessPrompt>, Owed) {
         let wrapped = self.wrapped_prompt(chat_id, typed, user_entry_id, computer);
-        let nudge = self.context_nudge(chat_id, harness_id, typed);
-        let carry = self.take_carry(chat_id, typed);
-        if nudge.is_none() && carry.is_none() {
-            return wrapped;
+        let owed = Owed {
+            carry: self.take_carry(chat_id, typed),
+            note: self.take_compact_note(chat_id, typed),
+        };
+        let nudge = self.context_nudge(chat_id, harness_id, typed, owed.note.as_deref());
+        if nudge.is_none() && owed.carry.is_none() {
+            return (wrapped, owed);
         }
         let mut wrapped = wrapped.unwrap_or_else(|| HarnessPrompt {
             prompt: typed.to_owned(),
@@ -3788,10 +3856,23 @@ impl Inner {
         if let Some(nudge) = nudge {
             wrapped.prompt = format!("{}\n\n{nudge}", wrapped.prompt);
         }
-        if let Some(carry) = carry {
+        if let Some(carry) = &owed.carry {
             wrapped.prompt = format!("{carry}\n\n{}", wrapped.prompt);
         }
-        Some(wrapped)
+        (Some(wrapped), owed)
+    }
+
+    fn restore_owed(&self, chat_id: &str, owed: Owed) {
+        if let Some(carry) = owed.carry {
+            lock(&self.carry_owed)
+                .entry(chat_id.to_string())
+                .or_insert(carry);
+        }
+        if let Some(note) = owed.note {
+            lock(&self.compact_owed)
+                .entry(chat_id.to_string())
+                .or_insert(note);
+        }
     }
 
     /// An idle start or a slash command leaves the carry for the next real prompt.
@@ -3846,7 +3927,6 @@ impl Inner {
                 .is_some_and(|workspace| workspace.mission_thread(chat_id))
     }
 
-    /// Context tokens once what a compaction could free reaches `nudgeTokens`.
     fn past_floor(&self, chat_id: &str, config: Option<&zeron_proto::ChatConfig>) -> Option<u64> {
         let nudge = self.registry.compaction_settings().nudge_tokens;
         let (tokens, baseline, window) = self.context_reading(chat_id, config)?;
@@ -3895,17 +3975,34 @@ impl Inner {
     }
 
     /// Slash commands go out untouched: the note would become their arguments.
-    fn context_nudge(&self, chat_id: &str, harness_id: HarnessId, typed: &str) -> Option<String> {
+    fn take_compact_note(&self, chat_id: &str, typed: &str) -> Option<String> {
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
+        self.cancel_agent_compact(chat_id, "a newer message reached you");
+        lock(&self.compact_owed).remove(chat_id)
+    }
+
+    /// A compaction already running is past cancelling.
+    fn cancel_agent_compact(&self, chat_id: &str, why: &str) {
         let pending = lock(&self.agent_compacts).get(chat_id).cloned();
         if let Some(request) = pending
             && !lock(&self.compacting).contains(chat_id)
         {
-            self.drop_agent_compact(chat_id, &request);
+            self.drop_agent_compact(chat_id, &request, why);
         }
-        let owed = lock(&self.compact_owed).remove(chat_id);
+    }
+
+    fn context_nudge(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        typed: &str,
+        owed: Option<&str>,
+    ) -> Option<String> {
+        if zeron_proto::invocation::leading_command(typed).is_some() {
+            return None;
+        }
         let reminder = if lock(&self.agent_compacted).remove(chat_id)
             || self.registry.compaction_settings().mode != CompactionMode::Threshold
         {
@@ -3920,7 +4017,7 @@ impl Inner {
             })
         };
         let findings = self.findings_reminder(chat_id);
-        let lines: Vec<&str> = [owed.as_deref(), findings.as_deref(), reminder.as_deref()]
+        let lines: Vec<&str> = [owed, findings.as_deref(), reminder.as_deref()]
             .into_iter()
             .flatten()
             .collect();
@@ -3932,16 +4029,17 @@ impl Inner {
         })
     }
 
-    fn drop_agent_compact(&self, chat_id: &str, request: &AgentCompact) {
+    fn drop_agent_compact(&self, chat_id: &str, request: &AgentCompact, why: &str) {
         self.edit_agent_compacts(|compacts| compacts.remove(chat_id));
         self.set_compact_plan(chat_id, None);
-        let mut note = "Your queued compaction was cancelled: a newer message reached you before it ran. Call compact again if it still fits.".to_string();
+        let mut note = format!(
+            "Your queued compaction was cancelled: {why} before it ran. Call compact again if it still fits."
+        );
         if let Some(text) = &request.continue_with {
             note.push_str(&format!(" Its continueWith was: {text}"));
         }
         lock(&self.compact_owed).insert(chat_id.to_string(), note);
     }
-
 
     /// Once per `MID_TURN_NUDGE_STEP` of growth: a long run of tool calls sees no new message.
     /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.
@@ -5598,13 +5696,16 @@ async fn drive_run(
     }
     // After the retry snapshot and the titler's capture, both of which want the
     // typed text: only what crosses into the harness carries the sidechat wrap.
-    let mut request = match inner.harness_prompt(
-        &chat_id,
-        harness_id,
-        &request.prompt,
-        &resume_state.user_message_id,
-        resume_state.turn_computer,
-    ) {
+    let mut request = match inner
+        .harness_prompt(
+            &chat_id,
+            harness_id,
+            &request.prompt,
+            &resume_state.user_message_id,
+            resume_state.turn_computer,
+        )
+        .0
+    {
         Some(HarnessPrompt { prompt, handoff }) => {
             if let Some(text) = handoff {
                 // Idempotent by part id: the startup-crash retry runs this
@@ -6433,6 +6534,7 @@ async fn drive_run(
             {
                 tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
             }
+            lock(&inner.streaks).remove(&chat_id);
             continue;
         }
         // The engine's input bridge is the sole authority on input requests:

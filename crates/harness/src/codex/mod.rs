@@ -136,13 +136,17 @@ impl Default for CodexHarness {
             launch: crate::LaunchOverrides::default(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
-            writers: ThreadWriters::default(),
+            writers: WRITERS.clone(),
         }
     }
 }
 
 #[derive(Clone, Default)]
 struct ThreadWriters(Arc<(std::sync::Mutex<HashSet<String>>, tokio::sync::Notify)>);
+
+/// Process-wide: editing a provider instance builds a new harness while the old one's app-server still holds the thread.
+static WRITERS: std::sync::LazyLock<ThreadWriters> =
+    std::sync::LazyLock::new(ThreadWriters::default);
 
 struct WriterClaim {
     writers: ThreadWriters,

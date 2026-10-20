@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use zeron_doc::{ClassifierRecord, ClassifierVerdict};
 
 use crate::agent_accounts::keychain;
-use crate::predictions::{head, key_account, tail, valid_api_key};
+use crate::predictions::{head, key_account, valid_api_key};
 use crate::registry::{CompactionSettings, HarnessRegistry, JevSource};
 
-pub(crate) const MODEL_LABEL: &str = "Jev 1.14";
+const MODEL_LABEL: &str = "Jev 1.14";
 const QUESTIONS: &str = include_str!("jev_questions.json");
 const TIMEOUT: Duration = Duration::from_secs(20);
 const STATE_CHARS: usize = 10_000;
@@ -98,7 +98,6 @@ pub(crate) async fn update_settings(
     if api_key.is_some() && source.is_none() {
         return Err("Pick a Jev source before saving its key".into());
     }
-    registry.set_compaction_settings(update.settings)?;
     if let (Some(key), Some(source)) = (api_key, source) {
         let account =
             key_account(registry).ok_or_else(|| "The engine has no data directory".to_string())?;
@@ -110,15 +109,8 @@ pub(crate) async fn update_settings(
                 .map_err(|error| error.to_string())?;
         }
     }
+    registry.set_compaction_settings(update.settings)?;
     Ok(settings_state(registry).await)
-}
-
-fn state(input: &str) -> String {
-    if input.chars().count() <= STATE_CHARS {
-        input.to_string()
-    } else {
-        format!("...{}", tail(input, STATE_CHARS))
-    }
 }
 
 fn request_body(source: JevSource, input: &str) -> serde_json::Value {
@@ -126,7 +118,7 @@ fn request_body(source: JevSource, input: &str) -> serde_json::Value {
         serde_json::from_str(QUESTIONS).expect("jev_questions.json is JSON");
     serde_json::json!({
         "model": source.model(),
-        "state": state(input),
+        "state": crate::compact_boundary::clip_start(input, STATE_CHARS),
         "questions": questions,
     })
 }
@@ -178,6 +170,9 @@ struct Scores {
 
 impl Scores {
     fn verdict(&self) -> ClassifierVerdict {
+        if self.p.new + self.p.carry + self.p.cont <= 0.0 {
+            return ClassifierVerdict::Failed;
+        }
         if self.p.new >= NEW_MIN && self.new_task >= NEW_TASK_MIN {
             return ClassifierVerdict::New;
         }
@@ -217,8 +212,11 @@ async fn ask(
     let key = api_key(registry, source)
         .await
         .ok_or_else(|| "No Jev API key in the Keychain".to_string())?;
-    let endpoint =
-        std::env::var("ZERON_JEV_ENDPOINT").unwrap_or_else(|_| source.endpoint().to_string());
+    // A bench hook: a release build never sends the key anywhere but the source.
+    let endpoint = std::env::var("ZERON_JEV_ENDPOINT")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .unwrap_or_else(|| source.endpoint().to_string());
     let response = HTTP
         .post(&endpoint)
         .bearer_auth(&key)
@@ -286,7 +284,7 @@ mod tests {
         assert_eq!(scores(0.0, 0.16, 0.84, 0.0).verdict(), Carry);
         assert_eq!(scores(0.6, 0.0, 0.4, 0.1).verdict(), Continue);
         assert_eq!(scores(1.0, 0.0, 0.0, 0.2).verdict(), Carry);
-        assert_eq!(scores(0.0, 0.0, 0.0, 0.0).verdict(), Carry);
+        assert_eq!(scores(0.0, 0.0, 0.0, 0.9).verdict(), Failed);
     }
 
     #[test]

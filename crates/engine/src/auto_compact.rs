@@ -46,6 +46,7 @@ fn arm(stats: &SessionStats, tokens: u64, min_tokens: u64) -> Option<Armed> {
 fn settled(session: &Session) -> bool {
     session.status == SessionStatus::Idle
         && !session.compacting
+        && session.classifying.is_none()
         && !session.held_by_subagents
         && session.running_subagents == 0
         && session.background_tasks.is_empty()
