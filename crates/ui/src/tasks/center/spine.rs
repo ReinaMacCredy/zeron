@@ -1231,7 +1231,7 @@ impl TaskCenter {
                 .id(SharedString::from(key.clone()))
                 .debug_selector(move || key.clone())
                 .role(gpui::Role::Button)
-                .aria_label(label)
+                .aria_label(format!("{label} {name}"))
                 .min_h(px(26.0))
                 .rounded_full()
             };
