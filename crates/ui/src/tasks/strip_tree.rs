@@ -33,6 +33,20 @@ pub(crate) enum StripTreeEvent {
 pub(crate) enum TreeHost {
     Strip,
     Supervisor,
+    Intro,
+}
+
+pub(crate) struct SampleRow {
+    pub title: &'static str,
+    pub status: Status,
+    pub word: &'static str,
+    pub brand: Option<(&'static str, Option<Hsla>)>,
+    pub secs: Option<i64>,
+}
+
+enum Source {
+    Task(String),
+    Sample(Vec<SampleRow>, DateTime<Utc>),
 }
 
 struct Row {
@@ -50,7 +64,7 @@ struct Row {
 
 pub(crate) struct StripTree {
     state: Entity<AppState>,
-    task_id: String,
+    source: Source,
     folded: HashSet<String>,
     chevrons: HashMap<String, Tween>,
     open: Tween,
@@ -76,7 +90,7 @@ impl StripTree {
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
-            task_id,
+            source: Source::Task(task_id),
             folded: HashSet::new(),
             chevrons: HashMap::new(),
             open: Tween::at(f32::from(u8::from(open)), now),
@@ -88,8 +102,17 @@ impl StripTree {
         }
     }
 
+    pub fn sample(state: Entity<AppState>, rows: Vec<SampleRow>, cx: &mut Context<Self>) -> Self {
+        let mut tree = Self::new(state, String::new(), true, TreeHost::Intro, cx);
+        tree.source = Source::Sample(rows, Utc::now());
+        tree
+    }
+
     pub fn task_id(&self) -> &str {
-        &self.task_id
+        match &self.source {
+            Source::Task(task_id) => task_id,
+            Source::Sample(..) => "",
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -108,11 +131,15 @@ impl StripTree {
     }
 
     fn rows(&self, cx: &App) -> Option<Vec<Row>> {
+        let task_id = match &self.source {
+            Source::Task(task_id) => task_id,
+            Source::Sample(rows, at) => return Some(sample_rows(rows, *at)),
+        };
         let state = self.state.read(cx);
         let task = state
             .tasks
             .iter()
-            .find(|task| task.id == self.task_id && !task.deleted)?;
+            .find(|task| task.id == *task_id && !task.deleted)?;
         let plan = rollup(state, task, Utc::now());
         let since = |chat: &zeron_proto::Chat| {
             state
@@ -228,7 +255,7 @@ impl Render for StripTree {
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
-            TreeHost::Strip => Theme::of(cx).for_popup(),
+            TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),
             TreeHost::Supervisor => Theme::of(cx).clone(),
         };
         let Some(rows) = self.rows(cx) else {
@@ -429,12 +456,17 @@ impl Render for StripTree {
             });
             let selection = row.selection.clone();
             let selector = format!("strip-tree-row-{}", row.id);
+            let opens = self.host != TreeHost::Intro;
             elements.push(
                 div()
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
                     .group(group)
-                    .role(gpui::Role::Button)
+                    .role(if opens {
+                        gpui::Role::Button
+                    } else {
+                        gpui::Role::ListItem
+                    })
                     .aria_label(format!("{}: {}", row.title, row.word))
                     .absolute()
                     .top(px(*top))
@@ -448,8 +480,9 @@ impl Render for StripTree {
                     .pl(px(6.0))
                     .pr(px(8.0))
                     .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.wash(0.05)))
+                    .when(opens, |el| {
+                        el.cursor_pointer().hover(|s| s.bg(theme.wash(0.05)))
+                    })
                     .text_size(ui_rems(11.5))
                     .text_color(theme.text_muted)
                     .child(
@@ -493,9 +526,11 @@ impl Render for StripTree {
                     .children(times[ix].clone().map(|time| div().flex_none().child(time)))
                     .children(fold)
                     .children(brief)
-                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.emit(StripTreeEvent::Open(selection.clone()))
-                    })),
+                    .when(opens, |el| {
+                        el.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(StripTreeEvent::Open(selection.clone()))
+                        }))
+                    }),
             );
         }
         if sweeping {
@@ -520,4 +555,26 @@ impl Render for StripTree {
             ))
             .into_any_element()
     }
+}
+
+fn sample_rows(rows: &[SampleRow], at: DateTime<Utc>) -> Vec<Row> {
+    rows.iter()
+        .enumerate()
+        .map(|(ix, row)| Row {
+            id: if ix == 0 { LEAD.into() } else { ix.to_string() },
+            parent: (ix > 0).then_some(0),
+            depth: usize::from(ix > 0),
+            title: row.title.into(),
+            status: row.status,
+            word: row.word,
+            brand: row.brand,
+            chat_id: None,
+            since: row.secs.map(|secs| at - chrono::Duration::seconds(secs)),
+            selection: if ix == 0 {
+                Selection::Lead
+            } else {
+                Selection::Step(ix.to_string())
+            },
+        })
+        .collect()
 }

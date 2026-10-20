@@ -39,7 +39,8 @@ pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
-pub(crate) use strip_tree::{StripTree, StripTreeEvent, TreeHost};
+pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
+pub(crate) use tree::Status as TreeStatus;
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
