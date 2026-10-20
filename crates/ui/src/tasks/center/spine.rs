@@ -28,6 +28,7 @@ struct BarRow {
     name: String,
     title: String,
     text: Option<String>,
+    asks: Option<usize>,
 }
 
 pub(super) struct Facts {
@@ -1570,16 +1571,28 @@ impl TaskCenter {
             ));
         } else {
             if waiting > 0 {
-                let questions = waiting - usize::from(review);
+                let asking: Vec<&BarRow> = facts
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        row.status == Status::Waiting && !(row.id == LEAD && row.text.is_some())
+                    })
+                    .collect();
                 let mut parts = Vec::new();
                 if review {
                     parts.push("plan review".to_string());
                 }
-                if questions > 0 {
-                    parts.push(format!(
-                        "{questions} {}",
-                        plural(questions, "question", "questions")
-                    ));
+                if asking.iter().any(|row| row.asks.is_none()) {
+                    let steps = asking.len();
+                    parts.push(format!("{steps} {}", plural(steps, "step", "steps")));
+                } else {
+                    let questions: usize = asking.iter().filter_map(|row| row.asks).sum();
+                    if questions > 0 {
+                        parts.push(format!(
+                            "{questions} {}",
+                            plural(questions, "question", "questions")
+                        ));
+                    }
                 }
                 pills.push(self.status_pill(
                     facts,
@@ -2122,6 +2135,7 @@ impl TaskCenter {
             title: task.title.clone(),
             text: (plan.phase(task) == super::super::PlanPhase::PlanReady)
                 .then(|| "Plan ready: approve to start running the steps.".to_string()),
+            asks: Some(1),
         }];
         rows.extend(shown.iter().enumerate().map(|(ix, (row, _, thread))| {
             let (status, word) = Status::of_step(
@@ -2138,6 +2152,7 @@ impl TaskCenter {
                 name: format!("Step {}", ix + 1),
                 title: row.step.title.clone(),
                 text: text.map(|text| crate::transcript::single_line(&text)),
+                asks: self.ask_count(row),
             }
         }));
         let (tokens, lead_tokens): (Vec<Option<u64>>, Option<u64>) = {

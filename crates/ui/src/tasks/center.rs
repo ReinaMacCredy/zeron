@@ -1193,6 +1193,19 @@ impl TaskCenter {
         }
     }
 
+    fn ask_count(&self, row: &StepRow) -> Option<usize> {
+        match row
+            .step
+            .chat_id
+            .as_deref()
+            .and_then(|chat| self.asks.get(chat))
+        {
+            Some(Ask::Ready(questions)) => Some(questions.len().max(1)),
+            Some(Ask::Loading { .. }) => None,
+            None => Some(1),
+        }
+    }
+
     fn step_note(&self, row: &StepRow, thread: Option<&Thread>) -> Option<String> {
         let delegation = thread.and_then(|t| t.delegation.as_ref());
         let (status, _) = super::tree::Status::of_step(row, delegation.map(|d| d.0));
