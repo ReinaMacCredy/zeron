@@ -42,8 +42,11 @@ pub(super) type Painted = Rc<RefCell<Rects>>;
 pub(super) fn measure(painted: &Painted, key: Key, border: Edges<f32>) -> impl IntoElement {
     let painted = painted.clone();
     gpui::canvas(
-        move |bounds, _, _| {
-            painted.borrow_mut().insert(key, bounds);
+        move |bounds, window, _| {
+            let old = painted.borrow_mut().insert(key, bounds);
+            if old.map(|old| old.size) != Some(bounds.size) {
+                window.request_animation_frame();
+            }
         },
         |_, _, _, _| {},
     )
