@@ -1,5 +1,5 @@
 # In-app Docs. Sections show in this order; articles keep their order within a
-# section. Each article's body is <id>.md, listed in src/docs.rs BODIES.
+# section. Each article's body is <id>.md, listed in crates/docs/src/lib.rs BODIES.
 # actions: tasks, supervisor, inbox, usage, pull-requests, changelog, settings/<slug>, docs/<id>.
 
 [[section]]
@@ -127,8 +127,16 @@ id = "delegation"
 section = "agents"
 title = "Delegation and subagents"
 icon = "lucide-bot"
-blurb = "Follow, open, and stop the child agents a chat starts."
+blurb = "Hand work to a child agent on any installed agent and model, then follow, answer, or stop it."
 actions = ["settings/general", "settings/tools"]
+
+[[article]]
+id = "threads"
+section = "agents"
+title = "Agents and other threads"
+icon = "lucide-message-square"
+blurb = "Let an agent read, start, message, watch, and tidy your other chats on this device."
+actions = ["settings/tools", "docs/delegation"]
 
 [[article]]
 id = "side-chat"
