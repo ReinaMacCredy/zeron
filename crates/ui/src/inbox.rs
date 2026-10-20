@@ -171,7 +171,7 @@ impl InboxPage {
         cx.emit(InboxEvent::CreateTask {
             task_id: task_id.clone(),
             title: title.clone(),
-            due_on: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+            due_on: work_day(Local::now()).format("%Y-%m-%d").to_string(),
         });
         if window.is_some() {
             self.card.update(cx, |card, cx| {
@@ -197,8 +197,8 @@ impl InboxPage {
             today_tasks(
                 &state.tasks,
                 &state.chats,
-                now.date_naive(),
-                local_midnight(now).with_timezone(&Utc),
+                work_day(now),
+                work_day_start(now).with_timezone(&Utc),
             )
             .into_iter()
             .find(|task| task.completed_at.is_none())
@@ -347,13 +347,6 @@ pub(crate) fn header_line(now: DateTime<Local>, needs: usize, open_tasks: usize)
         (n, _) => format!(" {n} things need you.{tasks}"),
     };
     format!("{}. {date}.{rest}", greeting(now))
-}
-
-fn local_midnight(now: DateTime<Local>) -> DateTime<Local> {
-    now.date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|midnight| Local.from_local_datetime(&midnight).earliest())
-        .unwrap_or(now)
 }
 
 pub(crate) fn resets_in(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
@@ -799,8 +792,8 @@ impl InboxPage {
         now: DateTime<Local>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let day_start = local_midnight(now).with_timezone(&Utc);
-        let today = now.date_naive();
+        let day_start = work_day_start(now).with_timezone(&Utc);
+        let today = work_day(now);
         let today_key = today.format("%Y-%m-%d").to_string();
         let selected = self.card.read(cx).task_id().map(str::to_owned);
         let state = self.state.read(cx);
@@ -976,12 +969,12 @@ impl InboxPage {
         let slots = day_slots(runs, now);
         let (open, done, overdue) = {
             let state = self.state.read(cx);
-            let today_key = now.date_naive().format("%Y-%m-%d").to_string();
+            let today_key = work_day(now).format("%Y-%m-%d").to_string();
             let tasks = today_tasks(
                 &state.tasks,
                 &state.chats,
-                now.date_naive(),
-                local_midnight(now).with_timezone(&Utc),
+                work_day(now),
+                work_day_start(now).with_timezone(&Utc),
             );
             let open: Vec<_> = tasks.iter().filter(|t| t.completed_at.is_none()).collect();
             let overdue = open
@@ -1252,8 +1245,8 @@ impl Render for InboxPage {
             today_tasks(
                 &state.tasks,
                 &state.chats,
-                now.date_naive(),
-                local_midnight(now).with_timezone(&Utc),
+                work_day(now),
+                work_day_start(now).with_timezone(&Utc),
             )
             .iter()
             .filter(|task| task.completed_at.is_none())
