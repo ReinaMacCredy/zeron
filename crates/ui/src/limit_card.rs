@@ -166,15 +166,21 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
                             div()
                                 .flex()
                                 .flex_row()
-                                .items_center()
+                                .items_start()
                                 .gap(px(5.0))
                                 .text_color(theme.text)
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .when(!lead.is_empty(), |el| {
-                                    el.child(SharedString::from(lead.to_string()))
+                                    el.child(
+                                        div()
+                                            .flex_none()
+                                            .child(SharedString::from(lead.to_string())),
+                                    )
                                 })
-                                .children(mark)
-                                .child(SharedString::from(title)),
+                                .when_some(mark, |el, mark| {
+                                    el.child(div().flex_none().pt(px(2.0)).child(mark))
+                                })
+                                .child(div().flex_1().min_w_0().child(SharedString::from(title))),
                         )
                         .child(
                             div()
