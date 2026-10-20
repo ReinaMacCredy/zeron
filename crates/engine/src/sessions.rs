@@ -750,6 +750,21 @@ impl Inner {
         })
     }
 
+    /// Only a delegated child gets a mid-run offer; top-level chats keep the limit pill.
+    fn limit_offer(&self, chat_id: &str, harness: HarnessId) -> Option<zeron_proto::LimitOffer> {
+        let owner = self.doc_host()?.child_owner(chat_id)?;
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        let now = now_ms();
+        Some(crate::routing::quota::offer(
+            &self.registry.routing_settings(),
+            harness,
+            owner.config.as_ref().map(crate::routing::target_of),
+            &offered,
+            &|id| self.quota.state(id, now),
+            now,
+        ))
+    }
+
     /// Claude Code under native policy Off loses its sub-agent tool while Delegation is live, so it still has a way to delegate.
     fn apply_native_policy(&self, chat_id: &str, harness: HarnessId, disabled: &mut Vec<String>) {
         if !crate::routing::guidance::native_tools_off(&self.registry.routing_settings(), harness) {
@@ -1025,6 +1040,24 @@ impl SessionsEngine {
             .get()
             .map(|schedule| schedule.defer_start(chat_id, at))
             .is_some()
+    }
+
+    pub fn limit_holds(&self, chat_id: &str) -> bool {
+        self.inner
+            .resume_schedule
+            .get()
+            .is_some_and(|schedule| schedule.holds(chat_id, now_ms()))
+    }
+
+    pub fn resolve_limit_offer(
+        &self,
+        chat_id: &str,
+        choice: crate::resume_schedule::OfferResolution,
+    ) -> Option<zeron_proto::LimitOffer> {
+        self.inner
+            .resume_schedule
+            .get()
+            .and_then(|schedule| schedule.resolve_offer(chat_id, choice))
     }
 
     pub fn deferred_until(&self, chat_id: &str) -> Option<i64> {
@@ -7060,6 +7093,9 @@ async fn drive_run(
                 && let Some(schedule) = inner.resume_schedule.get()
             {
                 schedule.note_limit(&chat_id, resets_at, last_user_entry(doc_ref), now_ms());
+                if let Some(offer) = inner.limit_offer(&chat_id, harness_id) {
+                    schedule.set_offer(&chat_id, offer);
+                }
             }
             record_session_stats(
                 doc_ref,

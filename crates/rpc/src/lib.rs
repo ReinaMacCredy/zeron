@@ -63,6 +63,7 @@ pub mod methods {
     pub const GET_ROUTING_SETTINGS: &str = "GetRoutingSettings";
     pub const SET_ROUTING_SETTINGS: &str = "SetRoutingSettings";
     pub const PREVIEW_ROUTES: &str = "PreviewRoutes";
+    pub const RESOLVE_LIMIT_OFFER: &str = "ResolveLimitOffer";
     pub const ENSURE_SUPERVISOR: &str = "EnsureSupervisor";
     pub const WATCH_SUPERVISOR: &str = "WatchSupervisor";
     pub const GET_SUPERVISOR_SETTINGS: &str = "GetSupervisorSettings";

@@ -252,6 +252,46 @@ pub fn gate(resolved: Resolved, gate: &Gate) -> Gated {
     }
 }
 
+/// The mid-run choice for a delegated child that hit its limit on `child`'s harness.
+pub fn offer(
+    settings: &RoutingSettings,
+    child: HarnessId,
+    owner: Option<RouteTarget>,
+    offered: &[HarnessId],
+    quota: &dyn Fn(HarnessId) -> QuotaState,
+    now: i64,
+) -> zeron_proto::LimitOffer {
+    let usable = |target: &RouteTarget| {
+        target.harness != child
+            && offered.contains(&target.harness)
+            && !quota(target.harness).exhausted
+    };
+    let listed = || {
+        settings
+            .fallback
+            .iter()
+            .find(|target| usable(target))
+            .cloned()
+    };
+    let to = match settings.out_of_quota {
+        OutOfQuota::NextInList => listed(),
+        _ => owner.filter(|owner| usable(owner)).or_else(listed),
+    };
+    let preselect = match (&to, settings.out_of_quota) {
+        (None, _) | (_, OutOfQuota::Wait) => zeron_proto::OfferChoice::Wait,
+        _ => zeron_proto::OfferChoice::Switch,
+    };
+    let act_at = match settings.out_of_quota {
+        OutOfQuota::Ask => None,
+        _ => settings.mid_run.delay_ms().map(|delay| now + delay),
+    };
+    zeron_proto::LimitOffer {
+        to,
+        preselect,
+        act_at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,5 +554,45 @@ mod tests {
         let grok = book.state(HarnessId::Grok, NOW);
         assert!(grok.exhausted);
         assert_eq!(grok.resets_at, Some(NOW + UNKNOWN_RESET_MS));
+    }
+
+    #[test]
+    fn a_mid_run_offer_switches_to_the_owner_or_the_list_and_counts_down() {
+        use zeron_proto::OfferChoice;
+        let quota = |harness| QuotaState {
+            exhausted: harness == HarnessId::Codex,
+            ..QuotaState::default()
+        };
+        let mut settings = settings(OutOfQuota::Native);
+        let owner = Some(claude("claude-opus-5-5"));
+        let native = offer(
+            &settings,
+            HarnessId::Codex,
+            owner.clone(),
+            &OFFERED,
+            &quota,
+            NOW,
+        );
+        assert_eq!(native.to, owner);
+        assert_eq!(native.preselect, OfferChoice::Switch);
+        assert_eq!(native.act_at, Some(NOW + 30_000));
+
+        settings.out_of_quota = OutOfQuota::NextInList;
+        settings.fallback = vec![codex(), claude("claude-sonnet-5-5")];
+        settings.mid_run = crate::routing::MidRun::Ask;
+        let listed = offer(
+            &settings,
+            HarnessId::Codex,
+            owner.clone(),
+            &OFFERED,
+            &quota,
+            NOW,
+        );
+        assert_eq!(listed.to, Some(claude("claude-sonnet-5-5")));
+        assert_eq!(listed.act_at, None);
+
+        settings.fallback = vec![codex()];
+        let none = offer(&settings, HarnessId::Codex, owner, &OFFERED, &quota, NOW);
+        assert_eq!((none.to, none.preselect), (None, OfferChoice::Wait));
     }
 }

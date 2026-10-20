@@ -156,6 +156,26 @@ pub struct LimitResume {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<i64>,
     pub auto: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<LimitOffer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfferChoice {
+    Switch,
+    Wait,
+}
+
+/// A delegated child's mid-run limit: switch it to `to` or wait for the reset, acting by itself at `act_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitOffer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<crate::RouteTarget>,
+    pub preselect: OfferChoice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -658,7 +678,8 @@ pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
 // assets base64-encoded; that message must fit the engine's 16 MiB frame
 // (tungstenite's default), with room for the script escaped as JSON.
 const _: () = assert!(
-    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024 < 16 * 1024 * 1024
+    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024
+        < 16 * 1024 * 1024
 );
 
 /// Whether `name` can name a visual's asset: a plain file name.

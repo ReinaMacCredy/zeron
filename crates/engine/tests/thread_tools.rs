@@ -83,6 +83,7 @@ impl Harness for RecordingHarness {
             }
         });
         let delay = self.step_delay;
+        let limited = self.id == HarnessId::Codex && request.prompt.contains("LIMIT ME");
         let reply = if request.prompt.contains("FOLLOW-UP") {
             "Because the handle outlives the request."
         } else {
@@ -106,6 +107,26 @@ impl Harness for RecordingHarness {
                     session_id: Some("hs-rec".into()),
                 },
             ];
+            let script = if limited {
+                let resets_at = chrono::Utc::now().timestamp_millis() + 3_600_000;
+                vec![
+                    script[0].clone(),
+                    AgentEvent::Error {
+                        message: "Codex usage limit reached".into(),
+                    },
+                    AgentEvent::UsageLimit {
+                        resets_at: Some(resets_at),
+                    },
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some("Codex usage limit reached".into()),
+                        session_id: Some("hs-rec".into()),
+                    },
+                ]
+            } else {
+                script
+            };
             for event in script {
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
@@ -1294,6 +1315,118 @@ async fn an_exhausted_route_follows_the_out_of_quota_policy() {
         Some("claude-sonnet-5-5")
     );
     assert_eq!(child.delegation.unwrap().route.unwrap().source, "fell_back");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
+    use zeron_engine::routing::{Role, RoleRoute};
+    let rig = routed_rig();
+    rig.core.registry.register(Arc::new(RecordingHarness {
+        id: HarnessId::Codex,
+        prompts: rig.prompts.clone(),
+        attachments: rig.attachments.clone(),
+        steers: rig.steers.clone(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: "noted",
+    }));
+    rig.core
+        .workspace
+        .set_chat_config(
+            "lead",
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::ClaudeCode,
+                model: Some("claude-opus-5-5".into()),
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Ask,
+                instructions: String::new(),
+                profile_id: None,
+                instance_id: None,
+                disabled_tools: Vec::new(),
+            },
+        )
+        .unwrap();
+    let mut routing = rig.core.registry.routing_settings();
+    routing.roles.insert(
+        Role::Worker,
+        RoleRoute::Target(zeron_proto::RouteTarget {
+            harness: HarnessId::Codex,
+            model: Some("gpt-6-luna".into()),
+            reasoning: None,
+        }),
+    );
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let view = client
+        .call(
+            zeron_rpc::methods::DELEGATE_TASK,
+            serde_json::json!({ "ownerChatId": "lead", "task": "LIMIT ME please", "role": "worker" }),
+        )
+        .await
+        .unwrap();
+    let child = view["taskId"].as_str().unwrap().to_string();
+    let offer = || {
+        rig.core
+            .resume_schedule
+            .snapshot()
+            .chats
+            .into_iter()
+            .find(|chat| chat.chat_id == child)
+            .and_then(|chat| chat.offer)
+    };
+    wait_for(|| offer().is_some(), "the mid-run offer").await;
+    let offer = offer().unwrap();
+    assert_eq!(offer.preselect, zeron_proto::OfferChoice::Switch);
+    assert_eq!(
+        offer.to.as_ref().map(|to| to.harness),
+        Some(HarnessId::ClaudeCode)
+    );
+    assert!(offer.act_at.is_some());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        delegation(&rig.core, &child).is_running(),
+        "the owner is not woken while the offer is pending"
+    );
+
+    client
+        .call(
+            zeron_rpc::methods::RESOLVE_LIMIT_OFFER,
+            serde_json::json!({ "chatId": child, "choice": "switch" }),
+        )
+        .await
+        .unwrap();
+    let row = rig.core.workspace.chat(&child).unwrap().unwrap();
+    let config = row.config.unwrap();
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
+    let route = row.delegation.unwrap().route.unwrap();
+    assert_eq!(route.source, "fell_back");
+    assert_eq!(
+        route.reason.as_deref(),
+        Some("Codex hit its usage limit mid-run")
+    );
+    let entries = rig
+        .core
+        .doc_host
+        .open(&child)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry
+            .parts
+            .iter()
+            .any(|part| matches!(part, zeron_doc::MessagePart::Handoff { .. }))
+    }));
+    wait_for(
+        || !prompts_with(&rig, zeron_proto::RESUME_PROMPT).is_empty(),
+        "the resumed turn",
+    )
+    .await;
     rig.core.shutdown().await;
 }
 

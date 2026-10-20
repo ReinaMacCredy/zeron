@@ -44,9 +44,9 @@ mod model_catalogs;
 mod model_prices;
 pub mod predictions;
 pub mod profile;
-pub mod provider_switch;
 pub mod project_actions;
 pub mod provider_instances;
+pub mod provider_switch;
 pub mod registry;
 pub mod repos;
 pub mod resume_schedule;
@@ -316,6 +316,11 @@ impl EngineCore {
                         send_continuation(&host, &continuation).await
                     }
                     resume_schedule::Due::Start(chat_id) => host.start_deferred(&chat_id).await,
+                    resume_schedule::Due::Switch(chat_id, to) => {
+                        if let Err(error) = host.act_on_offer(&chat_id, &to).await {
+                            tracing::warn!(chat = %chat_id, %error, "limit offer switch failed");
+                        }
+                    }
                 }
             }
         });
