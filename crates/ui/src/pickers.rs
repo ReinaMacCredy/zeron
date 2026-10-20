@@ -1970,6 +1970,9 @@ impl Pickers {
                 {
                     return;
                 }
+                if let Loadable::Ready(models) = &loaded {
+                    pickers.learn_labels(models, cx);
+                }
                 pickers.instance_models.insert(id, loaded);
                 pickers.catalog_rev += 1;
                 if pickers.open_kind() == Some(PickerKind::HarnessModel) {
@@ -2867,6 +2870,16 @@ impl Pickers {
         self.apply_model_catalog(harness, loaded, cx);
     }
 
+    fn learn_labels(&mut self, models: &[Model], cx: &mut Context<Self>) {
+        ModelLabels::learn(cx, models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+        let fresh = self
+            .defaults
+            .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+        if fresh {
+            self.save_defaults();
+        }
+    }
+
     fn apply_model_catalog(
         &mut self,
         harness: HarnessId,
@@ -2886,13 +2899,7 @@ impl Pickers {
             return;
         }
         if let Loadable::Ready(models) = &loaded {
-            ModelLabels::learn(cx, models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-            let fresh = self
-                .defaults
-                .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-            if fresh {
-                self.save_defaults();
-            }
+            self.learn_labels(models, cx);
         }
         self.models.insert(harness, loaded);
         self.catalog_rev += 1;
@@ -3241,9 +3248,9 @@ impl Pickers {
             if !self.detached
                 && let Some(harness) = self.effective_harness(cx)
             {
+                let instance = self.effective_instance(cx);
                 let label = self
-                    .models
-                    .get(&harness)
+                    .catalog(harness, instance.as_deref())
                     .and_then(|l| l.ready())
                     .and_then(|models| models.iter().find(|m| m.id == model_id))
                     .map(|m| m.label.clone())
