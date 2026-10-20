@@ -4110,6 +4110,9 @@ impl ComposerInput {
             changes.push((at + prefix.indent_start, removed, added));
             at += line.len() + 1;
         }
+        if outdent && changes.iter().all(|&(_, removed, _)| removed == 0) {
+            return false;
+        }
         let remap = |offset: usize| -> usize {
             let mut result = offset as isize;
             for &(at, removed, added) in &changes {
@@ -15769,6 +15772,14 @@ mod tests {
             .update(cx, |composer, _, cx| {
                 assert_eq!(composer.input_text(cx), "- shop\n- cart");
                 assert!(!composer.mission, "a list line still outdents");
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-tab");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input_text(cx), "- shop\n- cart");
+                assert!(composer.mission, "a top-level list line toggles");
+                composer.set_mission(false, cx);
                 composer.input.update(cx, |input, cx| {
                     input.set_text("Shop frontend\nNext.js and Tailwind", cx)
                 });
