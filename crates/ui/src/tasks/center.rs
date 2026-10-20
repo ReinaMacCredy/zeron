@@ -443,6 +443,8 @@ impl TaskCenter {
             }
         });
         let state_changes = cx.observe(&state, |_, _, cx| cx.notify());
+        let settings_changes =
+            cx.observe_global::<crate::settings::SettingsStore>(|_, cx| cx.notify());
         let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
         Self {
             gallery,
@@ -476,7 +478,7 @@ impl TaskCenter {
             focus: cx.focus_handle(),
             shimmer_since: Instant::now(),
             outline: None,
-            _subscriptions: vec![add_events, state_changes],
+            _subscriptions: vec![add_events, state_changes, settings_changes],
         }
     }
 
@@ -2170,52 +2172,25 @@ impl Render for TaskCenter {
                 }),
             ));
         }
-        let canvas = self.render_spine(
-            &task, &plan, &shown, &facts, editable, reduced, now, &theme, window, cx,
-        );
-        if self.spine_animating(now) {
-            window.request_animation_frame();
-        }
-        let list = div()
-            .id("task-center-plan")
-            .debug_selector(|| "task-center-plan".into())
-            .absolute()
-            .inset_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .pt(px(14.0))
-            .pb(px(96.0))
-            .pl(px(20.0))
-            .pr(px(self.canvas_pad()))
-            .child(canvas);
-        let live = self.render_live(&task, &plan, &theme, cx);
-        let drawer = self.render_drawer(live, now, &theme, cx);
-        let body = div()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(morph::measure(&self.painted, Key::Canvas, Edges::default()))
-                    .child(list),
-            )
-            .children(
-                editable
-                    .then(|| self.render_edit_bar(&theme, cx))
-                    .flatten()
-                    .map(|bar| {
-                        div()
-                            .flex_none()
-                            .pr(px(self.canvas_pad() - spine::CANVAS_PAD))
-                            .child(bar)
-                    }),
-            )
-            .children(drawer);
+        let view = crate::settings::current(cx).tree_view;
+        let root = self.resolve(self.state.read(cx)).0.map(str::to_owned);
+        let nodes = root
+            .as_deref()
+            .map(|root| super::tree_rows(self.state.read(cx), root, true, Utc::now()))
+            .unwrap_or_default();
+        let body = match root.filter(|_| view != crate::settings::TreeView::Spine) {
+            Some(root) if !nodes.is_empty() => self.render_split(&root, &nodes, &theme, cx),
+            _ => {
+                let mission = spine::SpineMission {
+                    task: &task,
+                    plan: &plan,
+                    shown: &shown,
+                    facts: &facts,
+                    editable,
+                };
+                self.render_spine_body(Some(mission), &nodes, reduced, now, &theme, window, cx)
+            }
+        };
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())
@@ -2244,6 +2219,78 @@ impl Render for TaskCenter {
             .child(body)
             .children(self.render_menu(&theme, cx))
             .child(div().absolute().size_0().child(self.gallery.clone()))
+            .into_any_element()
+    }
+}
+
+impl TaskCenter {
+    #[allow(clippy::too_many_arguments)]
+    fn render_spine_body(
+        &mut self,
+        mission: Option<spine::SpineMission<'_>>,
+        nodes: &[super::thread_tree::TreeNode],
+        reduced: bool,
+        now: Instant,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let editable = mission.as_ref().is_some_and(|m| m.editable);
+        let detail = match (&self.selected, &mission) {
+            (_, None) | (Selection::Node(_), Some(_)) if !nodes.is_empty() => {
+                let ix = self.picked(nodes);
+                Some(self.render_detail(nodes, ix, reduced, theme, cx))
+            }
+            _ => None,
+        };
+        let live = match (detail, &mission) {
+            (Some(detail), _) => detail,
+            (None, Some(m)) => self.render_live(m.task, m.plan, theme, cx),
+            (None, None) => div().into_any_element(),
+        };
+        let canvas = self.render_spine(mission, nodes, reduced, now, theme, window, cx);
+        if self.spine_animating(now) {
+            window.request_animation_frame();
+        }
+        let list = div()
+            .id("task-center-plan")
+            .debug_selector(|| "task-center-plan".into())
+            .absolute()
+            .inset_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .pt(px(14.0))
+            .pb(px(96.0))
+            .pl(px(20.0))
+            .pr(px(self.canvas_pad()))
+            .child(canvas);
+        let drawer = self.render_drawer(live, now, theme, cx);
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(morph::measure(&self.painted, Key::Canvas, Edges::default()))
+                    .child(list),
+            )
+            .children(
+                editable
+                    .then(|| self.render_edit_bar(theme, cx))
+                    .flatten()
+                    .map(|bar| {
+                        div()
+                            .flex_none()
+                            .pr(px(self.canvas_pad() - spine::CANVAS_PAD))
+                            .child(bar)
+                    }),
+            )
+            .children(drawer)
             .into_any_element()
     }
 }

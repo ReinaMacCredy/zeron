@@ -733,11 +733,31 @@ impl TaskCenter {
             .into_any_element()
     }
 
+    pub(super) fn render_split(
+        &mut self,
+        root: &str,
+        nodes: &[TreeNode],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let reduced = motion::reduced_motion(cx);
+        let ix = self.picked(nodes);
+        let outline = self.render_outline_column(root, &nodes[ix].id, theme, cx);
+        let detail = self.render_detail(nodes, ix, reduced, theme, cx);
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(outline)
+            .child(detail)
+            .into_any_element()
+    }
+
     pub(super) fn render_tree_page(
         &mut self,
         root: &str,
         theme: &Theme,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let now = Instant::now();
@@ -764,18 +784,27 @@ impl TaskCenter {
         if live && !reduced {
             motion::pulse_lease(cx.entity_id(), cx);
         }
-        let ix = self.picked(&nodes);
         let header = self.render_tree_header(&chat, &nodes, reduced, now, theme, cx);
-        let outline = self.render_outline_column(root, &nodes[ix].id, theme, cx);
-        let detail = self.render_detail(&nodes, ix, reduced, theme, cx);
+        let body = match crate::settings::current(cx).tree_view {
+            crate::settings::TreeView::Spine => {
+                self.render_spine_body(None, &nodes, reduced, now, theme, window, cx)
+            }
+            _ => self.render_split(root, &nodes, theme, cx),
+        };
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|center, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && center.menu.is_open() {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                if center.menu.is_open() {
                     cx.stop_propagation();
                     center.close_menu(cx);
+                } else if center.drawer_open {
+                    cx.stop_propagation();
+                    center.close_drawer(cx);
                 }
             }))
             .relative()
@@ -784,7 +813,7 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .child(header)
-            .child(div().flex_1().min_h_0().flex().child(outline).child(detail))
+            .child(body)
             .children(self.render_menu(theme, cx))
             .into_any_element()
     }

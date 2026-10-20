@@ -1,6 +1,15 @@
 use super::*;
 use crate::motion::Fold;
+use crate::tasks::thread_tree::{NodeKind, TreeNode};
 use crate::tasks::tree::{self, Dot, Link, NodeIn, Status};
+
+pub(super) struct SpineMission<'a> {
+    pub task: &'a zeron_proto::Task,
+    pub plan: &'a Rollup,
+    pub shown: &'a [(StepRow, Option<Tag>, Option<Thread>)],
+    pub facts: &'a Facts,
+    pub editable: bool,
+}
 
 const SPINE: f32 = 64.0;
 const ROW: f32 = 52.0;
@@ -18,6 +27,10 @@ const SPEC_CLOSE: MotionSpec = MotionSpec::new(240, tree::EASE);
 const SWEEP: std::time::Duration = std::time::Duration::from_millis(1400);
 const LEAD: &str = "lead";
 const GHOST: &str = "add";
+const MARK: &str = "agents-marker";
+const MARK_WIDTH: f32 = 300.0;
+const MARK_HEIGHT: f32 = 26.0;
+const AGENT_HEIGHT: f32 = 84.0;
 const CARD_HEIGHT: f32 = 96.0;
 const LEAD_HEIGHT: f32 = 150.0;
 
@@ -841,6 +854,7 @@ impl TaskCenter {
         range: Option<(usize, usize)>,
         editable: bool,
         tokens: Option<u64>,
+        inset: Option<AnyElement>,
         reduced: bool,
         now: Instant,
         theme: &Theme,
@@ -1444,6 +1458,7 @@ impl TaskCenter {
             ))
             .child(head)
             .children(line)
+            .children(inset.map(|inset| div().mt(px(7.0)).child(inset)))
             .child(footer)
             .children(well)
             .on_mouse_down(
@@ -1478,6 +1493,7 @@ impl TaskCenter {
             .border_1()
             .border_dashed()
             .border_color(theme.border_strong)
+            .bg(theme.bg)
             .child(morph::measure(&self.painted, Key::Add, Edges::default()))
             .child(
                 icon(icons::PLUS)
@@ -1807,12 +1823,17 @@ impl TaskCenter {
         let segments = steps.iter().map(|row| {
             let id = row.id.clone();
             let selector = format!("task-center-segment-{id}");
-            let color = self.tree.tint(&row.id, now, |status| match status {
+            let paint = |status: Status| match status {
                 Status::Queued => theme.wash(0.10),
                 Status::Stopped => theme.text_faint.opacity(0.35),
                 Status::Running => status.tone(theme).opacity(0.45),
                 _ => status.tone(theme),
-            });
+            };
+            let color = if self.tree.shown(&row.id) {
+                self.tree.tint(&row.id, now, paint)
+            } else {
+                paint(row.status)
+            };
             let lit = motion::mix(color, theme.text, 0.2);
             let tone = row.status.tone(theme);
             let shine = sweep
@@ -2263,20 +2284,31 @@ impl TaskCenter {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_spine(
         &mut self,
-        task: &zeron_proto::Task,
-        plan: &Rollup,
-        shown: &[(StepRow, Option<Tag>, Option<Thread>)],
-        facts: &Facts,
-        editable: bool,
+        mission: Option<SpineMission<'_>>,
+        tree_nodes: &[TreeNode],
         reduced: bool,
         now: Instant,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let editable = mission.as_ref().is_some_and(|m| m.editable);
+        let shown: &[(StepRow, Option<Tag>, Option<Thread>)] =
+            mission.as_ref().map_or(&[], |m| m.shown);
         let slots = Self::slots(shown);
-        let rows = &facts.rows;
-        let lead_status = rows[0].status;
+        let lead_status = match &mission {
+            Some(m) => m.facts.rows[0].status,
+            None => tree_nodes
+                .first()
+                .map_or(Status::Queued, |node| node.status),
+        };
+        let agents: Vec<usize> = (1..tree_nodes.len())
+            .filter(|ix| {
+                tree_nodes[*ix].parent == Some(0)
+                    && matches!(tree_nodes[*ix].kind, NodeKind::Agent | NodeKind::Native)
+            })
+            .collect();
+        let marked = mission.is_some() && !agents.is_empty();
 
         let mut nodes = vec![NodeIn {
             id: LEAD,
@@ -2284,13 +2316,15 @@ impl TaskCenter {
             visible: true,
             status: lead_status,
         }];
-        for (ix, (row, ..)) in shown.iter().enumerate() {
-            nodes.push(NodeIn {
-                id: &row.step.id,
-                root: false,
-                visible: !self.folded,
-                status: rows[ix + 1].status,
-            });
+        if let Some(m) = &mission {
+            for (ix, (row, ..)) in shown.iter().enumerate() {
+                nodes.push(NodeIn {
+                    id: &row.step.id,
+                    root: false,
+                    visible: !self.folded,
+                    status: m.facts.rows[ix + 1].status,
+                });
+            }
         }
         nodes.push(NodeIn {
             id: GHOST,
@@ -2299,6 +2333,20 @@ impl TaskCenter {
             // Not dimmed like a planned step: the ghost is the place to type.
             status: Status::Done,
         });
+        nodes.push(NodeIn {
+            id: MARK,
+            root: false,
+            visible: marked && !self.folded,
+            status: Status::Done,
+        });
+        for ix in &agents {
+            nodes.push(NodeIn {
+                id: &tree_nodes[*ix].id,
+                root: false,
+                visible: !self.folded,
+                status: tree_nodes[*ix].status,
+            });
+        }
         self.tree.sync(&nodes, reduced, now);
 
         let width = self
@@ -2340,6 +2388,16 @@ impl TaskCenter {
             })
             .collect();
         let (tops, end) = spine_tops(&heights);
+        let shown_agents: Vec<usize> = agents
+            .iter()
+            .copied()
+            .filter(|ix| self.tree.shown(&tree_nodes[*ix].id))
+            .collect();
+        let agent_heights: Vec<f32> = shown_agents
+            .iter()
+            .map(|ix| height_of(&Key::Task(tree_nodes[*ix].id.clone()), AGENT_HEIGHT))
+            .collect();
+        let (agent_tops, _) = spine_tops(&agent_heights);
         let snap = reduced || !known || self.sliding(now);
         let lifted = self.drag.as_ref().map(|drag| (drag.id.clone(), drag.dy));
         let mut placed: Vec<Placed> = Vec::new();
@@ -2391,16 +2449,51 @@ impl TaskCenter {
                 Some(side),
             );
         }
+        let mut next = body + end;
         let ghost_width = GHOST_WIDTH.min(width);
         if self.tree.shown(GHOST) {
+            let height = height_of(&Key::Add, 44.0);
             place(
                 &mut self.tree,
                 GHOST,
                 center - ghost_width / 2.0,
-                body + end,
+                next,
                 ghost_width,
-                height_of(&Key::Add, 44.0),
+                height,
                 None,
+            );
+            next += height + ROW_GAP + 12.0;
+        }
+        if self.tree.shown(MARK) {
+            let mark_width = MARK_WIDTH.min(width);
+            place(
+                &mut self.tree,
+                MARK,
+                center - mark_width / 2.0,
+                next,
+                mark_width,
+                MARK_HEIGHT,
+                None,
+            );
+            next += MARK_HEIGHT + ROW_GAP + 8.0;
+        }
+        if mission.is_none() {
+            next = body;
+        }
+        for (k, ix) in shown_agents.iter().enumerate() {
+            let (side, top) = agent_tops[k];
+            let x = match side {
+                Side::Left => center - SPINE / 2.0 - column,
+                Side::Right => center + SPINE / 2.0,
+            };
+            place(
+                &mut self.tree,
+                &tree_nodes[*ix].id,
+                x,
+                next + top,
+                column,
+                agent_heights[k],
+                Some(side),
             );
         }
         let bottom = placed
@@ -2408,29 +2501,39 @@ impl TaskCenter {
             .map(|placed| placed.y + placed.height)
             .fold(0.0, f32::max);
 
+        let status_of = |id: &str| {
+            mission
+                .as_ref()
+                .and_then(|m| m.facts.rows.iter().find(|row| row.id == id))
+                .map(|row| row.status)
+                .or_else(|| {
+                    tree_nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .map(|n| n.status)
+                })
+                .unwrap_or(Status::Queued)
+        };
         let lead = placed.iter().find(|placed| placed.id == LEAD);
         let anchor = lead.map(|lead| (lead.x + lead.width / 2.0, lead.y + lead_height));
         let mut links: Vec<(bool, Link)> = Vec::new();
         let mut leaving = Vec::new();
         if let Some(anchor) = anchor {
             for node in placed.iter().filter(|placed| placed.id != LEAD) {
-                let status = rows
-                    .iter()
-                    .find(|row| row.id == node.id)
-                    .map_or(Status::Queued, |row| row.status);
                 let to = match node.side {
                     Some(Side::Left) => (node.x + node.width, node.y + ANCHOR_Y),
                     Some(Side::Right) => (node.x, node.y + ANCHOR_Y),
                     None => (anchor.0, node.y),
                 };
-                let muted = node.id == GHOST || status.muted();
+                let fixed = node.id == GHOST || node.id == MARK;
+                let muted = fixed || status_of(&node.id).muted();
                 links.push((
                     muted,
                     Link {
                         from: anchor,
                         to,
                         drawn: node.frame.drawn,
-                        color: if node.id == GHOST {
+                        color: if fixed {
                             tree::link_color(true, theme)
                         } else {
                             self.tree.tint(&node.id, now, |status| {
@@ -2461,24 +2564,31 @@ impl TaskCenter {
         let mut cards: Vec<AnyElement> = Vec::new();
         for node in &placed {
             let element = if node.id == LEAD {
-                self.render_lead_card(
-                    task,
-                    plan,
-                    editable,
-                    facts.branch,
-                    facts.lead_time.clone(),
-                    reduced,
-                    theme,
-                    window,
-                    cx,
-                )
+                match &mission {
+                    Some(m) => self.render_lead_card(
+                        m.task,
+                        m.plan,
+                        editable,
+                        m.facts.branch,
+                        m.facts.lead_time.clone(),
+                        reduced,
+                        theme,
+                        window,
+                        cx,
+                    ),
+                    None => self.render_tree_lead_card(tree_nodes, reduced, theme, cx),
+                }
             } else if node.id == GHOST {
                 self.render_ghost(theme)
-            } else {
-                let Some(ix) = shown.iter().position(|(row, ..)| row.step.id == node.id) else {
-                    continue;
-                };
+            } else if node.id == MARK {
+                Self::render_marker(agents.len(), theme)
+            } else if let Some(ix) = shown.iter().position(|(row, ..)| row.step.id == node.id) {
                 let (row, tag, thread) = &shown[ix];
+                let inset = tree_nodes
+                    .iter()
+                    .position(|tree_node| tree_node.id == node.id)
+                    .and_then(|at| self.render_inset(tree_nodes, at, reduced, theme, cx));
+                let tokens = mission.as_ref().and_then(|m| m.facts.tokens[ix]);
                 self.render_spine_step(
                     ix,
                     row,
@@ -2486,13 +2596,18 @@ impl TaskCenter {
                     *tag,
                     move_range(&slots, ix),
                     editable,
-                    facts.tokens[ix],
+                    tokens,
+                    inset,
                     reduced,
                     now,
                     theme,
                     window,
                     cx,
                 )
+            } else if let Some(ix) = tree_nodes.iter().position(|n| n.id == node.id) {
+                self.render_agent_card(tree_nodes, ix, reduced, theme, cx)
+            } else {
+                continue;
             };
             let is_lifted = lifted.as_ref().is_some_and(|(id, _)| *id == node.id);
             let wrapper = div()
@@ -2667,6 +2782,472 @@ impl TaskCenter {
         } else {
             CANVAS_PAD
         }
+    }
+}
+
+impl TaskCenter {
+    fn render_marker(count: usize, theme: &Theme) -> AnyElement {
+        div()
+            .debug_selector(|| "task-center-agents-marker".into())
+            .h(px(MARK_HEIGHT))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(10.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg)
+                    .text_size(ui_rems(11.5))
+                    .text_color(theme.text_muted)
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Agents"),
+                    )
+                    .child(format!(
+                        "{count} \u{b7} started by the Lead, not in the plan"
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn node_selection(node: &TreeNode) -> Selection {
+        match (node.kind, &node.step_id) {
+            (NodeKind::Root, _) => Selection::Lead,
+            (NodeKind::Step(_), Some(step)) => Selection::Step(step.clone()),
+            _ => Selection::Node(node.id.clone()),
+        }
+    }
+
+    pub(super) fn render_inset(
+        &self,
+        nodes: &[TreeNode],
+        ix: usize,
+        reduced: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let base = nodes[ix].depth;
+        let mut below = Vec::new();
+        for (k, node) in nodes.iter().enumerate().skip(ix + 1) {
+            if node.depth <= base {
+                break;
+            }
+            below.push(k);
+        }
+        let direct = below
+            .iter()
+            .filter(|k| nodes[**k].parent == Some(ix))
+            .count();
+        if direct == 0 {
+            return None;
+        }
+        let rows = below.into_iter().map(|k| {
+            let node = &nodes[k];
+            let selection = Self::node_selection(node);
+            let selector = format!("task-center-inset-{}", node.id);
+            let time = {
+                let state = self.state.read(cx);
+                let stats = node
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| self.stats.get(state, id));
+                tree::thread_time(node.status, node.since, stats.as_ref())
+            };
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(format!("{}: {}", node.title, node.word))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .h(px(30.0))
+                .pl(px(6.0 + 16.0 * (node.depth - base - 1) as f32))
+                .pr(px(8.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.wash(0.07)))
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(tree::glyph(
+                    node.status,
+                    14.0,
+                    node.status.tone(theme),
+                    reduced,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(ui_rems(14.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(node.title.clone()),
+                )
+                .children(node.brand.map(|(mark, tint)| {
+                    icon(mark)
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(tint.unwrap_or(theme.text_muted))
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(node.status.tone(theme))
+                        .child(node.word),
+                )
+                .children(time.map(|time| div().flex_none().child(time)))
+                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    center.pick(selection.clone(), cx)
+                }))
+        });
+        Some(
+            div()
+                .ml(px(30.0))
+                .mb(px(2.0))
+                .pt(px(4.0))
+                .pl(px(4.0))
+                .pr(px(2.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.wash(0.03))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .text_size(ui_rems(11.0))
+                        .text_color(theme.text_faint)
+                        .child(
+                            icon(icons::LUCIDE_LIST_TREE)
+                                .size(px(11.0))
+                                .text_color(theme.text_faint),
+                        )
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text_muted)
+                                .child(format!(
+                                    "Started {direct} {}",
+                                    plural(direct, "agent", "agents")
+                                )),
+                        ),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_agent_card(
+        &self,
+        nodes: &[TreeNode],
+        ix: usize,
+        reduced: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let node = &nodes[ix];
+        let selection = Self::node_selection(node);
+        let selected = self.selected == selection;
+        let agent = {
+            let state = self.state.read(cx);
+            node.chat_id
+                .as_deref()
+                .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                .and_then(|chat| agent_of(chat, cx))
+        };
+        let kind = if node.kind == NodeKind::Native {
+            "Sub-agent"
+        } else {
+            "Agent"
+        };
+        let head = div()
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .child(Self::avatar(node.brand, theme).mt(px(1.0)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .min_w_0()
+                            .text_size(ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(kind),
+                            )
+                            .children(agent.map(|agent| {
+                                div().min_w_0().truncate().child(format!("\u{b7} {agent}"))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .line_clamp(2)
+                            .text_size(ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(node.title.clone()),
+                    ),
+            )
+            .child(Self::chip(node.status, node.word, reduced, theme));
+        let (tokens, time) = {
+            let state = self.state.read(cx);
+            let stats = node
+                .chat_id
+                .as_deref()
+                .and_then(|id| self.stats.get(state, id));
+            (
+                tree::amount::of(stats.as_ref()),
+                tree::thread_time(node.status, node.since, stats.as_ref()),
+            )
+        };
+        let open = node.chat_id.clone().map(|chat| {
+            let selector = format!("task-center-agent-open-{}", node.id);
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label("Open")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .h(px(22.0))
+                .pl(px(8.0))
+                .pr(px(6.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_size(ui_rems(11.5))
+                .text_color(theme.text_muted)
+                .hover(|s| s.bg(theme.wash(0.08)).text_color(theme.text))
+                .child("Open")
+                .child(
+                    icon(icons::LUCIDE_ARROW_UP_RIGHT)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(TaskCenterEvent::OpenChat(chat.clone()))
+                }))
+        });
+        let footer = div()
+            .mt(px(7.0))
+            .ml(px(30.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_h(px(22.0))
+            .child(self.amount(tokens, node.status == Status::Running, time, reduced, theme))
+            .children(open);
+        let inset = self.render_inset(nodes, ix, reduced, theme, cx);
+        let selector = format!("task-center-agent-{}", node.id);
+        self.card(selected, theme)
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .role(gpui::Role::ListItem)
+            .aria_label(format!("{kind}: {}", node.title))
+            .aria_selected(selected)
+            .child(morph::measure(
+                &self.painted,
+                Key::Task(node.id.clone()),
+                Edges::default(),
+            ))
+            .child(head)
+            .children(inset.map(|inset| div().mt(px(7.0)).child(inset)))
+            .child(footer)
+            .on_click(
+                cx.listener(move |center, _: &ClickEvent, _, cx| {
+                    center.pick(selection.clone(), cx)
+                }),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_tree_lead_card(
+        &self,
+        nodes: &[TreeNode],
+        reduced: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root = &nodes[0];
+        let (agent, can_plan, root_id) = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == root.id);
+            (
+                chat.and_then(|chat| agent_of(chat, cx)),
+                chat.is_some_and(|chat| crate::tasks::can_add_plan(state, chat)),
+                root.id.clone(),
+            )
+        };
+        let selected = self.selected == Selection::Lead;
+        let live = nodes.iter().any(|node| node.status.live());
+        let shimmer = self.shimmer(root.status == Status::Running, cx);
+        let top = div()
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .child(Self::avatar(root.brand, theme).mt(px(1.0)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child("Lead"),
+                            )
+                            .children(agent.map(|agent| {
+                                div().min_w_0().truncate().child(format!("\u{b7} {agent}"))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(ui_rems(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tree::shimmer_text(
+                                root.title.clone(),
+                                shimmer,
+                                ui_rems(13.0),
+                                theme.text_muted,
+                                theme,
+                            )),
+                    ),
+            )
+            .child(Self::chip(root.status, root.word, reduced, theme));
+        let add = can_plan.then(|| {
+            widgets::action_button(theme, widgets::ActionTone::Filled)
+                .id("task-center-lead-add-plan")
+                .debug_selector(|| "task-center-lead-add-plan".into())
+                .role(gpui::Role::Button)
+                .aria_label("Add plan")
+                .flex_none()
+                .min_h(px(24.0))
+                .rounded_full()
+                .gap(px(5.0))
+                .child(icon(icons::PLUS).size(px(12.0)).text_color(theme.text))
+                .child("Add plan")
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(TaskCenterEvent::AddPlan(root_id.clone()))
+                }))
+        });
+        let well = div()
+            .debug_selector(|| "task-center-no-plan".into())
+            .ml(px(30.0))
+            .px(px(11.0))
+            .py(px(9.0))
+            .rounded(px(8.0))
+            .bg(theme.wash(0.05))
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(ui_rems(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("No plan"),
+                    )
+                    .children(add),
+            )
+            .child(
+                div()
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(
+                        "Agents start from the chat as it goes. A plan turns this tree into a mission in place.",
+                    ),
+            );
+        let (tokens, time) = {
+            let state = self.state.read(cx);
+            let stats = self.stats.get(state, &root.id);
+            (
+                tree::amount::branch(
+                    None,
+                    nodes
+                        .iter()
+                        .filter_map(|node| node.chat_id.as_deref())
+                        .map(|id| tree::amount::of(self.stats.get(state, id).as_ref())),
+                ),
+                tree::thread_time(root.status, root.since, stats.as_ref()),
+            )
+        };
+        let kids = nodes[1..]
+            .iter()
+            .filter(|node| node.parent == Some(0))
+            .count();
+        let meta = div()
+            .ml(px(30.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_h(px(20.0))
+            .child(self.amount(tokens, live, time, reduced, theme))
+            .children((kids > 0).then(|| self.fold_button(kids, Instant::now(), theme, cx)));
+        self.card(selected, theme)
+            .gap(px(7.0))
+            .id("task-center-lead")
+            .debug_selector(|| "task-center-lead".into())
+            .role(gpui::Role::Button)
+            .aria_label("Lead")
+            .aria_selected(selected)
+            .child(morph::measure(&self.painted, Key::Lead, Edges::default()))
+            .child(top)
+            .child(well)
+            .child(meta)
+            .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.pick(Selection::Lead, cx)))
+            .into_any_element()
     }
 }
 

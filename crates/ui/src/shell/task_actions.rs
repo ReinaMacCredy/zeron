@@ -3,6 +3,7 @@ use crate::tasks::{LiveThread, TaskCenter, TaskCenterEvent};
 use zeron_proto::TaskPatch;
 
 const TASKS_VIEW_SEGMENT: f32 = 72.0;
+const TREE_VIEW_SEGMENT: f32 = 76.0;
 const TASKS_VIEW_THUMB: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_DRAWER);
 const CENTER_SLIDE_IN: motion::MotionSpec = motion::MotionSpec::new(380, motion::EASE_DRAWER);
 const CENTER_SLIDE_OUT: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_DRAWER);
@@ -1389,7 +1390,9 @@ impl Shell {
                 .max(self.title_bar_content_start() + plus_inset)))
             .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
             .child(back)
-            .children(crumb);
+            .children(crumb)
+            .child(div().flex_1())
+            .child(self.tree_view_switch(&theme, cx));
         let bar = div()
             .relative()
             .h(px(Theme::TITLEBAR_HEIGHT))
@@ -1398,6 +1401,79 @@ impl Shell {
             .child(inner);
         self.titlebar_drag_region("task-center-titlebar", bar, cx)
             .into_any_element()
+    }
+
+    fn tree_view_switch(&self, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let current = settings::current(cx).tree_view;
+        let thumb = motion::state_t(
+            "tree-view-past-spine",
+            current != settings::TreeView::Spine,
+            TASKS_VIEW_THUMB,
+            self.reduced_motion,
+        ) + motion::state_t(
+            "tree-view-past-outline",
+            current == settings::TreeView::Timeline,
+            TASKS_VIEW_THUMB,
+            self.reduced_motion,
+        );
+        let text = theme.text;
+        div()
+            .id("tree-view-toggle")
+            .debug_selector(|| "tree-view-toggle".into())
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .rounded(px(9.0))
+            .p(px(2.0))
+            .bg(crate::theme::ink(0.04))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .bottom(px(2.0))
+                    .left(px(2.0 + TREE_VIEW_SEGMENT * thumb))
+                    .w(px(TREE_VIEW_SEGMENT))
+                    .rounded(px(7.0))
+                    .bg(theme.bg)
+                    .border_1()
+                    .border_color(theme.border.opacity(0.8)),
+            )
+            .children(
+                [
+                    (settings::TreeView::Spine, "Spine"),
+                    (settings::TreeView::Outline, "Outline"),
+                    (settings::TreeView::Timeline, "Timeline"),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (value, label))| {
+                    let chosen = value == current;
+                    div()
+                        .id(("tree-view-toggle", ix))
+                        .debug_selector(move || format!("tree-view-{label}"))
+                        .role(gpui::Role::Button)
+                        .aria_label(label)
+                        .aria_selected(chosen)
+                        .w(px(TREE_VIEW_SEGMENT))
+                        .py(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(if chosen { theme.text } else { theme.text_muted })
+                        .when(!chosen, |el| {
+                            el.cursor_pointer()
+                                .hover(move |s| s.text_color(text))
+                                .on_click(move |_, _, cx| {
+                                    settings::update(settings::SavePolicy::Debounced, cx, |s| {
+                                        s.tree_view = value
+                                    });
+                                })
+                        })
+                        .child(label)
+                }),
+            )
     }
 
     pub(super) fn render_tasks_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {

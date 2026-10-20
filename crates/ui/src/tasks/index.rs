@@ -59,8 +59,8 @@ fn roots_a_tree(state: &AppState, chat: &Chat, children: &HashSet<&str>) -> bool
     if chat.archived || chat.is_system() || state.is_hidden_chat(&chat.id) {
         return false;
     }
-    let nested = zeron_proto::thread_link(chat, &state.tasks, &state.task_steps)
-        .is_some_and(|link| matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom));
+    let nested =
+        zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps).len() > 1;
     !nested
         && (plan_led_by(&state.tasks, &chat.id).is_some() || children.contains(chat.id.as_str()))
 }
