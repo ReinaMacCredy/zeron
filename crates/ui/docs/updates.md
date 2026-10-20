@@ -6,10 +6,21 @@ Zeron checks for a new version shortly after launch and then every hour. When on
 
 - **Update available**: click to download in the background.
 - **Downloading**: keep working while it downloads.
-- **Update ready**: click to restart into the new version.
+- **Update ready — restart to apply**: click to restart into the new version.
 - **Update failed**: click to try again.
+- **Restarting…**: Zeron is quitting to start the new version.
 
-To check by hand, choose **Zeron > Check for Updates…** in the menu bar. The dialog tells you whether **Zeron is up to date**, or offers **Download** and then **Restart to update**.
+Zeron downloads only when you click, and a downloaded update waits until you restart. (Setting `ZERON_AUTO_UPDATE=1` makes it download on its own and install when you quit; see [Command line and servers](zeron://docs/command-line).)
+
+Some copies of Zeron cannot replace themselves, and the button says so:
+
+- **Update available — v… · download from GitHub**: a copy no installer set up, such as a source build. Clicking opens the releases page and hides the button until the next version.
+- **Update available — v… · run `zeron update`**: install it from a terminal (see [Command line and servers](zeron://docs/command-line)). Clicking hides the button until the next version.
+- A copy without permission to replace itself, or a Mac copy running from a disk image or another temporary location, shows **Update available**, and clicking explains why. On a Mac, move Zeron to your Applications folder and reopen it.
+
+To check by hand, choose **Zeron > Check for Updates…** in the menu bar on macOS, or **Check for updates** in the account menu on Windows and Linux. The dialog tells you whether **Zeron is up to date**, or offers **Download** and then **Restart to update**. **Later** closes it without restarting.
+
+From a terminal, `zeron update` checks and installs in one step, and `zeron update --check` only reports.
 
 ## Updating agents
 
@@ -39,3 +50,4 @@ The question-mark button in the app rail (**Help**) opens a menu with:
 - **Full changelog**: the complete [changelog](zeron://changelog).
 - **Keybindings**: opens [Settings > Shortcuts](zeron://settings/shortcuts).
 - **Docs**: opens these help pages. See [Getting around](zeron://docs/getting-around).
+- **Mission Control intro**: shows the [Mission Control](zeron://docs/mission-control) introduction again.

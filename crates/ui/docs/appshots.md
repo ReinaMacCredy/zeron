@@ -6,7 +6,11 @@ Open [Settings > Appshots](zeron://settings/appshots) and switch on **Enable App
 
 ## Hotkey
 
-On macOS the **Hotkey** is a chord: press both keys of one modifier at the same time. Choose both Command keys (the default), both Option keys, both Shift keys, or **None** for no hotkey. On Linux you record a regular key combination instead. The **Capture Appshot** row in [Settings > Shortcuts](zeron://settings/shortcuts) sets the same hotkey.
+On macOS the **Hotkey** is a chord: press both keys of one modifier at the same time. Choose both Command keys (the default), both Option keys, both Shift keys, or **None** for no hotkey.
+
+On Linux you record a regular key combination instead; the default is Ctrl+Alt+Space. Click the field, press the new keys, or press Escape to cancel. On Wayland, Zeron registers the shortcut through your desktop's global shortcuts portal. If your desktop has no such portal, or the shortcut cannot be registered, the status line reads "This shortcut is unavailable. Choose a different key combination." In that case, bind the command `zeron appshot` to a key in your desktop's own keyboard shortcut settings: it takes an Appshot in the running Zeron app, the same as the hotkey. See [Command line and servers](zeron://docs/command-line).
+
+The hotkey lives only on this page; [Settings > Shortcuts](zeron://settings/shortcuts) has no row for it.
 
 ## Where the snap goes
 
@@ -31,5 +35,7 @@ The **macOS permissions** card lists what Appshots need:
 - **Accessibility**: optional. Lets the agent read the window's text as well as the image.
 
 Click **Grant** next to a permission to see the steps; the card updates when the grant lands, or use **Recheck permissions**. **Restore defaults** at the top of the page turns Appshots off and resets the hotkey, destination, and sound.
+
+On Linux the card keeps the **macOS permissions** title but lists only **Screen Recording** and **Accessibility**, each with a status and no **Grant** button: there is nothing to grant. On X11, Zeron captures the active window and can include the window's text. On Wayland, capture goes through your desktop's screenshot portal, which may ask you to pick the window each time, and the snap is the image only.
 
 > Appshots only attach an image and never give the agent control of your Mac; for that, see [Computer use](zeron://docs/computer-use).

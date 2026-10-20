@@ -1,6 +1,6 @@
 Mission Control runs a big task with more than one agent. A lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back. You can read and change the plan, approve it before anything runs, and watch every step live. A mission is a task on your [Tasks](zeron://docs/tasks) list, so it shows there with the rest of your work.
 
-Mission Control introduces itself once, in a three-page sheet that appears after the update unless you have already started a mission. **Try Mission Control** on its last page opens New chat in Mission Control mode.
+Mission Control introduces itself once, in a four-page sheet that appears after the update unless you have already started a mission: **Start with a goal**, **Approve the plan**, **Watch every step**, and **A lead and a Supervisor watch**. **Try Mission Control** on its last page opens New chat in Mission Control mode. To see the sheet again, choose **Mission Control intro** in the rail's **Help** menu.
 
 ## Start a mission from a task
 
