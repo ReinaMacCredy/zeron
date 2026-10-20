@@ -253,7 +253,7 @@ id = "mission-control"
 section = "work"
 title = "Mission Control"
 icon = "hugeicons-target-02"
-blurb = "A lead agent plans a big task into steps, runs each on its own thread, and checks the results."
+blurb = "Every chat that started other agents, as a tree, and missions: a plan whose lead runs each step on its own thread."
 actions = ["tasks", "supervisor", "settings/general"]
 
 [[article]]
@@ -261,7 +261,7 @@ id = "supervisor"
 section = "work"
 title = "Supervisor"
 icon = "lucide-shield"
-blurb = "One agent above your missions' leads: it wakes on their events, and you set what it may do."
+blurb = "One agent above your missions and the trees you pick: it wakes on their events, and you set what it may do."
 actions = ["supervisor", "tasks", "docs/mission-control"]
 
 [[article]]

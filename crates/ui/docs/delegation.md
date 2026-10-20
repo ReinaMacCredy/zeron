@@ -48,6 +48,10 @@ The parent's agent answers with Zeron's `respond_to_input` tool when the answer 
 
 The question waits for you as well, so you can answer it yourself. If you answer first, the parent's agent finds nothing left to answer. See [When an agent asks](zeron://docs/agent-questions).
 
+## When you write to a child
+
+You can talk to a child yourself in its tab. When you send a message to a delegated task that is still running, its parent's agent gets a note that names the child and quotes what you wrote, so it knows the child's plan may have changed. The same goes for a step of a [Mission Control](zeron://docs/mission-control) mission: its lead gets the note. The note is only news: it does not change the child's result, and the parent's agent does not need to answer it. A thread another chat merely opened with `create_thread` sends no note.
+
 ## Check on or stop a task
 
 With Zeron's `task_status` tool, the agent reads where a task stands: still working, waiting on children of its own, or done, with the child's final result, or the error when it failed. It can read a task another chat delegated too, without affecting that chat.
